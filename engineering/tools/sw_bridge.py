@@ -425,10 +425,10 @@ def _find_drawing_template(sw):
     for drive in ("C:", "D:", "E:", "F:"):
         for sw_dir in glob.glob(drive + r"\*SOLIDWORKS*"):
             cands.append(os.path.join(sw_dir, "templates"))
-    # 4) 匹配绘图模板
-    tmpl_names = ["gb_a3.prtdot", "gb_a2.prtdot", "gb_a4.prtdot",
-                  "A3.prtdot", "A2.prtdot", "A4.prtdot",
-                  "drawing.prtdot", "gb_a1.prtdot"]
+    # 4) 匹配绘图模板（.drwdot 格式）
+    tmpl_names = ["gb_a3.drwdot", "gb_a2.drwdot", "gb_a4.drwdot",
+                  "A3.drwdot", "A2.drwdot", "A4.drwdot",
+                  "drawing.drwdot", "gb_a1.drwdot"]
     for d in cands:
         if not d or not os.path.isdir(d):
             continue
@@ -436,6 +436,10 @@ def _find_drawing_template(sw):
             p = os.path.join(d, n)
             if os.path.exists(p):
                 return p
+        # 也尝试 .prtdot（某些版本）
+        found = glob.glob(os.path.join(d, "*.drwdot"))
+        if found:
+            return found[0]
         found = glob.glob(os.path.join(d, "*.prtdot"))
         if found:
             return found[0]
@@ -485,10 +489,15 @@ def cmd_drawing(sw, part_path, output_path=None):
     if not tmpl:
         return {"ok": False, "error": "no drawing template found"}
     
-    # 3. 确定输出路径
+    # 3. 确定输出路径（使用英文文件名避免编码问题）
     if not output_path:
-        base = os.path.splitext(part_path)[0]
-        output_path = base + ".slddrw"
+        part_name = os.path.basename(part_path)
+        # 移除中文扩展名，改用英文命名
+        name_no_ext = os.path.splitext(part_name)[0]
+        # 保留数字和字母，移除中文
+        import re
+        ascii_name = re.sub(r'[^\w\-]', '_', name_no_ext)
+        output_path = os.path.join(os.path.dirname(part_path), ascii_name + ".slddrw")
     
     # 4. 新建工程图（A3 横向 420x297）
     doc = sw.NewDocument(tmpl, 0, 0.420, 0.297)
@@ -516,7 +525,8 @@ def cmd_drawing(sw, part_path, output_path=None):
     
     for view_name, x, y, label in view_positions:
         try:
-            v = doc.CreateDrawViewFromModelView3(
+            # 使用旧版 API CreateDrawViewFromModelView（传文件路径字符串）
+            v = doc.CreateDrawViewFromModelView(
                 part_abs, view_name, x, y, 0)
             if v is not None:
                 views_added.append(label)
