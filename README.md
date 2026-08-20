@@ -1,3 +1,5 @@
+###我是一个新兵蛋子，现在还在测试，先不要哇，还有很多bug的，或者帮我修修代码也行
+
 # 🔧 DSH Engineering Mode — 工程模式
 
 [English](#english) | [中文](#中文)
