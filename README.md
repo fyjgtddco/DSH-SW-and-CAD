@@ -100,6 +100,47 @@ chmod +x install.sh
 3. AI 将以机械设计工程师的身份开始工作
 4. 告诉它你的设计需求，它会自动执行"分析→设计→验证"流程
 
+### QQ 机器人任务通知
+
+本预设内置了 **QQ 机器人任务通知** 功能，会自动将 DSH 任务状态推送到你的 QQ 群或私聊。
+
+**消息格式：**
+```
+📁 {项目名}
+📋 {状态/内容}
+```
+
+**支持监听的事件：**
+- `goal/changed` — 目标创建、完成、阻塞、恢复
+- `subagent/start` — 子代理启动
+- `subagent/end` — 子代理结束（成功/失败）
+- `agent/error` — Agent 出错
+
+**配置方法：**
+
+**群聊通知：**
+```powershell
+$env:QQ_GROUP_OPEN_ID = "你的群group_open_id"
+```
+
+**私聊通知（两种方式）：**
+
+方式一：直接用 open_id（需先在 QQ 开放平台获取）
+```powershell
+$env:QQ_USER_OPEN_ID = "用户的open_id"
+```
+
+方式二：用 QQ 号（需用户先给机器人发一条消息，机器人会自动记录 open_id）
+```powershell
+$env:QQ_PRIVATE_TARGET = "639424706"
+```
+
+**获取 open_id 的方法：**
+1. 让机器人加入群后，在群里 @机器人 发送任意消息
+2. 或在 QQ 开放平台 → 你的应用 → 事件订阅 → 查看群/私聊消息事件中的 `member.openId` / `author.openid`
+
+> 私聊模式下，用户需要**先给机器人发一条消息**，机器人才能获取其 open_id 并用于后续通知。
+
 ### 自定义
 
 你可以修改 `engineering/agent.cordis.yml` 中的 `persona` 配置，自定义 AI 的行为和指令。
