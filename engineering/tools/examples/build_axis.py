@@ -88,8 +88,8 @@ print("STEP5 chamfer left end  C1 ->", "OK" if c3 is not None else "FAIL")
 #   CreateSketchSlot(center_line=1, FullLength=1, 宽, X1, X2) 中:
 #     X1 = 槽中心，X2 = 右圆弧**圆心**（不是最外端点！）
 #     传 (中心=130, 右圆心=142.5) → 圆弧圆心落在 117.5 和 142.5
-#     → 圆心距 25 ✓，右圆心距右端面 7.5 ✓，全长 35 ✓
-#   注意: CenterCenter 模式(0) 的 X1 被解释为槽左端，会生成错误几何 ✗
+#     → 圆心距 25 OK，右圆心距右端面 7.5 OK，全长 35 OK
+#   注意: CenterCenter 模式(0) 的 X1 被解释为槽左端，会生成错误几何 FAIL
 KEY_W = 10.0                # 宽度（半径 R=5）
 KEY_R = KEY_W / 2.0         # 5
 KEY_CC = 25.0               # 圆心距（用户要求"长度25"）

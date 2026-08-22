@@ -197,6 +197,27 @@ if ($python_ok) {
     }
 }
 
+# Step 6: Install QQ Notification Plugin
+Write-Title "Step 6: Installing QQ Notification Plugin"
+$pluginSrc = Join-Path $SCRIPT_DIR "engineering" "plugins" "dsh-qq-notification"
+if (Test-Path $pluginSrc) {
+    # Find the web profile node_modules directory
+    $webProfile = Join-Path $DSH_HOME "profiles" "web" "node_modules"
+    if (-not (Test-Path $webProfile)) {
+        $webProfile = Join-Path $DSH_HOME "profiles" "default" "node_modules"
+    }
+    if (Test-Path $webProfile) {
+        $pluginDst = Join-Path $webProfile "dsh-qq-notification"
+        New-Item -ItemType Directory -Force -Path $pluginDst | Out-Null
+        Copy-Item -Path "$pluginSrc\*" -Destination $pluginDst -Recurse -Force
+        Write-Step "QQ notification plugin installed to node_modules" "OK"
+    } else {
+        Write-Step "Web profile node_modules not found, plugin source available at: $pluginSrc" "SKIP"
+    }
+} else {
+    Write-Step "QQ notification plugin source not found at: $pluginSrc" "SKIP"
+}
+
 # Final
 Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "  INSTALLATION COMPLETE" -ForegroundColor Green

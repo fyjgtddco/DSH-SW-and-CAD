@@ -63,7 +63,7 @@ m.rebuild()                   # 重建模型
 # ── 基准面 / 草图 ────────────────────────────────
 m.begin_sketch("Front Plane")        # 在基准面开始草图（自动正视+居中）
 m.begin_sketch_on_face(x, y, z)      # 在实体表面开草图（坐标 mm）
-m.end_sketch()                       # 结束草图（自动合并端点）
+m.end_sketch()                       # 结束草图（自动 MergePoints 闭合端点）
 
 # ── 草图图元（坐标单位 mm）───────────────────────
 m.rect(cx, cy, w, h)                # 中心矩形
@@ -93,6 +93,18 @@ python "<包目录>\sw_bridge.py" run "<脚本路径>"
 
 # 展示成品
 python "<包目录>\sw_bridge.py" show
+
+# 生成工程图（强制中文视图名 *前视/*上视/*右视/*等轴测）
+python "<包目录>\sw_bridge.py" drawing "零件路径" [输出路径]
+
+# 导出 DWG
+python "<包目录>\sw_bridge.py" dwg "零件路径" [输出路径]
+
+# 清理临时文件
+python "<包目录>\sw_bridge.py" cleanup "目录路径"
+
+# Vision 不可用时截图供前端识图
+python "<包目录>\sw_bridge.py" vision-fallback "描述"
 ```
 
 ## 5. 已踩坑与解决方案
@@ -120,6 +132,63 @@ python "<包目录>\sw_bridge.py" show
 ### 坑 6：欢迎页 vs 主窗口混淆
 - **现象**：SolidWorks 2022 有两个大窗口，主窗口标题含版本号
 - **解决**：`swapi._find_sw_windows()` 排除纯 "SOLIDWORKS" 标题
+
+## 5.5 关键 Bug 修复（2025-08-21）
+
+### Bug 6: FACE vs PLANE 选择
+- **现象**: 第一个特征后，`begin_sketch("Front Plane")` 失效，ActiveSketch 始终为 None
+- **根因**: 在已有特征的文档中，选择 PLANE 基准面无法激活草图
+- **解决**: 改用 `begin_sketch_on_face(x, y, z)` 选择实体表面
+- **示例**:
+  ```python
+  # 错误：底座创建后继续用基准面会失败
+  m.begin_sketch("Front Plane")  # ActiveSketch = None
+
+  # 正确：在实体表面开草图
+  m.begin_sketch_on_face(25, 0, 10)  # 底座顶面中心
+  ```
+
+### Bug 7: CreateLine 返回 None
+- **现象**: 线段创建静默失败
+- **解决**: 确保 `ActiveSketch is not None` 后再调用 CreateLine
+- **代码**: `_ensure_sketch_active()` 方法
+
+### Bug 8: 三角形轮廓不闭合
+- **现象**: 3条线画完但 FeatureExtrusion3 返回 None
+- **解决**: 在 end_sketch() 前调用 `MergePoints(0.0005)` 闭合端点
+- **代码**:
+  ```python
+  active_sk = self.skm.ActiveSketch
+  active_sk.MergePoints(0.0005)  # Bug 8 关键！
+  self.skm.InsertSketch(True)
+  ```
+
+### Bug 4: FeatureCut3 完全无效
+- **现象**: 所有参数组合都返回 None，体积不变
+- **解决**: 改用 FeatureExtrusion3 的切除模式（AddPad=False）
+- **代码**:
+  ```python
+  def cut(self, depth=10, through=False):
+      T1 = SW_END_THROUGH if through else SW_END_BLIND
+      d = depth * MM
+      feat = self.fm.FeatureExtrusion3(
+          False, False, False, T1, 0, d, 0,  # AddPad=False 即切除
+          ...)
+  ```
+
+### Bug 3: extrude-to-point (T1=2) 参数类型不匹配
+- **现象**: 无论传 list/tuple/None/VARIANT 都报类型不匹配
+- **解决**: 放弃此方法，改用标准 FeatureExtrusion3
+
+### Bug 10: 遗留文档干扰
+- **现象**: 新建零件时有13个旧文档打开
+- **解决**: `new_part()` 前先关闭所有文档
+  ```python
+  for _ in range(50):
+      try:
+          if sw.ActiveDoc: sw.ActiveDoc.CloseDoc(0)
+      except: pass
+  ```
 
 ## 6. 建模方法论
 
@@ -155,94 +224,18 @@ m.chamfer(1, [(0, 40, 10)], angle_deg=45)
 
 ## 7. 典型工作流（用户约定）
 
-1. **新建零件** → `m = swapi.new_part()`
-2. **画草图** → `m.begin_sketch("Front Plane")` → 画轮廓 → `m.end_sketch()`
-3. **创建特征** → `m.extrude(10)` / `m.cut(through=True)` / `m.revolve(360)`
-4. **循环** 步骤 2-3 直到完成
-5. **保存** → `m.save(os.path.join(dir, "DSH_零件名.sldprt"))`
-6. **展示** → `python sw_bridge.py show`
+1. **新建零件** → `m = swapi.new_part()`（自动清理遗留文档）
+2. **画草图** → 第一个特征用 `m.begin_sketch("Front Plane")`，后续用 `m.begin_sketch_on_face(x, y, z)`
+3. **画轮廓** → 使用 `rect()`、`circle()`、`line()` 等，每步检查 ActiveSketch
+4. **闭合端点** → `end_sketch()` 前自动调用 `MergePoints(0.0005)`
+5. **创建特征** → `m.extrude(10)` / `m.cut(through=True)` / `m.revolve(360)`
+6. **循环** 步骤 2-5 直到完成
+7. **保存** → `m.save(os.path.join(dir, "DSH_零件名.sldprt"))`
+8. **生成工程图** → `python sw_bridge.py drawing "零件路径"`
+9. **导出 DWG** → `python sw_bridge.py dwg "零件路径"`
+10. **展示** → `python sw_bridge.py show`
 
-**注意**：建模完成后**不要**调用 massprops 校验——容易卡死 SolidWorks。
-
-
-## 8. SW → CAD 图纸转换（一键生成工程图）
-
-### 使用方法（命令行）
-
-```powershell
-# 从零件生成工程图（三视图 + 等轴测）
-python "<包目录>\sw_bridge.py" drawing <零件路径> [输出路径]
-
-# 从零件直接生成 DWG 文件
-python "<包目录>\sw_bridge.py" dwg <零件路径> [输出路径]
-```
-
-### 示例
-
-```powershell
-# 生成工程图
-python "C:\...\tools\sw_bridge.py" drawing "C:\...\DSH_正方形.sldprt"
-# 输出: DSH_正方形.slddrw + 截图
-
-# 生成 DWG
-python "C:\...\tools\sw_bridge.py" dwg "C:\...\DSH_正方形.sldprt" "C:\...\output.dwg"
-# 输出: DSH_正方形.slddrw + DSH_正方形.dwg + 截图
-```
-
-### SW→DWG 完整工作流（用户一句话搞定）
-
-用户说："把这个零件变成 CAD 图纸"，AI 执行：
-
-```powershell
-# 第一步：找最近生成的 sldprt 文件
-python "sw_bridge.py" list
-
-# 第二步：生成工程图
-python "sw_bridge.py" drawing "DSH_正方形.sldprt"
-
-# 第三步：导出 DWG
-python "sw_bridge.py" dwg "DSH_正方形.sldprt" "DSH_正方形.dwg"
-
-# 第四步：展示截图给用户验收
-python "sw_bridge.py" show
-```
-
-### AI 自动生成图纸的完整脚本
-
-```python
-import os
-import swapi
-
-# ── 生成 11mm 正方形 ──
-m = swapi.new_part()
-m.begin_sketch("Front Plane")
-m.rect(0, 0, 11, 11)
-m.end_sketch()
-m.extrude(11)
-out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DSH_正方形.sldprt")
-m.save(out)
-print(f"零件已保存: {out}")
-```
-
-然后执行：
-```powershell
-python sw_bridge.py run <脚本路径>
-python sw_bridge.py drawing "DSH_正方形.sldprt"
-python sw_bridge.py dwg "DSH_正方形.sldprt"
-python sw_bridge.py show
-```
-
-### API 说明
-
-| 命令 | 参数 | 说明 |
-|------|------|------|
-| `drawing` | `<part>` `[output]` | 从零件生成工程图，含标准三视图+等轴测 |
-| `dwg` | `<part>` `[output]` | 生成工程图并导出为 DWG |
-| `export-pdf` | `<output>` | 导出当前视图为 PDF |
-
-### 注意事项
-
-1. **工程图模板自动探测**：无需手动指定，自动查找 gb_a3/gb_a4 模板
-2. **视图布局**：前视图居中，俯视图在下，右视图在右，等轴测在右上
-3. **DWG 导出**：SolidWorks 自动完成图纸到 DWG 的转换
-4. **截图**：每次操作后自动截图，方便 AI 向用户展示结果
+**关键规则**：
+- 第一个特征后用 `begin_sketch_on_face()` 而不是 `begin_sketch()`
+- `cut()` 已改用 FeatureExtrusion3 切除模式，不再依赖 FeatureCut3
+- `MergePoints()` 在 end_sketch() 内自动调用，无需手动调用
