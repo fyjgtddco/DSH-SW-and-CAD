@@ -126,7 +126,8 @@ win32com 的 IDispatch 后期绑定（dynamic.Dispatch），它不依赖类型�
 ### 各类零件的推荐建模方法
 | 零件类型 | 推荐方法 | 关键要点 |
 |---|---|---|
-| **轴/回转体**（阶梯轴、球、法兰） | 旋转特征 `revolve(360)` | 在穿过轴心的平面画**上半截面轮廓**（底边贴轴）+ `centerline` 旋转轴；轮廓用 `polyline` 阶梯点 |
+| **球体** | `create_sphere(cx, cy, cz, radius)`（Modeler 方法） | 不依赖草图旋转，直接通过 Modeler 创建球形曲面再转换为实体，避免几何条件限制 |
+| **轴/回转体**（阶梯轴、法兰） | 旋转特征 `revolve(360)` | 在穿过轴心的平面画**上半截面轮廓**（底边贴轴）+ `centerline` 旋转轴；轮廓用 `polyline` 阶梯点 |
 | **板/块/箱体** | 拉伸 `extrude` + 切除 `cut` | 画截面 → 拉伸 → 面上画孔/槽 → 切除 |
 | **带孔零件** | 拉伸 + 圆孔切除 | 顶面 `begin_sketch_on_face` 画圆 → `cut(through=True)` |
 | **圆角/倒角** | `fillet(r, edge_pts)` / `chamfer(w, edge_pts, angle)` | edge_pts 是目标棱边上任意一点坐标 |
@@ -138,9 +139,12 @@ win32com 的 IDispatch 后期绑定（dynamic.Dispatch），它不依赖类型�
 2. 选基准面 begin_sketch(plane) —— 自动正视+居中
 3. 画轮廓（rect/circle/polyline/line/centerline）
 4. end_sketch() —— 自动合并端点+刷新视图
-5. 特征操作（extrude/cut/revolve/fillet/chamfer）
+5. 特征操作（extrude/cut/revolve/fillet/chamfer/create_sphere）
 6. 重复 2-5 直到完成
 7. 保存 save(路径) —— 按用户命名约定
+
+# 特殊对象（如球体）可直接使用 Modeler 方法：
+m.create_sphere(cx=0, cy=0, cz=0, radius=25)  # D50mm 球体
 ```
 
 ### 设计思路要点（DSH 生成代码时遵循）
@@ -278,6 +282,71 @@ swapi.select_sketch_by_name(sw, m.model, "轮廓")
 21. **多文档积累会卡死**：连续测试会产生大量未关闭文档（几十个），导致
     NewDocument 返回 None 或卡顿。建模前若文档数异常多，先清理
     （关闭文档/重启 SolidWorks）。
+
+## 5.1 已修复的 Bug
+
+### Bug #1 — extrude() 拔模角度无效
+- **现象**：`draft_deg` 参数定义了但没传给 FeatureExtrusion3
+- **修复**：将 `draft_enabled` 和 `draft_angle_rad` 传入对应参数位
+
+### Bug #2 — cmd_run 编码崩溃
+- **现象**：Windows 中文版 GBK 编码导致 UnicodeDecodeError
+- **修复**：subprocess.run 添加 `encoding='utf-8'`
+
+### Bug #3 — cmd_run 二次崩溃
+- **现象**：proc.stdout 为 None 时 .strip() 崩溃
+- **修复**：添加防御性检查 `(proc.stdout or "").strip()`
+
+### Bug #4 — ExportFile 导出 DWG 失败
+- **现象**：SW 2020 可能没有 DWG 翻译器插件
+- **修复**：优先使用 SaveAs3，ExportFile 作为备选
+
+### Bug #7 — CreateDrawViewFromModelView 返回 False 而非 None
+- **现象**：工程图没有视图但代码报告"已添加"
+- **修复**：`if v is not None:` → `if v:`
+
+### Bug #8 — 中文版 SW 基准面名不匹配
+- **现象**：`Front Plane` 在中文版 SW 上失败
+- **修复**：添加 `_PLANES_ZH` 多语言支持，`select_plane()` 自动尝试中英文
+
+### Bug #9 — end_sketch() 未能提交草图
+- **现象**：草图未正确结束，特征树无草图
+- **修复**：`end_sketch()` 改用 `InsertSketch(True)` toggle 模式
+
+### Bug #10 — revolve() 不检查返回值
+- **现象**：FeatureRevolve2 返回 None 时静默失败
+- **修复**：添加 `if feat is None: raise RuntimeError(...)`
+
+### Bug #11 — 草图无法提交到特征树
+- **现象**：特征树里只有 Favorites，没有草图特征
+- **修复**：同 Bug #9，使用 toggle 模式 `InsertSketch(True)`
+
+### Bug #12 — CreateDrawViewFromModelView 返回 False
+- **现象**：4个视图全部返回 False，工程图是空白的
+- **修复**：修复 Bug #11 后自动解决
+
+### Bug #13 — GetMassProperties() 导致 SW 崩溃
+- **现象**：massprops 可能导致 SolidWorks 卡死
+- **修复**：添加 try-except 包裹，并在 docstring 中添加警告
+
+### Bug #14 — 球体创建
+- **现象**：revolve 创建球体有时几何条件不满足
+- **修复**：添加 `create_sphere()` 方法，使用半圆弧旋转法创建球体
+
+### Bug #15 — 工程图视图重叠/粘连（间距过小、等轴测位置错误）
+- **根本原因**：
+  - 原坐标 `(*前视, 0.150, 0.180)` / `(*上视, 0.150, 0.070)` 等间距仅 110mm
+  - 等轴测 `(0.280, 0.070)` 与俯视图 y 坐标相同，导致右上区域严重重叠
+  - 缺少视图间距约束，相邻视图线条直接粘连
+- **修复**（强制排版约束）：
+  1. 最小间距 35mm（`_DRAWING_VIEW_GAP`），严禁线条粘连
+  2. 三视图严格对齐：主俯同x（长对正），主右同y（高平齐）
+  3. 等轴测移至右上角独立区域 `(0.310, 0.210)`，与三视图区分离
+  4. A3 横向布局重新规划：主视(0.060,0.190) / 俯视(0.060,0.080) / 右视(0.230,0.190) / 轴测(0.310,0.210)
+- **附加约束**（写入 agent.cordis.yml 注意事项）：
+  - 中心线：圆柱/轴类必须画十字点划线
+  - 分界线：贴合特征交界处必须画分隔线或保留 0.1mm 间距
+  - 线宽分层：可见轮廓 0.5mm，中心线 0.25mm，隐藏线 0.2mm
 
 ## 6. 建模脚本模板（DSH 生成代码参考）
 

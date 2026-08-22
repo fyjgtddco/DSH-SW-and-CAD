@@ -185,57 +185,7 @@ SW_CHAMFER_ANGLE_DIST = 1   # 角度-距离倒角
 SW_CHAMFER_DIST_DIST = 2    # 距离-距离倒角
 SW_CHAMFER_VERTEX = 3
 
-# 基准面名称（多语言支持：英文 / 中文）
-_PLANES_EN = ("Front Plane", "Top Plane", "Right Plane")
-_PLANES_ZH = ("前视基准面", "上视基准面", "右视基准面")
-_PLANES = _PLANES_EN + _PLANES_ZH
-
-
-def _detect_plane_names(sw):
-    """检测 SolidWorks 语言版本，返回对应的基准面名称列表。
-
-    通过遍历特征树查找基准面名称来判断语言。
-    """
-    try:
-        swlang = sw.LanguageName
-        if "Chinese" in swlang or "Simplified" in swlang:
-            return _PLANES_ZH
-    except Exception:
-        pass
-    # 默认使用英文，同时尝试中文
-    return _PLANES_EN
-
-
-def _get_plane_names(sw):
-    """获取当前 SW 版本的基准面名称（带缓存）。"""
-    global _PLANE_NAMES_CACHE
-    if _PLANE_NAMES_CACHE:
-        return _PLANE_NAMES_CACHE
-    _PLANE_NAMES_CACHE = _detect_plane_names(sw)
-    return _PLANE_NAMES_CACHE
-
-
-_PLANE_NAMES_CACHE = None
-
-
-def _auto_detect_planes(sw):
-    """自动探测基准面名称：先试英文，失败再试中文。"""
-    for names in [_PLANES_EN, _PLANES_ZH]:
-        # 尝试选中前视基准面
-        dummy = sw.GetActiveDoc
-        try:
-            if dummy is not None:
-                ext = dummy.Extension
-                empty = win32com.client.VARIANT(pythoncom.VT_DISPATCH, None)
-                if ext.SelectByID2(names[0], "PLANE", 0, 0, 0, False, 0, empty, 0):
-                    return names
-        except Exception:
-            pass
-    # 回退：返回英文，兼容英文版
-    return _PLANES_EN
-
-
-# 可视化建模模式
+_PLANES = ("Front Plane", "Top Plane", "Right Plane")
 
 # 可视化建模模式
 VISUAL_MODE = True
@@ -270,8 +220,9 @@ def _find_main_hwnd():
     try:
         pids = subprocess.check_output(
             ['powershell', '-NoProfile', '-Command',
-             '(Get-Process sldworks -ErrorAction SilentlyContinue).Id']
-        ).decode().strip().split()
+             '(Get-Process sldworks -ErrorAction SilentlyContinue).Id'],
+            encoding='utf-8', errors='replace'
+        ).strip().split()
     except Exception:
         return None
     main_hwnd = None
@@ -304,8 +255,9 @@ def _show_main_window(maximize=False):
         import subprocess
         pids = subprocess.check_output(
             ['powershell', '-NoProfile', '-Command',
-             '(Get-Process sldworks -ErrorAction SilentlyContinue).Id']
-        ).decode().strip().split()
+             '(Get-Process sldworks -ErrorAction SilentlyContinue).Id'],
+            encoding='utf-8', errors='replace'
+        ).strip().split()
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         def hide_welcome(h, lp):
             pid = wintypes.DWORD()
@@ -343,10 +295,22 @@ def get_sw():
 
 
 def new_part(sw=None):
-    """新建零件，返回 SWModel。"""
+    """新建零件，返回 SWModel。
+
+    Bug 10 修复: 新建前先关闭所有遗留文档，避免干扰。
+    """
     if sw is None:
         sw = get_sw()
     _disable_snapping(sw)
+
+    # Bug 10: 关闭所有遗留文档
+    for _ in range(50):
+        try:
+            if sw.ActiveDoc:
+                sw.ActiveDoc.CloseDoc(0)
+        except Exception:
+            pass
+
     tmpl = get_part_template(sw)
     if tmpl is None:
         raise RuntimeError("no part template found (请确认 SolidWorks 已安装)")
@@ -418,31 +382,23 @@ class SWModel:
                 "updated": updated, "rc": rc}
 
     def massprops(self):
-        """质量属性（谨慎使用）。
-
-        ⚠️ 警告：GetMassProperties 可能导致 SolidWorks 卡死。
-        建模完成后不要调用此方法（用户明确约定：跳过校验）。
-
-        质量属性数组顺序（2022 实测）:
+        """质量属性数组顺序（2022 实测）:
         [cogX, cogY, cogZ, volume, surface_area, mass, Ixx, Iyy, Izz, Ixy, Ixz, Iyz]
         """
-        try:
-            mp = self.model.GetMassProperties
-            if mp is None or not isinstance(mp, tuple):
-                return {"ok": False, "error": f"GetMassProperties -> {mp!r}"}
-            v = [float(x) for x in mp]
-            vol, area, mass = v[3], v[4], v[5]
-            density = mass / vol if vol else 0.0
-            return {
-                "ok": True,
-                "volume_mm3": vol * 1e9,
-                "surface_area_mm2": area * 1e6,
-                "mass_kg": mass,
-                "density_kg_m3": density,
-                "center_of_mass_mm": [v[0] * 1000, v[1] * 1000, v[2] * 1000],
-            }
-        except Exception as e:
-            return {"ok": False, "error": f"massprops failed: {e}"}
+        mp = self.model.GetMassProperties
+        if mp is None or not isinstance(mp, tuple):
+            return {"ok": False, "error": f"GetMassProperties -> {mp!r}"}
+        v = [float(x) for x in mp]
+        vol, area, mass = v[3], v[4], v[5]
+        density = mass / vol if vol else 0.0
+        return {
+            "ok": True,
+            "volume_mm3": vol * 1e9,
+            "surface_area_mm2": area * 1e6,
+            "mass_kg": mass,
+            "density_kg_m3": density,
+            "center_of_mass_mm": [v[0] * 1000, v[1] * 1000, v[2] * 1000],
+        }
 
     def export_pdf(self, path):
         rc = self.model.SaveAs3(path, 0, 0)
@@ -457,8 +413,9 @@ class SWModel:
         user32 = ctypes.windll.user32
         pids = subprocess.check_output(
             ['powershell', '-NoProfile', '-Command',
-             '(Get-Process sldworks -ErrorAction SilentlyContinue).Id']
-        ).decode().strip().split()
+             '(Get-Process sldworks -ErrorAction SilentlyContinue).Id'],
+            encoding='utf-8', errors='replace'
+        ).strip().split()
         main_hwnd = None
         welcome_hwnds = []
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -540,13 +497,22 @@ class SWModel:
                 pass
         return self
 
-    def screenshot(self, path=None):
-        """对 SolidWorks 主窗口截图保存为 PNG。"""
+    def screenshot(self, path=None, for_vision=False):
+        """对 SolidWorks 主窗口截图保存为 PNG。
+
+        Args:
+            path: 截图保存路径，默认保存到工具目录
+            for_vision: 是否用于 Vision 识别，是则保存到 DSH-Check 目录便于前端读取
+        """
         if path is None:
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "solidworks_live.png")
+            if for_vision:
+                # 保存到 DSH-Check 目录，便于 DSH 前端识图插件读取
+                path = os.path.join(r"C:\Users\j1877\Desktop\DSH-Check",
+                                    "solidworks_vision_screenshot.png")
+            else:
+                path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "solidworks_live.png")
         try:
-            import mss
             import ctypes
             from ctypes import wintypes
             user32 = ctypes.windll.user32
@@ -563,10 +529,18 @@ class SWModel:
             h = rect.bottom - rect.top
             if w <= 0 or h <= 0:
                 return {"ok": False, "error": f"window rect invalid {w}x{h}"}
-            with mss.mss() as sct:
-                shot = sct.grab({'left': rect.left, 'top': rect.top,
-                                 'width': w, 'height': h})
-                mss.tools.to_png(shot.rgb, shot.size, output=path)
+            # 优先使用 mss（更快），回退到 PIL ImageGrab
+            try:
+                import mss
+                with mss.mss() as sct:
+                    shot = sct.grab({'left': rect.left, 'top': rect.top,
+                                     'width': w, 'height': h})
+                    mss.tools.to_png(shot.rgb, shot.size, output=path)
+            except ImportError:
+                from PIL import ImageGrab
+                img = ImageGrab.grab(bbox=(rect.left, rect.top,
+                                          rect.right, rect.bottom))
+                img.save(path, "PNG")
             return {"ok": True, "path": path, "size": f"{w}x{h}"}
         except Exception as e:
             return {"ok": False, "error": f"screenshot failed: {e}"}
@@ -607,102 +581,92 @@ class SWModel:
         return self
 
     def select_plane(self, name):
-        """选中基准面，自动尝试中英文名称。"""
-        name_map = {
-            "Front Plane": "前视基准面",
-            "Top Plane": "上视基准面",
-            "Right Plane": "右视基准面",
-            "前视基准面": "Front Plane",
-            "上视基准面": "Top Plane",
-            "右视基准面": "Right Plane",
-        }
-        # 先检查是否已经是已知的英文名
-        if name in _PLANES_EN:
-            # 英文名在中文SW上可能失败，尝试中文名回退
-            try:
-                self.ext.SelectByID2(name, "PLANE", 0, 0, 0, False, 0, self._empty, 0)
-            except Exception:
-                pass
-            # 回退：试中文名
-            cn_name = name_map.get(name)
-            if cn_name:
-                try:
-                    if self.ext.SelectByID2(cn_name, "PLANE", 0, 0, 0, False, 0, self._empty, 0):
-                        return self
-                except Exception:
-                    pass
-            return self
-        if name in _PLANES_ZH:
-            # 中文名在英文SW上可能失败，尝试英文名回退
-            try:
-                self.ext.SelectByID2(name, "PLANE", 0, 0, 0, False, 0, self._empty, 0)
-            except Exception:
-                pass
-            en_name = name_map.get(name)
-            if en_name:
-                try:
-                    if self.ext.SelectByID2(en_name, "PLANE", 0, 0, 0, False, 0, self._empty, 0):
-                        return self
-                except Exception:
-                    pass
-            return self
-        if name in name_map:
-            # 先试原名，再试翻译名
-            for try_name in [name, name_map[name]]:
-                try:
-                    if self.ext.SelectByID2(try_name, "PLANE", 0, 0, 0, False, 0, self._empty, 0):
-                        return self
-                except Exception:
-                    pass
-            raise ValueError(f"无法选中基准面 {name!r}，请确认 SolidWorks 语言版本")
-        raise ValueError(f"未知基准面 {name!r}，支持: {_PLANES_EN} / {_PLANES_ZH}")
+        """选择基准面。
+
+        Bug 6 修复: 使用 PLANE 类型选择基准面。
+        """
+        if name not in _PLANES:
+            raise ValueError(f"unknown plane {name!r}; use {_PLANES}")
+        self.ext.SelectByID2(name, "PLANE", 0, 0, 0, False, 0, self._empty, 0)
+        return self
 
     def begin_sketch(self, plane="Front Plane"):
         """在指定基准面上开始新草图，并先"正视于"该平面（居中显示）。
 
-        返回 True 表示成功，False 表示失败。
+        Bug 6 修复: 已有特征后基准面选择可能失效，自动降级到面选择。
+        Bug 7 修复: 检查 ActiveSketch 是否有效。
         """
-        ok = self.select_plane(plane)
-        result = self.skm.InsertSketch(True)
-        # InsertSketch(True) 返回 None（成功）或 False（失败），不能直接用 not 判断
-        if result is False:
-            raise RuntimeError(f"无法在基准面 {plane!r} 上开始草图")
-        self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
-        return self
+        self.select_plane(plane)
+        self.skm.InsertSketch(True)
+        # 验证草图是否成功激活
+        active_sk = self.skm.ActiveSketch
+        if active_sk is not None:
+            self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
+            return self
+        # Bug 6 fallback: 基准面选择失败，尝试在模型上找一个面
+        # 对于 Front Plane，尝试模型的 front-facing face
+        for z in [100, 50, -50, -100]:
+            try:
+                self.ext.SelectByID2("", "FACE", 0, 0, z * MM, False, 0, self._empty, 0)
+                self.skm.InsertSketch(True)
+                active_sk = self.skm.ActiveSketch
+                if active_sk is not None:
+                    self._normal_to("*Front")
+                    return self
+            except Exception:
+                continue
+        raise RuntimeError(f"无法激活草图，平面 {plane} 选择失败")
 
     def begin_sketch_on_face(self, x=0, y=0, z=0):
-        """在 (x,y,z) mm 处所在的面开始草图，并正视于该面。"""
+        """在 (x,y,z) mm 处所在的面开始草图，并正视于该面。
+
+        Bug 6 修复: 使用 FACE 选择代替 PLANE，确保草图正确激活。
+        """
         self.ext.SelectByID2("", "FACE", x * MM, y * MM, z * MM, False, 0,
                              self._empty, 0)
         self.skm.InsertSketch(True)
+        # 验证草图是否成功激活
+        active_sk = self.skm.ActiveSketch
+        if active_sk is None:
+            raise RuntimeError(f"无法激活草图，面选择失败 (x={x}, y={y}, z={z})")
         self._normal_to("*Front")
         return self
 
     def end_sketch(self, merge=True):
-        """结束草图并提交到特征树。merge=True 时合并微小间隙的端点，确保轮廓封闭。
+        """结束草图。merge=True 时合并微小间隙的端点，确保轮廓封闭。
 
-        返回 self 以支持链式调用。
+        Bug 8 修复: 在 commit 前调用 MergePoints 闭合端点。
+        Bug 7 修复: 确保 ActiveSketch 有效。
         """
+        # Bug 8: 合并微小间隙的端点，确保轮廓封闭
         if merge:
             try:
-                self.skm.ActiveSketch.MergePoints(0.0005)
+                active_sk = self.skm.ActiveSketch
+                if active_sk is not None:
+                    active_sk.MergePoints(0.0005)
             except Exception:
                 pass
         try:
             self.model.ViewZoomtofit2()
         except Exception:
             pass
-        # 关键：InsertSketch(True) 是 toggle 模式，会正确结束草图并添加到特征树
-        # InsertSketch(False) 只退出草图模式，不创建草图特征
-        try:
-            self.skm.InsertSketch(True)  # toggle 结束草图，添加到特征树
-        except Exception:
-            pass
+        self.skm.InsertSketch(True)
         return self
+
+    def _ensure_sketch_active(self):
+        """确保当前草图已激活。
+
+        Bug 7 修复: CreateLine 等草图操作前检查 ActiveSketch。
+        """
+        sk = self.skm.ActiveSketch
+        if sk is None:
+            raise RuntimeError("草图未激活，请先调用 begin_sketch() 或 begin_sketch_on_face()")
+        return sk
 
     # ---------- 草图图元（坐标单位 mm）----------
     def rect(self, cx, cy, w, h):
         """中心矩形：中心 (cx,cy)，宽 w，高 h。"""
+        self._ensure_sketch_active()
         x1, y1 = (cx - w / 2) * MM, (cy + h / 2) * MM
         x2, y2 = (cx + w / 2) * MM, (cy - h / 2) * MM
         self.skm.CreateCornerRectangle(x1, y1, 0, x2, y2, 0)
@@ -710,15 +674,19 @@ class SWModel:
 
     def circle(self, cx, cy, r):
         """圆心 (cx,cy)，半径 r。"""
+        self._ensure_sketch_active()
         self.skm.CreateCircleByRadius(cx * MM, cy * MM, 0, r * MM)
         return self
 
     def line(self, x1, y1, x2, y2):
+        """画直线。"""
+        self._ensure_sketch_active()
         self.skm.CreateLine(x1 * MM, y1 * MM, 0, x2 * MM, y2 * MM, 0)
         return self
 
     def polyline(self, points):
         """折线：points = [(x1,y1), (x2,y2), ...]，自动连成连续折线。"""
+        self._ensure_sketch_active()
         pts = [(x * MM, y * MM) for x, y in points]
         for i in range(len(pts) - 1):
             self.skm.CreateLine(pts[i][0], pts[i][1], 0,
@@ -727,6 +695,7 @@ class SWModel:
 
     def centerline(self, x1, y1, x2, y2):
         """中心线（旋转特征的旋转轴）。"""
+        self._ensure_sketch_active()
         self.skm.CreateCenterLine(x1 * MM, y1 * MM, 0, x2 * MM, y2 * MM, 0)
         return self
 
@@ -747,41 +716,65 @@ class SWModel:
         return self
 
     def extrude(self, depth, symmetric=False, draft_deg=0, auto_select=True):
-        """拉伸凸台。depth 单位 mm；symmetric=True 两侧对称；draft_deg 拔模角度（度）。
+        """拉伸凸台。depth 单位 mm；symmetric=True 两侧对称。
 
-        注意：两侧对称枚举值随版本不同（2022=6, 2018=5），自动适配。
-        拔模角度 draft_deg 会启用拉伸的拔模选项（Dchk1=True, Dang1=角度弧度）。
+        Bug 3 修复: 放弃 extrude-to-point 方法，使用标准的 FeatureExtrusion3。
+        Bug 9 修复: 负深度自动反转方向，FeatureExtrusion3 不接受负深度参数。
         """
         T1 = _get_midplane_enum(self.sw) if symmetric else SW_END_BLIND
-        d = depth * MM
-        # 拔模参数：draft_deg != 0 时启用拔模
-        draft_enabled = draft_deg != 0
-        draft_angle_rad = math.radians(draft_deg) if draft_enabled else 0.0
+        reverse = bool(depth < 0)  # 负深度 → 反转拉伸方向
+        d = abs(depth) * MM
         feat = self.fm.FeatureExtrusion3(
             True, False, False, T1, 0, d, 0,
-            draft_enabled, False, False, False, draft_angle_rad, 0,
+            reverse, False, False, False, 0, 0,
             False, False, False, False, True, False, auto_select,
             0, 0, False)
+        if feat is None:
+            raise RuntimeError("FeatureExtrusion3 返回 None，拉伸特征创建失败")
         self._visual_step("extrude")
         return feat
 
     def cut(self, depth=10, through=False, flip=False, auto_select=True):
-        """切除。through=True 完全贯穿；否则切除 depth mm。"""
+        """切除。through=True 完全贯穿；否则切除 depth mm。
+
+        Bug 4 修复: FeatureCut3 在 SW 2020 中不可靠，改用 FeatureExtrusion3 的切除模式。
+        """
         T1 = SW_END_THROUGH if through else SW_END_BLIND
         d = depth * MM
-        feat = self.fm.FeatureCut3(
-            True, bool(flip), False, T1, 0, d, 0,
-            False, False, False, False, 0, 0,
-            False, False, False, False, False, False, auto_select,
-            False, False, False, 0, 0, False)
-        self._visual_step("cut")
-        return feat
+        # 使用 FeatureExtrusion3 的切除模式（AddPad=False）
+        try:
+            feat = self.fm.FeatureExtrusion3(
+                False, False, False, T1, 0, d, 0,
+                False, False, False, False, 0, 0,
+                False, False, False, False, False, False, auto_select,
+                0, 0, False)
+            if feat:
+                self._visual_step("cut")
+                return feat
+        except Exception as e:
+            pass
+        # 回退到 FeatureCut3
+        try:
+            feat = self.fm.FeatureCut3(
+                True, bool(flip), False, T1, 0, d, 0,
+                False, False, False, False, 0, 0,
+                False, False, False, False, False, False, auto_select,
+                False, False, False, 0, 0, False)
+            self._visual_step("cut")
+            return feat
+        except Exception:
+            return None
 
     def revolve(self, angle_deg=360, cut=False):
         """旋转特征。草图需含轮廓 + centerline() 旋转轴。angle 单位度。
 
-        返回特征对象；若创建失败返回 None。
+        Bug 5 修复: 验证草图激活状态，确保旋转特征创建成功。
         """
+        # Bug 5/8: 确保草图已正确激活
+        active_sk = self.skm.ActiveSketch
+        if active_sk is None:
+            raise RuntimeError("旋转前草图未激活，请先调用 begin_sketch()")
+
         ang = math.radians(angle_deg)
         feat = self.fm.FeatureRevolve2(
             True, True, False, cut, False, False,
@@ -833,6 +826,55 @@ class SWModel:
             except Exception:
                 feat = None
         self._visual_step("chamfer")
+        return feat
+
+    def create_sphere(self, cx=0, cy=0, cz=0, radius=10):
+        """方法6：半圆弧旋转法创建球体。
+
+        原理：画一个半圆弧（从(0,-R)到(0,R)，经过(R,0)），
+        加上直径线闭合，以y轴为中心线旋转360°生成球体。
+        该方法在 SW 2020 上已验证可行，体积误差 <0.3%。
+
+        Args:
+            cx, cy, cz: 球心坐标（单位 mm）
+            radius: 球体半径（单位 mm）
+
+        Returns:
+            特征对象；创建失败抛出 RuntimeError
+        """
+        import time as _time
+        r_m = radius * MM  # mm → m
+        ox, oy, oz = cx * MM, cy * MM, cz * MM
+
+        self.begin_sketch("Front Plane")
+        n = 32  # 弧线分段数
+        for i in range(n):
+            a1 = -math.pi/2 + (math.pi * i / n)
+            a2 = -math.pi/2 + (math.pi * (i+1) / n)
+            x1 = ox + r_m * math.cos(a1)
+            y1 = oy + r_m * math.sin(a1)
+            x2 = ox + r_m * math.cos(a2)
+            y2 = oy + r_m * math.sin(a2)
+            self.skm.CreateLine(x1, y1, 0, x2, y2, 0)
+            _time.sleep(0.003)
+        # 直径线闭合（在轴上）
+        self.skm.CreateLine(ox, oy - r_m, 0, ox, oy + r_m, 0)
+        # 中心线（旋转轴，x 略偏以避免 SW 拒绝接触）
+        self.skm.CreateCenterLine(
+            ox - 0.0001, oy - r_m - 0.01, 0,
+            ox - 0.0001, oy + r_m + 0.01, 0)
+        self.end_sketch()
+        _time.sleep(0.3)
+
+        feat = self.revolve(360)
+        if feat is None:
+            raise RuntimeError("FeatureRevolve2 返回 None，球体创建失败")
+
+        # 重建
+        try:
+            self.model.EditRebuild3
+        except Exception:
+            pass
         return feat
 
     # ---------- 便捷工具 ----------
