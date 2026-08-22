@@ -513,7 +513,6 @@ class SWModel:
                 path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "solidworks_live.png")
         try:
-            import mss
             import ctypes
             from ctypes import wintypes
             user32 = ctypes.windll.user32
@@ -530,10 +529,18 @@ class SWModel:
             h = rect.bottom - rect.top
             if w <= 0 or h <= 0:
                 return {"ok": False, "error": f"window rect invalid {w}x{h}"}
-            with mss.mss() as sct:
-                shot = sct.grab({'left': rect.left, 'top': rect.top,
-                                 'width': w, 'height': h})
-                mss.tools.to_png(shot.rgb, shot.size, output=path)
+            # 优先使用 mss（更快），回退到 PIL ImageGrab
+            try:
+                import mss
+                with mss.mss() as sct:
+                    shot = sct.grab({'left': rect.left, 'top': rect.top,
+                                     'width': w, 'height': h})
+                    mss.tools.to_png(shot.rgb, shot.size, output=path)
+            except ImportError:
+                from PIL import ImageGrab
+                img = ImageGrab.grab(bbox=(rect.left, rect.top,
+                                          rect.right, rect.bottom))
+                img.save(path, "PNG")
             return {"ok": True, "path": path, "size": f"{w}x{h}"}
         except Exception as e:
             return {"ok": False, "error": f"screenshot failed: {e}"}
@@ -586,17 +593,29 @@ class SWModel:
     def begin_sketch(self, plane="Front Plane"):
         """在指定基准面上开始新草图，并先"正视于"该平面（居中显示）。
 
-        Bug 6 修复: 确保草图正确激活后再绘制。
+        Bug 6 修复: 已有特征后基准面选择可能失效，自动降级到面选择。
         Bug 7 修复: 检查 ActiveSketch 是否有效。
         """
         self.select_plane(plane)
         self.skm.InsertSketch(True)
         # 验证草图是否成功激活
         active_sk = self.skm.ActiveSketch
-        if active_sk is None:
-            raise RuntimeError(f"无法激活草图，平面 {plane} 选择失败")
-        self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
-        return self
+        if active_sk is not None:
+            self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
+            return self
+        # Bug 6 fallback: 基准面选择失败，尝试在模型上找一个面
+        # 对于 Front Plane，尝试模型的 front-facing face
+        for z in [100, 50, -50, -100]:
+            try:
+                self.ext.SelectByID2("", "FACE", 0, 0, z * MM, False, 0, self._empty, 0)
+                self.skm.InsertSketch(True)
+                active_sk = self.skm.ActiveSketch
+                if active_sk is not None:
+                    self._normal_to("*Front")
+                    return self
+            except Exception:
+                continue
+        raise RuntimeError(f"无法激活草图，平面 {plane} 选择失败")
 
     def begin_sketch_on_face(self, x=0, y=0, z=0):
         """在 (x,y,z) mm 处所在的面开始草图，并正视于该面。
@@ -700,12 +719,14 @@ class SWModel:
         """拉伸凸台。depth 单位 mm；symmetric=True 两侧对称。
 
         Bug 3 修复: 放弃 extrude-to-point 方法，使用标准的 FeatureExtrusion3。
+        Bug 9 修复: 负深度自动反转方向，FeatureExtrusion3 不接受负深度参数。
         """
         T1 = _get_midplane_enum(self.sw) if symmetric else SW_END_BLIND
-        d = depth * MM
+        reverse = bool(depth < 0)  # 负深度 → 反转拉伸方向
+        d = abs(depth) * MM
         feat = self.fm.FeatureExtrusion3(
             True, False, False, T1, 0, d, 0,
-            False, False, False, False, 0, 0,
+            reverse, False, False, False, 0, 0,
             False, False, False, False, True, False, auto_select,
             0, 0, False)
         if feat is None:
