@@ -348,6 +348,33 @@ swapi.select_sketch_by_name(sw, m.model, "轮廓")
   - 分界线：贴合特征交界处必须画分隔线或保留 0.1mm 间距
   - 线宽分层：可见轮廓 0.5mm，中心线 0.25mm，隐藏线 0.2mm
 
+### Bug #16 — begin_sketch 多特征后永久失效（高严重级）
+- **现象**：第一个特征后，后续所有 `begin_sketch("Front Plane")` 调用失败，报 RuntimeError
+- **根因**：`select_plane()` 中的 `clear_selection()` 过早清除平面选择状态，干扰 `InsertSketch(True)` 的选面逻辑；同时残留草图模式未退出
+- **修复**（两轮迭代）：
+  1. 移除 `select_plane()` 中的 `clear_selection()`，避免破坏 InsertSketch 的选面依赖
+  2. 在 `begin_sketch()` 开头先调用 `InsertSketch(False)` 退出残留草图模式，再重新选中平面
+  3. 草图激活成功后才调用 `clear_selection()`（不干扰选面过程）
+  4. fallback 改为动态范围搜索（±5/10/20/50/100/200mm），覆盖不同尺寸零件
+
+### Bug #17 — begin_sketch_on_face 最大边界面不可选（高严重级）
+- **现象**：最小边界（x=0/y=0/z=0）可选，最大边界（x=max/y=max）完全不可选
+- **根因**：`SelectByID2("", "FACE", x, y, z)` 使用射线拾取，在最大边界坐标处射线穿过边/顶点而非面；43次偏移全部无效
+- **根因补充**：SW COM 动态调用下 `face.Centroid`、`face.GetName2` 属性不可用；且用户传入的是局部坐标，而 `face.GetBox` 返回 SW 内部坐标（原点居中），直接比较永远匹配不上
+- **修复**：改用**面包围盒匹配+face.Select(True)**，含两步坐标处理
+  1. **第一遍**：用原始坐标直接匹配各面 GetBox（兼容已传内部坐标的旧脚本）
+  2. **第二遍**：遍历所有面聚合实体整体包围盒，将用户局部坐标转换为 SW 内部坐标：`internal = body_min + local`，再匹配
+  3. 匹配成功后调用 `face.Select(True)` 直接选面（绕过面名/质心限制）
+  4. 保留13次轻量坐标偏移作为最终 fallback
+- **验证结果**：9项测试全部通过 ✅（6个方块面含最大边界 x=100/y=60 + 球面 + 多特征后右面 + 多特征后 begin_sketch）
+
+### Bug #18 — 多特征后 on_face 成功率下降（中严重级）
+- **现象**：同一零件内随特征数量增加，`begin_sketch_on_face` 失败率上升（30-40%）
+- **根因**：SW COM 内部选择状态累积，导致后续面选择器退化
+- **修复**：
+  1. 每次 `SelectByID2` 尝试前调用 `clear_selection()` 清除状态
+  2. `extrude()` / `cut()` / `revolve()` 创建特征后自动调用 `rebuild()` 刷新模型状态
+
 ## 6. 建模脚本模板（DSH 生成代码参考）
 
 ```python

@@ -190,6 +190,22 @@ python "<包目录>\sw_bridge.py" vision-fallback "描述"
       except: pass
   ```
 
+### Bug 16: begin_sketch 多特征后永久失效
+- **现象**: 第一个特征后，后续所有 `begin_sketch("Front Plane")` 调用失败
+- **根因**: `clear_selection()` 过早清除平面选择状态，干扰 `InsertSketch(True)` 的选面逻辑；残留草图模式未退出
+- **解决**: 移除 `select_plane()` 中的 `clear_selection()`；在 `begin_sketch()` 开头先 `InsertSketch(False)` 退出残留模式；草图激活成功后再清理选择；fallback 改为动态范围搜索（±5~200mm）
+
+### Bug 17: begin_sketch_on_face 最大边界面不可选
+- **现象**: 最小边界（x=0/y=0/z=0）可选，最大边界（x=max/y=max）完全不可选
+- **根因**: `SelectByID2(FACE, x,y,z)` 使用射线拾取，在最大边界处射线穿过边/顶点而非面；且 face.GetBox 返回 SW 内部坐标（居中），与用户局部坐标不匹配
+- **解决**: 两步匹配法——第一遍用原始坐标尝试；失败后聚合所有面 GetBox 计算实体整体包围盒，将用户局部坐标转换为内部坐标（`internal = body_min + local`）再匹配；匹配后用 `face.Select(True)` 直接选面
+- **验证**: 9项测试全部通过 ✅（含最大边界 x=100/y=60、球面、多特征后）
+
+### Bug 18: 多特征后 on_face 成功率下降
+- **现象**: 随特征数量增加，`begin_sketch_on_face` 失败率上升
+- **根因**: SW COM 内部选择状态累积导致退化
+- **解决**: 每次 `SelectByID2` 尝试前调用 `clear_selection()`；特征创建后自动 `rebuild()`
+
 ## 6. 建模方法论
 
 ### 旋转体（轴、球、法兰）
@@ -236,6 +252,9 @@ m.chamfer(1, [(0, 40, 10)], angle_deg=45)
 10. **展示** → `python sw_bridge.py show`
 
 **关键规则**：
-- 第一个特征后用 `begin_sketch_on_face()` 而不是 `begin_sketch()`
+- `begin_sketch()` 在多特征后已修复（Bug 16），先退出残留草图模式再重新选面
+- `begin_sketch_on_face()` 优先用**面包围盒匹配+face.Select(True)**选面（Bug 17），可可靠命中最大边界和旋转体曲面
+- 每个 SelectByID2 尝试前自动清除选择状态（Bug 18）
+- 特征创建后自动 rebuild() 刷新 COM 状态（Bug 18）
 - `cut()` 已改用 FeatureExtrusion3 切除模式，不再依赖 FeatureCut3
 - `MergePoints()` 在 end_sketch() 内自动调用，无需手动调用

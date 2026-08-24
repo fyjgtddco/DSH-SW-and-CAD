@@ -36,6 +36,13 @@ DSH 通过 pwsh 工具调用本脚本，输出 JSON。
 
 依赖（新电脑安装）:
     pip install pywin32 mss Pillow
+
+【重要约束 — 修改前必读】
+  本项目基于 SW API + pywin32。已知以下约束：
+  1. 视图必须使用四锚点+递归比例降级算法；
+  2. 坐标写入必须使用 pythoncom.VARIANT 封送（VT_ARRAY | VT_R8）；
+  3. 禁止使用 CreateDrawViewFromModelView 的锚点参数；
+  4. 修改代码前必须先读取旧代码防止回归测试失败。
 """
 import sys
 import os

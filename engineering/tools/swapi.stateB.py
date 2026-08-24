@@ -346,10 +346,6 @@ class SWModel:
         self.fm = model.FeatureManager
         self.ext = model.Extension
         self._empty = win32com.client.VARIANT(pythoncom.VT_DISPATCH, None)
-        # 曲面草图偏移量（mm）：在圆柱侧面选面时，选低z点激活草图，后续画图Y坐标需偏移
-        self._surface_sketch_offset = 0.0
-        # Right Plane 穿透孔模式：后半侧圆柱面无法直接选面，改用 Right Plane 草图
-        self._right_plane_mode = False
 
     def _visual_step(self, label=""):
         """可视化建模：每个特征创建后实时居中展示。"""
@@ -687,16 +683,12 @@ class SWModel:
                     if not flist:
                         continue
 
-                    # ── 第一遍：尝试原始坐标直接匹配（仅平面） ─────────────
+                    # ── 第一遍：尝试原始坐标直接匹配 ──────────────────────
                     for face in flist:
                         try:
                             bb = face.GetBox
                             bb_min = (bb[0] * 1000, bb[1] * 1000, bb[2] * 1000)
                             bb_max = (bb[3] * 1000, bb[4] * 1000, bb[5] * 1000)
-                            # 跳过曲面（GetBox 对曲面返回参数空间坐标，不可靠）
-                            n = face.Normal
-                            if all(abs(v) < 0.01 for v in n):
-                                continue
                             if (bb_min[0] - tol <= x <= bb_max[0] + tol and
                                 bb_min[1] - tol <= y <= bb_max[1] + tol and
                                 bb_min[2] - tol <= z <= bb_max[2] + tol):
@@ -840,112 +832,6 @@ class SWModel:
         except Exception:
             return None
 
-    def _begin_sketch_on_curved_face(self, x, y, z):
-        """曲面草图绕过方案：对圆柱面，分情况处理。
-
-        【SW2020】(2025-08-23)
-        - 前半侧(z≤10mm): SelectByID2 直接选中 ✅
-        - 前半侧(任意z): 用低z点选面+Y偏移绕过 ✅
-        - 后半侧: 回退到 Right Plane 穿透孔（画在侧面上，切除贯穿）⚠️
-        - 适用范围: 轴线沿Z的圆柱面/圆孔面
-        """
-        import math
-        # 从模型获取圆柱几何信息
-        bodies = self.model.GetBodies2(0, 1)
-        R_approx = 0.015  # 默认15mm
-        cx_sw, cy_sw = 0.0, 0.0
-        if bodies:
-            body_list = list(bodies) if isinstance(bodies, tuple) else [bodies]
-            found_cylinder = False
-            for b in body_list:
-                try:
-                    faces = b.GetFaces()
-                    flist = list(faces) if isinstance(faces, tuple) else ([faces] if faces else [])
-                    for face in flist:
-                        try:
-                            surf = face.GetSurface
-                            if surf and getattr(surf, 'IsCylinder', False):
-                                bb = face.GetBox
-                                cx_sw = (bb[0] + bb[3]) / 2
-                                cy_sw = (bb[1] + bb[4]) / 2
-                                R_approx = (bb[3] - bb[0])
-                                found_cylinder = True
-                                break
-                        except: pass
-                    if found_cylinder:
-                        break
-                except: pass
-        else:
-            return self
-
-        # 计算目标角度，并将点投影到圆柱面上
-        target_sw_x = x * MM
-        target_sw_y = y * MM
-        dx = target_sw_x - cx_sw
-        dy = target_sw_y - cy_sw
-        dist = math.sqrt(dx * dx + dy * dy)
-        if dist > 1e-9:
-            # 投影到圆柱面
-            target_sw_x = cx_sw + R_approx * (dx / dist)
-            target_sw_y = cy_sw + R_approx * (dy / dist)
-        angle_rad = math.atan2(target_sw_y - cy_sw, target_sw_x - cx_sw)
-        angle_deg = math.degrees(angle_rad)
-
-        # 判断前半侧还是后半侧
-        is_front = -90 <= angle_deg <= 90
-
-        # 策略1: 低z点选面（前半侧有效）
-        low_z = 5.0
-        r_low = R_approx / 2
-        low_x = cx_sw + r_low * math.cos(angle_rad)
-        low_y = cy_sw + r_low * math.sin(angle_rad)
-        low_z_sw = low_z * MM
-
-        self.clear_selection()
-        sel = self.ext.SelectByID2("", "FACE", low_x, low_y, low_z_sw, False, 0, self._empty, 0)
-        if sel:
-            self.skm.InsertSketch(True)
-            active_sk = self.skm.ActiveSketch
-            if active_sk is not None:
-                self._surface_sketch_offset = z - low_z
-                print(f"[swapi] 圆柱侧面草图: 选z={low_z}mm处，"
-                      f"草图Y偏移+{self._surface_sketch_offset:.0f}mm "
-                      f"(对应目标z={z:.0f}mm, θ={angle_deg:.0f}°)")
-                self._normal_to("*Front")
-                return self
-
-        # 策略2: 后半侧 → Right Plane 穿透孔
-        print(f"[swapi] 圆柱侧面 ({x:.0f},{y:.0f},{z:.0f})mm(θ={angle_deg:.0f}°) "
-              f"改用 Right Plane 穿透孔")
-        right_plane_ok = False
-        try:
-            self.clear_selection()
-            for plane_name in ["Right Plane", "右视基准面"]:
-                sel = self.ext.SelectByID2(plane_name, "PLANE", 0, 0, 0, False, 0, self._empty, 0)
-                if sel:
-                    break
-            if sel:
-                self.skm.InsertSketch(True)
-                active_sk = self.skm.ActiveSketch
-                if active_sk is not None:
-                    self._right_plane_mode = True
-                    print(f"[swapi] Right Plane 草图已激活(θ={angle_deg:.0f}°)，"
-                          f"请用 circle(0,{y},{r}) 或 rect(0,{y},{w},{h}) 画图后调用 cut()")
-                    self._normal_to("*Front")
-                    right_plane_ok = True
-                    return self
-                self.clear_selection()
-        except Exception:
-            pass
-
-        if not right_plane_ok:
-            # 全部失败 → 回退基准面
-            print(f"[swapi] ⚠️ 当前不支持在坐标 ({x:.0f},{y:.0f},{z:.0f}) 处开草图，请你自己画。")
-            plane_name = self._find_nearest_datum_plane(x, y, z)
-            if plane_name:
-                return self
-        return self
-
     def _find_nearest_datum_plane(self, x, y, z):
         """在曲面选面失败后，回退到最近平行基准面（Front/Top/Right）。"""
         max_axis = max(abs(x), abs(y), abs(z), key=abs)
@@ -973,68 +859,55 @@ class SWModel:
     def begin_sketch_on_face(self, x=0, y=0, z=0):
         """在 (x,y,z) mm 处所在的面开始草图，并正视于该面。
 
-        Bug 7 修复: 最大边界面不可选——平面用 GetBox 匹配，曲面用绕过方案。
-        Bug 8 修复: 圆柱侧面全角度支持。
-          - 前半侧(z≤10mm): SelectByID2 直接选中 ✅
-          - 前半侧(任意z): 低z点选面+Y偏移 ✅
-          - 后半侧: Right Plane 穿透孔 ✅
-          - 非圆柱面/其他: 回退基准面 + 提示
+        Bug 7 修复: 最大边界面不可选——改用面包围盒匹配+face.Select(True)。
+        Bug 8 修复: 旋转体/球面等曲面不支持直接开草图——回退到最近平行基准面。
+        Bug 4 修复: 选择成功后清除 COM 内部选择缓存。
 
-        【SW2020 限制】
-        SelectByID2 射线拾取只能选中朝向摄像机的面。
-        后半侧圆柱面通过 Right Plane 穿透孔实现等效效果。
+        【SW2020 突破实验结论】(2025-08-23)
+        以下方法全部测试失败:
+          ❌ ISurface.Evaluate — 参数类型错误
+          ❌ FeatureManager.InsertRefPlane — 参数数不匹配（3~11参）
+          ❌ FeatureManager.InsertWrapFeature — 模型无变化
+          ❌ sw.CreateReference — 类型不匹配
+          ❌ EnsureDispatch(makepy) — 类型库未注册
+
+        当前行为:
+          - 平面: 直接开草图 ✅
+          - 曲面: 回退基准面 + 打印"当前不支持，请你自己画"
         """
-        import math
-
-        # 策略1: 对平面用 GetBox 匹配
+        # Bug 7: 用面包围盒匹配法选面
         if self._select_face_by_box(x, y, z):
             self.skm.InsertSketch(True)
             active_sk = self.skm.ActiveSketch
             if active_sk is not None:
                 self._normal_to("*Front")
                 return self
+            # 选面成功但草图未激活 → 可能是曲面
             self.clear_selection()
-
-        # 策略2: 直接用 SelectByID2 选面
-        self.clear_selection()
-        sel = self.ext.SelectByID2("", "FACE", x * MM, y * MM, z * MM, False, 0, self._empty, 0)
-        if sel:
-            self.skm.InsertSketch(True)
-            active_sk = self.skm.ActiveSketch
-            if active_sk is not None:
-                self._normal_to("*Front")
-                return self
-            self.clear_selection()
-
-        # 策略3: 检测曲面 → 绕过方案
-        bodies = self.model.GetBodies2(0, 1)
-        if bodies:
-            body_list = list(bodies) if isinstance(bodies, tuple) else [bodies]
-            for b in body_list:
-                try:
-                    faces = b.GetFaces()
-                    flist = list(faces) if isinstance(faces, tuple) else ([faces] if faces else [])
-                    for face in flist:
-                        if self._is_curved_face(face):
-                            return self._begin_sketch_on_curved_face(x, y, z)
-                except Exception:
-                    continue
-
-        # 策略4: 全部失败 → 回退基准面
-        print(f"[swapi] begin_sketch_on_face({x},{y},{z}) 失败，回退到 Front Plane")
-        print(f"[swapi] ⚠️ 当前不支持在坐标 ({x},{y},{z}) 处开草图，请你自己画。")
-        try:
-            self.clear_selection()
-            self.ext.SelectByID2("Front Plane", "PLANE", 0, 0, 0, False, 0, self._empty, 0)
-            self.skm.InsertSketch(True)
-            active_sk = self.skm.ActiveSketch
-            if active_sk is not None:
-                self._normal_to("*Front")
-                return self
-            self.clear_selection()
-        except Exception:
-            pass
-        return self
+            # Bug 8: 检测是否为曲面（Normal 全为零），并计算精确法线
+            bodies = self.model.GetBodies2(0, 1)
+            if bodies:
+                body_list = list(bodies) if isinstance(bodies, tuple) else [bodies]
+                for b in body_list:
+                    try:
+                        faces = b.GetFaces()
+                        flist = list(faces) if isinstance(faces, tuple) else ([faces] if faces else [])
+                        for face in flist:
+                            if self._is_curved_face(face):
+                                # 尝试计算精确法线（圆柱面可用）
+                                normal_info = self._get_surface_normal(face, x, y, z)
+                                if normal_info:
+                                    nx, ny, nz, px, py, pz = normal_info
+                                    print(f"[swapi] 曲面检测: 目标({x},{y},{z})mm "
+                                          f"法线({nx:.3f},{ny:.3f},{nz:.3f})")
+                                    print(f"[swapi] ⚠️ 当前不支持在曲面（圆柱/球面）上直接开草图，请你自己画。")
+                                plane_name = self._find_nearest_datum_plane(x, y, z)
+                                if plane_name:
+                                    return self
+                                break
+                    except Exception:
+                        continue
+            return self
 
         # 兜底：坐标射线拾取（应对特殊情况）
         fallback_attempts = [
@@ -1076,7 +949,6 @@ class SWModel:
 
     def end_sketch(self, merge=True):
         """结束草图。merge=True 时合并微小间隙的端点，确保轮廓封闭。
-        曲面草图模式下重置Y偏移量。
 
         Bug 8 修复: 在 commit 前调用 MergePoints 闭合端点。
         Bug 7 修复: 确保 ActiveSketch 有效。
@@ -1094,9 +966,6 @@ class SWModel:
         except Exception:
             pass
         self.skm.InsertSketch(True)
-        # 重置曲面草图偏移
-        self._surface_sketch_offset = 0.0
-        self._right_plane_mode = False
         return self
 
     def _ensure_sketch_active(self):
@@ -1111,48 +980,38 @@ class SWModel:
 
     # ---------- 草图图元（坐标单位 mm）----------
     def rect(self, cx, cy, w, h):
-        """中心矩形：中心 (cx,cy)，宽 w，高 h。
-        曲面草图模式下自动应用Y偏移。"""
+        """中心矩形：中心 (cx,cy)，宽 w，高 h。"""
         self._ensure_sketch_active()
-        adj_cy = cy + self._surface_sketch_offset
-        x1, y1 = (cx - w / 2) * MM, (adj_cy + h / 2) * MM
-        x2, y2 = (cx + w / 2) * MM, (adj_cy - h / 2) * MM
+        x1, y1 = (cx - w / 2) * MM, (cy + h / 2) * MM
+        x2, y2 = (cx + w / 2) * MM, (cy - h / 2) * MM
         self.skm.CreateCornerRectangle(x1, y1, 0, x2, y2, 0)
         return self
 
     def circle(self, cx, cy, r):
-        """圆心 (cx,cy)，半径 r。
-        曲面草图模式下自动应用Y偏移。Right Plane 模式下 x 固定为 0。"""
+        """圆心 (cx,cy)，半径 r。"""
         self._ensure_sketch_active()
-        adj_cy = cy + self._surface_sketch_offset
-        sketch_cx = 0.0 if self._right_plane_mode else cx
-        self.skm.CreateCircleByRadius(sketch_cx * MM, adj_cy * MM, 0, r * MM)
+        self.skm.CreateCircleByRadius(cx * MM, cy * MM, 0, r * MM)
         return self
 
     def line(self, x1, y1, x2, y2):
-        """画直线。曲面草图模式下自动应用Y偏移。"""
+        """画直线。"""
         self._ensure_sketch_active()
-        adj_y1 = y1 + self._surface_sketch_offset
-        adj_y2 = y2 + self._surface_sketch_offset
-        self.skm.CreateLine(x1 * MM, adj_y1 * MM, 0, x2 * MM, adj_y2 * MM, 0)
+        self.skm.CreateLine(x1 * MM, y1 * MM, 0, x2 * MM, y2 * MM, 0)
         return self
 
     def polyline(self, points):
-        """折线：points = [(x1,y1), (x2,y2), ...]，自动连成连续折线。
-        曲面草图模式下自动应用Y偏移。"""
+        """折线：points = [(x1,y1), (x2,y2), ...]，自动连成连续折线。"""
         self._ensure_sketch_active()
-        adj_pts = [(x * MM, (y + self._surface_sketch_offset) * MM) for x, y in points]
-        for i in range(len(adj_pts) - 1):
-            self.skm.CreateLine(adj_pts[i][0], adj_pts[i][1], 0,
-                                adj_pts[i + 1][0], adj_pts[i + 1][1], 0)
+        pts = [(x * MM, y * MM) for x, y in points]
+        for i in range(len(pts) - 1):
+            self.skm.CreateLine(pts[i][0], pts[i][1], 0,
+                                pts[i + 1][0], pts[i + 1][1], 0)
         return self
 
     def centerline(self, x1, y1, x2, y2):
-        """中心线（旋转特征的旋转轴）。曲面草图模式下自动应用Y偏移。"""
+        """中心线（旋转特征的旋转轴）。"""
         self._ensure_sketch_active()
-        adj_y1 = y1 + self._surface_sketch_offset
-        adj_y2 = y2 + self._surface_sketch_offset
-        self.skm.CreateCenterLine(x1 * MM, adj_y1 * MM, 0, x2 * MM, adj_y2 * MM, 0)
+        self.skm.CreateCenterLine(x1 * MM, y1 * MM, 0, x2 * MM, y2 * MM, 0)
         return self
 
     # ---------- 特征（尺寸单位 mm）----------
