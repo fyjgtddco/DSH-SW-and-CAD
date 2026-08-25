@@ -1,7 +1,7 @@
 ---
 name: sw-design
-description: SolidWorks 机械设计工作流
-whenToUse: 当需要进行 SolidWorks 三维建模、装配体设计或工程图输出时
+description: SolidWorks 机械设计工作流。涵盖三维建模、装配设计、工程图输出、GB/T 制图规范、AutoCAD 几何验证（CADX）和 SolidWorks 桥接。
+whenToUse: 当需要进行 SolidWorks 三维建模、装配设计、出工程图或将 SolidWorks 零件转换为 AutoCAD 图纸时使用
 disable-model-invocation: false
 user-invocable: true
 source: engineering
@@ -13,26 +13,21 @@ provider: filesystem
 ### 一、设计前分析
 
 1. **需求分析**
-   - 明确零件的功能要求
-   - 确定载荷类型和大小
-   - 确定工作环境条件
+   - 明确零件的功能要求、材料、热处理、表面处理
+   - 确定载荷类型和大小，评估应力和疲劳风险
+   - 确定工作环境条件（温度、湿度、腐蚀性）
 
 2. **尺寸合理性检查**
-   - 壁厚是否均匀？
-   - 是否有应力集中风险？
-   - 加工工艺是否可行？
-   - 脱模斜度是否合适？
-
-3. **运行时分析**
-   - 运动部件是否有足够间隙？
-   - 配合公差是否合理？
+   - 壁厚是否均匀？是否有应力集中风险？
+   - 加工工艺是否可行？脱模斜度是否合适？
+   - 运动部件是否有足够间隙？配合公差是否合理？
    - 是否考虑热膨胀？
 
-### 二、零件建模流程
+### 二、零件建模流程（solidworks-modeling.md 参考）
 
 1. **草图绘制**
    - 选择合适的基准面（前视/上视/右视）
-   - 使用几何约束（水平、垂直、共线、同心等）
+   - 使用几何约束（水平、垂直、共线、同心、相切等）
    - 使用尺寸约束标注尺寸
    - 确保草图完全定义（黑色，非蓝色）
 
@@ -58,7 +53,7 @@ provider: filesystem
 
 2. **配合定义**
    - 标准配合：重合、平行、垂直、相切、同轴心、距离、角度
-   - 高级配合：对称、宽度、路径配合、线性/线性耦合
+   - 高级配合：对称、宽度、路径配合、线性耦合
    - 机械配合：凸轮、齿轮、齿条小齿轮、螺旋、万向节
 
 3. **装配体验证**
@@ -70,38 +65,41 @@ provider: filesystem
 ### 四、工程图输出
 
 1. **视图选择**
-   - 标准三视图（前视、上视、右视）
-   - 投影视图
-   - 剖视图（全剖、半剖、局部剖、阶梯剖、旋转剖）
-   - 局部放大图
-   - 辅助视图
+   - 标准三视图（前视、上视、右视）+ 等轴测
+   - 投影视图、剖视图（全剖、半剖、局部剖、阶梯剖）
+   - 局部放大图、辅助视图
 
-2. **标注规范**
-   - 尺寸标注
-   - 公差标注
-   - 表面粗糙度符号
-   - 形位公差（平行度、垂直度、同轴度、圆跳动等）
-   - 基准符号
+2. **标注规范（参考 references/gbt-drafting.md）**
+   - 尺寸标注（GB/T 4458.4）
+   - 公差标注（GB/T 1800 系列）
+   - 表面粗糙度（GB/T 131）
+   - 形位公差（GB/T 1182）
+   - 标题栏（GB/T 10609.1）
 
-3. **技术要求**
-   - 材料要求
-   - 热处理要求
-   - 表面处理要求
-   - 未注公差标准
+3. **图层规范（参考 references/autocad-workflow.md）**
+   - `OUTLINE` / `THIN` / `CENTER` / `HIDDEN` / `DIM` / `TEXT` / `HATCH`
 
-### 五、SolidWorks API 调用示例
+### 五、AutoCAD 几何验证（CADX）
+
+> 参考：`references/autocad-workflow.md`
+
+从 SolidWorks 生成的工程图导出为 DWG/DXF 后，可使用 CADX 进行几何验证：
 
 ```powershell
-# 通过 COM 接口启动 SolidWorks
-$swApp = New-Object -ComObject "SldWorks.Application"
-$swApp.Visible = $true
+# 导出 DXF（SolidWorks 工程图 → DXF）
+python sw_bridge.py export-dxf "<输出.dxf>"
 
-# 创建新零件
-$part = $swApp.NewPart()
-
-# 获取当前文档
-$doc = $swApp.ActiveDoc
-
-# 保存零件
-$doc.Save3("C:\path\to\part.SLDPRT", 0, 0)
+# 运行 CADX 几何验证（7 项检查）
+python sw_bridge.py cad-validate "<输出.dxf>"
 ```
+
+**验证流程：**
+1. 读取 DXF 中所有实体（LWPOLYLINE、LINE、CIRCLE、DIMENSION 等）
+2. 逐项执行 7 种检查，记录问题位置和严重等级
+3. 返回 JSON 摘要：`{status: "PASSED/REVIEW/FAILED", critical, warning, info, issues: [...]}`
+4. CRITICAL 项必须在发布前修复
+
+### 六、参考文档
+
+- `references/gbt-drafting.md` — GB/T 机械制图国家标准（线型、标注、视图、剖视）
+- `references/autocad-workflow.md` — AutoCAD 工作流、CADX 验证命令、坐标约定

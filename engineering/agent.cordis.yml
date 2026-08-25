@@ -149,6 +149,50 @@
       3. 不要调用 massprops 校验——容易卡死 SW
       4. 选中草图用 `select_sketch_by_index()` 而不是中文名
 
+      ## ██ CADX / AutoCAD 几何验证能力 ██
+
+      你可以使用 **CADX** 对 AutoCAD 图纸进行几何验证。
+      这是从 CADX 工程中提取的 7 项几何检查引擎，运行在本地 Python 中。
+
+      ### 能力说明
+      - **连接 AutoCAD**：通过 COM 接口读取当前打开的 DWG 文件
+      - **导出 DXF**：将 DWG 导出为 DXF 格式（供解析）
+      - **几何验证**：7 项检查（未闭合多段线、重叠几何、尺寸过小、长宽比、墙厚、缺失元素、标注不一致）
+      - **问题高亮**：在 AutoCAD 中以红色/黄色圆圈标记问题位置
+
+      ### 命令用法
+      ```powershell
+      # 检查 AutoCAD 连接状态
+      python "<包目录>\sw_bridge.py" ac-status
+
+      # 导出 AutoCAD 当前图纸为 DXF
+      python "<包目录>\sw_bridge.py" ac-export
+
+      # 验证已保存的 DXF/DWG 文件（需先导出为 DXF）
+      python "<包目录>\sw_bridge.py" cad-validate "<图纸.dxf>"
+
+      # 验证当前 AutoCAD 活动文档（自动导出 DXF 后验证）
+      python "<包目录>\sw_bridge.py" cad-validate-live
+      ```
+
+      ### 验证结果解读
+      - `CRITICAL`（红色）：必须修复，否则图纸不可发布
+      - `WARNING`（黄色）：建议修复，影响可读性
+      - `INFO`（绿色）：参考建议，不影响功能
+      - 验证状态：`PASSED`（全通过）/ `REVIEW`（有 WARNING）/ `FAILED`（有 CRITICAL）
+
+      ### 使用场景
+      当用户生成或修改 AutoCAD 图纸时，**必须**运行 cad-validate 进行验证：
+      ```powershell
+      python sw_bridge.py cad-validate output.dxf
+      # 若返回 CRITICAL 项，必须让用户确认后再发布
+      ```
+
+      ### 依赖
+      - AutoCAD 已安装并运行
+      - pywin32（已包含在 DSH 环境）
+      - ezdxf + shapely（可选，没有则跳过重叠检查）
+
       ## ██ SW → CAD 图纸一键转换（核心能力） ██
 
       除了直接建模，你还能**把 SolidWorks 零件一键转换成 CAD 工程图（DWG/PDF）**。
@@ -444,18 +488,3 @@
   config:
     fetch: false
     searchTimeoutMs: 60000
-
-# ── QQ 机器人任务通知 ───────────────────────────────────────────────────────
-# 监听 DSH 任务完成/失败事件，自动推送到指定的 QQ 群或私聊。
-# 私聊支持：QQ_GROUP_OPEN_ID（群） / QQ_PRIVATE_TARGET（私聊，支持 QQ 号或 open_id）
-- id: qq-notification
-  name: dsh-qq-notification
-  config:
-    appId: !!js eval "(process.env.QQ_APP_ID || '1905462341')"
-    appSecret: !!js eval "(process.env.QQ_APP_SECRET || 'xra7RZUM7duvgBRR')"
-    targetGroupOpenId: !!js eval "(process.env.QQ_GROUP_OPEN_ID || null)"
-    targetUserOpenId: !!js eval "(process.env.QQ_USER_OPEN_ID || process.env.QQ_PRIVATE_TARGET || null)"
-    notifyOnGoal: true
-    notifyOnSubagent: true
-    notifyOnSubagentStart: true
-    notifyOnAgentError: true

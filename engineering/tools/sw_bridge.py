@@ -21,6 +21,14 @@ DSH 通过 pwsh 工具调用本脚本，输出 JSON。
     python sw_bridge.py save <路径>              # 另存为
     python sw_bridge.py sketch-rect <w> <h> <depth>  # 画矩形并拉伸
     python sw_bridge.py export-pdf <路径>        # 导出 PDF
+    python sw_bridge.py drawing <零件路径> [输出路径]  # 生成 SLDDRW 工程图
+    python sw_bridge.py dwg <零件路径> [输出路径]    # 导出 DWG（AutoCAD 可读）
+
+ CADX / AutoCAD 命令（需要安装 AutoCAD）:
+    python sw_bridge.py ac-status              # AutoCAD 连接状态
+    python sw_bridge.py ac-export [输出.dxf]   # 导出当前 AutoCAD 图纸为 DXF
+    python sw_bridge.py cad-validate <图纸.dxf> [规则]  # 几何验证（7项检查）
+    python sw_bridge.py cad-validate-live      # 验证当前 AutoCAD 活动文档（自动导出 DXF）
 
 脚本执行模式（DSH 自动生成的建模代码 —— 核心能力）:
     python sw_bridge.py run <script.py> [参数...]
@@ -52,6 +60,24 @@ import subprocess
 
 import pythoncom
 import win32com.client
+
+# CADX AutoCAD bridge & DXF validation（可选，需要 pyautocad/ezdxf/shapely）
+try:
+    import ac_bridge
+    import ac_validate
+    _HAS_CADX = True
+except ImportError:
+    _HAS_CADX = False
+
+# Physics-in-the-Loop 物理验证子系统
+try:
+    _PHYSICS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "physics")
+    if _PHYSICS_DIR not in sys.path:
+        sys.path.insert(0, _PHYSICS_DIR)
+    import physics_bridge as _pb
+    _HAS_PHYSICS = True
+except ImportError:
+    _HAS_PHYSICS = False
 
 # Fix GBK encoding on Windows terminals
 if sys.platform == 'win32':
@@ -1504,6 +1530,89 @@ def main():
             result = cmd_check_vision(sw)
         elif cmd == "reading":
             result = cmd_reading(sw)
+        elif cmd == "ac-status":
+            if not _HAS_CADX:
+                result = {"ok": False, "error": "ac_bridge 未找到，请确保 engineering/tools/ 下有 ac_bridge.py"}
+            else:
+                result = ac_bridge.get_ac().status() if ac_bridge.get_ac() else {"ok": False, "error": "无法连接 AutoCAD"}
+        elif cmd == "ac-export":
+            if not _HAS_CADX:
+                result = {"ok": False, "error": "ac_bridge 未找到"}
+            else:
+                ac = ac_bridge.get_ac()
+                if not ac:
+                    result = {"ok": False, "error": "无法连接 AutoCAD，请先启动 AutoCAD"}
+                else:
+                    out_path = args[1] if len(args) > 1 else ""
+                    result = {"ok": True, "dxf_path": ac.export_dxf(out_path)}
+        elif cmd == "cad-validate":
+            if not _HAS_CADX:
+                result = {"ok": False, "error": "ac_validate 未找到，请确保 engineering/tools/ 下有 ac_validate.py"}
+            else:
+                dxf_path = args[1] if len(args) > 1 else ""
+                rules = args[2] if len(args) > 2 else "mechanical"
+                if not dxf_path or not os.path.exists(dxf_path):
+                    result = {"ok": False, "error": f"DXF 文件不存在: {dxf_path}"}
+                else:
+                    result = ac_validate.validate_dxf(dxf_path, rules)
+        elif cmd == "cad-validate-live":
+            if not _HAS_CADX:
+                result = {"ok": False, "error": "ac_validate 未找到"}
+            else:
+                ac = ac_bridge.get_ac()
+                if not ac:
+                    result = {"ok": False, "error": "无法连接 AutoCAD，请先启动 AutoCAD"}
+                else:
+                    result = ac_validate.validate_live(ac, rules="mechanical")
+        # ── Physics-in-the-Loop 命令 ────────────────────────────
+        elif cmd == "physics-demo":
+            if not _HAS_PHYSICS:
+                result = {"ok": False, "error": "physics_bridge.py 未找到，请确保 engineering/tools/ 目录完整"}
+            else:
+                result = _pb.cmd_demo()
+        elif cmd == "physics-status":
+            if not _HAS_PHYSICS:
+                result = {"ok": False, "error": "physics_bridge.py 未找到"}
+            else:
+                result = _pb.cmd_status()
+        elif cmd == "physics-validate-case":
+            if not _HAS_PHYSICS:
+                result = {"ok": False, "error": "physics_bridge.py 未找到"}
+            else:
+                case_path = args[1] if len(args) > 1 else ""
+                if not case_path or not os.path.exists(case_path):
+                    result = {"ok": False, "error": f"载荷工况文件不存在: {case_path}"}
+                else:
+                    result = _pb.cmd_validate_case(case_path, relaxed=False)
+        elif cmd == "physics-optimize":
+            if not _HAS_PHYSICS:
+                result = {"ok": False, "error": "physics_bridge.py 未找到"}
+            else:
+                case_path = args[1] if len(args) > 1 else ""
+                # 解析 --max-iter N
+                max_iter = 5
+                for _i in range(2, len(args)):
+                    if args[_i] == "--max-iter" and _i + 1 < len(args):
+                        try:
+                            max_iter = int(args[_i + 1])
+                        except ValueError:
+                            pass
+                if not case_path or not os.path.exists(case_path):
+                    result = {"ok": False, "error": f"载荷工况文件不存在: {case_path}"}
+                else:
+                    result = _pb.cmd_optimize(case_path, max_iter=max_iter)
+        elif cmd == "physics-report":
+            if not _HAS_PHYSICS:
+                result = {"ok": False, "error": "physics_bridge.py 未找到"}
+            else:
+                run_id = args[1] if len(args) > 1 else ""
+                result = _pb.cmd_report(run_id)
+        elif cmd == "physics-recommend":
+            if not _HAS_PHYSICS:
+                result = {"ok": False, "error": "physics_bridge.py 未找到"}
+            else:
+                run_id = args[1] if len(args) > 1 else ""
+                result = _pb.cmd_recommend(run_id, max_iter=3)
         else:
             result = {"ok": False, "error": f"unknown command: {cmd}"}
         print(json.dumps(result, ensure_ascii=False, indent=2))

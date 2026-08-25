@@ -185,7 +185,8 @@ SW_CHAMFER_ANGLE_DIST = 1   # 角度-距离倒角
 SW_CHAMFER_DIST_DIST = 2    # 距离-距离倒角
 SW_CHAMFER_VERTEX = 3
 
-_PLANES = ("Front Plane", "Top Plane", "Right Plane")
+_PLANES = ("Front Plane", "Top Plane", "Right Plane",
+            "Bottom Plane", "Back Plane", "Left Plane")
 
 # 可视化建模模式
 VISUAL_MODE = True
@@ -585,6 +586,9 @@ class SWModel:
         "Front Plane": "*Front",
         "Top Plane": "*Top",
         "Right Plane": "*Right",
+        "Bottom Plane": "*Bottom",
+        "Back Plane": "*Back",
+        "Left Plane": "*Left",
     }
 
     def _normal_to(self, view_name):
@@ -613,8 +617,9 @@ class SWModel:
     def begin_sketch(self, plane="Front Plane"):
         """在指定基准面上开始新草图，并先"正视于"该平面（居中显示）。
 
-        Bug 6 修复: 多特征后 SW 内部状态累积——在 InsertSketch 后清理状态，
-        并确保每次进入草图模式前平面已被正确选中。
+        Bug 3 修复: Top/Bottom/Left/Right 等基准面在某些状态下选择不稳定，
+        增加多轮重试 + 面搜索兜底。
+        Bug 6 修复: 多特征后 SW 内部状态累积——在 InsertSketch 后清理状态。
         Bug 7 修复: 检查 ActiveSketch 是否有效。
         """
         # 先退出可能残留的草图模式（toggle off），再重新进入
@@ -622,25 +627,30 @@ class SWModel:
             self.skm.InsertSketch(False)
         except Exception:
             pass
-        self.select_plane(plane)
-        self.skm.InsertSketch(True)
-        # 验证草图是否成功激活
-        active_sk = self.skm.ActiveSketch
-        if active_sk is not None:
-            self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
-            # Bug 6: 草图激活后清理选择状态，防止影响后续特征操作
+        # Bug 3: 多轮重试选择基准面
+        for retry in range(3):
             try:
-                self.clear_selection()
+                self.select_plane(plane)
+                self.skm.InsertSketch(True)
+                active_sk = self.skm.ActiveSketch
+                if active_sk is not None:
+                    self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
+                    try:
+                        self.clear_selection()
+                    except Exception:
+                        pass
+                    return self
             except Exception:
                 pass
-            return self
-        # Bug 6 fallback: 基准面选择失败，按平面法线方向搜索实体面
-        # Front/Back → 沿 Z 轴搜索; Top/Bottom → 沿 Y 轴搜索; Right/Left → 沿 X 轴搜索
+            # 短暂延迟后再试
+            import time as _t
+            _t.sleep(0.1)
+
+        # Bug 3 fallback: 基准面选择失败，按平面法线方向搜索实体面
         search_axis = {"Front Plane": (0, 0, "z"), "Back Plane": (0, 0, "z"),
                        "Top Plane": (0, "y", 0), "Bottom Plane": (0, "y", 0),
                        "Right Plane": ("x", 0, 0), "Left Plane": ("x", 0, 0)}
         ax, ay, az = search_axis.get(plane, (0, 0, "z"))
-        # 动态偏移：取绝对值从小到大，覆盖不同尺寸零件
         for sign in (1, -1):
             for v in (5, 10, 20, 50, 100, 200):
                 try:
@@ -798,6 +808,38 @@ class SWModel:
             pass
         return None, False
 
+    def _has_curved_face_at(self, x, y, z):
+        """检查目标点是否落在某个曲面的包围盒内。
+        用于在 begin_sketch_on_face 中区分"用户真的想画在曲面上"还是"碰巧落在平面包围盒里"。
+        """
+        try:
+            bodies = self.model.GetBodies2(0, 1)
+            if not bodies:
+                return False
+            body_list = list(bodies) if isinstance(bodies, tuple) else [bodies]
+            for b in body_list:
+                try:
+                    faces = b.GetFaces()
+                    flist = list(faces) if isinstance(faces, tuple) else ([faces] if faces else [])
+                    for face in flist:
+                        if not self._is_curved_face(face):
+                            continue
+                        try:
+                            bb = face.GetBox
+                            bb_min = (bb[0] * 1000, bb[1] * 1000, bb[2] * 1000)
+                            bb_max = (bb[3] * 1000, bb[4] * 1000, bb[5] * 1000)
+                            if (bb_min[0] - 1 <= x <= bb_max[0] + 1 and
+                                bb_min[1] - 1 <= y <= bb_max[1] + 1 and
+                                bb_min[2] - 1 <= z <= bb_max[2] + 1):
+                                return True
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
     def _is_curved_face(self, face):
         """判断面是否为曲面（圆柱/球面等），无法直接在其上开草图。
         SW COM 动态调用下 face.Normal 对曲面返回 (0,0,0)，而平面返回非零法向量。
@@ -913,41 +955,89 @@ class SWModel:
                       f"(对应目标z={z:.0f}mm, θ={angle_deg:.0f}°)")
                 self._normal_to("*Front")
                 return self
+            # Bug 6 变体: 选面成功但草图未激活 → 先不退出，直接再试一次
+            self.skm.InsertSketch(True)
+            active_sk = self.skm.ActiveSketch
+            if active_sk is not None:
+                self._surface_sketch_offset = z - low_z
+                print(f"[swapi] 圆柱侧面草图(重试): 选z={low_z}mm处")
+                self._normal_to("*Front")
+                return self
+            # 仍然失败：清除并重新选面
+            self.clear_selection()
+            try:
+                self.skm.InsertSketch(False)
+            except Exception:
+                pass
+            self.clear_selection()
+            sel2 = self.ext.SelectByID2("", "FACE", low_x, low_y, low_z_sw, False, 0, self._empty, 0)
+            if sel2:
+                self.skm.InsertSketch(True)
+                active_sk2 = self.skm.ActiveSketch
+                if active_sk2 is not None:
+                    self._surface_sketch_offset = z - low_z
+                    print(f"[swapi] 圆柱侧面草图(二次重试): 选z={low_z}mm处")
+                    self._normal_to("*Front")
+                    return self
+            self.clear_selection()
 
-        # 策略2: 后半侧 → Right Plane 穿透孔
+        # 策略2: 后半侧 → Right Plane 穿透孔（加重试）
         print(f"[swapi] 圆柱侧面 ({x:.0f},{y:.0f},{z:.0f})mm(θ={angle_deg:.0f}°) "
               f"改用 Right Plane 穿透孔")
         right_plane_ok = False
         try:
-            self.clear_selection()
-            for plane_name in ["Right Plane", "右视基准面"]:
-                sel = self.ext.SelectByID2(plane_name, "PLANE", 0, 0, 0, False, 0, self._empty, 0)
-                if sel:
-                    break
-            if sel:
+            for _retry in range(3):
+                self.clear_selection()
+                sel = False  # 每次重试重置 sel
+                try:
+                    self.skm.InsertSketch(False)
+                except Exception:
+                    pass
+                for plane_name in ["Right Plane", "右视基准面"]:
+                    sel = self.ext.SelectByID2(plane_name, "PLANE", 0, 0, 0, False, 0, self._empty, 0)
+                    if sel:
+                        break
+                if not sel:
+                    import time as _t
+                    _t.sleep(0.1)
+                    continue
                 self.skm.InsertSketch(True)
                 active_sk = self.skm.ActiveSketch
                 if active_sk is not None:
                     self._right_plane_mode = True
                     print(f"[swapi] Right Plane 草图已激活(θ={angle_deg:.0f}°)，"
-                          f"请用 circle(0,{y},{r}) 或 rect(0,{y},{w},{h}) 画图后调用 cut()")
+                          f"请用 circle(0,{y},半径) 或 rect(0,{y},宽,高) 画图后调用 cut()")
                     self._normal_to("*Front")
                     right_plane_ok = True
-                    return self
+                    break
+                # Active=False → 不清除选择，直接再试一次 InsertSketch
+                self.skm.InsertSketch(True)
+                active_sk = self.skm.ActiveSketch
+                if active_sk is not None:
+                    self._right_plane_mode = True
+                    print(f"[swapi] Right Plane 草图已激活(θ={angle_deg:.0f}°)，"
+                          f"请用 circle(0,{y},半径) 或 rect(0,{y},宽,高) 画图后调用 cut()")
+                    self._normal_to("*Front")
+                    right_plane_ok = True
+                    break
                 self.clear_selection()
+                import time as _t
+                _t.sleep(0.1)
         except Exception:
             pass
 
         if not right_plane_ok:
-            # 全部失败 → 回退基准面
-            print(f"[swapi] ⚠️ 当前不支持在坐标 ({x:.0f},{y:.0f},{z:.0f}) 处开草图，请你自己画。")
-            plane_name = self._find_nearest_datum_plane(x, y, z)
-            if plane_name:
-                return self
+            # Bug 4: 失败时重置状态，抛出明确异常
+            self._surface_sketch_offset = 0.0
+            self._right_plane_mode = False
+            raise RuntimeError(
+                f"圆柱侧面 ({x:.0f},{y:.0f},{z:.0f})mm(θ={angle_deg:.0f}°) 无法开草图，"
+                f"请确认点在圆柱面上或改用 begin_sketch()。"
+            )
         return self
 
     def _find_nearest_datum_plane(self, x, y, z):
-        """在曲面选面失败后，回退到最近平行基准面（Front/Top/Right）。"""
+        """在曲面选面失败后，回退到最近平行基准面。"""
         max_axis = max(abs(x), abs(y), abs(z), key=abs)
         if max_axis == abs(z):
             plane_name = "Front Plane"
@@ -956,7 +1046,8 @@ class SWModel:
         else:
             plane_name = "Right Plane"
 
-        for name in [plane_name, "Front Plane", "Top Plane", "Right Plane"]:
+        for name in [plane_name, "Front Plane", "Top Plane", "Right Plane",
+                     "Bottom Plane", "Back Plane", "Left Plane"]:
             try:
                 self.clear_selection()
                 sel = self.ext.SelectByID2(name, "PLANE", 0, 0, 0, False, 0, self._empty, 0)
@@ -964,40 +1055,79 @@ class SWModel:
                     self.skm.InsertSketch(True)
                     active_sk = self.skm.ActiveSketch
                     if active_sk is not None:
+                        self._normal_to(self._PLANE_VIEW.get(name, "*Front"))
                         return name
                     self.clear_selection()
             except Exception:
                 continue
         return None
+        return None
 
     def begin_sketch_on_face(self, x=0, y=0, z=0):
         """在 (x,y,z) mm 处所在的面开始草图，并正视于该面。
 
+        Bug 2 修复: 失败时不再静默回退——抛出 RuntimeError 并输出清晰提示。
+        Bug 4 修复: 失败时重置 _surface_sketch_offset 和 _right_plane_mode。
         Bug 7 修复: 最大边界面不可选——平面用 GetBox 匹配，曲面用绕过方案。
         Bug 8 修复: 圆柱侧面全角度支持。
           - 前半侧(z≤10mm): SelectByID2 直接选中 ✅
           - 前半侧(任意z): 低z点选面+Y偏移 ✅
           - 后半侧: Right Plane 穿透孔 ✅
-          - 非圆柱面/其他: 回退基准面 + 提示
+          - 非圆柱面/其他: 抛出 RuntimeError + 提示
 
         【SW2020 限制】
         SelectByID2 射线拾取只能选中朝向摄像机的面。
         后半侧圆柱面通过 Right Plane 穿透孔实现等效效果。
         """
         import math
+        # 失败时保证状态干净
+        def _fail(msg):
+            self._surface_sketch_offset = 0.0
+            self._right_plane_mode = False
+            raise RuntimeError(msg)
 
-        # 策略1: 对平面用 GetBox 匹配
-        if self._select_face_by_box(x, y, z):
+        # 策略1: 对平面用 GetBox 匹配（但如果目标是曲面则跳过）
+        if not self._has_curved_face_at(x, y, z) and self._select_face_by_box(x, y, z):
             self.skm.InsertSketch(True)
             active_sk = self.skm.ActiveSketch
             if active_sk is not None:
                 self._normal_to("*Front")
                 return self
+            # Bug 6 重试: 面选中但草图未激活
+            self.clear_selection()
+            try:
+                self.skm.InsertSketch(False)
+            except Exception:
+                pass
+            self.clear_selection()
+            if self._select_face_by_box(x, y, z):
+                self.skm.InsertSketch(True)
+                active_sk = self.skm.ActiveSketch
+                if active_sk is not None:
+                    self._normal_to("*Front")
+                    return self
             self.clear_selection()
 
-        # 策略2: 直接用 SelectByID2 选面
+        # 策略2: 直接用 SelectByID2 选面（验证面确实包含目标点，避免射线拾取误选）
         self.clear_selection()
         sel = self.ext.SelectByID2("", "FACE", x * MM, y * MM, z * MM, False, 0, self._empty, 0)
+        if sel:
+            # 验证：检查选中面的包围盒是否包含目标点
+            sel_mgr = self.model.SelectionManager
+            if sel_mgr.GetSelectedObjectCount2(-1) > 0:
+                try:
+                    sel_obj = sel_mgr.GetSelectedObject6(1, -1)
+                    sel_bb = sel_obj.GetBox
+                    sel_bb_min = (sel_bb[0]*1000, sel_bb[1]*1000, sel_bb[2]*1000)
+                    sel_bb_max = (sel_bb[3]*1000, sel_bb[4]*1000, sel_bb[5]*1000)
+                    if not (sel_bb_min[0] <= x <= sel_bb_max[0] and
+                            sel_bb_min[1] <= y <= sel_bb_max[1] and
+                            sel_bb_min[2] <= z <= sel_bb_max[2]):
+                        # 选中面不包含目标点 → 射线拾取误选，清除选择
+                        self.clear_selection()
+                        sel = False
+                except Exception:
+                    pass
         if sel:
             self.skm.InsertSketch(True)
             active_sk = self.skm.ActiveSketch
@@ -1005,6 +1135,35 @@ class SWModel:
                 self._normal_to("*Front")
                 return self
             self.clear_selection()
+
+        # 策略2b: SelectByID2 失败 → 用 face.Select(True) 直接选面（绕过射线拾取限制）
+        bodies = self.model.GetBodies2(0, 1)
+        if bodies:
+            body_list = list(bodies) if isinstance(bodies, tuple) else [bodies]
+            for b in body_list:
+                try:
+                    faces = b.GetFaces()
+                    flist = list(faces) if isinstance(faces, tuple) else ([faces] if faces else [])
+                    for face in flist:
+                        try:
+                            bb = face.GetBox
+                            bb_min = (bb[0]*1000, bb[1]*1000, bb[2]*1000)
+                            bb_max = (bb[3]*1000, bb[4]*1000, bb[5]*1000)
+                            if (bb_min[0] <= x <= bb_max[0] and
+                                bb_min[1] <= y <= bb_max[1] and
+                                bb_min[2] <= z <= bb_max[2]):
+                                face.Select(True)
+                                self.skm.InsertSketch(True)
+                                active_sk = self.skm.ActiveSketch
+                                if active_sk is not None:
+                                    self._normal_to("*Front")
+                                    return self
+                                self.clear_selection()
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
 
         # 策略3: 检测曲面 → 绕过方案
         bodies = self.model.GetBodies2(0, 1)
@@ -1020,59 +1179,8 @@ class SWModel:
                 except Exception:
                     continue
 
-        # 策略4: 全部失败 → 回退基准面
-        print(f"[swapi] begin_sketch_on_face({x},{y},{z}) 失败，回退到 Front Plane")
-        print(f"[swapi] ⚠️ 当前不支持在坐标 ({x},{y},{z}) 处开草图，请你自己画。")
-        try:
-            self.clear_selection()
-            self.ext.SelectByID2("Front Plane", "PLANE", 0, 0, 0, False, 0, self._empty, 0)
-            self.skm.InsertSketch(True)
-            active_sk = self.skm.ActiveSketch
-            if active_sk is not None:
-                self._normal_to("*Front")
-                return self
-            self.clear_selection()
-        except Exception:
-            pass
-        return self
-
-        # 兜底：坐标射线拾取（应对特殊情况）
-        fallback_attempts = [
-            (0, 0, 0), (0.5, 0, 0), (-0.5, 0, 0),
-            (0, 0.5, 0), (0, -0.5, 0),
-            (0, 0, 0.5), (0, 0, -0.5),
-            (1, 0, 0), (-1, 0, 0),
-            (0, 1, 0), (0, -1, 0),
-            (0, 0, 1), (0, 0, -1),
-        ]
-        for dx, dy, dz in fallback_attempts:
-            try:
-                self.clear_selection()
-                self.ext.SelectByID2("", "FACE", (x + dx) * MM, (y + dy) * MM, (z + dz) * MM,
-                                     False, 0, self._empty, 0)
-                self.skm.InsertSketch(True)
-                active_sk = self.skm.ActiveSketch
-                if active_sk is not None:
-                    self._normal_to("*Front")
-                    return self
-            except Exception:
-                continue
-
-        # 全部失败：回退到 Front Plane，不报错，输出提示
-        print(f"[swapi] begin_sketch_on_face({x},{y},{z}) 失败，回退到 Front Plane")
-        print(f"[swapi] ⚠️ 当前不支持在坐标 ({x},{y},{z}) 处开草图，请你自己画。")
-        try:
-            self.clear_selection()
-            self.ext.SelectByID2("Front Plane", "PLANE", 0, 0, 0, False, 0, self._empty, 0)
-            self.skm.InsertSketch(True)
-            active_sk = self.skm.ActiveSketch
-            if active_sk is not None:
-                self._normal_to("*Front")
-                return self
-            self.clear_selection()
-        except Exception:
-            pass
-        return self
+        # 全部失败：抛出明确异常（Bug 2/4）
+        _fail(f"无法在坐标 ({x:.0f},{y:.0f},{z:.0f}) mm 处开草图，请确认点是否在实体表面上。")
 
     def end_sketch(self, merge=True):
         """结束草图。merge=True 时合并微小间隙的端点，确保轮廓封闭。

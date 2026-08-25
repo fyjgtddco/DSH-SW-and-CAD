@@ -90,12 +90,28 @@ python "sw_bridge.py" show
 4. **保存**：`SaveAs3` 保存为 .slddrw
 5. **导出 DWG**：重新打开工程图，用 `SaveAs3` 导出为 DWG
 
+## 几何验证（CADX）
+
+生成 DWG/DXF 后，推荐使用 CADX 进行 7 项几何验证，确保图纸质量：
+
+```powershell
+# 导出 DXF（SolidWorks 工程图 → DXF）
+python sw_bridge.py export-dxf "<输出.dxf>"
+
+# 运行几何验证
+python sw_bridge.py cad-validate "<输出.dxf>"
+```
+
+验证项：未闭合多段线、重叠几何、尺寸过小、长宽比异常、墙厚不足、缺失元素、标注不一致。
+详见 `engineering/skills/sw-design/references/autocad-workflow.md`。
+
 ## 已知限制
 
 1. **自动标注**：当前版本不自动添加尺寸标注，需要手动标注
 2. **图框**：使用默认 A3 图纸大小，不包含标题栏
 3. **复杂装配体**：仅支持单零件，装配体需要拆解后分别出图
 4. **模板**：自动探测绘图模板，如果找不到可能失败
+5. **AutoCAD 依赖**：CADX 验证需要已安装 AutoCAD（可选，非必需）
 
 ## 后续改进方向
 
