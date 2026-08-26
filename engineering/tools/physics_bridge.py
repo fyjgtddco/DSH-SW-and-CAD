@@ -54,7 +54,7 @@ import refine_rules
 #  命令实现 — 全部返回 dict，由调用方决定 print / 路由
 # ═══════════════════════════════════════════════════════════════
 
-def cmd_status() -> dict:
+def cmd_status(args=None) -> dict:
     """查询求解器后端状态。"""
     status = fea_solver.get_solver_status()
     status["command"] = "status"
@@ -212,6 +212,50 @@ def cmd_recommend(run_id: str, max_iter: int = 3) -> dict:
     return result
 
 
+def cmd_validate_domain(domain_id: str = "structural",
+                        design_params: dict = None,
+                        fea_result: dict = None) -> dict:
+    """领域特定验证（DSVA）入口。
+
+    调用示例:
+        python physics_bridge.py validate-domain structural
+        python sw_bridge.py physics-validate-domain transmission
+
+    详见 engineering/tools/physics/domain_validator.py
+    """
+    try:
+        import domain_validator
+    except ImportError:
+        return {"ok": False, "error": "domain_validator.py not found"}
+
+    if design_params is None:
+        design_params = {}
+    if fea_result is None:
+        fea_result = {}
+
+    result = domain_validator.validate_with_domain(
+        design_params=design_params,
+        fea_result=fea_result,
+        domain_id=domain_id,
+    )
+    result["command"] = "validate-domain"
+    result["available_domains"] = [d["id"] for d in domain_validator.list_domains()]
+    return result
+
+
+def cmd_list_domains() -> dict:
+    """列出所有可用的验证领域。"""
+    try:
+        import domain_validator
+    except ImportError:
+        return {"ok": False, "error": "domain_validator.py not found"}
+    return {
+        "ok": True,
+        "command": "list-domains",
+        "domains": domain_validator.list_domains(),
+    }
+
+
 def cmd_optimize(case_path: str, max_iter: int = 5) -> dict:
     """自动迭代优化：generate → simulate → check → refine 直到通过或达到 max_iter。"""
     lc_result = load_case.load_from_file(case_path)
@@ -301,7 +345,7 @@ def cmd_optimize(case_path: str, max_iter: int = 5) -> dict:
     }
 
 
-def cmd_demo() -> dict:
+def cmd_demo(args=None) -> dict:
     """运行悬臂梁演示：自动生成工况 → 解析解 → 报告。"""
     lc = load_case.default_load_case("DEMO_CANTILEVER", "演示悬臂梁")
     lc_result = load_case.validate_load_case(lc)

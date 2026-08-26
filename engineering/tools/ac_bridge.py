@@ -170,6 +170,11 @@ class AutoCADBridge:
             output_path: 输出路径（可选），默认保存到临时目录
         Returns:
             DXF 文件路径
+
+        Bug-27 修复: AutoCAD 2020 SaveAs 参数兼容性处理。
+        - AutoCAD 2020+: doc.SaveAs(filename, file_format)
+        - 旧版本: doc.SaveAs(filename)
+        自动尝试两种格式，失败时抛出明确错误信息。
         """
         if not self.doc:
             raise RuntimeError("No active AutoCAD document")
@@ -179,11 +184,31 @@ class AutoCADBridge:
             os.makedirs(out_dir, exist_ok=True)
             output_path = os.path.join(out_dir, f"{base}_export.dxf")
         abs_path = os.path.abspath(output_path)
-        # DXF 导出：SaveAs 参数 18 = DXF R2018
-        self.doc.SaveAs(abs_path, 18)
-        if os.path.exists(abs_path):
-            return abs_path
-        raise RuntimeError(f"DXF export failed: {abs_path} not created")
+
+        # Bug-27: 尝试多种 SaveAs 调用方式以兼容不同 AutoCAD 版本
+        saved = False
+        errors = []
+        for try_name, try_args in [
+            ("SaveAs(filename, format)", (abs_path, 18)),          # AutoCAD 2018+
+            ("SaveAs(filename)", (abs_path,)),                     # 兼容旧版本
+            ("SaveAs2(format, filename)", (18, abs_path)),         # 部分版本反序
+        ]:
+            try:
+                getattr(self.doc, "SaveAs")(*try_args)
+                if os.path.exists(abs_path):
+                    saved = True
+                    break
+                errors.append(f"{try_name}: file not created")
+            except Exception as e:
+                errors.append(f"{try_name}: {e}")
+
+        if not saved:
+            raise RuntimeError(
+                f"DXF 导出失败({abs_path})，所有方法均失败:\n" +
+                "\n".join(f"  - {e}" for e in errors) +
+                "\n请确认: 1) AutoCAD 已安装并打开图纸  2) 输出路径有写入权限"
+            )
+        return abs_path
 
     # ------------------------------------------------------------------
     # 实体读取

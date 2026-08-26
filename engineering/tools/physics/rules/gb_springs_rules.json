@@ -1,0 +1,41 @@
+{
+  "ruleset_id": "DSVA-GB_SPRINGS",
+  "revision": "A",
+  "category": "gb_springs",
+  "generated_from": "DSVA国标对照表.xlsx",
+  "total": 2,
+  "rules": [
+    {
+      "rule_id": "GB_SPRINGS-001",
+      "standard_id": "GB/T 1239.1-2009",
+      "title": "冷卷圆柱螺旋弹簧技术条件 第1部分：拉伸弹簧",
+      "topic": "圆柱螺旋弹簧技术条件",
+      "scope": "GB/T 1239的本部分规定了冷卷圆截面圆柱螺旋拉伸弹簧的技术要求、试验方法、检验规则及包装、标志、运输、贮存要求等。 本部分适用于冷卷圆截面圆柱螺旋拉伸弹簧(以下简称弹簧),弹簧材料的截面直径大于等于0.5 mm。 本部分不适用于特殊要求的弹簧。",
+      "status": "现行(全部代替GB/T 1239.1-1989)",
+      "dsva_requirement": "弹簧工作行程、并圈高度、稳定性、剪应力、疲劳",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=4E5D9299EE368E749946A37DE2EEF5C7",
+      "note": "系列.1拉伸/.2压缩/.3扭转均2009版仍现行"
+    },
+    {
+      "rule_id": "GB_SPRINGS-002",
+      "standard_id": "GB/T 1972.2-2023",
+      "title": "碟形弹簧 第2部分：技术条件",
+      "topic": "碟形弹簧",
+      "scope": "本文件规定了截面为矩形的碟形弹簧(以下简称\"碟簧\")的技术条件。包含碟形弹簧的结构型式、尺寸系列、技术要求、试验方法、检验规则。 本文件适用于外径不大于250 mm,且厚度为0.2 mm~14 mm的碟簧。 本文件不适用于开槽形碟簧、膜片碟簧和其他结构形式的碟簧。",
+      "status": "现行(全部代替GB/T 1972-2005)",
+      "dsva_requirement": "碟簧压缩量、疲劳",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=C1301C4609264EB8A19AA84CF37E3A56",
+      "note": "修改采用ISO 19690-2:2018；配套GB/T 1972.1-2023(第1部分:计算)"
+    }
+  ]
+}

@@ -178,7 +178,27 @@ class DXFAnalyzer:
                 yield e
 
     def _all_layers(self) -> list:
-        return [l.dxf.name for l in self._doc.layers]
+        """收集文档中所有已使用的图层名称（包括实体实际所在图层）。
+
+        Bug-3 修复: 原来只读文档级图层表（可能只有 ['0', 'Defpoints']），
+        但实体可能挂在未注册的自定义层上，导致 MISSING_LAYER 误报。
+        现在同时扫描实体所在的图层，确保检测到所有实际使用的层。
+        """
+        layers = set()
+        try:
+            for l in self._doc.layers:
+                layers.add(l.dxf.name)
+        except Exception:
+            pass
+        # 从实体实际所在图层收集（兜底，防止文档层表不完整）
+        for e in self._msp:
+            try:
+                ln = getattr(e.dxf, 'layer', None)
+                if ln:
+                    layers.add(ln)
+            except Exception:
+                pass
+        return list(layers)
 
     def _entity_midpoint(self, entity) -> tuple:
         """返回实体的中点坐标（近似）。"""

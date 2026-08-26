@@ -1,0 +1,113 @@
+{
+  "runs": [
+    {
+      "run_id": "opt_iter_1",
+      "iteration": 1,
+      "timestamp": "2026-08-25 20:28:16",
+      "design_params": {
+        "thickness_mm": {
+          "id": "thickness_mm",
+          "value": 5.0,
+          "min": 2,
+          "max": 20
+        },
+        "height_mm": {
+          "id": "height_mm",
+          "value": 60.0,
+          "min": 20,
+          "max": 200
+        },
+        "width_mm": {
+          "id": "width_mm",
+          "value": 40.0,
+          "min": 10,
+          "max": 100
+        },
+        "fillet_mm": {
+          "id": "fillet_mm",
+          "value": 2.0,
+          "min": 0.5,
+          "max": 15
+        }
+      },
+      "geometry_check": {
+        "status": "PASS",
+        "design_space": {
+          "ok": true,
+          "body_bbox_mm": [
+            0,
+            100,
+            0,
+            40,
+            0,
+            5
+          ],
+          "design_bounds": {
+            "x_min": 0,
+            "x_max": 100,
+            "y_min": 0,
+            "y_max": 40,
+            "z_min": 0,
+            "z_max": 5
+          },
+          "per_axis": {
+            "x": {
+              "violated": false
+            },
+            "y": {
+              "violated": false
+            },
+            "z": {
+              "violated": false
+            }
+          },
+          "violation_vol_mm3": 0.0,
+          "violation_pct": 0.0
+        },
+        "connectivity": {
+          "ok": true,
+          "num_bodies": 1,
+          "num_volumes": 1,
+          "single_body": true,
+          "status": "PASS",
+          "note": ""
+        },
+        "wall_thickness_estimate": {
+          "ok": false,
+          "error": "no face data available"
+        },
+        "interface_compliance": {
+          "ok": true,
+          "violations": [],
+          "locked_param_changes": []
+        },
+        "gates": [
+          {
+            "id": "DESIGN_SPACE",
+            "status": "PASS"
+          },
+          {
+            "id": "CONNECTIVITY",
+            "status": "PASS"
+          },
+          {
+            "id": "WALL_THICKNESS",
+            "status": "PASS"
+          }
+        ]
+      },
+      "fea_result": {
+        "ok": false,
+        "error": "float division by zero",
+        "traceback": "Traceback (most recent call last):\n  File \"C:\\Users\\j1877\\Desktop\\dsh-engineering-mode\\engineering\\tools\\physics\\fea_solver.py\", line 193, in solve_feapy\n    r = solve_cantilever(L, H, W, total_force, E, nu, nx=nx, ny=ny)\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\j1877\\Desktop\\dsh-engineering-mode\\engineering\\tools\\physics\\feapy_solver.py\", line 221, in solve_cantilever\n    return solve_cantilever_2d(L, H, W_or_T, F_load, E, nu, nx=nx, ny=ny)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\j1877\\Desktop\\dsh-engineering-mode\\engineering\\tools\\physics\\feapy_solver.py\", line 189, in solve_cantilever_2d\n    r[\"analytical\"]={\"delta_mm\":de,\"sigma_mpa\":se,\"disp_error_pct\":abs(r[\"max_displacement_mm\"]/de-1)*100,\"stress_error_pct\":abs(r[\"max_von_mises_mpa\"]/se-1)*100}\n                                                                       ~~~~~~~~~~~~~~~~~~~~~~~~^~~\nZeroDivisionError: float division by zero\n"
+      },
+      "report_path": "",
+      "status": "UNKNOWN",
+      "parent_run_id": null,
+      "changes_from_parent": {}
+    }
+  ],
+  "current_run_id": "opt_iter_1",
+  "load_case_path": "C:\\Users\\j1877\\Desktop\\DSH-Check\\test2_physics\\case_1.json",
+  "updated_at": "2026-08-25 20:28:16"
+}

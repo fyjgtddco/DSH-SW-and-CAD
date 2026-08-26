@@ -1,0 +1,151 @@
+{
+  "runs": [
+    {
+      "run_id": "opt_iter_1",
+      "iteration": 1,
+      "timestamp": "2026-08-26 17:13:49",
+      "design_params": {
+        "thickness_mm": {
+          "id": "thickness_mm",
+          "value": 5.0,
+          "min": 2,
+          "max": 20
+        },
+        "height_mm": {
+          "id": "height_mm",
+          "value": 60.0,
+          "min": 20,
+          "max": 200
+        },
+        "width_mm": {
+          "id": "width_mm",
+          "value": 40.0,
+          "min": 10,
+          "max": 100
+        },
+        "fillet_mm": {
+          "id": "fillet_mm",
+          "value": 2.0,
+          "min": 0.5,
+          "max": 15
+        }
+      },
+      "geometry_check": {
+        "status": "PASS",
+        "design_space": {
+          "ok": true,
+          "body_bbox_mm": [
+            0.0,
+            120.0,
+            -20.0,
+            20.0,
+            0.0,
+            10.0
+          ],
+          "design_bounds": {
+            "x_min": 0.0,
+            "x_max": 120.0,
+            "y_min": -20.0,
+            "y_max": 20.0,
+            "z_min": 0.0,
+            "z_max": 10.0
+          },
+          "per_axis": {
+            "x": {
+              "violated": false
+            },
+            "y": {
+              "violated": false
+            },
+            "z": {
+              "violated": false
+            }
+          },
+          "violation_vol_mm3": 0.0,
+          "violation_pct": 0.0
+        },
+        "connectivity": {
+          "ok": true,
+          "num_bodies": 1,
+          "num_volumes": 1,
+          "single_body": true,
+          "status": "PASS",
+          "note": ""
+        },
+        "wall_thickness_estimate": {
+          "ok": false,
+          "error": "no face data available"
+        },
+        "interface_compliance": {
+          "ok": true,
+          "violations": [],
+          "locked_param_changes": []
+        },
+        "gates": [
+          {
+            "id": "DESIGN_SPACE",
+            "status": "PASS"
+          },
+          {
+            "id": "CONNECTIVITY",
+            "status": "PASS"
+          },
+          {
+            "id": "WALL_THICKNESS",
+            "status": "PASS"
+          }
+        ]
+      },
+      "fea_result": {
+        "ok": true,
+        "method": "feapy_numpy",
+        "backend": "pure_python_cst_triangle",
+        "safety_factor": 3.5,
+        "max_von_mises_mpa": 67.14,
+        "max_displacement_mm": 0.3114,
+        "volume_mm3": 24000.0,
+        "mass_kg": 0.1884,
+        "gates": {
+          "SAFETY_FACTOR": {
+            "status": "PASS",
+            "actual": 3.5,
+            "required_min": 2.0,
+            "required_max": 5.0
+          },
+          "MAX_DISPLACEMENT": {
+            "status": "PASS",
+            "actual_mm": 0.3114,
+            "required_max_mm": 2.0
+          },
+          "DESIGN_SPACE": {
+            "status": "PASS"
+          },
+          "MESH_QUALITY": {
+            "status": "PASS",
+            "note": "CST triangle mesh: ~288 elements"
+          }
+        },
+        "overall": "PASS",
+        "limitations": [
+          "2D plane stress assumption only",
+          "CST linear elements (6-8%% error vs analytical)",
+          "no stress concentrations captured",
+          "no 3D effects"
+        ],
+        "analytical_comparison": {
+          "delta_mm": 0.41941747572815535,
+          "sigma_mpa": 90.0,
+          "disp_error_pct": 25.763669604382688,
+          "stress_error_pct": 25.400205591946158
+        }
+      },
+      "report_path": "",
+      "status": "PASS",
+      "parent_run_id": null,
+      "changes_from_parent": {}
+    }
+  ],
+  "current_run_id": "opt_iter_1",
+  "load_case_path": "C:\\Users\\j1877\\Desktop\\dsh-engineering-mode\\output\\DSH_悬臂支架_loadcase.json",
+  "updated_at": "2026-08-26 17:13:49"
+}

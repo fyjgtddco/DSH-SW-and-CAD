@@ -1,0 +1,25 @@
+{
+  "ruleset_id": "DSVA-GB_ELECTRICAL",
+  "revision": "A",
+  "category": "gb_electrical",
+  "generated_from": "DSVA国标对照表.xlsx",
+  "total": 1,
+  "rules": [
+    {
+      "rule_id": "GB_ELECTRICAL-001",
+      "standard_id": "GB/T 5226.1-2019",
+      "title": "机械电气安全 机械电气设备 第1部分：通用技术条件",
+      "topic": "电气安全",
+      "scope": "GB/T 5226的本部分适用于机械(包括协同工作的一组机械)的电气、电子和可编程序电子设备及系统,而不适用于手提工作式机械。本部分所论及的设备是从机械电气设备的电源引入处开始的(见5.1)。本部分适用的电气设备或电气设备部件,其标称电源电压不超过1000V a.c.或1500V d.c.,额定频率不超过200 Hz。本部分不包括所有技术要求(如防护、联锁或控制),这些要求是其他标准或规则为保障人身免遭非电气伤害所需要的。对有特殊要求的各种类型机械对安全性可提出特殊要求。本部分具体适用于(但不限于)3.1.40所定义的机械电气设备。本部分未规定下述机械电气设备的附加和特殊要求:露天(即建筑物或其他防护结构的外部)机械;使用、处理或生产易爆材料(如油漆或锯末)的机械;易爆易燃环境中使用的机械;当加工或使用某种材料时会产生特殊风险的机械;矿山机械;缝纫机、缝制单元和缝制系统(包括在IEC 60204-31中);起重机械(包括在IEC 60204-32中);半导体设备(包括在IEC 60204-33中)。直接用电能作为加工手段的动力电路不属于GB/T 5226本部分的范围",
+      "status": "现行(代替GB 5226.1-2008)",
+      "dsva_requirement": "接地、急停、短路保护、线缆防护、柜体防护等级",
+      "severity": "BLOCKER",
+      "validation_method": "manual_review",
+      "requires_manual_review": true,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=BEE78AD7B1CEAA7CD32A4747974489A4",
+      "note": "等同采用IEC 60204-1:2016(IDT)；代替强制性GB 5226.1-2008；相关新强标GB 46038-2025(2026-11-01实施)属同领域"
+    }
+  ]
+}

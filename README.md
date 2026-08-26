@@ -1,4 +1,4 @@
-# 🔧 DSH Engineering Mode — 工程模式 / Mode Ingénierie / Инженерный Режим / وضع الهندسة / Engineering Mode
+﻿# 🔧 DSH Engineering Mode — 工程模式 / Mode Ingénierie / Инженерный Режим / وضع الهندسة / Engineering Mode
 
 > [中文](#中文) · [English](#english) · [Français](#français) · [Español](#español) · [Русский](#русский)
 
@@ -369,7 +369,7 @@ chmod +x install.sh
 
 ## История версий
 
-### v0.4（当前版本）
+### v0.4 — 2026年8月25日（当前版本）
 
 **新增功能：**
 
@@ -403,7 +403,7 @@ chmod +x install.sh
 
 ---
 
-### v0.3
+### v0.3 — 2026年8月22日
 
 **新增功能：**
 
@@ -425,7 +425,7 @@ chmod +x install.sh
 
 ---
 
-### v0.2
+### v0.2 — 2026年8月20日
 
 **新增功能：**
 
@@ -452,7 +452,7 @@ chmod +x install.sh
 
 ---
 
-### v0.1
+### v0.1 — 2026年8月19日
 
 **初始版本：**
 
@@ -463,6 +463,130 @@ chmod +x install.sh
 - Goal 驱动的工作流追踪
 - 上下文压缩（compaction + tool-result-pruner）
 - 子代理并行（subagent + workflow）
+
+---
+
+## Changelog
+
+### v0.4 — Aug 25, 2026 (Current)
+- **2D/3D pure Python FEA solver** (`physics/feapy_solver.py`)
+  - 2D CST triangles: 6-8% error vs analytical (expected)
+  - 3D CTE tetrahedra: 1.5% disp / 11.4% stress error at 10×5×5 mesh
+  - Pure numpy, zero external FEA software required
+- **3D tetrahedron decomposition fix**: 5→6 tets per hexahedron (5 tets miss 1/6 volume)
+- **2D thickness parameter fix**: `FEASolver(thickness=T)` default 1.0
+- **Compatibility shim**: `solve_cantilever(L, H, W, F, E, nu)` auto-detects 2D/3D
+- **Removed**: `qq-notification` plugin and all references, backup files cleaned
+
+### v0.3 — Aug 22, 2026
+- **SolidWorks bridge** (`tools/sw_bridge.py` + `swapi.py`): win32com driver for SW 2018~2024
+- **AutoCAD bridge** (`tools/ac_bridge.py`): connection status + DXF export
+- **Skill system**: cad-workflow, sw-design, solidworks-bridge, sw-to-cad
+
+### v0.2 — Aug 20, 2026
+- **Physics verification subsystem** (`tools/physics/`): load_case, material_db, geometry_gate, mesh_adapter, fea_solver, simulation_report, design_state, refine_rules
+- **CLI commands**: physics-status, validate-case, demo, optimize, report, recommend
+- **Doctor self-check**: Python, pywin32, skfem, Gmsh, CalculiX dependency detection
+
+### v0.1 — Aug 19, 2026
+- Agent Preset framework: persona, tool chain, skill system
+- Plan Mode for engineering design review
+- Goal-driven workflow tracking
+- Context compaction (compaction + tool-result-pruner)
+- Sub-agent parallelism (subagent + workflow)
+
+---
+
+## Historique des versions
+
+### v0.4 — 25 août 2026 (Version actuelle)
+- **Solveur FEA Python pur 2D/3D** (`physics/feapy_solver.py`)
+  - Triangles CST 2D : erreur 6-8% vs analytique (attendu)
+  - Tétraèdres CTE 3D : erreur 1,5% déplacement / 11,4% contrainte à maillage 10×5×5
+  - numpy pur, aucun logiciel FEA externe requis
+- **Correction décomposition tétraèdre 3D** : 5→6 tétraèdres par hexaèdre (5 tétraèdres manquent 1/6 de volume)
+- **Correction paramètre épaisseur 2D** : `FEASolver(thickness=T)` défaut 1.0
+- **Shim compatibilité** : `solve_cantilever(L, H, W, F, E, nu)` détection auto 2D/3D
+- **Supprimé** : plugin `qq-notification` et toutes les références, sauvegardes nettoyées
+
+### v0.3 — 22 août 2026
+- **Pont SolidWorks** (`tools/sw_bridge.py` + `swapi.py`) : pilote win32com pour SW 2018~2024
+- **Pont AutoCAD** (`tools/ac_bridge.py`) : statut de connexion + export DXF
+- **Système de compétences** : cad-workflow, sw-design, solidworks-bridge, sw-to-cad
+
+### v0.2 — 20 août 2026
+- **Sous-système de vérification physique** (`tools/physics/`) : load_case, material_db, geometry_gate, mesh_adapter, fea_solver, simulation_report, design_state, refine_rules
+- **Commandes CLI** : physics-status, validate-case, demo, optimize, report, recommend
+- **Auto-vérification Doctor** : Python, pywin32, skfem, Gmsh, CalculiX
+
+### v0.1 — 19 août 2026
+- Framework Agent Preset : persona, chaîne d'outils, système de compétences
+- Plan Mode pour revue de conception ingénierie
+- Suivi de workflow piloté par Goal
+- Compression de contexte (compaction + tool-result-pruner)
+- Parallélisation sous-agent (subagent + workflow)
+
+---
+
+## Registro de cambios
+
+### v0.4 — 25 de agosto de 2026 (Versión actual)
+- **Solver FEA puro en Python 2D/3D** (`physics/feapy_solver.py`)
+  - Triángulos CST 2D: error 6-8% vs analítico (esperado)
+  - Tetraedros CTE 3D: error 1.5% desplazamiento / 11.4% tensión con malla 10×5×5
+  - numpy puro, sin software FEA externo requerido
+- **Corrección descomposición tetraedro 3D**: 5→6 tetraedros por hexaedro (5 tetraedros pierden 1/6 de volumen)
+- **Corrección parámetro grosor 2D**: `FEASolver(thickness=T)` por defecto 1.0
+- **Shim compatibilidad**: `solve_cantilever(L, H, W, F, E, nu)` detección automática 2D/3D
+- **Eliminado**: plugin `qq-notification` y todas las referencias, backups limpiados
+
+### v0.3 — 22 de agosto de 2026
+- **Puente SolidWorks** (`tools/sw_bridge.py` + `swapi.py`): controlador win32com para SW 2018~2024
+- **Puente AutoCAD** (`tools/ac_bridge.py`): estado de conexión + exportación DXF
+- **Sistema de habilidades**: cad-workflow, sw-design, solidworks-bridge, sw-to-cad
+
+### v0.2 — 20 de agosto de 2026
+- **Sistema de verificación física** (`tools/physics/`): load_case, material_db, geometry_gate, mesh_adapter, fea_solver, simulation_report, design_state, refine_rules
+- **Comandos CLI**: physics-status, validate-case, demo, optimize, report, recommend
+- **Autoverificación Doctor**: Python, pywin32, skfem, Gmsh, CalculiX
+
+### v0.1 — 19 de agosto de 2026
+- Framework Agent Preset: persona, cadena de herramientas, sistema de habilidades
+- Plan Mode para revisión de diseño de ingeniería
+- Seguimiento de flujo de trabajo impulsado por Goal
+- Compresión de contexto (compaction + tool-result-pruner)
+- Parallelización sub-agent (subagent + workflow)
+
+---
+
+## История версий
+
+### v0.4 — 25 августа 2026 (Текущая версия)
+- **2D/3D FEA решатель на чистом Python** (`physics/feapy_solver.py`)
+  - 2D CST треугольники: погрешность 6-8% против аналитики (ожидаемо)
+  - 3D CTE тетраэдры: погрешность 1,5% перемещение / 11,4% напряжение при сетке 10×5×5
+  - Чистый numpy, без внешнего FEA ПО
+- **Исправлена разбивка тетраэдра 3D**: 5→6 тетраэдров на гексаэдр (5 тетраэдров дают пропуск 1/6 объёма)
+- **Исправлен параметр толщины 2D**: `FEASolver(thickness=T)` по умолчанию 1.0
+- **Совместимый shim**: `solve_cantilever(L, H, W, F, E, nu)` автоопределение 2D/3D
+- **Удалено**: плагин `qq-notification` и все ссылки, бэкапы очищены
+
+### v0.3 — 22 августа 2026
+- **Мост SolidWorks** (`tools/sw_bridge.py` + `swapi.py`): драйвер win32com для SW 2018~2024
+- **Мост AutoCAD** (`tools/ac_bridge.py`): статус подключения + экспорт DXF
+- **Система навыков**: cad-workflow, sw-design, solidworks-bridge, sw-to-cad
+
+### v0.2 — 20 августа 2026
+- **Подсистема физической верификации** (`tools/physics/`): load_case, material_db, geometry_gate, mesh_adapter, fea_solver, simulation_report, design_state, refine_rules
+- **Команды CLI**: physics-status, validate-case, demo, optimize, report, recommend
+- **Самопроверка Doctor**: Python, pywin32, skfem, Gmsh, CalculiX
+
+### v0.1 — 19 августа 2026
+- Базовый каркас Agent Preset: persona, цепочка инструментов, система навыков
+- Plan Mode для инженерного обзора проекта
+- Отслеживание рабочего процесса через Goal
+- Сжатие контекста (compaction + tool-result-pruner)
+- Параллелизм под-агентов (subagent + workflow)
 
 ---
 

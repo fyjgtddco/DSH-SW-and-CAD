@@ -1,0 +1,48 @@
+{
+  "domain_id": "mold",
+  "domain_name": "模具",
+  "version": "1.0",
+  "description": "型腔/型芯/镶件等模具零件的设计规范",
+  "rules": [
+    {
+      "id": "MD-001",
+      "type": "parametric",
+      "target": "cavity_depth_mm",
+      "condition": {"min": 0.1, "max": 200.0},
+      "severity": "CRITICAL",
+      "message": "型腔深度应在 0.1~200mm 之间"
+    },
+    {
+      "id": "MD-002",
+      "type": "parametric",
+      "target": "draft_angle_deg",
+      "condition": {"min": 0.5, "max": 5.0},
+      "severity": "CRITICAL",
+      "message": "脱模斜度应在 0.5°~5° 之间（避免脱模卡死）"
+    },
+    {
+      "id": "MD-003",
+      "type": "fea",
+      "target": "max_von_mises_mpa",
+      "condition": {"max": 800.0},
+      "severity": "WARNING",
+      "message": "模具钢（HRC 50+）允许应力 ≤ 800MPa"
+    },
+    {
+      "id": "MD-004",
+      "type": "fea",
+      "target": "max_displacement_mm",
+      "condition": {"max": 0.05},
+      "severity": "CRITICAL",
+      "message": "模具型腔变形 ≤ 0.05mm（保证制品精度）"
+    },
+    {
+      "id": "MD-005",
+      "type": "parametric",
+      "target": "surface_roughness_um",
+      "condition": {"min": 0.025, "max": 6.3},
+      "severity": "INFO",
+      "message": "型腔表面粗糙度应在 0.025~6.3μm 之间"
+    }
+  ]
+}

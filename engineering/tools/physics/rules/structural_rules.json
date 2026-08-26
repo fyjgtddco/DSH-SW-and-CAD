@@ -1,0 +1,56 @@
+{
+  "domain_id": "structural",
+  "domain_name": "结构件",
+  "version": "1.0",
+  "description": "梁/板/壳/框架类结构件的设计规范",
+  "rules": [
+    {
+      "id": "ST-001",
+      "type": "parametric",
+      "target": "thickness_mm",
+      "condition": {"min": 1.0, "max": 100.0},
+      "severity": "CRITICAL",
+      "message": "结构件壁厚应在 1~100mm 之间，过薄易变形，过厚不经济"
+    },
+    {
+      "id": "ST-002",
+      "type": "parametric",
+      "target": "fillet_mm",
+      "condition": {"min": 0.5, "max": 20.0},
+      "severity": "WARNING",
+      "message": "圆角半径应在 0.5~20mm，避免应力集中"
+    },
+    {
+      "id": "ST-003",
+      "type": "fea",
+      "target": "max_von_mises_mpa",
+      "condition": {"max": 250.0},
+      "severity": "CRITICAL",
+      "message": "最大等效应力不应超过 250MPa（普通钢屈服强度）"
+    },
+    {
+      "id": "ST-004",
+      "type": "fea",
+      "target": "max_displacement_mm",
+      "condition": {"max": 5.0},
+      "severity": "WARNING",
+      "message": "最大位移不应超过 5mm，避免影响装配"
+    },
+    {
+      "id": "ST-005",
+      "type": "fea",
+      "target": "safety_factor",
+      "condition": {"min": 2.0, "max": 5.0},
+      "severity": "WARNING",
+      "message": "安全系数应在 2~5 之间，过低不安全，过高过度设计"
+    },
+    {
+      "id": "ST-006",
+      "type": "fea",
+      "target": "mass_kg",
+      "condition": {"max": 50.0},
+      "severity": "INFO",
+      "message": "结构件质量建议 < 50kg"
+    }
+  ]
+}

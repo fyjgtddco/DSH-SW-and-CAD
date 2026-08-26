@@ -121,11 +121,19 @@ def _release_status(overall: str, fr: dict, acc: dict) -> str:
         sf = fr.get("safety_factor", 0)
         min_sf = acc.get("min_safety_factor", 2.0)
         max_sf = acc.get("target_safety_factor_max", 5.0)
+        # Bug-21 修复: 安全系数在范围内 → RELEASE_CANDIDATE；超出上限 → OVER_ENGINEERED
         if min_sf <= sf <= max_sf:
             return "RELEASE_CANDIDATE"
         return "OVER_ENGINEERED"
     elif overall == "FAIL":
         return "NEEDS_REVISION"
+    # Bug-21 修复: 安全系数过高但整体 PASS 时，返回 OVER_ENGINEERED 而非 RELEASE_CANDIDATE
+    if overall == "WARNING":
+        sf = fr.get("safety_factor", 0)
+        max_sf = acc.get("target_safety_factor_max", 5.0)
+        if sf > max_sf:
+            return "OVER_ENGINEERED"
+        return "REVIEW_NEEDED"
     return "PENDING"
 
 
@@ -171,4 +179,5 @@ def report_to_markdown(report: dict) -> str:
         lines.append("\n### Not Evaluated")
         for g in report["not_evaluated"]:
             lines.append(f"- ⏭ {g}")
-    return "\n".join(lines)
+    # Bug-23 修复: 确保末尾换行，防止 markdown 截断
+    return "\n".join(lines) + "\n"

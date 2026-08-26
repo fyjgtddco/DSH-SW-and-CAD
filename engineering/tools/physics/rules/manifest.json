@@ -1,0 +1,54 @@
+{
+  "ruleset_id": "DSVA-GB",
+  "revision": "A",
+  "generated_from": "DSVA国标对照表.xlsx",
+  "enabled_packs": [
+    "gb_standards_registry.json",
+    "gb_base_rules.json",
+    "gb_materials_rules.json",
+    "gb_structural_rules.json",
+    "gb_transmission_rules.json",
+    "gb_housing_rules.json",
+    "gb_drafting_rules.json",
+    "gb_electrical_rules.json",
+    "gb_fasteners_rules.json",
+    "gb_springs_rules.json",
+    "gb_manufacturing_rules.json",
+    "gb_surface_rules.json",
+    "gb_safety_rules.json"
+  ],
+  "deprecated_standards": {
+    "GB/T 3323": "原单号已废止，拆分为 GB/T 3323.1-2019、GB/T 3323.2-2019",
+    "GB/T 12469": "1990版已废止（2005-10-14）；用户原写名称实为 GB/T 12467 系列",
+    "GB/T 15753": "1995版实际是圆弧圆柱齿轮精度，不是原文写的圆柱齿轮精度；直齿/斜齿应见 GB/T 10095",
+    "GB/T 16923": "2008版将被 GB/T 16923-2026 代替（2027-02-01起）",
+    "GB/T 11365": "1989版旧名已变更为\"锥齿轮 精度制\"",
+    "GB/T 42124.3-2025": "部分平台标注 GB/T 6414 被代替，存分歧；DSVA 暂保留 GB/T 6414-2017"
+  },
+  "manual_review_required": [
+    "GB/T 5226.1",
+    "GB/T 15706",
+    "GB/T 16754",
+    "GB 50017",
+    "GB 6067.1",
+    "GB 50661",
+    "GB/T 16855.1",
+    "GB/T 23821",
+    "GB/T 16855",
+    "GB/T 3811",
+    "GB 2894",
+    "GB/T 14406",
+    "GB/T 6067.1"
+  ],
+  "notes": [
+    "本规则集为元数据注册表与适用性提示；具体机读数值表须另行从标准原文提取。",
+    "BLOCKER/CRITICAL 类规则必须经人工复核，不可由 AI 自动放行。",
+    "deprecated 项已保留但需在使用前确认现行版本。"
+  ],
+  "source_metadata": {
+    "xlsx_path": "C:\\Users\\j1877\\WorkBuddy\\2026-08-26-15-05-33\\DSVA国标对照表.xlsx",
+    "rows_imported": 91,
+    "deprecated_count": 9,
+    "manual_review_count": 11
+  }
+}

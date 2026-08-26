@@ -80,9 +80,19 @@ def solve_analytical(load_case: dict, mesh_stats: dict) -> dict[str, Any]:
     loads = load_case.get("loads", [])
     acceptance = load_case.get("acceptance", {})
 
-    # 根据载荷类型选择解析公式
-    total_force = sum(l.get("magnitude_n", 0) for l in loads
-                      if l.get("type") in ("distributed_force", "concentrated_force"))
+    # Bug #2 遗留修复: 支持 magnitude_n 和 magnitude_n_mm2 (压强)
+    def _load_force(l):
+        if l.get("type") not in ("distributed_force", "concentrated_force"):
+            return 0.0
+        mag = l.get("magnitude_n") or 0
+        if mag <= 0:
+            p = l.get("magnitude_n_mm2") or 0
+            sel = l.get("face_selector", "")
+            if p > 0 and sel:
+                from load_case import _face_area_from_selector
+                mag = p * _face_area_from_selector(domain, sel)
+        return max(mag, 0)
+    total_force = sum(_load_force(l) for l in loads)
     force_dir = loads[0].get("direction", [0, 0, -1]) if loads else [0, 0, -1]
 
     L = domain.get("x_max", 200)
@@ -99,10 +109,20 @@ def solve_analytical(load_case: dict, mesh_stats: dict) -> dict[str, Any]:
     # 计算安全系数
     safety_factor = sigma_y / sigma_max if sigma_max > 0 else float("inf")
 
+    # Bug-21 修复: 安全系数过高不是 FAIL，应标记 WARNING（过于保守=浪费材料，但结构安全）
+    # 原逻辑: sf > max_sf → FAIL（错误：92 > 5 被判为超限）
+    # 正确逻辑: sf < min_sf → FAIL（强度不足），sf > max_sf → WARNING（过度设计）
+    if safety_factor < acceptance.get("min_safety_factor", 2.0):
+        sf_status = "FAIL"
+    elif safety_factor > acceptance.get("target_safety_factor_max", 5.0):
+        sf_status = "WARNING"
+    else:
+        sf_status = "PASS"
+
     # 检查约束
     gates = {
         "SAFETY_FACTOR": {
-            "status": "PASS" if acceptance.get("min_safety_factor", 2.0) <= safety_factor <= acceptance.get("target_safety_factor_max", 5.0) else "FAIL",
+            "status": sf_status,
             "actual": round(safety_factor, 2),
             "required_min": acceptance.get("min_safety_factor", 2.0),
             "required_max": acceptance.get("target_safety_factor_max", 5.0),
@@ -165,11 +185,19 @@ def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, 
     H = domain.get("z_max", 60.0)
 
     loads = load_case.get("loads", [])
-    total_force = sum(
-        l.get("magnitude_n", 0)
-        for l in loads
-        if l.get("type") in ("distributed_force", "concentrated_force")
-    )
+    # Bug #2 遗留修复: 支持 magnitude_n 和 magnitude_n_mm2 (压强)
+    def _load_force(l):
+        if l.get("type") not in ("distributed_force", "concentrated_force"):
+            return 0.0
+        mag = l.get("magnitude_n") or 0
+        if mag <= 0:
+            p = l.get("magnitude_n_mm2") or 0
+            sel = l.get("face_selector", "")
+            if p > 0 and sel:
+                from load_case import _face_area_from_selector
+                mag = p * _face_area_from_selector(domain, sel)
+        return max(mag, 0)
+    total_force = sum(_load_force(l) for l in loads)
     force_dir = loads[0].get("direction", [0, 0, -1]) if loads else [0, 0, -1]
 
     acceptance = load_case.get("acceptance", {})
@@ -190,8 +218,9 @@ def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, 
         gates = {
             "SAFETY_FACTOR": {
                 "status": (
-                    "PASS" if min_sf <= safety_factor <= max_sf
-                    else "FAIL"
+                    "FAIL" if safety_factor < min_sf
+                    else "WARNING" if safety_factor > max_sf
+                    else "PASS"
                 ),
                 "actual": round(safety_factor, 2),
                 "required_min": min_sf,

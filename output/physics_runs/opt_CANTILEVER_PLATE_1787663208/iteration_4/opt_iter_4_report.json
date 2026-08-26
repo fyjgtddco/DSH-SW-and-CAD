@@ -1,0 +1,181 @@
+{
+  "schema_version": "1.0",
+  "run_id": "opt_iter_4",
+  "iteration": 4,
+  "timestamp": "2026-08-25 21:06:49",
+  "parent_run_id": "opt_iter_3",
+  "load_case_summary": {
+    "problem_id": "CANTILEVER_PLATE",
+    "title": "悬臂梁板仿真",
+    "material": "?",
+    "yield_strength_mpa": 276,
+    "E_mpa": 68900
+  },
+  "design_params": {
+    "thickness_mm": {
+      "id": "thickness_mm",
+      "value": 2.2,
+      "min": 2,
+      "max": 20
+    },
+    "height_mm": {
+      "id": "height_mm",
+      "value": 61.1,
+      "min": 20,
+      "max": 200
+    },
+    "width_mm": {
+      "id": "width_mm",
+      "value": 40.0,
+      "min": 10,
+      "max": 100
+    },
+    "fillet_mm": {
+      "id": "fillet_mm",
+      "value": 2.0,
+      "min": 0.5,
+      "max": 15
+    }
+  },
+  "geometry_gate": {
+    "status": "PASS",
+    "design_space": {
+      "ok": true,
+      "body_bbox_mm": [
+        0,
+        100,
+        0,
+        40,
+        0,
+        5
+      ],
+      "design_bounds": {
+        "x_min": 0,
+        "x_max": 100,
+        "y_min": 0,
+        "y_max": 40,
+        "z_min": 0,
+        "z_max": 5
+      },
+      "per_axis": {
+        "x": {
+          "violated": false
+        },
+        "y": {
+          "violated": false
+        },
+        "z": {
+          "violated": false
+        }
+      },
+      "violation_vol_mm3": 0.0,
+      "violation_pct": 0.0
+    },
+    "connectivity": {
+      "ok": true,
+      "num_bodies": 1,
+      "num_volumes": 1,
+      "single_body": true,
+      "status": "PASS",
+      "note": ""
+    },
+    "wall_thickness_estimate": {
+      "ok": false,
+      "error": "no face data available"
+    },
+    "interface_compliance": {
+      "ok": true,
+      "violations": [],
+      "locked_param_changes": []
+    },
+    "gates": [
+      {
+        "id": "DESIGN_SPACE",
+        "status": "PASS"
+      },
+      {
+        "id": "CONNECTIVITY",
+        "status": "PASS"
+      },
+      {
+        "id": "WALL_THICKNESS",
+        "status": "PASS"
+      }
+    ]
+  },
+  "fea_result": {
+    "ok": true,
+    "method": "feapy_numpy",
+    "backend": "pure_python_cst_triangle",
+    "safety_factor": 8.7,
+    "max_von_mises_mpa": 31.74,
+    "max_displacement_mm": 0.5293,
+    "volume_mm3": 20000,
+    "mass_kg": 0.054,
+    "gates": {
+      "SAFETY_FACTOR": {
+        "status": "WARNING",
+        "actual": 8.7,
+        "required_min": 2.0,
+        "required_max": 5.0
+      },
+      "MAX_DISPLACEMENT": {
+        "status": "FAIL",
+        "actual_mm": 0.5293,
+        "required_max_mm": 0.5
+      },
+      "DESIGN_SPACE": {
+        "status": "PASS"
+      },
+      "MESH_QUALITY": {
+        "status": "PASS",
+        "note": "CST triangle mesh: ~240 elements"
+      }
+    },
+    "overall": "FAIL",
+    "limitations": [
+      "2D plane stress assumption only",
+      "CST linear elements (6-8%% error vs analytical)",
+      "no stress concentrations captured",
+      "no 3D effects"
+    ],
+    "analytical_comparison": {
+      "delta_mm": 1.1611030478955007,
+      "sigma_mpa": 60.0,
+      "disp_error_pct": 54.410782308954154,
+      "stress_error_pct": 47.101460778275005
+    }
+  },
+  "acceptance_criteria": {
+    "min_safety_factor": 2.0,
+    "max_safety_factor": 5.0,
+    "max_displacement_mm": 0.5,
+    "analysis_type": "linear_static"
+  },
+  "overall_status": "FAIL",
+  "passed_gates": [
+    "DESIGN_SPACE",
+    "CONNECTIVITY",
+    "WALL_THICKNESS",
+    "MESH_QUALITY"
+  ],
+  "failed_gates": [
+    {
+      "id": "MAX_DISPLACEMENT",
+      "status": "FAIL",
+      "actual_mm": 0.5293,
+      "required_max_mm": 0.5
+    }
+  ],
+  "not_evaluated": [],
+  "release_readiness": {
+    "status": "NEEDS_REVISION",
+    "human_review_required": true,
+    "limitations": [
+      "2D plane stress assumption only",
+      "CST linear elements (6-8%% error vs analytical)",
+      "no stress concentrations captured",
+      "no 3D effects"
+    ]
+  }
+}

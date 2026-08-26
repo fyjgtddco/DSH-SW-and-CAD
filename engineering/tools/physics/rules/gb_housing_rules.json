@@ -1,0 +1,41 @@
+{
+  "ruleset_id": "DSVA-GB_HOUSING",
+  "revision": "A",
+  "category": "gb_housing",
+  "generated_from": "DSVA国标对照表.xlsx",
+  "total": 2,
+  "rules": [
+    {
+      "rule_id": "GB_HOUSING-001",
+      "standard_id": "GB/T 4208-2017",
+      "title": "外壳防护等级(IP代码)",
+      "topic": "防护等级",
+      "scope": "本标准适用于额定电压不超过72.5 kV,借助外壳防护的电气设备的防护分级。本标准的目的如下:a)规定电气设备下述内容的外壳防护等级:b)防护等级的标识。c)各防护等级标识的要求。d)按本标准的要求对外壳作验证试验。各类产品引用外壳防护等级的程度和方式,以及采用何种外壳,留待产品标准决定。本标准仅考虑在各方面都符合有关产品标准规定的外壳,在正常使用条件下,外壳的材料和工艺应保证达到所需要的防护等级。",
+      "status": "现行(2025-03-27复审继续有效)",
+      "dsva_requirement": "IP 等级、开孔、密封、排水、防尘",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=09CCED55688D4116ED89659C1E7526F8",
+      "note": "等同采用IEC 60529:2013(IDT)；有第1号修改单GB/T 4208-2017/XG1-2024(2025-01-01实施)"
+    },
+    {
+      "rule_id": "GB_HOUSING-002",
+      "standard_id": "GB/T 8923.1-2011",
+      "title": "涂覆涂料前钢材表面处理 表面清洁度的目视评定 第1部分：未涂覆过的钢材表面和全面清除原有涂层后的钢材表面的锈蚀等级和处理等级",
+      "topic": "防腐",
+      "scope": "GB/T 8923的本部分规定了一系列的钢材表面锈蚀等级和处理等级(分别见第2章和第3章)。各种等级通过文字叙述和典型样板照片共同定义,这些照片是符合文字叙述的典型实例。本部分适用于采用喷射清理、手工和动力工具清理以及火焰清理等方法进行涂覆涂料前处理的热轧钢材表面。本部分也适用于除残余氧化皮之外还牢固附着残余涂层和其他外来杂质的钢材表面。",
+      "status": "现行(代替GB/T 8923-1988)",
+      "dsva_requirement": "表面处理等级、涂层体系、腐蚀环境",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=6BC8D52A103AFEE95AC318BEB5DC4EC8",
+      "note": "原单号已拆分为.1~.4，取.1"
+    }
+  ]
+}

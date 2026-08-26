@@ -84,7 +84,13 @@ m.chamfer(width, edge_points, 45)   # 倒角
 
 AI 通过 DSH 的 `pwsh` 工具执行：
 
+> **路径查找（新电脑/未知环境）**：先运行 `python sw_bridge.py self-path`，返回 JSON 中的 `.dir` 字段即为 `<包目录>`。无需手动替换占位符。
+
 ```powershell
+# 查找 sw_bridge.py 路径（推荐第一步）
+python sw_bridge.py self-path
+# 返回: {"ok": true, "path": "C:\\...\\sw_bridge.py", "dir": "C:\\..."}
+
 # 检查 SolidWorks 连接状态
 python "<包目录>\sw_bridge.py" status
 

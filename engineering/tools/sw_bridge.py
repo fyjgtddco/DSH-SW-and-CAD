@@ -69,6 +69,75 @@ try:
 except ImportError:
     _HAS_CADX = False
 
+
+# ── Bug-24 补充: 自动安装 ezdxf/shapely ─────────────────────────────────────
+# 当 CADX 模块存在但 ezdxf 未安装时（如 ac_validate 已导入但内部 lazy import），
+# 提供自动安装能力，让 agent 无需手动执行 pip install。
+
+def ensure_ezdxf():
+    """确保 ezdxf 和 shapely 已安装；若缺失则自动通过 pip 安装。
+
+    这是 Bug-24 的补充：之前只在报错时提示安装命令，现在改为主动尝试安装。
+    适用于个人 agent 场景——无需管理员权限，使用 --user 安装到用户目录。
+
+    Returns:
+        {"ok": True}  若已安装或安装成功
+        {"ok": False, "error": "..."}  若安装失败
+    """
+    try:
+        import ezdxf  # noqa: F401
+        return {"ok": True}
+    except ImportError:
+        pass
+    try:
+        import shapely  # noqa: F401
+    except ImportError:
+        pass
+
+    import subprocess
+    import sys
+    pkgs = []
+    try:
+        __import__("ezdxf")
+    except ImportError:
+        pkgs.append("ezdxf")
+    try:
+        __import__("shapely")
+    except ImportError:
+        pkgs.append("shapely")
+
+    if not pkgs:
+        return {"ok": True}
+
+    # pip install --user 无需管理员权限，适合个人桌面环境
+    pip_cmd = [sys.executable, "-m", "pip", "install", "--user", "--quiet"] + pkgs
+    try:
+        result = subprocess.run(pip_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        if result.returncode == 0:
+            # 安装成功后重新尝试导入
+            import ezdxf  # noqa: F401
+            try:
+                import shapely  # noqa: F401
+            except ImportError:
+                pass
+            return {"ok": True, "installed": pkgs, "note": "自动安装成功"}
+        else:
+            return {
+                "ok": False,
+                "installed": [],
+                "error": f"pip 安装失败 (exit={result.returncode})\n{result.stderr[:500]}",
+                "hint": "请手动运行: pip install ezdxf shapely",
+            }
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "installed": [],
+            "error": "pip 安装超时（120s）",
+            "hint": "请手动运行: pip install ezdxf shapely",
+        }
+    except Exception as e:
+        return {"ok": False, "installed": [], "error": str(e), "hint": "请手动运行: pip install ezdxf shapely"}
+
 # Physics-in-the-Loop 物理验证子系统
 try:
     _PHYSICS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "physics")
@@ -314,12 +383,18 @@ def cmd_massprops(sw):
 
 
 def cmd_close(sw):
-    d = sw.ActiveDoc
-    if d is None:
-        return {"ok": False, "error": "no active document"}
-    title = _prop(d, "GetTitle")
-    sw.CloseDoc(title)
-    return {"ok": True, "closed": title}
+    """关闭活动文档（Bug-25 修复: 尝试 CloseAllDocuments 作为 SW 2020 兼容替代）。"""
+    import swapi as _swapi
+    try:
+        d = sw.ActiveDoc
+        if d is not None:
+            title = _prop(d, "GetTitle")
+            sw.CloseDoc(title)
+            return {"ok": True, "closed": title}
+    except Exception:
+        pass
+    # Bug-25: SW 2020 无 Quit()，使用 CloseAllDocuments + GC 清理
+    return _swapi.close_all_and_exit(sw)
 
 
 def cmd_save(sw, path):
@@ -1232,6 +1307,17 @@ def cmd_cleanup(sw, temp_dir=None):
     return {"ok": True, "cleaned": cleaned, "count": len(cleaned)}
 
 
+# ── Bug-25: 安全退出 SolidWorks ─────────────────────────────────────
+def cmd_close_all(sw):
+    """关闭所有 SolidWorks 文档（SW 2020 兼容）。
+
+    SW 2020 没有 sw.Quit() 方法，使用 CloseAllDocuments() + GC 清理替代。
+    """
+    import swapi as _swapi
+    result = _swapi.close_all_and_exit(sw)
+    return result
+
+
 def cmd_vision_fallback(sw, description="", auto_save=True):
     """Vision 后端不可用时的降级方案：截图并返回路径供前端识图。
 
@@ -1488,6 +1574,8 @@ def main():
         print(json.dumps({"ok": False, "error": "no command"}, ensure_ascii=False))
         return
     cmd = args[0]
+    # Bug-26: 路径解析——任何位置调用均可自动定位本脚本
+    _SW_BRIDGE_SELF = os.path.abspath(__file__)
     try:
         sw = get_sw()
         if cmd == "status":
@@ -1506,6 +1594,10 @@ def main():
             result = cmd_massprops(sw)
         elif cmd == "close":
             result = cmd_close(sw)
+        elif cmd == "close-all":
+            # Bug-25: 安全退出接口（SW 2020 兼容）
+            import swapi as _swapi
+            result = _swapi.close_all_and_exit(sw)
         elif cmd == "save":
             result = cmd_save(sw, args[1] if len(args) > 1 else "")
         elif cmd == "sketch-rect":
@@ -1530,6 +1622,9 @@ def main():
             result = cmd_check_vision(sw)
         elif cmd == "reading":
             result = cmd_reading(sw)
+        elif cmd == "self-path":
+            # Bug-26: 返回本脚本的绝对路径，解决"路径错误"问题
+            result = {"ok": True, "command": "self-path", "path": _SW_BRIDGE_SELF, "dir": os.path.dirname(_SW_BRIDGE_SELF)}
         elif cmd == "ac-status":
             if not _HAS_CADX:
                 result = {"ok": False, "error": "ac_bridge 未找到，请确保 engineering/tools/ 下有 ac_bridge.py"}
@@ -1547,14 +1642,30 @@ def main():
                     result = {"ok": True, "dxf_path": ac.export_dxf(out_path)}
         elif cmd == "cad-validate":
             if not _HAS_CADX:
-                result = {"ok": False, "error": "ac_validate 未找到，请确保 engineering/tools/ 下有 ac_validate.py"}
+                result = {"ok": False, "error": (
+                    "ac_validate 模块未找到，请确保 engineering/tools/ 下有 ac_validate.py。\n"
+                    "如需 CADX 几何验证，还需安装依赖：pip install ezdxf shapely"
+                )}
             else:
-                dxf_path = args[1] if len(args) > 1 else ""
-                rules = args[2] if len(args) > 2 else "mechanical"
-                if not dxf_path or not os.path.exists(dxf_path):
-                    result = {"ok": False, "error": f"DXF 文件不存在: {dxf_path}"}
+                # Bug-24 补充: 自动安装 ezdxf/shapely（个人 agent 无需手动执行 pip）
+                install_result = ensure_ezdxf()
+                if not install_result.get("ok"):
+                    result = {"ok": False, "error": install_result.get("error", "ezdxf 安装失败"),
+                              "hint": install_result.get("hint", "请手动运行: pip install ezdxf shapely")}
                 else:
-                    result = ac_validate.validate_dxf(dxf_path, rules)
+                    dxf_path = args[1] if len(args) > 1 else ""
+                    rules = args[2] if len(args) > 2 else "mechanical"
+                    if not dxf_path or not os.path.exists(dxf_path):
+                        result = {"ok": False, "error": f"DXF 文件不存在: {dxf_path}"}
+                    else:
+                        try:
+                            result = ac_validate.validate_dxf(dxf_path, rules)
+                        except RuntimeError as e:
+                            msg = str(e)
+                            if "ezdxf" in msg.lower() or "import" in msg.lower():
+                                result = {"ok": False, "error": f"DXF 验证失败: {msg}\n请运行: pip install ezdxf shapely"}
+                            else:
+                                result = {"ok": False, "error": msg}
         elif cmd == "cad-validate-live":
             if not _HAS_CADX:
                 result = {"ok": False, "error": "ac_validate 未找到"}

@@ -186,7 +186,7 @@ def solve_cantilever_2d(L,H,T,F_load,E,nu,nx=40,ny=12):
         n=nr+j; loads.append((n,0.0,-F_load/(ny+1)))
     r=s.solve(E,nu,fixed=fixed,loads=loads)
     I=T*H**3/12; de=F_load*L**3/(3*E*I); se=6*F_load*L/(T*H**2)
-    r["analytical"]={"delta_mm":de,"sigma_mpa":se,"disp_error_pct":abs(r["max_displacement_mm"]/de-1)*100,"stress_error_pct":abs(r["max_von_mises_mpa"]/se-1)*100}
+    r["analytical"]={"delta_mm":de,"sigma_mpa":se,"disp_error_pct":abs(r["max_displacement_mm"]/de-1)*100 if de else 0,"stress_error_pct":abs(r["max_von_mises_mpa"]/se-1)*100 if se else 0}
     return r
 
 

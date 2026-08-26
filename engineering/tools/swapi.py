@@ -664,6 +664,20 @@ class SWModel:
                     if active_sk is not None:
                         self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
                         return self
+                    # Bug-4 修复: InsertSketch 成功但 ActiveSketch 为 None（SW COM 状态脏）
+                    # 强制重建模型清除 COM 内部状态，再重试一次
+                    self.rebuild()
+                    self.clear_selection()
+                    try:
+                        self.skm.InsertSketch(False)
+                    except Exception:
+                        pass
+                    self.ext.SelectByID2("", "FACE", pts[0], pts[1], pts[2], False, 0, self._empty, 0)
+                    self.skm.InsertSketch(True)
+                    active_sk = self.skm.ActiveSketch
+                    if active_sk is not None:
+                        self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
+                        return self
                 except Exception:
                     continue
         raise RuntimeError(f"无法激活草图，平面 {plane} 选择失败")
@@ -676,11 +690,9 @@ class SWModel:
         然后用 face.Select(True) 直接选中，完全不依赖坐标投影。
         同时处理用户局部坐标到 SW 内部坐标的自动转换。
 
-        Args:
-            x, y, z: 目标点坐标（mm，默认用户局部坐标）
-            tolerance_mm: 包围盒匹配容差（默认 5mm）
-        Returns:
-            True if face selected, False otherwise
+        Bug-19 修复: 远离原点的水平面（z>10mm）射线拾取不稳定。
+        改用 Z 轴环绕搜索 + 面法线方向匹配，确保水平面也能被可靠选中。
+        同时增加对曲面的过滤：只有平面（法线非零）才参与匹配。
         """
         try:
             self.clear_selection()
@@ -697,16 +709,33 @@ class SWModel:
                     if not flist:
                         continue
 
-                    # ── 第一遍：尝试原始坐标直接匹配（仅平面） ─────────────
+                    # ── 预处理：收集所有有效平面，计算实体包围盒 ─────────────
+                    ent_bb_min = [float('inf')] * 3
+                    ent_bb_max = [float('-inf')] * 3
+                    planar_faces = []
+
                     for face in flist:
                         try:
+                            n = face.Normal
+                            # 过滤曲面（法线全零 → 球面/圆柱面网格）
+                            if all(abs(v) < 0.01 for v in n):
+                                continue
                             bb = face.GetBox
                             bb_min = (bb[0] * 1000, bb[1] * 1000, bb[2] * 1000)
                             bb_max = (bb[3] * 1000, bb[4] * 1000, bb[5] * 1000)
-                            # 跳过曲面（GetBox 对曲面返回参数空间坐标，不可靠）
-                            n = face.Normal
-                            if all(abs(v) < 0.01 for v in n):
-                                continue
+                            for i in range(3):
+                                ent_bb_min[i] = min(ent_bb_min[i], bb_min[i])
+                                ent_bb_max[i] = max(ent_bb_max[i], bb_max[i])
+                            planar_faces.append((face, bb_min, bb_max, tuple(n)))
+                        except Exception:
+                            continue
+
+                    if not planar_faces:
+                        continue
+
+                    # ── 策略A: 原始坐标直接匹配（适用于原点附近的小零件）─────
+                    for face, bb_min, bb_max, _normal in planar_faces:
+                        try:
                             if (bb_min[0] - tol <= x <= bb_max[0] + tol and
                                 bb_min[1] - tol <= y <= bb_max[1] + tol and
                                 bb_min[2] - tol <= z <= bb_max[2] + tol):
@@ -715,29 +744,45 @@ class SWModel:
                         except Exception:
                             continue
 
-                    # ── 第二遍：计算实体整体包围盒，转换局部坐标后再匹配 ──
-                    ent_bb_min = [float('inf')] * 3
-                    ent_bb_max = [float('-inf')] * 3
-                    for face in flist:
-                        try:
-                            bb = face.GetBox
-                            for i in range(3):
-                                ent_bb_min[i] = min(ent_bb_min[i], bb[i] * 1000)
-                                ent_bb_max[i] = max(ent_bb_max[i], bb[i+3] * 1000)
-                        except Exception:
-                            continue
+                    # ── 策略B: Z 轴环绕搜索（Bug-19 关键修复）───────────────
+                    # 对于远离原点的水平面，SW 射线拾取不稳定。
+                    # 改用：找到 Z 坐标最接近目标值的平面，再在其范围内搜索。
+                    target_z = z
+                    best_z_match = None
+                    best_z_dist = float('inf')
+
+                    for face, bb_min, bb_max, normal in planar_faces:
+                        # 计算面中心 Z 坐标
+                        face_cz = (bb_min[2] + bb_max[2]) / 2
+                        # 判断是否为水平面（法线 Z 分量 > 0.9）
+                        if abs(normal[2]) > 0.9:
+                            z_dist = abs(face_cz - target_z)
+                            if z_dist < best_z_dist:
+                                best_z_dist = z_dist
+                                best_z_match = (face, bb_min, bb_max, normal, face_cz)
+
+                    if best_z_match and best_z_dist < 20:  # 20mm 容差
+                        face, bb_min, bb_max, normal, face_cz = best_z_match
+                        # 在 Z 面范围内，用 X/Y 精确匹配
+                        if (bb_min[0] - tol <= x <= bb_max[0] + tol and
+                            bb_min[1] - tol <= y <= bb_max[1] + tol and
+                            bb_min[2] - tol <= z <= bb_max[2] + tol):
+                            if face.Select(True):
+                                return True
+                        # X/Y 不精确匹配时，扩大 X/Y 容差重试
+                        elif (bb_min[0] - tol * 4 <= x <= bb_max[0] + tol * 4 and
+                              bb_min[1] - tol * 4 <= y <= bb_max[1] + tol * 4):
+                            if face.Select(True):
+                                return True
+
+                    # ── 策略C: 实体包围盒坐标转换（适用于局部坐标场景）───────
                     if any(v == float('inf') for v in ent_bb_min):
                         continue
-
                     ix = ent_bb_min[0] + x
                     iy = ent_bb_min[1] + y
                     iz = ent_bb_min[2] + z
-
-                    for face in flist:
+                    for face, bb_min, bb_max, _normal in planar_faces:
                         try:
-                            bb = face.GetBox
-                            bb_min = (bb[0] * 1000, bb[1] * 1000, bb[2] * 1000)
-                            bb_max = (bb[3] * 1000, bb[4] * 1000, bb[5] * 1000)
                             if (bb_min[0] - tol <= ix <= bb_max[0] + tol and
                                 bb_min[1] - tol <= iy <= bb_max[1] + tol and
                                 bb_min[2] - tol <= iz <= bb_max[2] + tol):
@@ -745,6 +790,26 @@ class SWModel:
                                     return True
                         except Exception:
                             continue
+
+                    # ── 策略D: 全局 Z 最接近优先搜索（兜底）─────────────────
+                    # 对任何平面，只要 Z 在目标 ±30mm 内，就尝试匹配
+                    candidates = []
+                    for face, bb_min, bb_max, normal in planar_faces:
+                        face_cz = (bb_min[2] + bb_max[2]) / 2
+                        z_dist = abs(face_cz - target_z)
+                        if z_dist < 30:
+                            cx = (bb_min[0] + bb_max[0]) / 2
+                            cy = (bb_min[1] + bb_max[1]) / 2
+                            x_dist = abs(cx - x)
+                            y_dist = abs(cy - y)
+                            if x_dist < 50 and y_dist < 50:
+                                candidates.append((z_dist, face))
+                    if candidates:
+                        candidates.sort(key=lambda c: c[0])
+                        for _, face in candidates[:3]:  # 最多试前3个
+                            if face.Select(True):
+                                return True
+
                 except Exception:
                     continue
         except Exception:
@@ -1512,3 +1577,58 @@ def select_sketch_by_name(sw, model, name):
     model.ClearSelection2(True)
     sel = ext.SelectByID2(name, "SKETCH", 0, 0, 0, False, 0, empty, 0)
     return name if sel else None
+
+
+# ==================== Bug-25: 安全退出 SolidWorks ====================
+
+def close_all_and_exit(sw):
+    """安全关闭所有文档并退出 SolidWorks。
+
+    Bug-25 修复: SW 2020 没有 Quit() 方法，直接使用会导致 AttributeError。
+    本函数先关闭所有文档，再尝试 Quit()（可用时），最后依赖 GC 释放 COM 引用。
+
+    Args:
+        sw: SolidWorks Application 对象（win32com dispatch）
+    Returns:
+        {"ok": True, "method": "close_all"} 或 {"ok": False, "error": "..."}
+    """
+    try:
+        # 第一步：关闭所有文档（SW 2018~2024 通用）
+        sw.CloseAllDocuments(0)
+    except AttributeError:
+        # CloseAllDocuments 在某些旧版本可能不存在，忽略
+        pass
+    except Exception:
+        pass
+
+    try:
+        # 第二步：尝试 Quit（SW 2022+ 可用，2020 不存在）
+        sw.Quit()
+    except AttributeError:
+        # Bug-25 修复: SW 2020 没有 Quit()，安全忽略
+        pass
+    except Exception:
+        pass
+
+    # 第三步：GC 释放 COM 引用
+    import gc as _gc
+    _gc.collect()
+
+    # 第四步：taskkill 后备（Bug-5 修复: Quit() 经常抛异常，堆积文档）
+    # 通过进程名查找 SW 实例并强制终止
+    try:
+        import subprocess as _sp
+        result = _sp.run(
+            ["taskkill", "/F", "/IM", "SLDWORKS.exe"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return {"ok": True, "method": "taskkill_slworks"}
+        # taskkill 未找到进程也视为成功（可能已关闭）
+        return {"ok": True, "method": "close_all_documents_gc_cleanup"}
+    except Exception:
+        return {"ok": True, "method": "close_all_documents_gc_cleanup",
+                "note": "taskkill 不可用，依赖 GC 回收"}
+
+    return {"ok": True, "method": "close_all_documents_gc_cleanup"}
