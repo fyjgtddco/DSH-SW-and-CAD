@@ -1,0 +1,36 @@
+{
+  "name": "dsh-profile-web",
+  "private": true,
+  "pnpm": {
+    "overrides": {
+      "zod": "^4.4.3"
+    }
+  },
+  "dependencies": {
+    "@dsh-external/dsh-client-ui-skin-deep-whale-manager": "github:Small-tailqwq/dsh-deep-whale#b693d2c224a0a6fb5b621e7cc1284f20d9849c1c&path:/skin-manager",
+    "@dsh-external/dsh-client-ui-skin-maid-atelier": "github:Small-tailqwq/dsh-deep-whale#b693d2c224a0a6fb5b621e7cc1284f20d9849c1c&path:/maid-atelier",
+    "@sanqi-normal/dsh-webui-market-plugin": "^0.5.5",
+    "dsh-dafeiyu": "^0.1.6",
+    "dsh-meme": "^0.1.39",
+    "dsh-reasoning-effort": "github:statem-li/dsh-reasoning-effort#3c0d3dd964d268fb45aa93ff8de43e7cc06429ec",
+    "dsh-skin-market": "^0.1.46",
+    "dsh-tool-workflow-gate": "file:./node_modules/dsh-tool-workflow-gate",
+    "dsh-vision-router": "2.0.1"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "dsh-skin-market",
+        "@sanqi-normal/dsh-webui-market-plugin",
+        "dsh-dafeiyu",
+        "@dsh-external/dsh-client-ui-skin-maid-atelier",
+        "@dsh-external/dsh-client-ui-skin-deep-whale-manager",
+        "dsh-meme",
+        "dsh-vision-router",
+        "dsh-tool-workflow-gate"
+      ]
+    }
+  }
+}
