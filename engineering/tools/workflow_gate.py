@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import json, os, sys, time
+
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8')
+
+STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflow_state.json")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODE_GATE_PATH = os.path.join(BASE_DIR, "mode_gate.py")
+
+CHOICES = {
+    "A": {"label": "完全自主搭建", "strategy": "parallel", "detail": "full", "desc": "AI自主决策"},
+    "B": {"label": "部分自主搭建", "strategy": "hybrid", "detail": "key_points", "desc": "关键节点询问"},
+    "C": {"label": "步步确认", "strategy": "sequential", "detail": "every_step", "desc": "每步确认"},
+}
+PARALLEL_CHOICES = {
+    "D": {"label": "多小屋并行", "mode": "parallel", "desc": "同时开SW"},
+    "E": {"label": "单小屋串行", "mode": "sequential", "desc": "一次一个SW"},
+}
+
+def _fresh_state():
+    return {"step": "idle", "task": "", "context": None, "mechanics_result": None,
+            "user_choice": None, "choice_detail": None, "parallel_mode": None,
+            "subagent_config": None, "created_at": None}
+
+def load_state():
+    if not os.path.exists(STATE_PATH):
+        return _fresh_state()
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return _fresh_state()
+
+def save_state(state):
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+def estimate_mechanics(task, context=None):
+    t = (task + " " + (context or "")).lower()
+    load, sf = 500, 2.5
+    if any(k in t for k in ["冲击","impact","shock"]): load *= 2.0
+    elif any(k in t for k in ["动态","dynamic","循环"]): load *= 1.5
+    elif any(k in t for k in ["大型","重型","large"]): load = 2000
+    elif any(k in t for k in ["小型","轻型","small"]): load = 100
+    if any(k in t for k in ["传动","齿轮","轴","gear"]): sf = 2.5
+    elif any(k in t for k in ["壳体","机架","housing","frame"]): sf = 2.5
+    elif any(k in t for k in ["承载","support","bearing"]): sf = 2.5
+    if any(k in t for k in ["高温","heat"]): mat = "Cr12MoV"
+    elif any(k in t for k in ["轻量","aluminum","6061"]): mat = "6061-T6 Aluminum"
+    elif any(k in t for k in ["腐蚀","rust"]): mat = "304 Stainless"
+    elif any(k in t for k in ["传动","齿轮"]): mat = "45# Steel / 40Cr"
+    else: mat = "Q235 Carbon Steel"
+    return {"load_estimate": "%d N" % load, "safety_factor": sf,
+            "material_recommend": mat, "scenario": "通用工业场景", "notes": "基于用户输入估算"}
+
+def _get_done_rooms():
+    ms_path = os.path.join(BASE_DIR, "mode_state.json")
+    done = set()
+    if os.path.exists(ms_path):
+        try:
+            with open(ms_path, "r", encoding="utf-8") as f:
+                ms = json.load(f)
+            for rn, rv in ms.get("rooms", {}).items():
+                if rv.get("ended_at"):
+                    done.add(rn)
+        except Exception:
+            pass
+    return done
+
+def _ask_questions(task_desc):
+    nl = chr(10)
+    return nl.join([
+        "=== 设计任务背景确认 ===",
+        "任务描述: %s" % task_desc,
+        "",
+        "请回答以下5个问题：",
+        "1. 【使用场合】户外/室内/水下/高温/低温？",
+        "2. 【负载类型】静态/动态/冲击/循环？",
+        "3. 【运行方式】手动/电动/液压/气动？",
+        "4. 【工作频率】连续/间歇/偶尔？",
+        "5. 【特殊要求】防水/防尘/防爆/轻量化？",
+    ])
+
+def _default_rooms():
+    return [("结构件","structural"),("传动机构","transmission"),
+            ("壳体机架","housing"),("总装与验证","assembly"),("工程图输出","drafting")]
+
+def generate_subagent_config(choice, parallel_mode, task, context=None):
+    t = (task + " " + (context or "")).lower()
+    rooms = list(_default_rooms())
+    if any(k in t for k in ["轴承","支撑","bearing","support"]):
+        rooms.append(("支撑结构","support"))
+    if any(k in t for k in ["弹簧","spring","弹性"]):
+        rooms.append(("弹性元件","spring"))
+    if any(k in t for k in ["高温","heat"]):
+        rooms.append(("耐热部件","thermal"))
+    if any(k in t for k in ["腐蚀","corrosion","锈蚀"]):
+        rooms.append(("防腐处理","corrosion"))
+    strategies = {
+        "A": {"parallel": True, "ask_user_at": [], "detail_level": "full"},
+        "B": {"parallel": True, "ask_user_at": ["material_selection"], "detail_level": "key_points"},
+        "C": {"parallel": False, "ask_user_at": ["every_part"], "detail_level": "every_step"},
+    }
+    if parallel_mode == "sequential":
+        strategies[choice]["parallel"] = False
+    return {"rooms": rooms, "strategy": strategies[choice],
+            "parallel_mode": parallel_mode, "total_rooms": len(rooms)}
+
+def _sync_mode_gate(choice, parallel_mode):
+    try:
+        os.system('python "%s" declare 2 >nul 2>&1' % MODE_GATE_PATH)
+    except:
+        pass
+
+def cmd_init(task_desc):
+    state = load_state()
+    state["step"] = "context_asked"
+    state["task"] = task_desc
+    state["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    save_state(state)
+    return {"ok": True, "step": "context_asked", "task": task_desc,
+            "message": _ask_questions(task_desc),
+            "next_command": "请先回答背景问题，然后调用: workflow_gate.py provide_context <回答>"}
+
+def cmd_provide_context(context_text):
+    state = load_state()
+    if state.get("step") != "context_asked":
+        return {"ok": False, "error": "请先调用 init 命令！"}
+    state["context"] = context_text
+    state["mechanics_result"] = estimate_mechanics(state["task"], context_text)
+    state["step"] = "mechanics_done"
+    save_state(state)
+    m = state["mechanics_result"]
+    nl = chr(10)
+    msg = nl.join([
+        "力学估算完成:",
+        "  负载: %s  安全系数: %.1f  材料: %s" % (m["load_estimate"], m["safety_factor"], m["material_recommend"]),
+        "",
+        "请选择搭建方式 A/B/C 和并行策略 D/E（例如：C, E）",
+    ])
+    return {"ok": True, "step": "mechanics_done", "task": state["task"],
+            "mechanics": m, "message": msg}
+
+def cmd_select(choice, parallel=None):
+    state = load_state()
+    # 串行模式允许重复调用 select 获取下一个房间
+    _pmode_val = PARALLEL_CHOICES.get(state.get("parallel_mode", ""), {}).get("mode", "")
+    if state.get("step") == "user_selected" and _pmode_val in ("sequential", "parallel"):
+        pass
+    elif state.get("step") != "mechanics_done":
+        return {"ok": False, "error": "请先完成力学估算！"}
+    choice = choice.upper().strip()
+    if choice not in CHOICES:
+        return {"ok": False, "error": "选择必须是 A, B, 或 C！"}
+    if parallel is None:
+        parallel = "D"
+    parallel = parallel.upper().strip()
+    if parallel not in PARALLEL_CHOICES:
+        return {"ok": False, "error": "并行模式必须是 D 或 E！"}
+    config = CHOICES[choice]
+    pconfig = PARALLEL_CHOICES[parallel]
+    state["step"] = "user_selected"
+    state["user_choice"] = choice
+    state["choice_detail"] = config
+    state["parallel_mode"] = parallel
+    _pmode = PARALLEL_CHOICES.get(parallel, {}).get("mode", parallel)
+    state["subagent_config"] = generate_subagent_config(choice, _pmode, state["task"], state.get("context"))
+    save_state(state)
+    _sync_mode_gate(choice, parallel)
+
+    rooms = state["subagent_config"]["rooms"]
+    _raw_pmode = state.get("parallel_mode", "parallel")
+    pmode = PARALLEL_CHOICES.get(_raw_pmode, {}).get("mode", _raw_pmode)
+    nl = chr(10)
+
+    if pmode == "sequential":
+        done = _get_done_rooms()
+        pending = [r for r in rooms if r[0] not in done]
+        if not pending:
+            return {"ok": True, "step": "user_selected", "choice": choice,
+                    "choice_label": config["label"], "parallel_mode": parallel,
+                    "parallel_label": pconfig["label"],
+                    "subagent_strategy": config["strategy"],
+                    "subagent_config": state["subagent_config"],
+                    "pending_rooms": [],
+                    "completed_count": len(done),
+                    "total_rooms": len(rooms),
+                    "message": "所有 %d 个房间已全部完成！进入总装和出图阶段。" % len(rooms),
+                    "ready_to_build": True}
+        next_room = pending[0]
+        done_count = len(done)
+        total = len(rooms)
+        msg = nl.join([
+            "=== 门禁确认 | 串行模式 ===", "",
+            "搭建方式: %s | 并行: 单小屋串行" % config["label"],
+            "进度: %d/%d 个房间" % (done_count, total), "",
+            "--- 当前待处理房间 ---",
+            "房间名: [%s]" % next_room[0],
+            "房间类型: %s" % next_room[1], "",
+            "--- 执行步骤（严格按顺序）---",
+            '  步骤1: python mode_gate.py room-start "%s"' % next_room[0],
+            '  步骤2: subagent_fork(description="%s")' % next_room[0],
+            "  步骤3: 等待该小屋完成",
+            '  步骤4: python mode_gate.py room-end "%s"' % next_room[0],
+            '  步骤5: 重新调用 workflow_gate.py select %s %s 获取下一个房间' % (choice, parallel),
+            "",
+            "严禁一次性创建所有小屋！必须逐个完成。",
+            "步骤1~4 全部完成后，再调用 select 获取下一个房间。",
+        ])
+        pending_rooms = [{"name": next_room[0], "type": next_room[1]}]
+        wave_num, wave_name = 0, "串行逐个"
+    else:
+        # ===== 并行模式：三波式推进（波内同时启动，波间必须等上一波全部完成）=====
+        done = _get_done_rooms()
+        waves = [
+            (1, "独立爆发期", ["structural", "transmission", "housing", "support", "spring", "thermal", "corrosion"]),
+            (2, "收敛汇合期", ["assembly"]),
+            (3, "出图期", ["drafting"]),
+        ]
+        cur = None
+        for wnum, wname, wtypes in waves:
+            wave_rooms = [r for r in rooms if r[1] in wtypes]
+            pending = [r for r in wave_rooms if (r[0] not in done and r[1] not in done)]
+            if pending:
+                cur = (wnum, wname, pending)
+                break
+        if cur is None:
+            return {"ok": True, "step": "user_selected", "choice": choice,
+                    "choice_label": config["label"], "parallel_mode": parallel,
+                    "parallel_label": pconfig["label"],
+                    "subagent_strategy": config["strategy"],
+                    "subagent_config": state["subagent_config"],
+                    "pending_rooms": [], "wave": 0, "wave_name": "全部完成",
+                    "completed_count": len(done), "total_rooms": len(rooms),
+                    "message": "所有 %d 个房间已全部完成！汇总交付。" % len(rooms),
+                    "ready_to_build": True}
+        wnum, wname, pending = cur
+        pending_rooms = [{"name": r[0], "type": r[1]} for r in pending]
+        wave_num, wave_name = wnum, wname
+        if wnum == 1:
+            msg = nl.join([
+                "=== 门禁确认 | 并行模式 · 第%d波【%s】===" % (wnum, wname), "",
+                "本波 %d 个房间【同时启动】: %s" % (len(pending), " ".join("[%s]" % r[0] for r in pending)), "",
+                "--- 执行步骤 ---",
+                "  步骤1: 对每个房间分别调用 mode_gate.py room-start <房间名>",
+                "  步骤2: 在同一条回复里连续调用 subagent_fork 一次性创建本波全部小屋！",
+                "  ⚠️ 严禁只创建一个小屋！本波房间一个都不能少，必须同时启动！",
+                "  ⚠️ 各小屋的 SW 调用自带互斥锁自动排队（FIFO 先到先用），无需人工协调",
+                "  ⚠️ 小屋内建模必须写单个脚本用 sw_bridge.py run 一次性执行多步操作（一次调用规划多步）",
+                "  步骤3: 每个小屋完成后调用 mode_gate.py room-end <房间名>（会自动释放SW锁）",
+                "  步骤4: 本波全部 room-end 后，重新调用 select %s %s 获取下一波" % (choice, parallel),
+            ])
+        elif wnum == 2:
+            msg = nl.join([
+                "=== 门禁确认 | 并行模式 · 第%d波【%s】===" % (wnum, wname), "",
+                "前置检查通过: 上一波房间已全部完成",
+                "本波房间: [%s]（总装与验证，单独创建）" % pending[0][0], "",
+                "--- 执行步骤 ---",
+                '  步骤1: mode_gate.py room-start "%s"' % pending[0][0],
+                "  步骤2: subagent_fork 创建总装小屋",
+                "  步骤3: 总装 + 干涉检查 + 整体验证",
+                '  步骤4: mode_gate.py room-end "%s"' % pending[0][0], "",
+                "--- 报错回退规则 ---",
+                "  若总装失败: 定位出错源房间（结构件/传动机构/壳体机架）",
+                "  调用 mode_gate.py room-fail <源房间名> 将其回退到待处理状态",
+                "  重新调用 select %s %s 重做该房间，完成后再次进入本波" % (choice, parallel),
+            ])
+        else:
+            msg = nl.join([
+                "=== 门禁确认 | 并行模式 · 第%d波【%s】===" % (wnum, wname), "",
+                "前置检查通过: 总装已完成",
+                "本波房间: [%s]（工程图输出）" % pending[0][0], "",
+                "--- 执行步骤 ---",
+                '  步骤1: mode_gate.py room-start "%s"' % pending[0][0],
+                "  步骤2: subagent_fork 创建出图小屋",
+                "  步骤3: 工程图 + GB/T 检查 + DWG/PDF 导出",
+                '  步骤4: mode_gate.py room-end "%s"' % pending[0][0],
+                "  步骤5: select %s %s 确认全部完成" % (choice, parallel),
+            ])
+
+    return {
+        "ok": True, "step": "user_selected", "choice": choice,
+        "choice_label": config["label"], "parallel_mode": parallel,
+        "parallel_label": pconfig["label"],
+        "subagent_strategy": config["strategy"],
+        "subagent_config": state["subagent_config"],
+        "pending_rooms": pending_rooms,
+        "completed_count": len(_get_done_rooms()),
+        "total_rooms": len(rooms),
+        "wave": wave_num, "wave_name": wave_name,
+        "message": msg, "ready_to_build": True
+    }
+
+def cmd_status():
+    state = load_state()
+    return {"ok": True, "step": state.get("step"), "task": state.get("task",""),
+            "user_choice": state.get("user_choice"), "parallel_mode": state.get("parallel_mode"),
+            "ready": state.get("step") == "user_selected"}
+
+def cmd_reset():
+    state = _fresh_state()
+    save_state(state)
+    return {"ok": True, "step": "idle"}
+
+def cmd_check():
+    state = load_state()
+    if state.get("step") != "user_selected":
+        return {"ok": False, "gate": "BLOCKED", "error": "设计门禁拦截！"}
+    return {"ok": True, "gate": "OPEN"}
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print(json.dumps({"ok": False, "error": "用法: workflow_gate.py {init|provide_context|select|status|reset|check} [args]"}, ensure_ascii=False))
+        sys.exit(1)
+    cmd = sys.argv[1].lower()
+    if cmd == "init":
+        print(json.dumps(cmd_init(sys.argv[2]) if len(sys.argv) > 2 else {"ok":False,"error":"need task"}, ensure_ascii=False, indent=2))
+    elif cmd == "provide_context":
+        print(json.dumps(cmd_provide_context(sys.argv[2]) if len(sys.argv) > 2 else {"ok":False,"error":"need context"}, ensure_ascii=False, indent=2))
+    elif cmd == "select":
+        print(json.dumps(cmd_select(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None), ensure_ascii=False, indent=2))
+    elif cmd == "status":
+        print(json.dumps(cmd_status(), ensure_ascii=False, indent=2))
+    elif cmd == "reset":
+        print(json.dumps(cmd_reset(), ensure_ascii=False, indent=2))
+    elif cmd == "check":
+        print(json.dumps(cmd_check(), ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps({"ok": False, "error": "未知命令: " + cmd}, ensure_ascii=False))
+        sys.exit(1)
