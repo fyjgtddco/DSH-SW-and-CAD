@@ -1,0 +1,5 @@
+# dsh-engineering-ui — cordis 补丁
+# 由 profile 的 dsh.profile.bundles 引入；客户端半由 dsh.client 元数据自动装配。
+- insert:
+    - id: dsh-engineering-ui
+      name: dsh-engineering-ui

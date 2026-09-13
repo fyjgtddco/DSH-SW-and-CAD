@@ -1776,13 +1776,7 @@ def main():
     # 原先 doctor 因 parallel_mode=D 被强制要求 --room，无法做独立环境自检。
     _READONLY_CMDS = {"self-path", "doctor", "status", "info", "list",
                       "sw-proc", "help", "version", "ping"}
-    # 【测试反馈 Bug4 修复】SW【收尾类】命令也不该强制 --room：
-    #   close-all 的语义就是"关闭 SolidWorks 并释放使用权"，它本身就是释放动作。
-    #   若还要求先指定房间才能释放，会出现"锁被上一家占着 → 想释放却因没带 room
-    #   被拒"的死结；串行模式下更是完全没有房间概念。
-    #   因此 close-all / sw-release / rooms-reset 豁免 --room 与取锁流程。
-    _NO_ROOM_CMDS = {"close-all", "sw-release", "rooms-reset"}
-    if cmd not in _READONLY_CMDS and cmd not in _NO_ROOM_CMDS:
+    if cmd not in _READONLY_CMDS:
         _room_id = _detect_gate_room(args)
         if _room_id is None and _need_room:
             print(json.dumps({"ok": False, "error": "并行模式下必须指定 --room <房间名>！",

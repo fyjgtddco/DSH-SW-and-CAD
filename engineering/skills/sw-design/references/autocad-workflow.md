@@ -56,26 +56,26 @@ python "<工程目录>\sw_bridge.py" cad-validate-live
 
 ```powershell
 # 环境自检
-python sw_bridge.py doctor
+python "<工程模式根目录>\tools\sw_bridge.py" doctor
 
 # 连接状态
-python sw_bridge.py status
+python "<工程模式根目录>\tools\sw_bridge.py" status
 
 # 列出已打开文档
-python sw_bridge.py list
+python "<工程模式根目录>\tools\sw_bridge.py" list
 
 # SolidWorks 零件 → 工程图
-python sw_bridge.py drawing <零件.sldprt>
+python "<工程模式根目录>\tools\sw_bridge.py" drawing <零件.sldprt>
 
 # 工程图 → DWG（AutoCAD 可读）
-python sw_bridge.py dwg <零件.sldprt>
+python "<工程模式根目录>\tools\sw_bridge.py" dwg <零件.sldprt>
 
 # 导出 DXF（供 CADX 验证）
-python sw_bridge.py export-dxf <图纸.dxf>
+python "<工程模式根目录>\tools\sw_bridge.py" export-dxf <图纸.dxf>
 
 # AutoCAD 几何验证
-python sw_bridge.py cad-validate <图纸.dxf>
+python "<工程模式根目录>\tools\sw_bridge.py" cad-validate <图纸.dxf>
 
 # 展示 SolidWorks 窗口 + 截图
-python sw_bridge.py show
+python "<工程模式根目录>\tools\sw_bridge.py" show
 ```

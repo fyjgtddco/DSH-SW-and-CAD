@@ -94,10 +94,10 @@ provider: filesystem
 
 ```powershell
 # 导出 DXF（SolidWorks 工程图 → DXF）
-python sw_bridge.py export-dxf "<输出.dxf>"
+python "<工程模式根目录>\tools\sw_bridge.py" export-dxf "<输出.dxf>"
 
 # 运行 CADX 几何验证（7 项检查）
-python sw_bridge.py cad-validate "<输出.dxf>"
+python "<工程模式根目录>\tools\sw_bridge.py" cad-validate "<输出.dxf>"
 ```
 
 **验证流程：**

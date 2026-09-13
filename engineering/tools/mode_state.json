@@ -2,20 +2,26 @@
   "mode": "2",
   "rooms": {
     "结构件": {
-      "active": false,
-      "started_at": 1788439840.6965322,
-      "ended_at": 1788440058.9341748
-    },
-    "传动机构": {
-      "active": false,
-      "started_at": 1788440058.9995205,
-      "ended_at": 1788442409.2572048
-    },
-    "壳体机架": {
       "active": true,
-      "started_at": 1788442409.3224478
+      "started_at": 1789306684.531943
     }
   },
-  "declared_at": 1788439840.6355665,
-  "mode_name": "大型复杂器械装配"
+  "declared_at": 1789306343.6276677,
+  "mode_name": "大型复杂器械装配",
+  "sw_lock": {
+    "owner": null,
+    "queue": [],
+    "acquired_at": null,
+    "prev_owner": "结构件",
+    "sw_by_room": true,
+    "cmd_seq": 2,
+    "fair_start": 1789306891.7704258,
+    "hold_mode": "command"
+  },
+  "subagents": {
+    "结构件": {
+      "id": "6d6af072-8509-4af7-bb42-47d99c2ce58b",
+      "assigned_at": 1789306711.0926085
+    }
+  }
 }

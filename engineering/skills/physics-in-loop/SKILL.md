@@ -58,22 +58,22 @@ LLM 擅长生成设计方案，但不擅长计算物理真实性。
 
 ```powershell
 # 1. 先运行演示，理解工作流
-python sw_bridge.py physics-demo
+python "<工程模式根目录>\tools\sw_bridge.py" physics-demo
 
 # 2. 检查可用求解器
-python sw_bridge.py physics-status
+python "<工程模式根目录>\tools\sw_bridge.py" physics-status
 
 # 3. 校验你的载荷工况文件
-python sw_bridge.py physics-validate-case my_load_case.json
+python "<工程模式根目录>\tools\sw_bridge.py" physics-validate-case my_load_case.json
 
 # 4. 自动迭代优化（最多 5 轮）
-python sw_bridge.py physics-optimize my_load_case.json --max-iter 5
+python "<工程模式根目录>\tools\sw_bridge.py" physics-optimize my_load_case.json --max-iter 5
 
 # 5. 查看某轮结果
-python sw_bridge.py physics-report opt_iter_3
+python "<工程模式根目录>\tools\sw_bridge.py" physics-report opt_iter_3
 
 # 6. 获取下轮修正建议
-python sw_bridge.py physics-recommend opt_iter_3
+python "<工程模式根目录>\tools\sw_bridge.py" physics-recommend opt_iter_3
 ```
 
 ## 载荷工况文件格式（load_case.json）

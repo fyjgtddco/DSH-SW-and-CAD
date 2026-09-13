@@ -71,22 +71,22 @@ provider: filesystem
 #### 方式 A：SolidWorks 生成工程图（推荐）
 ```powershell
 # 从 SolidWorks 零件生成 SLDDRW（含三视图+等轴测）
-python sw_bridge.py drawing "<零件路径>"
+python "<工程模式根目录>\tools\sw_bridge.py" drawing "<零件路径>"
 
 # 导出为 DWG（AutoCAD 可读）
-python sw_bridge.py dwg "<零件路径>"
+python "<工程模式根目录>\tools\sw_bridge.py" dwg "<零件路径>"
 
 # 导出为 PDF
-python sw_bridge.py export-pdf "<输出.pdf>"
+python "<工程模式根目录>\tools\sw_bridge.py" export-pdf "<输出.pdf>"
 ```
 
 #### 方式 B：AutoCAD 直接绘制（CADX 能力）
 ```powershell
 # 启动 AutoCAD 并导出 DXF
-python sw_bridge.py ac-export "<输出.dxf>"
+python "<工程模式根目录>\tools\sw_bridge.py" ac-export "<输出.dxf>"
 
 # 运行几何验证（7 项检查）
-python sw_bridge.py cad-validate "<图纸.dxf>"
+python "<工程模式根目录>\tools\sw_bridge.py" cad-validate "<图纸.dxf>"
 ```
 
 ### 五、CADX 几何验证命令
@@ -95,10 +95,10 @@ python sw_bridge.py cad-validate "<图纸.dxf>"
 
 ```powershell
 # 验证已保存的 DXF/DWG（需先导出为 DXF）
-python sw_bridge.py cad-validate <图纸.dxf> [规则文件]
+python "<工程模式根目录>\tools\sw_bridge.py" cad-validate <图纸.dxf> [规则文件]
 
 # 验证当前 AutoCAD 活动文档（自动导出 DXF）
-python sw_bridge.py cad-validate-live
+python "<工程模式根目录>\tools\sw_bridge.py" cad-validate-live
 ```
 
 **验证结果解读：**
@@ -119,14 +119,14 @@ python sw_bridge.py cad-validate-live
 
 ```powershell
 # SolidWorks：新建零件 → 建模 → 出图 → 验证
-python sw_bridge.py run my_script.py           # 建模脚本
-python sw_bridge.py drawing part.sldprt         # 生成工程图
-python sw_bridge.py dwg part.sldprt             # 导出 DWG
-python sw_bridge.py cad-validate part.dxf       # 几何验证
-python sw_bridge.py show                         # 查看结果
+python "<工程模式根目录>\tools\sw_bridge.py" run my_script.py           # 建模脚本
+python "<工程模式根目录>\tools\sw_bridge.py" drawing part.sldprt         # 生成工程图
+python "<工程模式根目录>\tools\sw_bridge.py" dwg part.sldprt             # 导出 DWG
+python "<工程模式根目录>\tools\sw_bridge.py" cad-validate part.dxf       # 几何验证
+python "<工程模式根目录>\tools\sw_bridge.py" show                         # 查看结果
 
 # AutoCAD：连接 → 绘制 → 验证
-python sw_bridge.py ac-status                   # 检查 AutoCAD 连接
-python sw_bridge.py ac-export output.dxf        # 导出 DXF
-python sw_bridge.py cad-validate output.dxf     # 验证几何
+python "<工程模式根目录>\tools\sw_bridge.py" ac-status                   # 检查 AutoCAD 连接
+python "<工程模式根目录>\tools\sw_bridge.py" ac-export output.dxf        # 导出 DXF
+python "<工程模式根目录>\tools\sw_bridge.py" cad-validate output.dxf     # 验证几何
 ```

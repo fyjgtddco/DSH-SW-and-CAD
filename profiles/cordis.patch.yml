@@ -1,0 +1,49 @@
+# DSH 权限预设组合（profile 层）
+#
+# 【问题1 修复】原配置只声明了 read-only / workspace-write / danger-full-access /
+# sw-single-line 四个条目，且【没有 defaultPreset】。权限服务的行为是：
+#     const inferredDefault = this.derive(EMPTY_KNOBS);
+#     const defaultPreset = config.defaultPreset ?? inferredDefault;
+# 由于 patch 是"整体替换该行 config"，一旦本文件覆盖了 presets 表，
+# 服务就只能靠推导——推不出来时会把 UI 里的默认值落到表内任意项，
+# 实际表现为"设置了 Full access，新会话却仍被 SW单行模式 锁住"。
+#
+# 修复要点：
+#   1. 补齐 DSH 标准预设（含 Full access 的规范 name/description），
+#      确保 derive() 能命中正确条目；
+#   2. 【显式声明 defaultPreset = danger-full-access】，
+#      与设置页"默认权限模式 = Full access"保持一致，不再依赖推导；
+#   3. sw-single-line 保留为可选条目（工程模式专用），但不再是默认。
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      deepseek:
+        streamIdleTimeoutMs: 60000
+
+- id: permission
+  name: "@deepseek-ai/dsh-permission-presets"
+  config:
+    # 与设置页"默认权限模式"一致：新会话默认 Full access
+    defaultPreset: danger-full-access
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+        name: 只读
+        description: 只能读取，任何修改都需要审批
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+        name: 工作区可写
+        description: 可在工作区内写入，越界需要审批
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+        name: Full access
+        description: 完全文件访问，不再弹出审批提示
+      sw-single-line:
+        sandbox: danger-full-access
+        approval: never
+        name: SW单行模式
+        description: 工程模式专用（SW活）：关闭沙盒，SolidWorks 与 DSH 相关文件直接执行不再询问

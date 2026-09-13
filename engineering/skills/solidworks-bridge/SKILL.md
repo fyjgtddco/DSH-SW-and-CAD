@@ -84,11 +84,11 @@ m.chamfer(width, edge_points, 45)   # 倒角
 
 AI 通过 DSH 的 `pwsh` 工具执行：
 
-> **路径查找（新电脑/未知环境）**：先运行 `python sw_bridge.py self-path`，返回 JSON 中的 `.dir` 字段即为 `<包目录>`。无需手动替换占位符。
+> **路径查找（新电脑/未知环境）**：先运行 `python "<工程模式根目录>\tools\sw_bridge.py" self-path`，返回 JSON 中的 `.dir` 字段即为 `<包目录>`。无需手动替换占位符。
 
 ```powershell
 # 查找 sw_bridge.py 路径（推荐第一步）
-python sw_bridge.py self-path
+python "<工程模式根目录>\tools\sw_bridge.py" self-path
 # 返回: {"ok": true, "path": "C:\\...\\sw_bridge.py", "dir": "C:\\..."}
 
 # 检查 SolidWorks 连接状态
@@ -115,9 +115,9 @@ python "<包目录>\sw_bridge.py" vision-fallback "描述"
 
 ## 4.5 SW 使用窗口互斥 + 批量调用（多小屋并行时必须遵守）
 
-### SW 互斥锁（代码级强制，自动生效）
+### SW 进程级互斥窗口（代码级强制，自动生效）
 
-每个 `sw_bridge.py` 调用都会自动经过 mode_gate 的 SW 使用锁：
+每个 sw_bridge.py 调用都会自动检测 SLDWORKS.EXE 进程并排队（FIFO 先到先用）：
 
 ```powershell
 # 推荐：带上房间名（来自小屋 prompt 中的房间名）
@@ -127,22 +127,25 @@ python "<包目录>\sw_bridge.py" run "script.py" --room "结构件"
 $env:DSH_ROOM = "结构件"; python "<包目录>\sw_bridge.py" run "script.py"
 ```
 
-- 并行模式下多个小屋同时跑：SW 调用自动 FIFO 排队（谁先排队谁先用），无需人工协调
-- 串行模式 / 单房间：锁自动跳过，零影响
-- sw_bridge 进程结束（成功或失败）自动释放锁；room-end 也会自动释放
+- 并行模式下多个小屋同时跑：SW 调用自动检测进程并 FIFO 排队（谁先排队谁先用）
+- 若返回 sw_busy:true：执行 Start-Sleep -Seconds 90 后重试同一条命令（必须带 --room），队列位置已保留，禁止放弃
+- 前一个小屋完全关闭 SW 进程后，队首小屋自动获得 SW 使用权
+- 串行模式 / 非模式2：锁自动跳过，零影响
+- 锁随小屋生命周期保持，由主对话的 room-end 统一释放并确保 SW 进程关闭
+- 小屋收工前必须 close-all 完全关闭 SW，否则 room-end 等 20 秒后会强制关闭
 
 ### 一次调用规划多步操作（批量执行，禁止逐步调用）
 
 ❌ **禁止**这样逐步调用（每次都要重新连接 SW，又慢又占锁窗口）：
 ```powershell
-python sw_bridge.py new          # 连接1
-python sw_bridge.py sketch-rect 120 80 30   # 连接2
-python sw_bridge.py save "x.sldprt"    # 连接3
+python "<工程模式根目录>\tools\sw_bridge.py" new          # 连接1
+python "<工程模式根目录>\tools\sw_bridge.py" sketch-rect 120 80 30   # 连接2
+python "<工程模式根目录>\tools\sw_bridge.py" save "x.sldprt"    # 连接3
 ```
 
 ✅ **必须**把全部建模步骤写进一个脚本，一次 run 执行（一次调用规划多步）：
 ```powershell
-python sw_bridge.py run "D:\work\build_part.py" --room "结构件"
+python "<工程模式根目录>\tools\sw_bridge.py" run "D:\work\build_part.py" --room "结构件"
 ```
 ```python
 # build_part.py —— 所有步骤一个脚本内完成
@@ -159,8 +162,8 @@ print("DONE")
 
 在创建任何下一个子代理（同级小屋或下一级子代理孩子）之前：
 1. 当前建模必须已完成并保存（`m.save(...)`）
-2. 调用 `python sw_bridge.py close-all` 保存并关闭 SW
-3. 确认 SW 锁已释放（room-end 会自动释放；或 `python mode_gate.py sw-release <房间名>`）
+2. 调用 `python "<工程模式根目录>\tools\sw_bridge.py" close-all` 保存并关闭 SW
+3. 确认 SW 锁已释放（room-end 会自动释放；或 `python "<工程模式根目录>\tools\mode_gate.py" sw-release <房间名>`）
 **严禁开着 SW 去开下一个子代理！**
 
 ## 5. 已踩坑与解决方案
@@ -294,6 +297,23 @@ m.fillet(5, [(60, 40, 5), (-60, 40, 5)])
 m.chamfer(1, [(0, 40, 10)], angle_deg=45)
 ```
 
+### 💓 小屋心跳（代码级强制）
+
+每个小屋必须定期记录存活心跳，防止断联时主对话无法判断状态：
+
+```powershell
+# 每 60 秒调用一次（放入后台循环或定时任务）
+python "<包目录>\mode_gate.py" room-heartbeat "结构件"
+
+# 检查心跳状态
+python "<包目录>\mode_gate.py" room-heartbeat-check "结构件"
+# 返回: {"alive": true/false, "age_seconds": 45}
+```
+
+⚠️ 若心跳超过 180 秒未更新，主对话会判定该小屋死亡并自动重启（通过 workflow_gate.py restart）
+
+---
+
 ## 7. 典型工作流（用户约定）
 
 1. **新建零件** → `m = swapi.new_part()`（自动清理遗留文档）
@@ -303,9 +323,9 @@ m.chamfer(1, [(0, 40, 10)], angle_deg=45)
 5. **创建特征** → `m.extrude(10)` / `m.cut(through=True)` / `m.revolve(360)`
 6. **循环** 步骤 2-5 直到完成
 7. **保存** → `m.save(os.path.join(dir, "DSH_零件名.sldprt"))`
-8. **生成工程图** → `python sw_bridge.py drawing "零件路径"`
-9. **导出 DWG** → `python sw_bridge.py dwg "零件路径"`
-10. **展示** → `python sw_bridge.py show`
+8. **生成工程图** → `python "<工程模式根目录>\tools\sw_bridge.py" drawing "零件路径"`
+9. **导出 DWG** → `python "<工程模式根目录>\tools\sw_bridge.py" dwg "零件路径"`
+10. **展示** → `python "<工程模式根目录>\tools\sw_bridge.py" show`
 
 **关键规则**：
 - `begin_sketch()` 在多特征后已修复（Bug 16），先退出残留草图模式再重新选面

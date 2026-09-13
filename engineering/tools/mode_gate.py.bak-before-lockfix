@@ -19,7 +19,6 @@ Mode Gate -- 代码级强制关卡 v2（SW 进程级使用窗口）
     python mode_gate.py sw-request <房间名>   # 排队/获取SW使用权（sw_bridge自动调用）
     python mode_gate.py sw-wait <房间名> [秒] # 阻塞等待SW使用权
     python mode_gate.py sw-release <房间名>   # 释放SW使用权
-    python mode_gate.py lock-doctor [--auto] # 锁体检：检测/自动清理失效锁、失联状态
     python mode_gate.py sw-proc              # 查看SW进程状态
     python mode_gate.py sw-status            # 查看SW锁状态
     python mode_gate.py status               # 查看关卡状态
@@ -38,25 +37,11 @@ except Exception:
 
 SW_EXE = "SLDWORKS.EXE"
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
-SW_MAX_HOLD = 4 * 3600   # 单房间最长持锁秒数（兜底防死锁）
+SW_MAX_HOLD = 4 * 3600   # 单房间最长持锁秒数（防死锁）
 SW_HANDOVER_GRACE = 20   # room-end 时等待SW自行退出的宽限秒数
 SW_HEARTBEAT_TIMEOUT = 180   # 房间心跳超时秒数（超过视为死亡，释放锁）
 SW_STALE_KILL = 120      # 上家SW未关闭时，等待这么久后强制接管
 SW_START_GRACE = 120     # room-start 后允许无心跳的启动宽限秒数（期间状态=starting，禁止判死）
-# ── 单命令级锁（Bug4/5修复）───────────────────────────────────────────────
-SW_CMD_HOLD = 90         # 单条命令最长持锁秒数：超时视为命令已结束，可被接管
-SW_ORPHAN_TIMEOUT = 90   # owner 心跳静默超过此秒数 → 判为孤儿锁，自动回收
-SW_SW_IDLE_TIMEOUT = 600 # SW进程空闲(无心跳)超过此秒数且无人持锁 → 允许清理
-# ── 【Bug2 修复】SW 锁公平轮转（防饥饿）──────────────────────────────────
-# 问题现象：结构件小屋连续提交建模命令（cmd_seq 到 14），每执行一条就刷新
-#   acquired_at，导致 _lock_owner_lock_age 永远小于 SW_CMD_HOLD → 超过 90 秒
-#   也不会被回收；传动机构/壳体机架在队列里被活活饿死（实测锁被独占 272 秒）。
-# 修复：改用【命令条数 + 独占时长】双重公平判据——
-#   · 队首等待者出现后，当前持有者的累计命令数超过 SW_FAIR_CMDS 即必须让位
-#   · 或连续独占（自首次取锁起）超过 SW_FAIR_SECONDS 即必须让位
-#   · 让位时把队首提升为新 owner，保证 FIFO 队列真正前进
-SW_FAIR_CMDS = 3         # 有人在排队时，单房间最多连续执行几条 SW 命令就必须让位
-SW_FAIR_SECONDS = 180    # 有人在排队时，单房间连续独占上限（秒）
 
 # -- SW 后台监控进程（持续检测 SLDWORKS.EXE 进程状态）--
 
@@ -210,118 +195,13 @@ REPORT_STAGES = ("registered", "params_shown", "params_confirmed", "modeling",
                  "part_done", "validating", "done", "failed")
 
 
-def _pending_confirm_path(room):
-    """每个房间的待确认状态文件（记录哪些零件在等用户签字）。"""
-    os.makedirs(REPORTS_DIR, exist_ok=True)
-    return os.path.join(REPORTS_DIR, _safe_room_name(room) + ".pending.json")
-
-
-def _load_pending(room):
-    p = _pending_confirm_path(room)
-    try:
-        if os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f) or {}
-    except Exception:
-        pass
-    return {}
-
-
-def _save_pending(room, data):
-    p = _pending_confirm_path(room)
-    try:
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-def cmd_confirm_part(room, part, by="user"):
-    """【Bug1 修复】由【用户确认】来解锁某个零件的 params_confirmed。
-
-    背景：结构件小屋在"大臂确认后"，对"小臂/连杆/立柱"自行上报了
-    params_confirmed（时间戳显示 shown 与 confirmed 间隔仅 0.05~0.08 秒，
-    远短于人工确认所需），并注明"沿用大臂已确认基础" —— 属于子代理越权
-    代替用户签字，违反 C 模式"每个零件必须单独确认"的铁律。
-
-    根因：room-report 无条件接受任何 stage，小屋可以自己给自己发确认。
-
-    修复：params_confirmed 改为【需要令牌】——必须有本命令写入的授权记录，
-    否则判定为越权，拒绝该上报并标记违规。
-    """
-    room = (room or "").strip()
-    part = (part or "").strip()
-    if not room or not part:
-        return {"ok": False, "error": "用法: confirm-part <房间名> <零件名>"}
-    data = _load_pending(room)
-    grants = data.get("grants") or {}
-    grants[part] = {"by": by, "ts": time.time(),
-                    "time": time.strftime("%Y-%m-%d %H:%M:%S")}
-    data["grants"] = grants
-    _save_pending(room, data)
-    return {"ok": True, "room": room, "part": part, "confirmed_by": by,
-            "message": "已授权该零件的确认；小屋随后上报 params_confirmed 才会被接受。"}
-
-
-def _confirm_granted(room, detail):
-    """检查 detail 里提到的零件是否已获用户授权确认。
-
-    detail 形如 "小臂 已确认" / "大臂(300mm) 已确认" → 提取零件名做前缀匹配。
-    未授权则返回 (False, 零件名)。
-    """
-    data = _load_pending(room)
-    grants = data.get("grants") or {}
-    if not grants:
-        return False, (detail or "").split()[0] if detail else ""
-    text = detail or ""
-    for part, info in grants.items():
-        if part and part in text:
-            return True, part
-    # 兜底：若只有一个授权零件且 detail 无法解析，视为不匹配（从严）
-    return False, (text.split()[0] if text.split() else "")
-
-
 def cmd_room_report(room, stage, detail=""):
     """【bug6修复】小屋进度旁路上报：写文件，不走对话通道。
 
     关键设计：小屋在关键节点主动写进度，主对话用 room-report-read 旁路读取，
     双方零干扰——彻底替代"主对话 send_message 问进度"的插队做法。
     写报告同时刷新心跳（上报即存活证明）。
-
-    【Bug1 修复】params_confirmed 是【唯一需要授权】的阶段：
-    小屋不得自行宣布"用户已确认"，必须由 confirm-part 先写入授权令牌。
     """
-    # ── 越权拦截：params_confirmed 需要用户授权令牌 ──────────────────────
-    if stage == "params_confirmed":
-        ok_grant, part = _confirm_granted(room, detail)
-        if not ok_grant:
-            # 记录越权行为，供主对话审计
-            os.makedirs(REPORTS_DIR, exist_ok=True)
-            vpath = os.path.join(REPORTS_DIR, _safe_room_name(room) + ".violations.json")
-            try:
-                viol = []
-                if os.path.exists(vpath):
-                    with open(vpath, "r", encoding="utf-8") as f:
-                        viol = (json.load(f) or {}).get("items", [])
-                viol.append({"room": room, "part": part, "detail": detail,
-                             "ts": time.time(),
-                             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                             "reason": "子代理未经用户确认自行上报 params_confirmed"})
-                with open(vpath, "w", encoding="utf-8") as f:
-                    json.dump({"room": room, "items": viol[-50:]}, f,
-                              ensure_ascii=False, indent=2)
-            except Exception:
-                pass
-            return {
-                "ok": False, "room": room, "stage": stage, "violation": True,
-                "error": ("【违规·越权确认】零件 '%s' 未经用户确认。"
-                          "C 模式铁律：每个零件必须单独获得用户授权。" % (part or detail)),
-                "hint": ("正确流程：先用 ask_user.py 向用户弹卡片；用户点选后，"
-                         "由主对话执行 mode_gate.py confirm-part <房间名> <零件名> "
-                         "写入授权，之后本上报才会被接受。"
-                         "沿用上一个零件的确认 = 违规，必须逐件确认。"),
-            }
-
     os.makedirs(REPORTS_DIR, exist_ok=True)
     path = _report_path(room)
     rec = {"room": room, "stage": stage, "detail": detail,
@@ -486,47 +366,6 @@ def cmd_subagent_status():
                     "room_status=completed/failed 的小屋必须 interrupt_agent 清理后才能开下一波，禁止不管"}
 
 
-def cmd_whoami(room=None):
-    """【问题6/9 修复】让子代理自查身份：我是哪个房间、我的 sessionId 是什么。
-
-    背景：v1 小屋死在"不知道自己 sessionId → 提问通道用不了"。
-    根因是身份只在主对话侧记录（subagent-assign），子代理无从读取。
-    子代理按 prompt 里的房间名调用本命令即可拿到自己的 sessionId，
-    进而能用 ask_user.py --child <sessionId> 发起提问。
-    """
-    state = load_state()
-    subs = state.get("subagents", {}) or {}
-    rooms = state.get("rooms", {}) or {}
-
-    if room:
-        rec = subs.get(room)
-        if not rec:
-            return {"ok": False, "room": room,
-                    "error": ("该房间尚未登记 subagent（请让主对话先执行 "
-                              "mode_gate.py subagent-assign <房间名> <subagent_id>）"),
-                    "hint": "若确实刚创建，等待 1~2 秒后重试",
-                    "known_rooms": list(subs.keys())}
-        d = rec if isinstance(rec, dict) else {"id": rec}
-        sid = d.get("id")
-        return {"ok": True, "room": room, "subagent_id": sid,
-                "assigned_at": d.get("assigned_at"),
-                "note": "把 subagent_id 作为 ask_user.py 的 --child 参数",
-                "ask_example": ("python \"<工程模式根目录>\\tools\\ask_user.py\" "
-                                "--room \"%s\" --child \"%s\" "
-                                "--question \"...\" --option \"确认\"") % (room, sid)}
-
-    out = []
-    for rn, rec in subs.items():
-        d = rec if isinstance(rec, dict) else {"id": rec}
-        info = rooms.get(rn, {}) or {}
-        out.append({"room": rn, "subagent_id": d.get("id"),
-                    "active": bool(info.get("active")),
-                    "ended": bool(info.get("ended_at")),
-                    "failed": bool(info.get("failed_at"))})
-    return {"ok": True, "assignments": out,
-            "hint": "若知道自己的房间名，直接调 whoami <房间名> 更准确"}
-
-
 def _fresh_state():
     return {"mode": "1", "rooms": {}, "declared_at": None, "mode_name": MODE_NAMES["1"],
             "sw_lock": {"owner": None, "queue": [], "acquired_at": None,
@@ -573,107 +412,6 @@ def get_parallel_mode():
         return None
 
 
-def _lock_owner_alive(state, owner):
-    """判断锁持有者的房间是否仍然存活。
-
-    存活判据（任一满足即为存活）：
-      1. 该房间在 rooms 中 active=True
-      2. 该房间心跳文件 age <= SW_HEARTBEAT_TIMEOUT
-    两者都不满足 → 判为孤儿锁。
-    """
-    if not owner:
-        return False
-    # 判据1: 房间仍然 active
-    rooms = state.get("rooms", {})
-    room = rooms.get(owner)
-    if room and room.get("active"):
-        return True
-    # 判据2: 心跳新鲜
-    try:
-        hb = _heartbeat_path(owner)
-        if os.path.exists(hb):
-            age = time.time() - os.path.getmtime(hb)
-            if age <= SW_HEARTBEAT_TIMEOUT:
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _lock_owner_lock_age(state):
-    """返回当前锁已持有的秒数（无 acquired_at 时返回 0）。"""
-    lk = state.get("sw_lock") or {}
-    at = lk.get("acquired_at")
-    if not at:
-        return 0.0
-    try:
-        return max(0.0, time.time() - float(at))
-    except Exception:
-        return 0.0
-
-
-def _reclaim_lock(state, reason, requester=None):
-    """【Bug1/3修复】回收失效锁：owner 死亡 / 超时 / 孤儿。
-
-    返回 (reclaimed: bool, old_owner: str|None)
-    """
-    lk = _sw_lock(state)
-    owner = lk.get("owner")
-    if not owner:
-        # 【Bug5修复】owner 为空但 sw_by_room=True 且进程在跑 → 释放标志，
-        # 让队首能立即接管，而不是被 prev_owner 逻辑永久挡住。
-        if lk.get("sw_by_room") and not lk.get("prev_owner"):
-            lk["sw_by_room"] = False
-            return True, None
-        return False, None
-
-    held = _lock_owner_lock_age(state)
-    alive = _lock_owner_alive(state, owner)
-
-    should_reclaim = False
-    why = ""
-    # 【Bug2 修复】公平轮转：有人排队时，持有者不能无限续期。
-    # 只有当 requester 不是 owner 本人（即确有其他房间在争用）时才触发。
-    queue = [q for q in (lk.get("queue") or []) if q != owner]
-    has_waiter = bool(queue) and requester != owner
-    cmds = int(lk.get("cmd_seq", 0) or 0)
-    # 自"本轮首次取锁"起算的连续独占时长（首次取锁时由 sw-request 记 fair_start）
-    fair_start = lk.get("fair_start") or lk.get("acquired_at")
-    try:
-        fair_held = time.time() - float(fair_start) if fair_start else 0.0
-    except Exception:
-        fair_held = 0.0
-
-    if not alive:
-        should_reclaim = True
-        why = "持有者[%s]已无活动心跳/已非活动房间" % owner
-    elif has_waiter and cmds >= SW_FAIR_CMDS:
-        # 排队者已等候多时，且持有者已连跑满额命令 → 让位（防饥饿核心）
-        should_reclaim = True
-        why = ("公平轮转：持有者[%s]已连续执行 %d 条命令(上限%d)，"
-               "队首[%s]等待中，强制让位" % (owner, cmds, SW_FAIR_CMDS, queue[0]))
-    elif has_waiter and fair_held > SW_FAIR_SECONDS:
-        should_reclaim = True
-        why = ("公平轮转：持有者[%s]连续独占 %.0f 秒(上限%d)，"
-               "队首[%s]等待中，强制让位" % (owner, fair_held, SW_FAIR_SECONDS, queue[0]))
-    elif held > SW_CMD_HOLD and requester != owner:
-        # 单命令级锁：超过 SW_CMD_HOLD 仍未释放，视为该命令已结束
-        should_reclaim = True
-        why = "持有者[%s]持锁%.0f秒超过单命令上限%d秒" % (owner, held, SW_CMD_HOLD)
-
-    if should_reclaim:
-        lk["prev_owner"] = owner
-        lk["owner"] = None
-        lk["acquired_at"] = None
-        # 只有在进程确实没跑时才清 sw_by_room，避免误判正在运行的SW
-        if not _sw_running():
-            lk["sw_by_room"] = False
-        if requester and requester in lk.get("queue", []):
-            pass
-        return True, owner
-    return False, None
-
-
 def _sw_lock(state):
     return state.setdefault("sw_lock", {"owner": None, "queue": [], "acquired_at": None,
                                         "prev_owner": None, "sw_by_room": False})
@@ -712,56 +450,17 @@ def cmd_sw_monitor_stop():
     return {"ok": True}
 
 
-def _monitor_alive():
-    """检测监控进程是否真的存活（并清理失效 PID 文件）。"""
-    if not os.path.exists(_SW_MONITOR_PID_FILE):
-        return False
+def cmd_sw_monitor_status():
+    """查看监控状态 + SW 进程信息。"""
+    alive = False
     try:
         with open(_SW_MONITOR_PID_FILE, "r") as f:
             mpid = int(f.read().strip())
-    except Exception:
-        return False
-    if mpid <= 0:
-        return False
-    # Windows 用 tasklist 判断，跨平台用 os.kill(pid, 0)
-    try:
-        if sys.platform == "win32":
-            out = subprocess.run(["tasklist", "/FI", "PID eq %d" % mpid, "/FO", "CSV", "/NH"],
-                                 capture_output=True, text=True, timeout=10,
-                                 creationflags=CREATE_NO_WINDOW)
-            if str(mpid) not in (out.stdout or ""):
-                try:
-                    os.remove(_SW_MONITOR_PID_FILE)
-                except Exception:
-                    pass
-                return False
-            return True
+        import signal
         os.kill(mpid, 0)
-        return True
+        alive = True
     except Exception:
-        try:
-            os.remove(_SW_MONITOR_PID_FILE)
-        except Exception:
-            pass
-        return False
-
-
-def _write_sw_state_now():
-    """【Bug2修复】立即回写一次真实进程状态（不依赖监控进程）。"""
-    try:
-        count, pids = _sw_proc_list()
-        st = {"sw_running": count > 0, "sw_count": count, "sw_pids": pids,
-              "updated_at": time.time()}
-        with open(_SW_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(st, f)
-        return st
-    except Exception:
-        return None
-
-
-def cmd_sw_monitor_status():
-    """查看监控状态 + SW 进程信息（含自动自愈）。"""
-    alive = _monitor_alive()
+        pass
     count, pids = _sw_proc_list()
     state = {}
     try:
@@ -769,26 +468,11 @@ def cmd_sw_monitor_status():
             state = json.load(f)
     except Exception:
         pass
-    # 【Bug2修复】监控失联或状态文件过期 → 立即用真实进程回写
-    file_age = None
-    if state:
-        try:
-            file_age = time.time() - float(state.get("updated_at", 0))
-        except Exception:
-            file_age = None
-    stale = (file_age is None or file_age > SW_MONITOR_INTERVAL * 4
-             or bool(state.get("sw_running")) != (count > 0))
-    if stale:
-        fresh = _write_sw_state_now()
-        if fresh:
-            state = fresh
     return {
         "ok": True, "monitor_running": alive,
         "sw_running": count > 0, "sw_count": count, "sw_pids": pids,
         "last_updated": state.get("updated_at"),
         "state_file": state if state else {},
-        "state_was_stale": stale,
-        "state_file_age_seconds": round(file_age, 1) if file_age is not None else None,
     }
 
 
@@ -892,18 +576,8 @@ def _finalize_room(name, failed=False):
     was_owner = (lk.get("owner") == name)
     killed = False
     waited = False
-    # 【Bug1修复】即使 owner 不是自己，只要本房间在队列中也要移除，
-    # 避免死房间永久占队列位。
-    if name in lk.get("queue", []):
-        lk["queue"] = [x for x in lk.get("queue", []) if x != name]
-    # 【Bug1修复】owner 已是死房间（或本来就是自己）→ 都要释放锁。
-    # 原先只在 was_owner 时释放，导致死房间留下的锁永久占用。
-    _owner_dead = bool(lk.get("owner")) and (not _lock_owner_alive(state, lk.get("owner")))
-    if was_owner or _owner_dead:
-        if _owner_dead and not was_owner:
-            lk["prev_owner"] = lk.get("owner")
-        else:
-            lk["prev_owner"] = name
+    if was_owner:
+        lk["prev_owner"] = name
         lk["owner"] = None
         lk["acquired_at"] = None
         # 本房间启动的 SW 必须完全关闭，下一个房间才能干净地开SW
@@ -926,7 +600,7 @@ def _finalize_room(name, failed=False):
                 killed = True
         lk["sw_by_room"] = False
     save_state(state)
-    return (was_owner or _owner_dead), killed, waited
+    return was_owner, killed, waited
 
 
 def cmd_room_end(name):
@@ -959,78 +633,48 @@ def cmd_sw_request(name):
     if not _lock_needed(state):
         save_state(state)
         return {"ok": True, "need_lock": False, "room": name}
-    # 【Bug2 修复·饥饿根因】原实现在这里直接给持有者续期：
-    #     if lk.get("owner") == name: return {"acquired": True}
-    # 这等于让持有者无限次"插自己的队"，永远不会走到下面的公平检查，
-    # 于是 cmd_seq 一路涨到 14、锁被独占 272 秒，队列里的房间被饿死。
-    #
-    # 现在改为：持有者再次取锁时，先做公平体检——若队列里有别人在等，
-    # 且自己已达连跑上限（SW_FAIR_CMDS）或连续独占超时（SW_FAIR_SECONDS），
-    # 则主动让位；否则才允许续期。
-    q0 = lk.setdefault("queue", [])
     if lk.get("owner") == name:
-        _others = [x for x in q0 if x != name]
-        _cmds = int(lk.get("cmd_seq", 0) or 0)
-        _fs = lk.get("fair_start") or lk.get("acquired_at")
-        try:
-            _fheld = time.time() - float(_fs) if _fs else 0.0
-        except Exception:
-            _fheld = 0.0
-        if _others and (_cmds >= SW_FAIR_CMDS or _fheld > SW_FAIR_SECONDS):
-            # 让位：清空自己，把队首扶正，交由下方流程重新分配
-            lk["prev_owner"] = name
-            lk["owner"] = None
-            lk["acquired_at"] = None
-            lk["cmd_seq"] = 0
-            lk["fair_start"] = None
-            save_state(state)
-            lk = _sw_lock(state)
-        else:
-            return {"ok": True, "need_lock": True, "acquired": True, "room": name,
-                    "renewed": True, "cmd_seq": _cmds}
+        return {"ok": True, "need_lock": True, "acquired": True, "room": name}
     q = lk.setdefault("queue", [])
     if name not in q:
         q.append(name)
-
-    # ── 【Bug1/3修复】先尝试回收失效锁（死房间/超时/孤儿）──
-    reclaimed, old_owner = _reclaim_lock(state, "sw-request", requester=name)
-    if reclaimed:
-        save_state(state)
-        lk = _sw_lock(state)
-
     running = _sw_running()
-    # 【Bug5修复】owner为空但 sw_by_room=True 且进程在跑 → 无人持锁却挡住队首。
-    # 若 prev_owner 已不再是活动房间，清掉 sw_by_room 让队首立即接管。
-    if (not lk.get("owner")) and lk.get("sw_by_room"):
-        _prev = lk.get("prev_owner")
-        if _prev and not _lock_owner_alive(state, _prev):
+    # 检查上一个占用者是否已死亡（心跳超时 → 强制释放锁）
+    _prev = lk.get("prev_owner")
+    if lk.get("owner") and _prev and _prev != name:
+        hb_path = os.path.join(HEARTBEAT_DIR, _prev + ".heartbeat")
+        _is_stale = True
+        try:
+            if os.path.exists(hb_path):
+                _age = time.time() - os.path.getmtime(hb_path)
+                _is_stale = (_age > SW_HEARTBEAT_TIMEOUT)
+        except Exception:
+            pass
+        if _is_stale:
+            # 上个房间心跳超时，强制释放锁
+            lk["prev_owner"] = name
+            lk["owner"] = None
+            lk["acquired_at"] = None
             lk["sw_by_room"] = False
-            lk["prev_owner"] = None
-            save_state(state)
-        elif not _prev:
-            lk["sw_by_room"] = False
-            save_state(state)
-    can_fast = False
+            # 重新评估快路径
+            running = _sw_running()
+            can_fast = ((not lk.get("owner")) and q and q[0] == name
+                        and ((not running) or (not lk.get("sw_by_room"))))
+        else:
+            can_fast = False
+    else:
+        can_fast = False
     # 快路径: 锁空闲 + 自己是队首 + (SW没在跑 或 SW不是房间启动的)
-    if (not lk.get("owner")) and q and q[0] == name:
+    if not lk.get("owner") and q and q[0] == name:
         can_fast = ((not running) or (not lk.get("sw_by_room")))
     if can_fast:
         lk["owner"] = name
         lk["acquired_at"] = time.time()
-        # 【Bug4修复】单命令级锁：记录本次命令编号，命令结束后即可释放。
-        # 同一个房间的下一步命令会重新排队，但不影响其他房间公平性。
-        # 新一轮取锁：若上一轮已让位（fair_start 为空），重置计数与公平计时
-        if not lk.get("fair_start"):
-            lk["cmd_seq"] = 0
-            lk["fair_start"] = time.time()
-        lk["cmd_seq"] = int(lk.get("cmd_seq", 0)) + 1
-        lk["hold_mode"] = "command"   # command=单命令级 | room=房间级
         lk["sw_by_room"] = (not running) or bool(lk.get("sw_by_room"))
         lk["queue"] = [x for x in q if x != name]
         save_state(state)
         return {"ok": True, "need_lock": True, "acquired": True, "room": name,
-                "sw_was_running": running, "hold_mode": "command",
-                "cmd_seq": lk["cmd_seq"], "max_hold_seconds": SW_CMD_HOLD}
+                "sw_was_running": running}
     pos = (q.index(name) + 1) if name in q else None
     save_state(state)
     return {"ok": True, "need_lock": True, "acquired": False, "queued": True,
@@ -1050,42 +694,22 @@ def cmd_sw_wait(name, timeout=300):
         q.append(name)
         save_state(state)
     stale_since = None
-    last_reclaim_check = 0
     while True:
         state = load_state()
         lk = _sw_lock(state)
         if lk.get("owner") == name:
             return {"ok": True, "acquired": True, "room": name}
         q = lk.get("queue", [])
-        # ── 【Bug1/3/5修复】每秒检查一次失效锁，立即回收而不是干等 ──
-        now_ts = time.time()
-        if now_ts - last_reclaim_check >= 1.0:
-            last_reclaim_check = now_ts
-            reclaimed, old_owner = _reclaim_lock(state, "sw-wait", requester=name)
-            if reclaimed:
-                save_state(state)
-                lk = _sw_lock(state)
-                q = lk.get("queue", [])
         if (not lk.get("owner")) and q and q[0] == name:
             running = _sw_running()
-            # 【Bug5修复】prev_owner 若已死亡，不能继续挡队首
-            _prev_owner = lk.get("prev_owner")
-            if _prev_owner and _prev_owner != name and not _lock_owner_alive(state, _prev_owner):
-                lk["sw_by_room"] = False
-                lk["prev_owner"] = None
-                save_state(state)
-                running = _sw_running()
             blocked_by_prev = running and lk.get("sw_by_room") and lk.get("prev_owner") not in (None, name)
             if not blocked_by_prev:
                 lk["owner"] = name
                 lk["acquired_at"] = time.time()
-                lk["cmd_seq"] = int(lk.get("cmd_seq", 0)) + 1
-                lk["hold_mode"] = "command"
                 lk["sw_by_room"] = (not running) or bool(lk.get("sw_by_room"))
                 lk["queue"] = [x for x in q if x != name]
                 save_state(state)
-                return {"ok": True, "acquired": True, "room": name, "waited": True,
-                        "hold_mode": "command", "max_hold_seconds": SW_CMD_HOLD}
+                return {"ok": True, "acquired": True, "room": name, "waited": True}
             if stale_since is None:
                 stale_since = time.time()
             elif time.time() - stale_since > SW_STALE_KILL:
@@ -1112,103 +736,6 @@ def cmd_sw_wait(name, timeout=300):
                     "position": pos, "sw_running": _sw_running(),
                     "error": "SW 正被 [%s] 占用(已 %.0f 秒)，等待超时。请稍后重试。" % (lk.get("owner"), held)}
         time.sleep(1.0)
-
-
-def cmd_lock_doctor(auto=False):
-    """【Bug1/2/3/5修复】锁体检：检测并清理失效锁、孤儿队列、失联状态。
-
-    auto=False 仅报告；auto=True 自动修复。
-    """
-    state = load_state()
-    lk = _sw_lock(state)
-    report = {"ok": True, "auto": auto, "findings": [], "fixed": []}
-
-    owner = lk.get("owner")
-    held = _lock_owner_lock_age(state)
-    running, pids = _sw_proc_list()
-
-    # 检查1: owner 是否存活
-    if owner:
-        alive = _lock_owner_alive(state, owner)
-        report["findings"].append({
-            "check": "owner_alive", "owner": owner, "alive": alive, "held_seconds": round(held, 1)
-        })
-        if not alive:
-            if auto:
-                lk["prev_owner"] = owner
-                lk["owner"] = None
-                lk["acquired_at"] = None
-                report["fixed"].append("释放死房间[%s]持有的锁（已持%.0f秒）" % (owner, held))
-            else:
-                report["findings"].append({"issue": "owner_dead", "owner": owner,
-                                           "hint": "运行 lock-doctor --auto 自动释放"})
-        elif held > SW_CMD_HOLD:
-            report["findings"].append({"issue": "owner_over_hold", "owner": owner,
-                                       "held": round(held, 1), "limit": SW_CMD_HOLD})
-            if auto:
-                lk["prev_owner"] = owner
-                lk["owner"] = None
-                lk["acquired_at"] = None
-                report["fixed"].append("释放超时锁（[%s] 持锁%.0f秒 > %d秒）" % (owner, held, SW_CMD_HOLD))
-
-    # 检查2: Bug5 —— owner=null 但 sw_by_room=true
-    if (not lk.get("owner")) and lk.get("sw_by_room"):
-        report["findings"].append({"issue": "orphan_sw_by_room", "sw_by_room": True,
-                                   "running": running, "prev_owner": lk.get("prev_owner")})
-        if auto:
-            lk["sw_by_room"] = False
-            lk["prev_owner"] = None
-            report["fixed"].append("清除孤儿标志 sw_by_room（owner为空却标记SW被房间占用）")
-
-    # 检查3: 队列中的死房间
-    dead_in_queue = []
-    for r in list(lk.get("queue", [])):
-        if not _lock_owner_alive(state, r):
-            dead_in_queue.append(r)
-    if dead_in_queue:
-        report["findings"].append({"issue": "dead_rooms_in_queue", "rooms": dead_in_queue})
-        if auto:
-            lk["queue"] = [x for x in lk.get("queue", []) if x not in dead_in_queue]
-            report["fixed"].append("清除队列中已死亡的房间: %s" % ", ".join(dead_in_queue))
-
-    # 检查4: Bug2 —— sw_state.json 与真实进程对比
-    stale = None
-    try:
-        with open(_SW_STATE_FILE, "r", encoding="utf-8") as f:
-            stale = json.load(f)
-    except Exception:
-        pass
-    if stale is not None:
-        age = time.time() - stale.get("updated_at", 0)
-        mismatch = (bool(stale.get("sw_running")) != (running > 0))
-        report["findings"].append({
-            "check": "sw_state_sync", "file_running": stale.get("sw_running"),
-            "real_running": running > 0, "real_count": running, "real_pids": pids,
-            "file_age_seconds": round(age, 1), "mismatch": mismatch
-        })
-        if mismatch or age > 30:
-            if auto:
-                st = {"sw_running": running > 0, "sw_count": running, "sw_pids": pids,
-                      "updated_at": time.time()}
-                try:
-                    with open(_SW_STATE_FILE, "w", encoding="utf-8") as f:
-                        json.dump(st, f)
-                    report["fixed"].append("回写 sw_state.json（真实进程数=%d）" % running)
-                except Exception:
-                    pass
-
-    # 检查5: 队列非空但无人持锁 → 队首应能立即接管
-    q = lk.get("queue", [])
-    if q and not lk.get("owner"):
-        report["findings"].append({"issue": "queue_stalled", "queue": q,
-                                   "hint": "队首应可接管（若被 sw_by_room 挡住，已自动清除）"})
-
-    if auto:
-        save_state(state)
-    report["lock_after"] = dict(_sw_lock(load_state()))
-    report["sw_running_now"] = running
-    report["sw_pids_now"] = pids
-    return report
 
 
 def cmd_sw_release(name):
@@ -1243,53 +770,15 @@ def cmd_sw_proc():
     return {"ok": True, "sw_running": running, "pids": pids, "exe": SW_EXE}
 
 
-def _heartbeat_age(room):
-    """返回房间心跳年龄（秒）；无心跳返回 None。"""
-    try:
-        hb = _heartbeat_path(room)
-        if os.path.exists(hb):
-            return round(time.time() - os.path.getmtime(hb), 1)
-    except Exception:
-        pass
-    return None
-
-
 def cmd_sw_status():
     state = load_state()
-    # 【Bug1修复】查询状态时顺带回收失效锁（只读查询也要顺手清理）
-    reclaimed, old_owner = _reclaim_lock(state, "sw-status")
-    if reclaimed:
-        save_state(state)
     lk = state.get("sw_lock", {})
     held = 0
     if lk.get("acquired_at"):
         held = time.time() - lk["acquired_at"]
-    owner = lk.get("owner")
-    _owner_alive = _lock_owner_alive(state, owner) if owner else None
-    _owner_hb_age = _heartbeat_age(owner) if owner else None
-    # 队列中每个房间的心跳年龄，便于排查
-    queue_detail = []
-    for r in lk.get("queue", []):
-        queue_detail.append({
-            "room": r,
-            "alive": _lock_owner_alive(state, r),
-            "heartbeat_age": _heartbeat_age(r),
-            "is_head": (lk.get("queue", [None])[0] == r),
-        })
-    running, pids = _sw_proc_list()
-    return {"ok": True, "owner": owner, "queue": lk.get("queue", []),
-            "queue_detail": queue_detail,
-            "held_seconds": round(held, 1),
-            "held_limit_seconds": SW_CMD_HOLD,
-            "over_hold": held > SW_CMD_HOLD,
-            "sw_running": running > 0, "sw_pids": pids,
+    return {"ok": True, "owner": lk.get("owner"), "queue": lk.get("queue", []),
+            "held_seconds": round(held, 1), "sw_running": _sw_running(),
             "sw_by_room": lk.get("sw_by_room"), "prev_owner": lk.get("prev_owner"),
-            "owner_alive": _owner_alive,
-            "owner_heartbeat_age": _owner_hb_age,
-            "owner_heartbeat_timeout": SW_HEARTBEAT_TIMEOUT,
-            "reclaimed_on_query": reclaimed,
-            "reclaimed_from": old_owner,
-            "hold_mode": lk.get("hold_mode"),
             "parallel_mode": get_parallel_mode(), "lock_needed": _lock_needed(state)}
 
 
@@ -1328,7 +817,7 @@ def cmd_check():
 def main():
     args = sys.argv[1:]
     if not args:
-        print(json.dumps({"ok": False, "error": "用法: mode_gate.py <declare|room-start|room-end|room-fail|sw-request|sw-wait|sw-release|lock-doctor [--auto]|sw-proc|sw-status|status|check> [...]",
+        print(json.dumps({"ok": False, "error": "用法: mode_gate.py <declare|room-start|room-end|room-fail|sw-request|sw-wait|sw-release|sw-proc|sw-status|status|check> [...]",
                           "modes": MODE_NAMES}, ensure_ascii=False, indent=2))
         return
     cmd = args[0]
@@ -1347,8 +836,6 @@ def main():
                              int(args[2]) if len(args) > 2 else 300)
     elif cmd == "sw-release":
         result = cmd_sw_release(args[1] if len(args) > 1 else "unknown")
-    elif cmd == "lock-doctor":
-        result = cmd_lock_doctor(auto=("--auto" in args))
     elif cmd == "room-heartbeat":
         result = cmd_room_heartbeat(args[1] if len(args) > 1 else "unknown")
     elif cmd == "room-heartbeat-check":
@@ -1367,14 +854,6 @@ def main():
                                  " ".join(args[3:]) if len(args) > 3 else "")
     elif cmd == "room-report-read":
         result = cmd_room_report_read(args[1] if len(args) > 1 else None)
-    elif cmd == "whoami":
-        # 【问题6/9 修复】子代理自查身份（拿自己的 sessionId 去调 ask_user.py）
-        result = cmd_whoami(args[1] if len(args) > 1 else None)
-    elif cmd == "confirm-part":
-        # 【Bug1 修复】由用户确认后授权某零件，之后 params_confirmed 才会被接受
-        result = cmd_confirm_part(args[1] if len(args) > 1 else "",
-                                  args[2] if len(args) > 2 else "",
-                                  args[3] if len(args) > 3 else "user")
     elif cmd == "rooms-reset":
         result = cmd_rooms_reset()
     elif cmd == "sw-monitor-start":

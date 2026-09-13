@@ -42,71 +42,11 @@ CONFIRMATION_PROTOCOL_C = [
     "        不修改 mode_state.json 的房间与锁状态，因此不属于编排命令，可安全调用。",
     "",
     "【每个零件的确认循环 —— 对房间内的每一个零件重复执行以下步骤，直到所有零件都走完】",
-    "第零步（自查身份 · 必须先做，否则后续步骤全废）：",
-    "  ⚠️ 小屋开工第一件事：调 mode_gate.py whoami <房间名> 拿到自己的 subagent_id。",
-    "     例：python \"<工程模式根目录>\\tools\\mode_gate.py\" whoami \"<房间名>\"",
-    "     返回的 subagent_id 就是后面 ask_user.py 的 --child 参数。",
-    "     若返回「尚未登记」，等 1~2 秒重试；仍失败则上报 report failed 并说明原因，",
-    "     禁止在不知道 sessionId 的情况下盲目往下做（v1 小屋正是死在这一步）。",
-    "",
-    "第一步（输出参数表 · 必须有量化设计依据）：",
-    "  输出结构化【零件参数表】，字段与要求如下（缺任一项视为不合格）：",
-    "    · 零件名",
-    "    · 材料（含牌号，如 Q235 / 45# / 6061-T6）",
-    "    · 关键尺寸（长×宽×厚 / 直径 / 孔径，全部带 mm 单位）",
-    "    · 配合公差：【必须写标准配合代号】，如 H7/g6、H8/f7、k6；",
-    "      严禁写「0.1mm(ISO 286-1)」这类没有配合性质的模糊说法。",
-    "      依据 GB/T 1800；自由尺寸明确写「未注公差按 GB/T 1804-m」。",
-    "    · 【设计依据 · 必须量化】至少包含：",
-    "        a) 载荷来源与数值（引用门禁力学估算的实际值，如 750N / 300N）",
-    "        b) 危险截面与校核公式（如悬臂弯矩 M=F·L，截面模量 W，σ=M/W）",
-    "        c) 计算结果与许用值对比（如 σ=9.7MPa ≤ [σ]=94MPa，安全系数 n=9.7）",
-    "        d) 尺寸与载荷的匹配性自检 ——",
-    "           反例（真实发生）：门禁估算等效负载 750N、臂长约 300mm，",
-    "           小屋却给出 长100×宽30×厚5mm 的大臂 —— 臂长与估算严重不符、",
-    "           厚度过薄，属设计依据薄弱，必须重做参数。",
-    "      ⚠️ 若尺寸与门禁给出的臂长/负载不匹配，必须在参数表中显式说明理由，",
-    "         或修正尺寸后再提交确认。禁止不经校核直接给「看起来差不多」的尺寸。",
-    "第二步（用户确认 · 必须交由主代理代问，小屋自己问不到用户）：",
-    "  ⚠️【平台硬限制】子代理无权向用户提问。DSH 的 userQuestions.ask() 会校验",
-    "     agents.roots().includes(agent)，而子代理不在 roots 中 → 必然抛",
-    "     DELEGATED_CALLER。所以【严禁】小屋直接调 ask_user_question，调了必失败。",
-    "",
-    "  ✅ 正确做法：用【ask_user.py】直接在子代理面板提问（阻塞等待，不结束回合）",
-    "     命令（任意工作目录都可，用绝对路径）：",
-    "       python \"<工程模式根目录>\\tools\\ask_user.py\" --room \"<房间名>\" --child \"<本子代理sessionId>\" ",
-    "              --header \"零件确认\" --question \"以下参数将用于建模<零件名>，要用吗？\" ",
-    "              --option \"确认，开始建模\" --option \"需要修改\"",
-    "     （复杂问题建议写 questions.json 再传 --spec questions.json，避免转义问题）",
-    "     该脚本会：",
-    "       1) 把问题登记到本子代理名下 → 选项卡片出现在【右侧子代理面板】",
-    "       2) 【原地阻塞轮询】，直到用户在面板里点选并提交",
-    "       3) 拿到答案后以 JSON 打印到 stdout 并退出",
-    "     小屋读到 stdout 的答案即为『用户已确认』，据此继续建模 —— 全程不结束回合。",
-    "",
-    "  说明（为何要经过这个脚本）：DSH 平台限制子代理不能直接调 ask_user_question",
-    "  （会抛 DELEGATED_CALLER）。ask_user.py 由宿主插件代为发起原生提问，",
-    "  再把答案交回本小屋，等价于一次普通工具调用的返回值。",
-    "",
-    "  🚫【严禁自导自演】小屋（以及任何模型）不得在自己的输出里编造：",
-    "     『【用户回答】』『选择：确认』『用户已回复继续』等「用户已经作答」的内容。",
-    "     模型只负责输出【问题 + 选项】；用户的选择必须由前端真实捕获并注入。",
-    "     自行编造用户答复 = 严重违规 = 该零件作废重做，并记为幻觉错误。",
-    "",
-    "  🚫【严禁越权确认 · Bug1 已由代码强制拦截】",
-    "     绝不允许『沿用上一个零件的确认』——每个零件必须单独向用户提问、单独得到答复。",
-    "     反面案例（真实发生）：大臂确认后，小屋对『小臂』直接上报",
-    "       room-report <房间> params_confirmed '小臂 已确认(沿用大臂已确认基础)'",
-    "     并且 params_shown → params_confirmed 间隔仅 0.05 秒（远短于人工确认）——",
-    "     这属于代用户签字，零件即使建成也【程序上无效，必须作废重做】。",
-    "     代码已强制：params_confirmed 需要用户授权令牌（由主对话在用户答复后调用",
-    "       mode_gate.py confirm-part <房间名> <零件名>",
-    "     写入）。未授权的 params_confirmed 会被拒绝并记入 violations.json。",
-    "     ✅ 正确节奏：小臂 → 弹卡片 → 等用户答复 → 收到答复 → 上报 params_confirmed。",
-    "        然后再处理下一个零件，绝不允许批量或沿用。",
-    "",
-    "  等待期间小屋调 mode_gate.py room-report <房间名> params_shown '<零件名> 待确认' 并保持心跳；",
-    "  未收到主对话转达的确认前，禁止调用 sw_bridge 建模该零件。",
+    "第一步（输出参数表）：",
+    "  输出结构化【零件参数表】：零件名 / 材料 / 关键尺寸(长宽厚、直径、孔径) / 配合公差 / 设计依据",
+    "第二步（用户确认）：",
+    "  用 ask_user_question 工具把参数表展示给用户，问：「以下参数将用于建模 <零件名>，要用吗？」",
+    "  必须等用户明确答复（用/可以/确认/OK 任一表示通过）才继续；未答复前禁止调用 sw_bridge",
     "第三步（建模执行）：",
     "  用户确认后，用 sw_bridge.py 建模该零件；完成后调 mode_gate.py room-report <房间名> part_done '<零件名> 已建模完毕'",
     "",
@@ -119,24 +59,14 @@ CONFIRMATION_PROTOCOL_C = [
     "  - 跳过一个零件直接建模 = 违规，补做完所有被跳过零件的确认循环",
     "",
     "【进度旁路上报（与确认循环并行，不阻断流程）】",
-    "  ⚠️【问题7 修复 · 第一次上报是硬性要求】",
-    "     小屋开工后【第一件事】必须上报 registered，否则主对话侧永远看到",
-    "     「report=null」，会误判小屋从未启动，进而触发无谓的 recover/重启。",
-    "     命令：python \"<工程模式根目录>\\tools\\mode_gate.py\" room-report \"<房间名>\" registered \"小屋已启动, 开始处理 <零件列表>\"",
-    "     之后每个节点都必须上报，顺序如下：",
-    "  - registered      ：小屋启动（必做，且必须最先做）",
-    "  - params_shown    ：已展示参数表等用户确认",
-    "  - params_confirmed：用户已确认，开始建模（需先有 confirm-part 授权）",
-    "  - modeling        ：建模脚本执行中",
-    "  - part_done       ：单零件完成",
-    "  - validating      ：FEA/CADX 验证中",
-    "  - done            ：本房间全部零件完成",
-    "  - failed          ：失败，<原因>（必须写清卡在哪一步）",
-    "",
-    "  ⚠️【问题9 修复 · 卡住时必须先上报再退出】",
-    "     任何异常（拿不到 sessionId / 建模脚本报错 / SW 调用失败 / 答复交接异常）",
-    "     都必须【先 room-report <房间名> failed '<具体原因>' 再结束】，",
-    "     禁止静默停摆——静默停摆会导致主对话无法判断卡点，只能盲目重启。",
+    "  以下节点必须调 mode_gate.py room-report <房间名> <阶段> <详情>：",
+    "  - params_shown：已展示参数表等用户确认",
+    "  - params_confirmed：用户已确认，开始建模",
+    "  - modeling：建模脚本执行中",
+    "  - part_done：单零件完成",
+    "  - validating：FEA/CADX 验证中",
+    "  - done：本房间全部零件完成",
+    "  - failed：失败，<原因>",
 ]
 
 def _fresh_state():
@@ -261,142 +191,34 @@ def cmd_confirm_assembly(parts_payload):
                         "零件清单，只做装配+干涉检查+整体验证，禁止重新建模/简化任何零件。")}
 
 
-# ── 背景问题规格表（单一事实来源 · 全流程统一）──────────────────────────────
-# 每一题：id / 组 / 标题 / 提示 / 选项 / 是否力学关键
-# 代码、skill 文档、persona 都从这张表生成，确保永远一致。
-QUESTION_SPEC = [
-    # A 组：结构形态（几何尺寸，直接决定能否建模）
-    {"id": "mech_type", "group": "A 结构形态", "title": "机构类型",
-     "hint": "几轴？什么机构？", 
-     "options": ["6轴关节臂", "4轴/5轴关节臂", "3轴直角坐标(XYZ)", "2轴云台", "四连杆/连杆机构", "丝杠/导轨直线模组", "其他(请说明)"],
-     "mech": True},
-    {"id": "arm_lengths", "group": "A 结构形态", "title": "臂长/行程",
-     "hint": "各段长度或各轴行程，带单位（如 大臂300mm+小臂250mm；或 X600/Y400/Z300）",
-     "options": ["你决定", "其他(请说明)"],
-     "mech": True},
-    {"id": "base_form", "group": "A 结构形态", "title": "基座形式",
-     "hint": "固定式/移动式/旋转式？安装方式？",
-     "options": ["落地固定式", "壁挂式", "法兰安装", "导轨移动式", "旋转底座", "你决定"],
-     "mech": True},
-    {"id": "end_effector", "group": "A 结构形态", "title": "末端执行器",
-     "hint": "末端形式与接口（夹爪/吸盘/法兰盘/孔径）",
-     "options": ["二指夹爪", "吸盘", "标准法兰盘", "卡盘", "焊枪/工具接口", "暂无(仅作结构验证)", "你决定"],
-     "mech": True},
-    {"id": "envelope", "group": "A 结构形态", "title": "整体包络",
-     "hint": "总体外形尺寸上限（长×宽×高）或占地范围",
-     "options": ["无严格限制", "你决定", "其他(请说明)"],
-     "mech": True},
-
-    # B 组：工况载荷（力学校核的输入）
-    {"id": "load_magnitude", "group": "B 工况载荷", "title": "额定负载",
-     "hint": "末端需要搬运/承受的重量（N 或 kg，注明单位）",
-     "options": ["你决定", "其他(请说明)"],
-     "mech": True},
-    {"id": "load_type", "group": "B 工况载荷", "title": "负载类型",
-     "hint": "动载荷性质，直接影响安全系数与疲劳校核",
-     "options": ["静态保持", "平稳动态", "频繁启停/冲击", "往复循环(疲劳)", "振动环境", "你决定"],
-     "mech": True},
-    {"id": "environment", "group": "B 工况载荷", "title": "使用场合",
-     "hint": "环境条件决定材料与防护等级",
-     "options": ["普通室内", "户外(日晒雨淋)", "潮湿/水下", "高温(>150℃)", "低温(<-20℃)", "粉尘环境", "洁净室/食品级", "你决定"],
-     "mech": True},
-    {"id": "lifespan", "group": "B 工况载荷", "title": "设计寿命",
-     "hint": "目标使用寿命（年）或动作次数",
-     "options": ["1年以内(短周期)", "3~5年", "10年", "20~30年(长期)", "你决定"],
-     "mech": True},
-
-    # C 组：驱动与运行（选型依据）
-    {"id": "drive", "group": "C 驱动与运行", "title": "驱动方式",
-     "hint": "动力来源与传动形式",
-     "options": ["伺服电机+减速机", "步进电机", "直流有刷/无刷", "液压", "气动", "手动", "你决定"],
-     "mech": False},
-    {"id": "duty", "group": "C 驱动与运行", "title": "工作制度",
-     "hint": "运行频率与占空比",
-     "options": ["连续运行(24/7)", "间歇运行(每天数小时)", "偶尔使用", "单次动作", "你决定"],
-     "mech": False},
-    {"id": "precision", "group": "C 驱动与运行", "title": "精度要求",
-     "hint": "定位/重复精度，决定配合公差与加工等级",
-     "options": ["一般(±1mm)", "较高(±0.1mm)", "精密(±0.01mm)", "无要求(仅结构验证)", "你决定"],
-     "mech": False},
-
-    # D 组：制造与边界条件
-    {"id": "material_pref", "group": "D 制造条件", "title": "材料倾向",
-     "hint": "材料偏好或限制（如必须轻量化/必须防腐）",
-     "options": ["Q235碳钢", "45#钢/40Cr", "304/316不锈钢", "6061-T6铝", "工程塑料", "无偏好(由你选)", "你决定"],
-     "mech": False},
-    {"id": "manufacturing", "group": "D 制造条件", "title": "加工方式",
-     "hint": "打算怎么造，影响结构工艺性",
-     "options": ["数控加工(CNC)", "焊接结构", "铸造", "钣金折弯", "3D打印", "外购标准件为主", "你决定"],
-     "mech": False},
-    {"id": "budget", "group": "D 制造条件", "title": "成本/重量倾向",
-     "hint": "在成本、重量、强度之间的取舍",
-     "options": ["成本优先(经济方案)", "重量优先(轻量化)", "强度/可靠性优先", "均衡", "你决定"],
-     "mech": False},
-
-    # E 组：特殊要求（自由补充）
-    {"id": "special", "group": "E 特殊要求", "title": "特殊要求",
-     "hint": "防水/防尘/防爆/轻量化/认证标准等硬性要求",
-     "options": ["无特殊要求", "防水防尘(IP等级)", "防爆", "轻量化", "需符合某国标/行业标准", "你决定"],
-     "mech": False},
-
-    # ★ 开放式收尾：确保覆盖表单之外的一切
-    {"id": "open_extra", "group": "Z 开放补充", "title": "其他补充（开放式）",
-     "hint": "以上没覆盖到的任何要求、约束、参考案例或偏好，请自由填写；"
-             "没有可写「无」",
-     "options": [],   # 纯填空，不给选项
-     "mech": False, "open": True},
-]
-
-
-def _format_question_block(num, q):
-    """把一条问题规格渲染成给用户看的文本块。"""
-    lines = ["[%s] %d. 【%s】%s" % (q.get("group", ""), num, q.get("title", ""),
-                                   q.get("hint", ""))]
-    opts = q.get("options") or []
-    if opts:
-        lines.append("     可选：" + " / ".join(opts))
-    else:
-        lines.append("     （开放题：请直接填写，无内容可写「无」）")
-    return chr(10).join(lines)
-
-
-def question_spec_for_prompt():
-    """供子代理 prompt 注入的精简版（保证小屋也按同一套维度设计）。"""
-    out = []
-    for q in QUESTION_SPEC:
-        opts = q.get("options") or []
-        out.append("- %s：%s%s" % (
-            q.get("title", ""), q.get("hint", ""),
-            ("  可选: " + " / ".join(opts)) if opts else "  （开放填写）"))
-    return out
-
-
 def _ask_questions(task_desc):
-    """门禁背景问题集（v3 · 统一版）。
+    """【B4修复】门禁问题分为两组：结构形态（几何必需）+ 工况背景（力学必需）。
 
-    设计目标（按用户要求）：
-      1. 【一致性】全流程只有这一份问题定义——代码、skill 文档、persona 全部引用它，
-         杜绝"有时问5个、有时问10个"的分裂。
-      2. 【覆盖度】分组穷举影响设计与力学的关键维度，覆盖 99% 工业机械任务；
-         每组都允许"你决定"，由门禁给默认值。
-      3. 【开放式收尾】末尾必有 open 一题，让用户补充任何表单没覆盖到的要求。
-
-    返回纯文本（供模型原样呈现给用户）。
+    旧版只有工况背景 5 问，缺少轴数/臂长/基座形式等建模必需的几何尺寸，
+    导致子代理无据建模。现补充结构形态组，共 10 问。
     """
     nl = chr(10)
     return nl.join([
-        "=== 设计任务背景确认（共 %d 题，请逐题作答；不确定的可写「你决定」）===" % len(QUESTION_SPEC),
+        "=== 设计任务背景确认 ===",
         "任务描述: %s" % task_desc,
         "",
-    ] + [
-        "%s" % _format_question_block(idx + 1, q)
-        for idx, q in enumerate(QUESTION_SPEC)
-    ] + [
+        "【A组·结构形态（几何尺寸，建模必需）】",
+        "1. 【机构类型】几轴？什么机构？（如 6轴关节臂 / 3轴直角坐标 / 2轴云台 / 四连杆）",
+        "2. 【臂长范围】各段臂长/行程尺寸？（如 大臂 300mm + 小臂 250mm；或 X/Y/Z 行程）",
+        "3. 【基座形式】固定式/移动式/旋转式？安装方式？（落地/壁挂/法兰/导轨）",
+        "4. 【负载安装】末端执行器形式与接口？（夹爪/吸盘/法兰盘/孔径）",
+        "5. 【整体包络】总体外形尺寸限制？（长×宽×高上限，或占地范围）",
         "",
-        "注：标「你决定」的题，门禁会按任务描述给出合理默认值，",
-        "    但默认值会在每个零件的参数表中明确标注，供你复核后再确认。",
+        "【B组·工况背景（力学与选型必需）】",
+        "6. 【使用场合】户外/室内/水下/高温/低温？",
+        "7. 【负载类型】静态/动态/冲击/循环？",
+        "8. 【运行方式】手动/电动/液压/气动？",
+        "9. 【工作频率】连续/间歇/偶尔？",
+        "10. 【特殊要求】防水/防尘/防爆/轻量化？",
+        "",
+        "注：A组若用户回答「你决定/自定」，门禁会按任务描述给出合理默认值，",
+        "    但默认值会明确标注在零件参数表中供用户复核。",
     ])
-
 
 def _extract_structure_spec(context_text):
     """【B4修复】从用户对「A组·结构形态」的回答中提取几何规格。
@@ -470,17 +292,27 @@ def generate_subagent_config(choice, parallel_mode, task, context=None):
         "C": {"parallel": False, "ask_user_at": ["every_part"], "detail_level": "every_step",
               "confirmation_protocol": CONFIRMATION_PROTOCOL_C},
     }
-    # 【用户明确要求：不要回退】C 模式 + 并行策略 D 必须被尊重，不得自动降级为 E。
-    # 旧版（B3）认为"C 要逐零件阻塞确认"与"并行多小屋"冲突，于是强制改成 sequential。
-    # 但实际机制已经支持该组合：
-    #   · 每个小屋的提问彼此独立，各自持有自己的 pendingId
-    #   · 前端选项卡按 seq 排队，用户逐个作答即可（不存在"无法串行提问"）
-    #   · SW 使用权由 mode_gate 的 FIFO 进程级锁自动排队，不会互抢
-    # 因此这里只按用户原始选择设置策略，不做任何隐式改写。
+    # 【B3修复】C 模式（步步确认）与并行策略存在结构冲突：
+    #   C 要求每个零件阻塞等用户 ask_user_question 确认，但并行子代理无法协调
+    #   对用户的串行提问，且会互抢 SW 锁 → 实际不可行。
+    # 处理方式：强制 C 模式降级为串行（每波只启动一个房间），并给出明确警告。
+    c_mode_conflict = None
+    if choice == "C" and parallel_mode == "parallel":
+        c_mode_conflict = (
+            "⚠️【B3 冲突已自动消解】C 模式（步步确认）要求每个零件阻塞等用户确认，"
+            "而并行模式下多个子代理无法协调对用户的串行提问，且会互抢 SW 锁。"
+            "已将并行策略自动降级为『单小屋串联（E）』：每波只启动一个房间，"
+            "该房间内每个零件走完确认循环后再启动下一波。"
+            "如需真正的并行，请改用 A 或 B 模式。"
+        )
+        parallel_mode = "sequential"
     if parallel_mode == "sequential":
         strategies[choice]["parallel"] = False
     result = {"rooms": rooms, "strategy": strategies[choice],
               "parallel_mode": parallel_mode, "total_rooms": len(rooms)}
+    if c_mode_conflict:
+        result["conflict_warning"] = c_mode_conflict
+        result["original_parallel_mode"] = "parallel"
     return result
 
 def _sync_mode_gate(choice, parallel_mode):
@@ -601,8 +433,13 @@ def cmd_select(choice, parallel=None):
     state["parallel_mode"] = parallel
     _pmode = PARALLEL_CHOICES.get(parallel, {}).get("mode", parallel)
     state["subagent_config"] = generate_subagent_config(choice, _pmode, state["task"], state.get("context"))
-    # 【用户要求：不要回退】不再做任何隐式降级写回。
-    # 用户选了 D 就按 D 调度（并行模式会自动启动 SW 监控进程做 FIFO 排队）。
+    # 【B3修复】C模式与并行冲突被自动消解时，把降级后的真实模式写回 state，
+    # 避免后续波次仍按并行调度（那会导致多个小屋同时抢 SW 锁）。
+    _conflict = state["subagent_config"].get("conflict_warning")
+    if _conflict:
+        state["parallel_mode"] = "E"
+        _pmode = "sequential"
+        parallel = "E"
     save_state(state)
     _sync_mode_gate(choice, parallel)
 
@@ -616,15 +453,8 @@ def cmd_select(choice, parallel=None):
             pass
 
     rooms = state["subagent_config"]["rooms"]
-    # 【修复值体系混用】state["parallel_mode"] 存的是用户选项 'D'/'E'，
-    # 而 subagent_config 里是 'parallel'/'sequential'。旧代码只查 PARALLEL_CHOICES
-    # （键为 D/E），当值是 'parallel' 时查不到，仅靠兜底参数侥幸正确。
-    # 这里显式同时接受两种写法，避免任何一条路径解析错。
     _raw_pmode = state.get("parallel_mode", "parallel")
-    if _raw_pmode in ("parallel", "sequential"):
-        pmode = _raw_pmode
-    else:
-        pmode = PARALLEL_CHOICES.get(_raw_pmode, {}).get("mode", _raw_pmode)
+    pmode = PARALLEL_CHOICES.get(_raw_pmode, {}).get("mode", _raw_pmode)
     nl = chr(10)
 
     if pmode == "sequential":

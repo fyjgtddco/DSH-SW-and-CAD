@@ -1,0 +1,15 @@
+# dsH-engineering-sw-single-line — cordis 补丁
+#
+# 【安装说明】
+#   1. 本包必须放在 node_modules/<包名>/ 下（目录名必须等于 package.json 的 name）
+#   2. 在 profile package.json 的 dependencies 与 dsh.profile.bundles 中登记 **包名**
+#   3. 重启 DSH Web 生效
+#
+# 【为什么只 insert 一条】
+#   host 半（index.js）由本 patch 加载；
+#   client 半（client.js）由 package.json 的 dsh.client 元数据自动装配。
+#   绝不能在 patch 里再 insert 一个纯前端包 —— 那会让宿主侧去 import 前端模块，
+#   模块求值时访问 window 直接报 window is not defined。
+- insert:
+    - id: sw-single-line-mode
+      name: 'dsH-engineering-sw-single-line'

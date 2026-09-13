@@ -47,16 +47,6 @@ SW_START_GRACE = 120     # room-start 后允许无心跳的启动宽限秒数（
 SW_CMD_HOLD = 90         # 单条命令最长持锁秒数：超时视为命令已结束，可被接管
 SW_ORPHAN_TIMEOUT = 90   # owner 心跳静默超过此秒数 → 判为孤儿锁，自动回收
 SW_SW_IDLE_TIMEOUT = 600 # SW进程空闲(无心跳)超过此秒数且无人持锁 → 允许清理
-# ── 【Bug2 修复】SW 锁公平轮转（防饥饿）──────────────────────────────────
-# 问题现象：结构件小屋连续提交建模命令（cmd_seq 到 14），每执行一条就刷新
-#   acquired_at，导致 _lock_owner_lock_age 永远小于 SW_CMD_HOLD → 超过 90 秒
-#   也不会被回收；传动机构/壳体机架在队列里被活活饿死（实测锁被独占 272 秒）。
-# 修复：改用【命令条数 + 独占时长】双重公平判据——
-#   · 队首等待者出现后，当前持有者的累计命令数超过 SW_FAIR_CMDS 即必须让位
-#   · 或连续独占（自首次取锁起）超过 SW_FAIR_SECONDS 即必须让位
-#   · 让位时把队首提升为新 owner，保证 FIFO 队列真正前进
-SW_FAIR_CMDS = 3         # 有人在排队时，单房间最多连续执行几条 SW 命令就必须让位
-SW_FAIR_SECONDS = 180    # 有人在排队时，单房间连续独占上限（秒）
 
 # -- SW 后台监控进程（持续检测 SLDWORKS.EXE 进程状态）--
 
@@ -210,118 +200,13 @@ REPORT_STAGES = ("registered", "params_shown", "params_confirmed", "modeling",
                  "part_done", "validating", "done", "failed")
 
 
-def _pending_confirm_path(room):
-    """每个房间的待确认状态文件（记录哪些零件在等用户签字）。"""
-    os.makedirs(REPORTS_DIR, exist_ok=True)
-    return os.path.join(REPORTS_DIR, _safe_room_name(room) + ".pending.json")
-
-
-def _load_pending(room):
-    p = _pending_confirm_path(room)
-    try:
-        if os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f) or {}
-    except Exception:
-        pass
-    return {}
-
-
-def _save_pending(room, data):
-    p = _pending_confirm_path(room)
-    try:
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-def cmd_confirm_part(room, part, by="user"):
-    """【Bug1 修复】由【用户确认】来解锁某个零件的 params_confirmed。
-
-    背景：结构件小屋在"大臂确认后"，对"小臂/连杆/立柱"自行上报了
-    params_confirmed（时间戳显示 shown 与 confirmed 间隔仅 0.05~0.08 秒，
-    远短于人工确认所需），并注明"沿用大臂已确认基础" —— 属于子代理越权
-    代替用户签字，违反 C 模式"每个零件必须单独确认"的铁律。
-
-    根因：room-report 无条件接受任何 stage，小屋可以自己给自己发确认。
-
-    修复：params_confirmed 改为【需要令牌】——必须有本命令写入的授权记录，
-    否则判定为越权，拒绝该上报并标记违规。
-    """
-    room = (room or "").strip()
-    part = (part or "").strip()
-    if not room or not part:
-        return {"ok": False, "error": "用法: confirm-part <房间名> <零件名>"}
-    data = _load_pending(room)
-    grants = data.get("grants") or {}
-    grants[part] = {"by": by, "ts": time.time(),
-                    "time": time.strftime("%Y-%m-%d %H:%M:%S")}
-    data["grants"] = grants
-    _save_pending(room, data)
-    return {"ok": True, "room": room, "part": part, "confirmed_by": by,
-            "message": "已授权该零件的确认；小屋随后上报 params_confirmed 才会被接受。"}
-
-
-def _confirm_granted(room, detail):
-    """检查 detail 里提到的零件是否已获用户授权确认。
-
-    detail 形如 "小臂 已确认" / "大臂(300mm) 已确认" → 提取零件名做前缀匹配。
-    未授权则返回 (False, 零件名)。
-    """
-    data = _load_pending(room)
-    grants = data.get("grants") or {}
-    if not grants:
-        return False, (detail or "").split()[0] if detail else ""
-    text = detail or ""
-    for part, info in grants.items():
-        if part and part in text:
-            return True, part
-    # 兜底：若只有一个授权零件且 detail 无法解析，视为不匹配（从严）
-    return False, (text.split()[0] if text.split() else "")
-
-
 def cmd_room_report(room, stage, detail=""):
     """【bug6修复】小屋进度旁路上报：写文件，不走对话通道。
 
     关键设计：小屋在关键节点主动写进度，主对话用 room-report-read 旁路读取，
     双方零干扰——彻底替代"主对话 send_message 问进度"的插队做法。
     写报告同时刷新心跳（上报即存活证明）。
-
-    【Bug1 修复】params_confirmed 是【唯一需要授权】的阶段：
-    小屋不得自行宣布"用户已确认"，必须由 confirm-part 先写入授权令牌。
     """
-    # ── 越权拦截：params_confirmed 需要用户授权令牌 ──────────────────────
-    if stage == "params_confirmed":
-        ok_grant, part = _confirm_granted(room, detail)
-        if not ok_grant:
-            # 记录越权行为，供主对话审计
-            os.makedirs(REPORTS_DIR, exist_ok=True)
-            vpath = os.path.join(REPORTS_DIR, _safe_room_name(room) + ".violations.json")
-            try:
-                viol = []
-                if os.path.exists(vpath):
-                    with open(vpath, "r", encoding="utf-8") as f:
-                        viol = (json.load(f) or {}).get("items", [])
-                viol.append({"room": room, "part": part, "detail": detail,
-                             "ts": time.time(),
-                             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                             "reason": "子代理未经用户确认自行上报 params_confirmed"})
-                with open(vpath, "w", encoding="utf-8") as f:
-                    json.dump({"room": room, "items": viol[-50:]}, f,
-                              ensure_ascii=False, indent=2)
-            except Exception:
-                pass
-            return {
-                "ok": False, "room": room, "stage": stage, "violation": True,
-                "error": ("【违规·越权确认】零件 '%s' 未经用户确认。"
-                          "C 模式铁律：每个零件必须单独获得用户授权。" % (part or detail)),
-                "hint": ("正确流程：先用 ask_user.py 向用户弹卡片；用户点选后，"
-                         "由主对话执行 mode_gate.py confirm-part <房间名> <零件名> "
-                         "写入授权，之后本上报才会被接受。"
-                         "沿用上一个零件的确认 = 违规，必须逐件确认。"),
-            }
-
     os.makedirs(REPORTS_DIR, exist_ok=True)
     path = _report_path(room)
     rec = {"room": room, "stage": stage, "detail": detail,
@@ -486,47 +371,6 @@ def cmd_subagent_status():
                     "room_status=completed/failed 的小屋必须 interrupt_agent 清理后才能开下一波，禁止不管"}
 
 
-def cmd_whoami(room=None):
-    """【问题6/9 修复】让子代理自查身份：我是哪个房间、我的 sessionId 是什么。
-
-    背景：v1 小屋死在"不知道自己 sessionId → 提问通道用不了"。
-    根因是身份只在主对话侧记录（subagent-assign），子代理无从读取。
-    子代理按 prompt 里的房间名调用本命令即可拿到自己的 sessionId，
-    进而能用 ask_user.py --child <sessionId> 发起提问。
-    """
-    state = load_state()
-    subs = state.get("subagents", {}) or {}
-    rooms = state.get("rooms", {}) or {}
-
-    if room:
-        rec = subs.get(room)
-        if not rec:
-            return {"ok": False, "room": room,
-                    "error": ("该房间尚未登记 subagent（请让主对话先执行 "
-                              "mode_gate.py subagent-assign <房间名> <subagent_id>）"),
-                    "hint": "若确实刚创建，等待 1~2 秒后重试",
-                    "known_rooms": list(subs.keys())}
-        d = rec if isinstance(rec, dict) else {"id": rec}
-        sid = d.get("id")
-        return {"ok": True, "room": room, "subagent_id": sid,
-                "assigned_at": d.get("assigned_at"),
-                "note": "把 subagent_id 作为 ask_user.py 的 --child 参数",
-                "ask_example": ("python \"<工程模式根目录>\\tools\\ask_user.py\" "
-                                "--room \"%s\" --child \"%s\" "
-                                "--question \"...\" --option \"确认\"") % (room, sid)}
-
-    out = []
-    for rn, rec in subs.items():
-        d = rec if isinstance(rec, dict) else {"id": rec}
-        info = rooms.get(rn, {}) or {}
-        out.append({"room": rn, "subagent_id": d.get("id"),
-                    "active": bool(info.get("active")),
-                    "ended": bool(info.get("ended_at")),
-                    "failed": bool(info.get("failed_at"))})
-    return {"ok": True, "assignments": out,
-            "hint": "若知道自己的房间名，直接调 whoami <房间名> 更准确"}
-
-
 def _fresh_state():
     return {"mode": "1", "rooms": {}, "declared_at": None, "mode_name": MODE_NAMES["1"],
             "sw_lock": {"owner": None, "queue": [], "acquired_at": None,
@@ -632,30 +476,9 @@ def _reclaim_lock(state, reason, requester=None):
 
     should_reclaim = False
     why = ""
-    # 【Bug2 修复】公平轮转：有人排队时，持有者不能无限续期。
-    # 只有当 requester 不是 owner 本人（即确有其他房间在争用）时才触发。
-    queue = [q for q in (lk.get("queue") or []) if q != owner]
-    has_waiter = bool(queue) and requester != owner
-    cmds = int(lk.get("cmd_seq", 0) or 0)
-    # 自"本轮首次取锁"起算的连续独占时长（首次取锁时由 sw-request 记 fair_start）
-    fair_start = lk.get("fair_start") or lk.get("acquired_at")
-    try:
-        fair_held = time.time() - float(fair_start) if fair_start else 0.0
-    except Exception:
-        fair_held = 0.0
-
     if not alive:
         should_reclaim = True
         why = "持有者[%s]已无活动心跳/已非活动房间" % owner
-    elif has_waiter and cmds >= SW_FAIR_CMDS:
-        # 排队者已等候多时，且持有者已连跑满额命令 → 让位（防饥饿核心）
-        should_reclaim = True
-        why = ("公平轮转：持有者[%s]已连续执行 %d 条命令(上限%d)，"
-               "队首[%s]等待中，强制让位" % (owner, cmds, SW_FAIR_CMDS, queue[0]))
-    elif has_waiter and fair_held > SW_FAIR_SECONDS:
-        should_reclaim = True
-        why = ("公平轮转：持有者[%s]连续独占 %.0f 秒(上限%d)，"
-               "队首[%s]等待中，强制让位" % (owner, fair_held, SW_FAIR_SECONDS, queue[0]))
     elif held > SW_CMD_HOLD and requester != owner:
         # 单命令级锁：超过 SW_CMD_HOLD 仍未释放，视为该命令已结束
         should_reclaim = True
@@ -959,35 +782,8 @@ def cmd_sw_request(name):
     if not _lock_needed(state):
         save_state(state)
         return {"ok": True, "need_lock": False, "room": name}
-    # 【Bug2 修复·饥饿根因】原实现在这里直接给持有者续期：
-    #     if lk.get("owner") == name: return {"acquired": True}
-    # 这等于让持有者无限次"插自己的队"，永远不会走到下面的公平检查，
-    # 于是 cmd_seq 一路涨到 14、锁被独占 272 秒，队列里的房间被饿死。
-    #
-    # 现在改为：持有者再次取锁时，先做公平体检——若队列里有别人在等，
-    # 且自己已达连跑上限（SW_FAIR_CMDS）或连续独占超时（SW_FAIR_SECONDS），
-    # 则主动让位；否则才允许续期。
-    q0 = lk.setdefault("queue", [])
     if lk.get("owner") == name:
-        _others = [x for x in q0 if x != name]
-        _cmds = int(lk.get("cmd_seq", 0) or 0)
-        _fs = lk.get("fair_start") or lk.get("acquired_at")
-        try:
-            _fheld = time.time() - float(_fs) if _fs else 0.0
-        except Exception:
-            _fheld = 0.0
-        if _others and (_cmds >= SW_FAIR_CMDS or _fheld > SW_FAIR_SECONDS):
-            # 让位：清空自己，把队首扶正，交由下方流程重新分配
-            lk["prev_owner"] = name
-            lk["owner"] = None
-            lk["acquired_at"] = None
-            lk["cmd_seq"] = 0
-            lk["fair_start"] = None
-            save_state(state)
-            lk = _sw_lock(state)
-        else:
-            return {"ok": True, "need_lock": True, "acquired": True, "room": name,
-                    "renewed": True, "cmd_seq": _cmds}
+        return {"ok": True, "need_lock": True, "acquired": True, "room": name}
     q = lk.setdefault("queue", [])
     if name not in q:
         q.append(name)
@@ -1019,10 +815,6 @@ def cmd_sw_request(name):
         lk["acquired_at"] = time.time()
         # 【Bug4修复】单命令级锁：记录本次命令编号，命令结束后即可释放。
         # 同一个房间的下一步命令会重新排队，但不影响其他房间公平性。
-        # 新一轮取锁：若上一轮已让位（fair_start 为空），重置计数与公平计时
-        if not lk.get("fair_start"):
-            lk["cmd_seq"] = 0
-            lk["fair_start"] = time.time()
         lk["cmd_seq"] = int(lk.get("cmd_seq", 0)) + 1
         lk["hold_mode"] = "command"   # command=单命令级 | room=房间级
         lk["sw_by_room"] = (not running) or bool(lk.get("sw_by_room"))
@@ -1367,14 +1159,6 @@ def main():
                                  " ".join(args[3:]) if len(args) > 3 else "")
     elif cmd == "room-report-read":
         result = cmd_room_report_read(args[1] if len(args) > 1 else None)
-    elif cmd == "whoami":
-        # 【问题6/9 修复】子代理自查身份（拿自己的 sessionId 去调 ask_user.py）
-        result = cmd_whoami(args[1] if len(args) > 1 else None)
-    elif cmd == "confirm-part":
-        # 【Bug1 修复】由用户确认后授权某零件，之后 params_confirmed 才会被接受
-        result = cmd_confirm_part(args[1] if len(args) > 1 else "",
-                                  args[2] if len(args) > 2 else "",
-                                  args[3] if len(args) > 3 else "user")
     elif cmd == "rooms-reset":
         result = cmd_rooms_reset()
     elif cmd == "sw-monitor-start":

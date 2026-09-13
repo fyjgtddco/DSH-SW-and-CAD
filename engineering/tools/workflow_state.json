@@ -1,0 +1,93 @@
+{
+  "step": "user_selected",
+  "task": "设计一个使用寿命30年、能搬运300N的东西的机械臂",
+  "context": "1.使用场合:户外; 2.负载类型:冲击/循环(300N固定重量，有碰撞风险，需额外安全裕度); 3.运行方式:电动(伺服电机+减速器); 4.工作频率:偶尔使用; 5.特殊要求:无特殊环境要求，标准防护即可。使用寿命目标30年。",
+  "mechanics_result": {
+    "load_estimate": "1000 N",
+    "safety_factor": 2.5,
+    "material_recommend": "Q235 Carbon Steel",
+    "scenario": "通用工业场景",
+    "notes": "基于用户输入估算"
+  },
+  "user_choice": "C",
+  "choice_detail": {
+    "label": "步步确认",
+    "strategy": "sequential",
+    "detail": "every_step",
+    "desc": "每步确认"
+  },
+  "parallel_mode": "E",
+  "subagent_config": {
+    "rooms": [
+      [
+        "结构件",
+        "structural"
+      ],
+      [
+        "传动机构",
+        "transmission"
+      ],
+      [
+        "壳体机架",
+        "housing"
+      ],
+      [
+        "总装与验证",
+        "assembly"
+      ],
+      [
+        "工程图输出",
+        "drafting"
+      ]
+    ],
+    "strategy": {
+      "parallel": false,
+      "ask_user_at": [
+        "every_part"
+      ],
+      "detail_level": "every_step",
+      "confirmation_protocol": [
+        "=== C模式·步步确认协议（每个零件独立走一遍完整循环，不得合并或跳过） ===",
+        "",
+        "【本小屋允许调用的 mode_gate.py 命令（仅进度上报通道）】",
+        "  ✅ 允许: room-report（进度上报）、room-heartbeat（心跳保活）",
+        "  ❌ 禁止: room-start / room-end / room-fail / sw-request / sw-wait / sw-release / declare / check",
+        "     以上编排命令由大屋（主对话）独占，小屋调用=夺舍，主流程会被劫持。",
+        "  说明: room-report / room-heartbeat 只写入 reports/ 与 heartbeats/ 文件，",
+        "        不修改 mode_state.json 的房间与锁状态，因此不属于编排命令，可安全调用。",
+        "",
+        "【每个零件的确认循环 —— 对房间内的每一个零件重复执行以下步骤，直到所有零件都走完】",
+        "第一步（输出参数表）：",
+        "  输出结构化【零件参数表】：零件名 / 材料 / 关键尺寸(长宽厚、直径、孔径) / 配合公差 / 设计依据",
+        "第二步（用户确认）：",
+        "  用 ask_user_question 工具把参数表展示给用户，问：「以下参数将用于建模 <零件名>，要用吗？」",
+        "  必须等用户明确答复（用/可以/确认/OK 任一表示通过）才继续；未答复前禁止调用 sw_bridge",
+        "第三步（建模执行）：",
+        "  用户确认后，用 sw_bridge.py 建模该零件；完成后调 mode_gate.py room-report <房间名> part_done '<零件名> 已建模完毕'",
+        "",
+        "【用户要求修改时的分支】",
+        "  用户提出修改意见 → 修改参数后重新回到第二步（必须再问一次用户确认），禁止用户没说 OK 就直接改完建模",
+        "",
+        "【违规判定】",
+        "  - 未等用户确认就调 sw_bridge = 该零件作废，重做该零件全程",
+        "  - 把多个零件的确认合并成一次问 = 违规，拆回每个零件单独问",
+        "  - 跳过一个零件直接建模 = 违规，补做完所有被跳过零件的确认循环",
+        "",
+        "【进度旁路上报（与确认循环并行，不阻断流程）】",
+        "  以下节点必须调 mode_gate.py room-report <房间名> <阶段> <详情>：",
+        "  - params_shown：已展示参数表等用户确认",
+        "  - params_confirmed：用户已确认，开始建模",
+        "  - modeling：建模脚本执行中",
+        "  - part_done：单零件完成",
+        "  - validating：FEA/CADX 验证中",
+        "  - done：本房间全部零件完成",
+        "  - failed：失败，<原因>"
+      ]
+    },
+    "parallel_mode": "sequential",
+    "total_rooms": 5,
+    "conflict_warning": "⚠️【B3 冲突已自动消解】C 模式（步步确认）要求每个零件阻塞等用户确认，而并行模式下多个子代理无法协调对用户的串行提问，且会互抢 SW 锁。已将并行策略自动降级为『单小屋串联（E）』：每波只启动一个房间，该房间内每个零件走完确认循环后再启动下一波。如需真正的并行，请改用 A 或 B 模式。",
+    "original_parallel_mode": "parallel"
+  },
+  "created_at": "2026-09-10 15:42:17"
+}

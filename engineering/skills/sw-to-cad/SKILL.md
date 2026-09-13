@@ -96,10 +96,10 @@ python "sw_bridge.py" show
 
 ```powershell
 # 导出 DXF（SolidWorks 工程图 → DXF）
-python sw_bridge.py export-dxf "<输出.dxf>"
+python "<工程模式根目录>\tools\sw_bridge.py" export-dxf "<输出.dxf>"
 
 # 运行几何验证
-python sw_bridge.py cad-validate "<输出.dxf>"
+python "<工程模式根目录>\tools\sw_bridge.py" cad-validate "<输出.dxf>"
 ```
 
 验证项：未闭合多段线、重叠几何、尺寸过小、长宽比异常、墙厚不足、缺失元素、标注不一致。

@@ -25,15 +25,10 @@ swapi.py — SolidWorks 高层建模封装（通用版，跨电脑/跨版本）
 """
 import math
 import os
-import sys
 import glob
-import subprocess
 
 import pythoncom
 import win32com.client
-
-# 静默子进程（Windows 下不弹窗）
-CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 MM = 0.001  # 毫米 → 米
 
@@ -42,153 +37,6 @@ MM = 0.001  # 毫米 → 米
 def _version_year(major):
     """SW 主版本号 → 年份：30=2022, 31=2023, 32=2024, 29=2021, 28=2020..."""
     return major + 1992
-
-
-def _sw_install_from_registry():
-    """【B1修复】从注册表读取 SolidWorks 安装路径（最可靠，跨盘符）。
-
-    读取 HKLM\SOFTWARE\SolidWorks\Applications 的 FullName 值，
-    该值由安装程序写入，无论装到哪个盘都能找到。
-    """
-    cands = []
-    if sys.platform != "win32":
-        return cands
-    try:
-        import winreg
-    except Exception:
-        return cands
-    reg_paths = [
-        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\SolidWorks\Applications"),
-        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\SolidWorks\Applications"),
-        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\SolidWorks\Applications"),
-    ]
-    for hive, key_path in reg_paths:
-        try:
-            with winreg.OpenKey(hive, key_path) as k:
-                i = 0
-                while True:
-                    try:
-                        name, value, _ = winreg.EnumValue(k, i)
-                        i += 1
-                    except OSError:
-                        break
-                    if isinstance(value, str) and value.lower().endswith(".exe"):
-                        cands.append(value)
-        except Exception:
-            continue
-    # 也试 SolidWorks 主键下的 InstallDir / 各版本子键
-    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-        for base in (r"SOFTWARE\SolidWorks", r"SOFTWARE\WOW6432Node\SolidWorks"):
-            try:
-                with winreg.OpenKey(hive, base) as k:
-                    i = 0
-                    while True:
-                        try:
-                            sub = winreg.EnumKey(k, i)
-                            i += 1
-                        except OSError:
-                            break
-                        for vname in ("InstallDir", "InstallLocation", "Path"):
-                            try:
-                                with winreg.OpenKey(hive, base + "\\" + sub) as sk:
-                                    val, _ = winreg.QueryValueEx(sk, vname)
-                                    if isinstance(val, str) and val:
-                                        cands.append(val)
-                            except Exception:
-                                pass
-            except Exception:
-                continue
-    return cands
-
-
-def _all_drive_letters():
-    """枚举系统上所有存在的盘符（含 Z 等网络/虚拟盘）。"""
-    drives = []
-    if sys.platform == "win32":
-        try:
-            import string
-            for letter in string.ascii_uppercase:
-                root = letter + ":\\"
-                if os.path.exists(root):
-                    drives.append(letter + ":")
-        except Exception:
-            pass
-    if not drives:
-        drives = ["C:"]
-    return drives
-
-
-def find_sldworks_exe():
-    """【B1修复】定位 SLDWORKS.exe 真实路径。
-
-    搜索顺序（从最可靠到兜底）：
-      1. 注册表 FullName（安装程序写入的绝对路径）
-      2. 注册表 InstallDir 下的 SLDWORKS.exe
-      3. 所有盘符的常见安装目录（含 Program Files\SOLIDWORKS Corp*）
-      4. 运行中进程的可执行文件路径
-    返回第一个存在的绝对路径；找不到返回 None。
-    """
-    seen = set()
-    # 1) 注册表直给的可执行文件
-    for v in _sw_install_from_registry():
-        if not v:
-            continue
-        low = v.lower()
-        if low.endswith("sldworks.exe") and os.path.isfile(v):
-            return v
-        # 注册表给的是目录 → 拼上可执行名
-        for sub in ("SLDWORKS.exe", "sldworks.exe",
-                    "SOLIDWORKS\\SLDWORKS.exe", "SolidWorks\\SLDWORKS.exe"):
-            cand = os.path.join(v, sub)
-            if os.path.isfile(cand):
-                return cand
-        # 逐级上溯找 SLDWORKS.exe
-        d = v
-        for _ in range(4):
-            if not d or not os.path.isdir(d):
-                break
-            cand = os.path.join(d, "SLDWORKS.exe")
-            if os.path.isfile(cand):
-                return cand
-            d = os.path.dirname(d)
-
-    # 2) 全盘符扫描常见安装目录
-    exe_names = ("SLDWORKS.exe", "sldworks.exe")
-    sub_patterns = [
-        r"Program Files\SOLIDWORKS Corp*\SOLIDWORKS",
-        r"Program Files\SOLIDWORKS Corp*",
-        r"SOLIDWORKS Corp*\SOLIDWORKS",
-        r"SOLIDWORKS Corp*",
-        r"Program Files\SolidWorks Corp*\SolidWorks",
-        r"Program Files (x86)\SOLIDWORKS Corp*\SOLIDWORKS",
-    ]
-    for drive in _all_drive_letters():
-        for pat in sub_patterns:
-            try:
-                for d in glob.glob(os.path.join(drive + "\\", pat)):
-                    for exe in exe_names:
-                        cand = os.path.join(d, exe)
-                        if cand not in seen:
-                            seen.add(cand)
-                            if os.path.isfile(cand):
-                                return cand
-            except Exception:
-                continue
-
-    # 3) 运行中进程的可执行路径（已启动时最准）
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-Process sldworks -ErrorAction SilentlyContinue | "
-             "Select-Object -First 1 -ExpandProperty Path)"],
-            capture_output=True, text=True, timeout=20,
-            creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-        p = (out.stdout or "").strip()
-        if p and os.path.isfile(p):
-            return p
-    except Exception:
-        pass
-    return None
 
 
 def _find_template(sw=None):

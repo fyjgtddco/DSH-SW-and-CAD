@@ -1,0 +1,62 @@
+// dsh-engineering-ui — Client 半
+// 1) 子代理三栏：主对话 3/4 + 中间竖排频道列表 + 右侧子代理对话面（无子代理时全隐藏）
+// 2) 非工程模式警告横幅（仅当权限预设选了 SW单行模式 时才提示）
+window.__ModuleLoader__.load({
+  id: 'dsh-engineering-ui',
+  factory: function (require) {
+    var module = { exports: {} };
+    var exports = module.exports;
+    var React = require('react');
+    var useState = React.useState;
+    var useEffect = React.useEffect;
+    var useRef = React.useRef;
+    var h = React.createElement;
+    var STYLE_ID = 'dsh-engineering-ui-style';
+    var DOCK_CLASS = 'dsh-eng-dock';
+    var PRESET_LABEL = 'SW单行模式';
+    var PRESET_KEY = 'sw-single-line';
+    var MODE_KEY = 'engineering';
+    var PRESET_ICON = 'data:image/png;base64,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... (line truncated to 2000 chars)';
+    // 实心配色：不依赖可能被主题皮肤设成透明的 --dsw-* 变量
+    var STYLE = [
+      ':root{--dsh-eng-w:clamp(340px,26vw,600px)}',
+      'body.' + DOCK_CLASS + ' div[style*=grid-template-columns]{padding-right:var(--dsh-eng-w);box-sizing:border-box}',
+      '.eng-dock{background:#ffffff;border-left:1px solid #cbd5e1;bottom:0;box-shadow:-10px 0 30px rgba(15,23,42,.18);color:#0f172a;display:flex;flex-direction:column;font-size:12px;position:fixed;right:0;top:0;width:var(--dsh-eng-w);z-index:9000}',
+      '.eng-body{display:flex;flex:1;min-height:0}',
+      '.eng-rail{background:#f1f5f9;border-right:1px solid #cbd5e1;display:flex;flex:none;flex-direction:column;gap:6px;overflow-y:auto;padding:8px 6px;width:66px}',
+      '.eng-rail-cap{color:#64748b;font-size:10px;font-weight:700;letter-spacing:.04em;padding:2px 0 4px;text-align:center}',
+      '.eng-item{align-items:center;background:#ffffff;border:1px solid #cbd5e1;border-radius:10px;color:#334155;cursor:pointer;display:flex;flex-direction:column;font-size:10px;font-weight:700;height:48px;justify-content:center;line-height:1.15;padding:0 2px;position:relative;width:52px;word-break:break-all}',
+      '.eng-item:hover{background:#e2e8f0}',
+      '.eng-item.on{background:#1d4ed8;border-color:#1d4ed8;color:#ffffff}',
+      '.eng-dot{border:1px solid #ffffff;border-radius:50%;height:9px;position:absolute;right:3px;top:3px;width:9px;background:#94a3b8}',
+      '.eng-dot.run{background:#16a34a;animation:eng-pulse 1.3s ease-in-out infinite}',
+      '@keyframes eng-pulse{0%,100%{opacity:1}50%{opacity:.25}}',
+      '.eng-screen{background:#ffffff;display:flex;flex:1;flex-direction:column;min-width:0}',
+      '.eng-head{align-items:center;background:#f8fafc;border-bottom:1px solid #cbd5e1;display:flex;gap:6px;min-height:46px;padding:0 8px 0 10px}',
+      '.eng-name{color:#0f172a;flex:1;font-size:12.5px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.eng-tag{background:#e2e8f0;border-radius:5px;color:#475569;font-size:10px;font-weight:600;padding:2px 6px;white-space:nowrap}',
+      '.eng-tag.run{background:#16a34a;color:#ffffff}',
+      '.eng-x{background:#ffffff;border:1px solid #cbd5e1;border-radius:6px;color:#475569;cursor:pointer;font-size:13px;font-weight:700;height:24px;line-height:1;width:24px}',
+      '.eng-x:hover{background:#e2e8f0}',
+      '.eng-log{background:#ffffff;flex:1;overflow-y:auto;padding:10px 10px 16px}',
+      '.eng-msg{border-radius:9px;margin:0 0 8px;padding:7px 9px;white-space:pre-wrap;word-break:break-word}',
+      '.eng-msg.a{background:#f1f5f9;color:#0f172a;border:1px solid #e2e8f0}',
+      '.eng-msg.u{background:#1d4ed8;color:#ffffff}',
+      '.eng-msg.s{background:#fffbeb;border:1px solid #fcd34d;color:#78350f;font-weight:600}',
+      '.eng-tool{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;margin:0 0 5px;overflow:hidden}',
+      '.eng-tool-h{align-items:center;color:#1d4ed8;cursor:pointer;display:flex;font-weight:700;gap:5px;padding:5px 8px}',
+      '.eng-tool-h:hover{background:#dbeafe}',
+      '.eng-tool-b{background:#ffffff;border-top:1px solid #bfdbfe;color:#334155;font-family:ui-monospace,Consolas,monospace;font-size:10.5px;max-height:220px;overflow:auto;padding:6px 8px;white-space:pre-wrap;word-break:break-word}',
+      '.eng-note{color:#64748b;font-size:11.5px;padding:14px 10px;text-align:center}',
+      '.eng-err{background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;color:#991b1b;font-size:11px;margin:0 0 8px;padding:7px 9px;word-break:break-word}',
+      '.eng-fab{position:fixed;right:10px;top:76px;z-index:9000}',
+      '.eng-preset-icon{background-image:url(' + PRESET_ICON + ');background-position:center;background-repeat:no-repeat;background-size:contain;border-radius:3px;display:inline-block;flex:none;height:15px;width:15px}',
+      '[aria-label*="' + PRESET_LABEL + '"]::before{background-image:url(' + PRESET_ICON + ');background-position:center;background-repeat:no-repeat;background-size:contain;border-radius:3px;content:"";flex:none;height:15px;margin-right:5px;width:15px}',
+      '.eng-warn{align-items:center;background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,.10);color:#78350f;display:flex;font-size:12.5px;gap:10px;line-height:1.45;margin:6px 0;padding:8px 11px}',
+      '.eng-warn-txt{flex:1;min-width:0}',
+      '.eng-btn{background:#ffffff;border:1px solid #d97706;border-radius:6px;color:#92400e;cursor:pointer;font-size:12px;font-weight:600;padding:4px 12px;white-space:nowrap}',
+      '.eng-btn:hover{background:#fef3c7}',
+      '.eng-btn.p{background:#d97706;border-color:#d97706;color:#ffffff}',
+      '@media(prefers-color-scheme:dark){.eng-dock{background:#16181d;border-left-color:#33383f;color:#e5e7eb}.eng-rail{background:#1c1f26;border-right-color:#33383f}.eng-rail-cap{color:#94a3b8}.eng-item{background:#22262e;border-color:#3a4048;color:#cbd5e1}.eng-item:hover{background:#2c313a}.eng-item.on{background:#2563eb;border-color:#2563eb;color:#fff}.eng-screen,.eng-log{background:#16181d}.eng-head{background:#1c1f26;border-bottom-color:#33383f}.eng-name{color:#e5e7eb}.eng-tag{background:#2c313a;color:#cbd5e1}.eng-x{background:#22262e;border-color:#3a4048;color:#cbd5e1}.eng-msg.a{background:#22262e;border-color:#33383f;color:#e5e7eb}.eng-tool{background:#1a2436;border-color:#2c4a75}.eng-tool-h{color:#93c5fd}.eng-tool-b{background:#12151b;border-top-color:#2c4a75;color:#cbd5e1}.eng-note{color:#94a3b8}.eng-warn{background:#3a2f10;border-color:#a16207;color:#fde68a}.eng-btn{background:#22262e;border-color:#a16207;color:#fde68a}.eng-btn.p{background:#a16207;color:#fff}}',
+      '@media(max-width:900px){.eng-dock{width:100vw}body.' + DOCK_CLASS + ' div[style*=grid-template-columns]{padding-right:0}}'
+    ].join('');

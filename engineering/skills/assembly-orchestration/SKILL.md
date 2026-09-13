@@ -213,7 +213,7 @@ for agent in agents:
 ```
 
 - **Step 1**：自动推导载荷工况，生成 load_case.json
-  `python sw_bridge.py physics-validate-case <case.json>`
+  `python "<工程模式根目录>\tools\sw_bridge.py" physics-validate-case <case.json>`
 - **Step 2**：FEA 求解
   - 优先使用解析解（Level 0，无需外部软件）
   - 次优先纯Python FEA（Level 1，numpy CST三角形单元）
@@ -223,7 +223,7 @@ for agent in agents:
   - **WARNING**（安全系数 > 5，过度设计）-> 记录但允许通过
   - **FAIL**（安全系数 < 2，强度不足）-> 进入 Step 4
 - **Step 4**：自动优化迭代（最多5轮）
-  `python sw_bridge.py physics-optimize <case.json> --max-iter 5`
+  `python "<工程模式根目录>\tools\sw_bridge.py" physics-optimize <case.json> --max-iter 5`
   自动调整厚度/圆角/加强筋，重新求解
 
 ### ③ 设计规则检查与几何拓扑验证框架（黄线）— 作用于小屋4/5
@@ -234,7 +234,7 @@ for agent in agents:
 - 干涉检查：全量配对干涉检测
 - 运动学间隙：运动部件间隙是否满足最小要求
 - 装配约束合理性：配合类型是否正确（重合/同轴/距离等）
-- 调用：`python sw_bridge.py status` + SW 内置干涉检查工具
+- 调用：`python "<工程模式根目录>\tools\sw_bridge.py" status` + SW 内置干涉检查工具
 
 **B. GB/T 制图规范检查**（小屋5 出图阶段）：
 每次生成工程图（.slddrw）后**必须**自动运行：
@@ -246,7 +246,7 @@ for agent in agents:
 6. 标题栏：材料、比例、图号、设计者信息
 
 **C. CADX 几何验证**（小屋5 出图后）：
-`python sw_bridge.py cad-validate <图纸.dxf>`
+`python "<工程模式根目录>\tools\sw_bridge.py" cad-validate <图纸.dxf>`
 - 7项检查：未闭合多段线、重叠几何、尺寸过小、长宽比、墙厚、缺失元素、标注不一致
 - CRITICAL（红线）：必须修复 -> 触发红线路由回小屋5
 - WARNING（黄线）：建议修复
@@ -281,12 +281,17 @@ for agent in agents:
   → 报错回退：定位出错源房间 → room-fail <源房间> → 重新 select 重做 → 再进第2波
 第3波【出图期】：总装完成后调 select → 工程图输出
 
-SW 使用窗口互斥（代码级强制，无需人工协调）：
-  - 每个小屋的 sw_bridge.py 调用自动经过 mode_gate 的 SW 锁（FIFO 先到先用）
-  - 小屋1 在用 SW 时，小屋2/3 的 SW 调用自动阻塞等待
-  - 小屋1 用完（sw_bridge 进程结束自动释放），谁先排队谁先用
+SW 使用窗口互斥（进程级强制，检测 SLDWORKS.EXE 进程）+ 心跳保活：
+  - 每个小屋的 sw_bridge.py 调用自动检测 SW 进程并 FIFO 排队（谁先排队谁先用）
+  - 小屋1 在用 SW 时，小屋2/3 的调用返回 sw_busy:true → 执行 Start-Sleep -Seconds 90
+    后重试同一条命令（必须带 --room 房间名），队列位置保留，禁止放弃
+  - 小屋1 完全关闭 SW 进程后，队首（小屋2）才获得 SW 使用权，然后是小屋3
+  - 小屋完成建模后必须 sw_bridge.py close-all 完全关闭 SW 再收工
+  - room-end 兜底：发现本房间启动的残留 SW 进程，等 20 秒后强制关闭
   - 建模必须写单个脚本用 sw_bridge.py run 一次执行多步（一次调用规划多步操作）
-  - 开下一个子代理（同级或下一级）前必须先收尾 SW（close-all），锁随 room-end 自动释放
+  - 开下一个子代理（同级或下一级）前必须先收尾 SW（close-all）
+  - **💓 心跳保活**：每个小屋每 60 秒调 mode_gate.py room-heartbeat <房间名>，
+    超时（>3 分钟）则主对话自动 restart 重启该小屋
 
 ## 四、小屋工作规范
 
@@ -294,12 +299,22 @@ SW 使用窗口互斥（代码级强制，无需人工协调）：
 
 **大屋（主对话）独占：mode_gate / workflow_gate / subagent 相关命令**
 小屋（子代理）在任何情况下都**绝对禁止**调用以下命令——调用了就是夺舍，主流程会被劫持：
-- ❌ 禁止调用 mode_gate.py（room-start / room-end / room-fail / sw-* / declare / check）
+- ❌ 禁止调用 mode_gate.py **编排命令**（room-start / room-end / room-fail / sw-request / sw-wait / sw-release / declare / check）
 - ❌ 禁止调用 workflow_gate.py（init / provide_context / select / status）
 - ❌ 禁止调用 list_agents / interrupt_agent / send_message / subagent_fork 等编排命令
 - ❌ 禁止修改 mode_state.json / workflow_state.json
 
-小屋的唯一职责：在本小屋负责的房间内完成建模 / 验证 / 输出文件。
+✅ **小屋允许调用的 mode_gate.py 命令（仅进度上报通道）**：
+- room-report <房间名> <阶段> <详情>   —— 上报建模进度
+- room-heartbeat <房间名>              —— 心跳保活（每 60 秒）
+- room-report-read                     —— 读取进度报告
+
+这三条命令**只写入 reports/ 与 heartbeats/ 文件**，不修改 mode_state.json 的
+房间状态、SW 锁、队列，因此不属于编排命令，小屋可安全调用。
+（【B2 修复】旧版铁律笼统写"禁止调用 mode_gate.py"，与 C 模式要求的
+ "小屋进度旁路上报" 直接矛盾，导致 C 模式无法合规执行。现按命令语义区分。）
+
+小屋的唯一职责：在本小屋负责的房间内完成建模 / 验证 / 输出文件，并上报进度。
 所有房间登记、锁管理、波次推进、子代理编排，**全部由大屋统一调度**，小屋一概不参与。
 
 ---
@@ -432,7 +447,7 @@ SW 使用窗口互斥（代码级强制，无需人工协调）：
 
 报错回退（第2波失败时）：
 1. 大屋分析总装错误，定位出错源房间（结构件/传动机构/壳体机架）
-2. 调用 `python mode_gate.py room-fail <源房间名>` —— 该房间回到待处理状态
+2. 调用 `python "<工程模式根目录>\tools\mode_gate.py" room-fail <源房间名>` —— 该房间回到待处理状态
 3. 重新调用 select → 返回第1波（只含失败房间）→ 重做
 4. 重做完成后再次 select → 重新进入第2波
 

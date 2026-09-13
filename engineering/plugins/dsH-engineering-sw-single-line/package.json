@@ -1,0 +1,33 @@
+{
+  "name": "dsH-engineering-sw-single-line",
+  "version": "0.1.0",
+  "description": "工程模式 SW单行模式插件：权限预设注册 + 非工程模式发送前确认面板",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-agent-preset",
+        "@deepseek-ai/dsh-client-ui-permission-presets"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "react": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "keywords": ["dsh-plugin", "engineering", "sw-single-line", "deepseek-harness"],
+  "license": "MIT"
+}

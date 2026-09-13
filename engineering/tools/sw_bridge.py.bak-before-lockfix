@@ -253,16 +253,6 @@ def cmd_doctor(sw):
         result["template"] = tmpl or "NOT FOUND (请检查 SolidWorks 模板目录)"
     except Exception as e:
         result["solidworks"] = {"connected": False, "error": str(e)}
-
-    # 【B1修复】SW 可执行文件路径探测（注册表优先 + 全盘符扫描）
-    # 旧版只扫 C/D/E/F 盘，装在 Z 盘等非标准位置会误判"SW 未安装"。
-    try:
-        import swapi as _swapi
-        exe = _swapi.find_sldworks_exe()
-        result["sldworks_exe"] = exe or "NOT FOUND (注册表与全盘符均未找到 SLDWORKS.exe)"
-        result["install_drives_scanned"] = _swapi._all_drive_letters()
-    except Exception as _e:
-        result["sldworks_exe"] = "PROBE ERROR: %s" % _e
     # 结论
     problems = []
     if str(result.get("pywin32", "")).startswith("MISSING") or not result.get("pywin32"):
@@ -271,12 +261,6 @@ def cmd_doctor(sw):
         problems.append("mss 未安装: pip install mss")
     if str(result.get("pillow", "")).startswith("MISSING") or not result.get("pillow"):
         problems.append("Pillow 未安装: pip install Pillow")
-    # 【B1修复】SW 可执行文件找不到 → 明确报错而不是静默误判
-    _exe = str(result.get("sldworks_exe", ""))
-    if (not _exe) or _exe.startswith("NOT FOUND"):
-        problems.append("未找到 SLDWORKS.exe（已扫描盘符: %s）。"
-                        "请确认 SolidWorks 已安装，或手动设置环境变量 DSH_SW_EXE 指向可执行文件。"
-                        % result.get("install_drives_scanned"))
     if not result.get("solidworks", {}).get("connected"):
         problems.append("无法连接 SolidWorks: 请先启动 SolidWorks")
     if not result.get("template"):
@@ -1728,22 +1712,15 @@ def _gate_sw_lock(room):
 
 
 def _gate_sw_unlock(lock):
-    """【Bug4修复】单命令级锁：命令执行完立即释放，不占整个房间生命周期。
-
-    旧行为：锁随小屋生命周期保持，只在 room-end 释放。
-            -> 某小屋需要用户交互确认时，其他小屋被无限阻塞。
-    新行为：每条 sw_bridge 命令结束即释放锁，队列中下一个房间立即接管。
-            如需保持旧行为（整个房间持锁），设置 DSH_SW_UNLOCK_ON_EXIT=0。
-    """
+    """锁随小屋生命周期保持：不在进程退出时释放（同一小屋的下一条命令免重新排队）。
+    释放统一由 mode_gate room-end 完成（同时确保 SW 进程完全关闭）。
+    如需单条命令用完即释放，设置环境变量 DSH_SW_UNLOCK_ON_EXIT=1。"""
     try:
         if not lock or lock.get("skipped") or lock.get("busy"):
             return
-        # 默认：命令级释放（环境变量显式设 "0" 才保持房间级）
-        if os.environ.get("DSH_SW_UNLOCK_ON_EXIT") == "0":
+        if os.environ.get("DSH_SW_UNLOCK_ON_EXIT") != "1":
             return
         gate = _get_mode_gate_path()
-        if not gate or not os.path.exists(gate):
-            return
         subprocess.run([sys.executable, gate, "sw-release", lock.get("room", "")],
                        capture_output=True, text=True, encoding="utf-8", timeout=30)
     except Exception:
@@ -1772,17 +1749,7 @@ def main():
     except Exception:
         pass
     _lock = None
-    # 【B5修复】只读/自检命令不需要 SW 独占权，跳过锁与 --room 强制要求。
-    # 原先 doctor 因 parallel_mode=D 被强制要求 --room，无法做独立环境自检。
-    _READONLY_CMDS = {"self-path", "doctor", "status", "info", "list",
-                      "sw-proc", "help", "version", "ping"}
-    # 【测试反馈 Bug4 修复】SW【收尾类】命令也不该强制 --room：
-    #   close-all 的语义就是"关闭 SolidWorks 并释放使用权"，它本身就是释放动作。
-    #   若还要求先指定房间才能释放，会出现"锁被上一家占着 → 想释放却因没带 room
-    #   被拒"的死结；串行模式下更是完全没有房间概念。
-    #   因此 close-all / sw-release / rooms-reset 豁免 --room 与取锁流程。
-    _NO_ROOM_CMDS = {"close-all", "sw-release", "rooms-reset"}
-    if cmd not in _READONLY_CMDS and cmd not in _NO_ROOM_CMDS:
+    if cmd != "self-path":
         _room_id = _detect_gate_room(args)
         if _room_id is None and _need_room:
             print(json.dumps({"ok": False, "error": "并行模式下必须指定 --room <房间名>！",
