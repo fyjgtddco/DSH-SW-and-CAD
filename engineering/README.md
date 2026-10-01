@@ -96,11 +96,78 @@ patch 是**整体替换该行 config**，一旦覆盖了 `presets` 表又没给 
 
 ## 工作流门禁（Mode 2 · 大型复杂器械装配）
 
-### 三步门禁（必须用 DSH 工具，不是命令行）
+> ⚠️ **【BUG-03/04 修复】真实入口是命令行脚本，不是 DSH 工具**
+>
+> 历史文档曾写 `workflow-gate-init` / `workflow-gate-provide-context` /
+> `workflow-gate-select` 这些"DSH 工具名"，但**本环境并未注册这些工具**，
+> 照文档调用必然失败。真实入口是 `tools/workflow_gate.py` 的命令行：
+>
+> ```powershell
+> $WG = "<工程模式根目录>\tools\workflow_gate.py"
+> python $WG init "<任务描述>"              # 第 1 步：返回第 0 题
+> python $WG provide_context "<回答原文>"   # 第 2 步：第一次 → 第二段问题
+> python $WG provide_context "<回答原文>"   #          第二次 → 力学估算
+> python $WG select C,E                    # 第 3 步：搭建方式+并行策略
+> python $WG confirm-assembly "<零件清单>"  # 总装前确认
+> python $WG status / recover / reset
+> ```
+>
+> `select` 接受多种写法（**BUG-03 修复**，不再只有单一格式）：
+> `select C E` / `select C,E` / `select "C, E"` / `select c e` /
+> `select --choice C --parallel E`
 
-1. `workflow-gate-init` — 返回**统一问题集**，必须原样问给用户
-2. `workflow-gate-provide-context` — 力学估算，返回 A/B/C 搭建方式 + D/E 并行策略
-3. `workflow-gate-select` — 用户选定后生成子代理房间配置
+### 三步门禁（命令行脚本）
+
+1. `workflow_gate.py init "<任务>"` — 返回**第 0 题：参数需求强度**，必须原样问给用户
+2. `workflow_gate.py provide_context "<回答>"` — **需调用两次**：
+   第一次判深度并返回第二段问题；第二次做力学估算，
+   返回 A/B/C 搭建方式 + D/E 并行策略
+3. `workflow_gate.py select C,E` — 用户选定后生成子代理房间配置
+
+### 数值口径一致性（BUG-01 / 07 修复）
+
+`init → provide_context` 阶段的力学估算现在：
+
+| 项目 | 修复前 | 修复后 |
+|------|--------|--------|
+| 额定载荷 | 只看关键词，**忽略用户写的数值**；500N 起算 | **优先读取用户明确给出的数值**（`100N`/`10kg`/`0.1kN`…） |
+| 冲击关键词 | 直接把载荷 ×2（100N → 1000N，放大 10 倍） | 只作用于**动载系数**，不改用户给的额定值 |
+| 与 physics 口径 | 门禁一套数、physics 另一套数（BUG-07） | 门禁**直接落盘载荷工况**，physics 直接读该文件 |
+
+落盘文件：`tools/load_cases/gate_load_case.json`，其中
+`magnitude_n = nominal_load_n`（额定载荷）；设计校核另乘 `impact_factor`。
+另含 `acceptance.design_life_years` / `operating_cycles_per_year`，
+供 physics 疲劳模块做 S-N + Miner 累积损伤校核。
+
+> 若用户未给出载荷数值，返回体会带 `load_is_estimate=true` 与醒目提示 ——
+> **必须向用户复核**，不得拿估算值当设计基准。
+
+### 疲劳 / 设计寿命校核（BUG-02 修复）
+
+修复前整条工具链只有**线性静力**，没有疲劳与寿命校核。现在：
+
+```powershell
+# 疲劳校核（默认按 30 年设计寿命）
+python sw_bridge.py physics-fatigue <case.json>
+python sw_bridge.py physics-fatigue --report <run_id>
+python physics_bridge.py fatigue <case.json> --stress 45   # 直接给应力
+```
+
+- 方法：Basquin S-N + Marin 修正（ka/kb/kc/kd/ke）+ Goodman/Soderberg/Gerber
+  平均应力修正 + **Miner 线性累积损伤**
+- 每次 `solve_fea` 都会**自动追加**疲劳校核，结论并入 `gates` 与 `overall`；
+  静力过了但寿命不够的零件会被判 `FAIL`，不再误判为 PASS
+- 铝合金按无真实疲劳极限处理（5×10⁸ 次条件极限）
+
+### 材料健全性（BUG-05 / 08 修复）
+
+- `swapi.new_part()` **默认赋 Q235 碳钢**（7850 kg/m³），
+  杜绝"密度恒为 1000（水）"；可用 `new_part(material="6061-T6")` 覆盖
+- physics 报告在材料缺失/密度=1000 时给出**显式告警**并阻断疲劳结论，
+  不再显示 `?` 让人误以为正常
+- SW 导出 DXF 后**自动整理图层名**：中文图层（"可见边线"/"尺寸"…）
+  映射为 CADX 标准层 `OUTLINE/THIN/CENTER/HIDDEN/DIM/TEXT/HATCH`，
+  并补齐缺失的标准层 —— 消除每次出图的一堆 MISSING_LAYER WARNING
 
 ### 统一问题集（17 题 · 单一事实来源）
 

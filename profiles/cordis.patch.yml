@@ -24,8 +24,32 @@
 - id: permission
   name: "@deepseek-ai/dsh-permission-presets"
   config:
-    # 与设置页"默认权限模式"一致：新会话默认 Full access
-    defaultPreset: danger-full-access
+    # 【问题1 修复 · 关键】这里【绝对不能】再写死 defaultPreset！
+    #
+    # 机制（已核实 dsh-permission-presets 源码）：
+    #   · 服务构造时：const defaultPreset = config.defaultPreset ?? this.derive(EMPTY_KNOBS);
+    #     然后 installSettingsSection(..., baseSettings={defaultPreset}, {
+    #       setSource: (current) => { this.defaultSettings = current }   // ← 设置页写入处
+    #     })
+    #   · 新会话创建时：pinInitialPermission() 调 this.defaultPreset（即 defaultSettings
+    #     的值）给会话打初始权限钉。
+    #
+    # 原来的写法把 defaultPreset 硬编码成 danger-full-access，等价于把"设置页的
+    # 初始值"钉死成了常量。虽然 setSource 仍会在用户改设置页后覆盖内存值，
+    # 但一旦出现以下任一情况，就会被这个硬编码值固定：
+    #   ① 设置页尚未写过（全新 profile）→ 所有新会话一律 danger-full-access；
+    #   ② patch 整体替换 dsh-base 的 config，覆盖了宿主其它层注入的默认；
+    #   ③ profile 重装/升级后设置存储被重置 → 又回落到这个硬编码值。
+    # 用户表现为："无论在哪些场景、哪个情况，新建对话都是同一个权限模式"。
+    #
+    # 正确做法：完全【不声明】defaultPreset ——
+    #   · 让 config.defaultPreset 为 undefined → 走 ?? this.derive(EMPTY_KNOBS)；
+    #   · derive() 会按 shell/approval 的实际组合推导出匹配的预设；
+    #   · 设置页（installation settings）成为唯一权威来源，用户选什么就是什么，
+    #     且每个新会话都会正确地取"当前用户默认值"。
+    #
+    # 保留 presets 表（必须完整重述，因为 patch 是整体替换该行 config）。
+    # 注意：本文件修改后【必须重启 DSH】才生效（宿主层/进程级配置）。
     presets:
       read-only:
         sandbox: read-only

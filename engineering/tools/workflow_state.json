@@ -1,22 +1,45 @@
 {
   "step": "user_selected",
-  "task": "设计一个使用寿命30年、能搬运300N的东西的机械臂",
-  "context": "1.使用场合:户外; 2.负载类型:冲击/循环(300N固定重量，有碰撞风险，需额外安全裕度); 3.运行方式:电动(伺服电机+减速器); 4.工作频率:偶尔使用; 5.特殊要求:无特殊环境要求，标准防护即可。使用寿命目标30年。",
+  "task": "设计一台校内竞速小车，要求高速直线行驶并快速转弯，赛道：外形4500x4500mm方框赛道，含R600圆弧、R688.57圆弧、2100mm直线、1000mm窄段、1600mm入口；小车需3D打印制造",
+  "context": "强需求：严格校核，参数要有设计依据 1. 阿克曼转向4轮（前轮舵机转向、后轮双无刷电机+减速箱直驱）\n2. 长300×宽180×高120mm，轴距200mm，轮距150mm\n3. 单片车架底板(300×180×8) + 前/后横梁骨架，PETG\n4. 前置摄像头座、电池仓、双电机座、舵机支架\n5. 赛道4500×4500方框、R600/R688.57圆弧、1000mm窄段、1600mm入口；整车包络≤300×180×120mm\n6. 整车目标重量≤1.5kg(含电池)，碰撞冲击按整车自重1.5kg·g≈14.71N 额定\n7. 频繁启停/冲击+过弯侧向力，动载系数2.0\n8. 普通室内赛道\n9. 1年(200000次跑动循环)\n10. 后轮双无刷电机+减速箱直驱，前舵机转向\n11. 间歇运行(单圈数分钟)\n12. 较高(转向±0.5°、直线偏差<20mm/5m)\n13. PETG(结构件/壳体) + Nylon PA12(齿轮/耐磨件) + ABS + Q235碳钢(车轴/轴承座内衬)\n14. 3D打印(FDM)为主，轴类CNC\n15. 均衡(强度/重量/成本平衡)\n16. 符合校内竞速规则(尺寸上限300×180×120mm)\n17. 无",
   "mechanics_result": {
-    "load_estimate": "1000 N",
-    "safety_factor": 2.5,
-    "material_recommend": "Q235 Carbon Steel",
+    "load_estimate": "29 N",
+    "safety_factor": 3.0,
+    "material_recommend": "PETG",
     "scenario": "通用工业场景",
-    "notes": "基于用户输入估算"
+    "notes": "额定载荷来源: 用户输入: 1.5kg；动载系数 ×2.0（impact）；设计寿命 1 年（用户输入）；动作频次 200000 次/年（间歇运行(每天数小时) 估算）",
+    "nominal_load_n": 14.71,
+    "design_load_n": 29.42,
+    "impact_factor": 2.0,
+    "load_type": "impact",
+    "load_source": "用户输入: 1.5kg",
+    "user_load_n": 14.71,
+    "design_life_years": 1.0,
+    "cycles_per_year": 200000.0,
+    "load_is_estimate": false,
+    "material_source": "用户回答/任务描述中的材料选择（3D 打印材料库）",
+    "material_spec": {
+      "id": "PETG",
+      "name": "PETG",
+      "youngs_modulus_mpa": 2000.0,
+      "poissons_ratio": 0.37,
+      "yield_strength_mpa": 40.0,
+      "uts_mpa": 50.0,
+      "density_kg_m3": 1270.0,
+      "source": "workflow_gate.infer_material"
+    },
+    "task_type": "vehicle",
+    "task_type_label": "轮式车辆 / 小车",
+    "consistency_contract": "physics 载荷工况的 magnitude_n 必须等于 nominal_load_n（设计校核另乘 impact_factor，不得直接写 design_load_n 当额定值）"
   },
-  "user_choice": "C",
+  "user_choice": "A",
   "choice_detail": {
-    "label": "步步确认",
-    "strategy": "sequential",
-    "detail": "every_step",
-    "desc": "每步确认"
+    "label": "完全自主搭建",
+    "strategy": "parallel",
+    "detail": "full",
+    "desc": "AI自主决策"
   },
-  "parallel_mode": "E",
+  "parallel_mode": "D",
   "subagent_config": {
     "rooms": [
       [
@@ -38,56 +61,41 @@
       [
         "工程图输出",
         "drafting"
+      ],
+      [
+        "支撑结构",
+        "support"
       ]
     ],
     "strategy": {
-      "parallel": false,
-      "ask_user_at": [
-        "every_part"
-      ],
-      "detail_level": "every_step",
-      "confirmation_protocol": [
-        "=== C模式·步步确认协议（每个零件独立走一遍完整循环，不得合并或跳过） ===",
-        "",
-        "【本小屋允许调用的 mode_gate.py 命令（仅进度上报通道）】",
-        "  ✅ 允许: room-report（进度上报）、room-heartbeat（心跳保活）",
-        "  ❌ 禁止: room-start / room-end / room-fail / sw-request / sw-wait / sw-release / declare / check",
-        "     以上编排命令由大屋（主对话）独占，小屋调用=夺舍，主流程会被劫持。",
-        "  说明: room-report / room-heartbeat 只写入 reports/ 与 heartbeats/ 文件，",
-        "        不修改 mode_state.json 的房间与锁状态，因此不属于编排命令，可安全调用。",
-        "",
-        "【每个零件的确认循环 —— 对房间内的每一个零件重复执行以下步骤，直到所有零件都走完】",
-        "第一步（输出参数表）：",
-        "  输出结构化【零件参数表】：零件名 / 材料 / 关键尺寸(长宽厚、直径、孔径) / 配合公差 / 设计依据",
-        "第二步（用户确认）：",
-        "  用 ask_user_question 工具把参数表展示给用户，问：「以下参数将用于建模 <零件名>，要用吗？」",
-        "  必须等用户明确答复（用/可以/确认/OK 任一表示通过）才继续；未答复前禁止调用 sw_bridge",
-        "第三步（建模执行）：",
-        "  用户确认后，用 sw_bridge.py 建模该零件；完成后调 mode_gate.py room-report <房间名> part_done '<零件名> 已建模完毕'",
-        "",
-        "【用户要求修改时的分支】",
-        "  用户提出修改意见 → 修改参数后重新回到第二步（必须再问一次用户确认），禁止用户没说 OK 就直接改完建模",
-        "",
-        "【违规判定】",
-        "  - 未等用户确认就调 sw_bridge = 该零件作废，重做该零件全程",
-        "  - 把多个零件的确认合并成一次问 = 违规，拆回每个零件单独问",
-        "  - 跳过一个零件直接建模 = 违规，补做完所有被跳过零件的确认循环",
-        "",
-        "【进度旁路上报（与确认循环并行，不阻断流程）】",
-        "  以下节点必须调 mode_gate.py room-report <房间名> <阶段> <详情>：",
-        "  - params_shown：已展示参数表等用户确认",
-        "  - params_confirmed：用户已确认，开始建模",
-        "  - modeling：建模脚本执行中",
-        "  - part_done：单零件完成",
-        "  - validating：FEA/CADX 验证中",
-        "  - done：本房间全部零件完成",
-        "  - failed：失败，<原因>"
-      ]
+      "parallel": true,
+      "ask_user_at": [],
+      "detail_level": "full",
+      "confirmation_required": false,
+      "confirm_part_token_required": false,
+      "note": "完全自主：小屋可直接建模，无需逐零件人工确认；但必须在报告里输出带量化设计依据的【零件参数表】。"
     },
-    "parallel_mode": "sequential",
-    "total_rooms": 5,
-    "conflict_warning": "⚠️【B3 冲突已自动消解】C 模式（步步确认）要求每个零件阻塞等用户确认，而并行模式下多个子代理无法协调对用户的串行提问，且会互抢 SW 锁。已将并行策略自动降级为『单小屋串联（E）』：每波只启动一个房间，该房间内每个零件走完确认循环后再启动下一波。如需真正的并行，请改用 A 或 B 模式。",
-    "original_parallel_mode": "parallel"
+    "parallel_mode": "parallel",
+    "total_rooms": 6,
+    "retry_policy": {
+      "retry_limit_per_part": 3,
+      "on_exceed": [
+        "跳过该零件并 room-report failed",
+        "降级为简化几何（如圆角代替复杂曲面）",
+        "上报主对话请求人工介入"
+      ],
+      "room_timeout_min": 45,
+      "note": "【Bug-19】单零件重试上限 3 次；房间软超时 45 分钟。超限必须 room-report failed 并交主对话决策，禁止无限重试拖死整波。"
+    }
   },
-  "created_at": "2026-09-10 15:42:17"
+  "created_at": "2026-10-01 09:55:45",
+  "parallel_mode_reconciled_at": "2026-10-01 09:55:29",
+  "task_id": "20261001_095545_68323AED",
+  "work_dir": "C:\\Users\\j1877\\Desktop\\test\\20261001_095545_68323AED",
+  "assembly_confirmed": false,
+  "assembly_inputs": null,
+  "finished_at": null,
+  "param_depth": "full",
+  "depth_answer": "强需求：严格校核，参数要有设计依据",
+  "load_case_file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\load_cases\\gate_load_case.json"
 }

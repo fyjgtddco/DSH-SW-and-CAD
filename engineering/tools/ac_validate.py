@@ -596,8 +596,19 @@ class DXFAnalyzer:
         if pattern:
             import re as _re
             for ln in existing:
-                if ln in ("0", "DEFPOINTS", "DSH_CADX_VALIDATION"):
+                # ── 【BUG-06 修复·实机补强】豁免 AutoCAD/SW 固有保留层 ──────
+                # 原实现对 "Defpoints" 用的是【全大写】比较，而 DXF 里实际
+                #   存的是 "Defpoints"（首字母大写）→ 大小写不匹配，豁免失效；
+                #   同时完全没覆盖 "SLD-0"（SolidWorks 默认层）与工程图内部
+                #   的纯数字保留层（"5"/"9"/"10"…）。
+                #   后果：每次 SW 出图都刷 4~6 条 LAYER_NAME_INVALID INFO，
+                #   把真正需要处理的问题淹没在噪声里。
+                # 现改为【大小写不敏感 + 覆盖 SLD-0/纯数字层】。
+                _ln_k = str(ln).strip().lower()
+                if _ln_k in ("0", "defpoints", "dsh_cadx_validation", "sld-0"):
                     continue
+                if _ln_k.isdigit():
+                    continue          # SW 工程图内部数字保留层
                 if not _re.match(pattern, ln):
                     self.issues.append(Issue(
                         id=self._next_id(),

@@ -36,16 +36,36 @@ export class SwSingleLineModeService extends Service {
     this._applyToAllSessions();
   }
 
-  /** 从 session events 中解析当前 agent preset */
+  /** 从 session events 中解析当前 agent preset
+   *
+   * 【DSH 0.2.0 兼容改造】（兼容性清单 第 5 项）
+   *  0.2.0 的 Session 不再公开 events 数组（日志是私有状态），
+   *  同步读取只能走 session.snapshotEvents()；创建时的预设则落在
+   *  header.agentPreset（SessionHeader 的正式字段）。
+   *  这里两条都取，旧版 .events 仅作兜底，语义与原来完全一致。
+   */
   _resolveCurrentPreset(session) {
-    if (!session || !session.events) return null;
-    for (let i = session.events.length - 1; i >= 0; i--) {
-      const ev = session.events[i];
-      if (ev && ev.type === 'agent-preset/selected') {
-        return ev.data && ev.data.agentPreset;
+    if (!session) return null;
+    let evs = null;
+    try {
+      if (typeof session.snapshotEvents === 'function') {
+        evs = session.snapshotEvents();
+      } else if (Array.isArray(session.events)) {
+        evs = session.events;
+      }
+    } catch (e) {
+      evs = null;
+    }
+    if (Array.isArray(evs)) {
+      for (let i = evs.length - 1; i >= 0; i--) {
+        const ev = evs[i];
+        if (ev && ev.type === 'agent-preset/selected') {
+          const v = ev.data && ev.data.agentPreset;
+          if (v) return v;
+        }
       }
     }
-    return session.header && session.header.agentPreset;
+    return (session.header && session.header.agentPreset) || null;
   }
 
   /** 对现有会话立即应用：已是 engineering 的会话切换其权限预设到 sw-single-line */

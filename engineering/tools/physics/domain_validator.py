@@ -198,6 +198,180 @@ def validate_with_domain(
     }
 
 
+
+# ══ 【C16 修复】单位一致性校验 ═════════════════════════════════════════
+# 测试反馈（真实数学 bug）：壳体机架房间抗倾覆校核【单位错误导致虚高 1000 倍】，
+#   单件 K=33.6 虚高，整机总装核算 K=0.24 FAIL。
+# 根因：N 与 kN、mm 与 m 混用（1000 因子），且没有任何机制捕获它。
+# 修复：提供通用单位校验器，对力学量做【量级合理性】检查；
+#   同时给出抗倾覆安全系数 K 的标准算法（统一 N / mm），杜绝口径混乱。
+
+# 单位换算到基准单位（力=N，长度=mm，力矩=N·mm，质量=kg）
+_UNIT_SCALE = {
+    # 力 → N
+    "n": 1.0, "N": 1.0, "kn": 1000.0, "kN": 1000.0,
+    "kgf": 9.80665, "tf": 9806.65, "lbf": 4.4482216152605,
+    # 长度 → mm
+    "mm": 1.0, "cm": 10.0, "m": 1000.0, "in": 25.4,
+    # 力矩 → N·mm（覆盖工程里各种写法，避免因写法不同而"误报未知单位"）
+    "nmm": 1.0, "N·mm": 1.0, "Nmm": 1.0, "N.mm": 1.0, "n-mm": 1.0,
+    "n.m": 1000.0, "Nm": 1000.0, "N·m": 1000.0, "N*m": 1000.0, "n-m": 1000.0,
+    "knm": 1000000.0, "kN·m": 1000000.0, "kN.m": 1000000.0, "kNm": 1000000.0,
+    # 应力/压强 → MPa
+    "pa": 1e-6, "kpa": 1e-3, "mpa": 1.0, "gpa": 1000.0,
+    "n/mm2": 1.0, "N/mm2": 1.0, "mpa_nmm2": 1.0,
+}
+
+
+def _norm_unit(u: str) -> str:
+    """单位归一化：统一大小写与常见分隔符写法。
+
+    【C16】工程里同一个单位有大量写法（N.m / N·m / Nm / n-m、MPa / N/mm2 …），
+      若严格区分大小写，会把"N.m"和"n.m"当成两个不同单位，
+      既可能误报"未知单位"，也可能掩盖真正的单位不一致 —— 必须归一化。
+    """
+    s = str(u).strip()
+    s = s.replace("·", ".").replace("*", ".").replace("×", ".")
+    s = s.replace(" ", "").replace("_", "")
+    return s.lower()
+
+
+# 归一化后的单位表（启动时构建一次）
+_UNIT_NORM = {}
+for _k, _v in _UNIT_SCALE.items():
+    _UNIT_NORM.setdefault(_norm_unit(_k), _v)
+
+
+def convert(value: float, from_unit: str, to_unit: str) -> float:
+    """通用单位换算（大小写不敏感）。任一单位未知时抛 ValueError。
+
+    【C16】静默返回原值是单位 bug 的温床 —— 必须显式报错，
+      但报错前应先做归一化，避免因写法差异产生假报错。
+    """
+    fu, tu = _norm_unit(from_unit), _norm_unit(to_unit)
+    if fu not in _UNIT_NORM:
+        raise ValueError("未知源单位: %r（可用示例: %s）"
+                         % (from_unit, ", ".join(sorted(set(_UNIT_SCALE))[:20])))
+    if tu not in _UNIT_NORM:
+        raise ValueError("未知目标单位: %r" % (to_unit,))
+    return float(value) * _UNIT_NORM[fu] / _UNIT_NORM[tu]
+
+
+def check_unit_consistency(quantities: dict, domain: str = "structural") -> dict:
+    """【C16 修复】单位一致性 + 量级合理性校验。
+
+    用途：任何力学计算结果上报前先过一遍本函数，能拦下绝大多数
+      N/kN、mm/m 混用造成的 1000 倍错误（正是抗倾覆校核翻车的根因）。
+
+    Args:
+        quantities: {名称: {"value": 数值, "unit": 单位, "expected_unit": 期望单位}}
+                    也接受简写 {"名称": (数值, 单位)}
+        domain: structural / transmission / thermal ... 用于选择量级参考
+
+    Returns:
+        {ok, issues:[], checked:int, hint}
+    """
+    issues = []
+    checked = 0
+    # 各物理量的"合理量级"参考区间（在基准单位下）
+    _SANE = {
+        "force_n":        (1e-3, 1e7),      # 1 mN ~ 10 MN
+        "length_mm":      (1e-3, 1e5),      # 1 µm ~ 100 m
+        "moment_nmm":     (1e-3, 1e10),
+        "stress_mpa":     (1e-3, 1e4),      # 1 kPa ~ 10 GPa
+        "mass_kg":        (1e-6, 1e6),
+        "safety_factor":  (0.01, 1e4),
+        "stiffness_n_mm": (1e-4, 1e10),
+    }
+    for name, spec in (quantities or {}).items():
+        checked += 1
+        try:
+            if isinstance(spec, (tuple, list)) and len(spec) >= 2:
+                val, unit = float(spec[0]), str(spec[1])
+                exp_unit = None
+            elif isinstance(spec, dict):
+                val = float(spec.get("value", 0))
+                unit = str(spec.get("unit", ""))
+                exp_unit = spec.get("expected_unit")
+            else:
+                val = float(spec)
+                unit, exp_unit = "", None
+        except Exception as e:
+            issues.append({"name": name, "level": "error",
+                           "message": "无法解析数值: %r" % (e,)})
+            continue
+        # 1) 单位是否已知（归一化后判断）
+        if unit and _norm_unit(unit) not in _UNIT_NORM:
+            issues.append({"name": name, "level": "warn",
+                           "message": "单位 %r 不在已知表内，无法校验一致性" % unit})
+        # 2) 与期望单位比对（给出换算建议）
+        if unit and exp_unit and _norm_unit(unit) != _norm_unit(exp_unit):
+            try:
+                conv = convert(val, unit, exp_unit)
+                issues.append({"name": name, "level": "error",
+                               "message": ("单位不一致：得到 %s %s，期望 %s %s。"
+                                           "按换算应为 %s %s（差了 %.6g 倍）")
+                                           % (val, unit, exp_unit, exp_unit,
+                                              round(conv, 6), exp_unit,
+                                              (conv / val) if val else 0)})
+            except Exception:
+                pass
+        # 3) 量级合理性（抓 1000 倍这类错误）
+        _key = {"force": "force_n", "length": "length_mm",
+                "moment": "moment_nmm", "stress": "stress_mpa",
+                "mass": "mass_kg", "safety_factor": "safety_factor"}.get(name.replace("_n", "").replace("_mm", ""), None)
+        _rng = _SANE.get(_key)
+        if _rng and (val < _rng[0] or val > _rng[1]):
+            issues.append({"name": name, "level": "warn",
+                           "message": ("量级异常：%s %s 超出常见范围 [%g, %g]"
+                                       " —— 请检查是否存在 N/kN 或 mm/m 混用")
+                                       % (val, unit or "?", _rng[0], _rng[1])})
+    _errs = [i for i in issues if i.get("level") == "error"]
+    return {"ok": len(_errs) == 0, "checked": checked, "issues": issues,
+            "errors": len(_errs),
+            "hint": ("发现单位不一致，必须先统一到 N / mm / MPa / N·mm 再计算。"
+                     "抗倾覆安全系数 K 的百万倍/千倍错误即源于此类混用。")
+                     if _errs else "单位一致性检查通过。"}
+
+
+def overturning_safety_factor(resisting_moment_nmm: float,
+                              overturning_moment_nmm: float) -> dict:
+    """抗倾覆安全系数 K（统一 N·mm 口径，杜绝 1000 倍错误）。
+
+    【C16 修复】标准定义：K = M_抗倾覆 / M_倾覆，二者必须是【同一力矩单位】。
+      常见错误：一侧用 N·m、另一侧用 N·mm → K 直接差 1000 倍
+      （测试中单件 K=33.6 虚高、整机 K=0.24 FAIL 即为此类）。
+      本函数强制要求传入 N·mm，并在返回值里附带两者数值供复核。
+
+    判据（工程惯例，可依据具体标准调整）：
+      K >= 2.0  通过（一般机械）
+      1.5 <= K < 2.0  偏低，需复核
+      K < 1.5   不通过，必须加大配重/加宽支撑/降低重心
+
+    Args: 抗倾覆力矩与倾覆力矩，单位均为 N·mm
+    Returns: {ok, K, resisting_nmm, overturning_nmm, judgement, hint}
+    """
+    try:
+        mr = float(resisting_moment_nmm)
+        mo = float(overturning_moment_nmm)
+    except Exception as e:
+        return {"ok": False, "error": "力矩必须为数值: %r" % (e,)}
+    if mo == 0:
+        return {"ok": False, "error": "倾覆力矩为 0，无法计算 K（请检查载荷输入）"}
+    K = mr / mo
+    if K >= 2.0:
+        judgement, ok = "通过（K>=2.0）", True
+    elif K >= 1.5:
+        judgement, ok = "偏低，建议复核（1.5<=K<2.0）", False
+    else:
+        judgement, ok = "不通过（K<1.5），需加大配重/加宽支撑/降低重心", False
+    return {"ok": ok, "K": round(K, 4),
+            "resisting_nmm": mr, "overturning_nmm": mo,
+            "K_over_1": round(1.0 / K, 4),
+            "judgement": judgement,
+            "hint": ("⚠️ 若 K 与手算相差整数倍（1000/1e6），"
+                     "几乎一定是两侧力矩单位不一致：统一为 N·mm 后重算。")}
+
 def _check_condition(value: Any, condition: dict) -> Optional[str]:
     """检查值是否满足条件。
 

@@ -290,8 +290,15 @@ SW 使用窗口互斥（进程级强制，检测 SLDWORKS.EXE 进程）+ 心跳�
   - room-end 兜底：发现本房间启动的残留 SW 进程，等 20 秒后强制关闭
   - 建模必须写单个脚本用 sw_bridge.py run 一次执行多步（一次调用规划多步操作）
   - 开下一个子代理（同级或下一级）前必须先收尾 SW（close-all）
-  - **💓 心跳保活**：每个小屋每 60 秒调 mode_gate.py room-heartbeat <房间名>，
-    超时（>3 分钟）则主对话自动 restart 重启该小屋
+  - **🔴【Bug-23 修复】存活判定改用 DSH 平台状态，不再要求小屋跳心跳**：
+    用户明确要求"去掉心跳机制，直接采用 DSH 平台 running 状态判定子代理是否死亡"。
+    实测：小屋心跳 age 涨到 1222~1777s，但平台侧 list_agents 始终 running、
+    且持续产出零件 —— 心跳完全失真（小屋忙于 SW 建模没空调 mode_gate）。
+    · 大屋在每次 `list_agents` 之后，用一条命令登记平台真实状态：
+      `python "<工程模式根目录>\tools\mode_gate.py" platform-sync <房间名> running|inactive|missing`
+    · room-status / residue-check / recover 全部以该登记为准（10 分钟内有效）；
+    · 小屋 **不再需要** room-heartbeat（该命令保留兼容，但已降级为辅助证据）；
+    · 小屋只需在关键节点 room-report，并在 save 后 room-artifact 登记产物归属。
 
 ## 四、小屋工作规范
 
@@ -306,16 +313,112 @@ SW 使用窗口互斥（进程级强制，检测 SLDWORKS.EXE 进程）+ 心跳�
 
 ✅ **小屋允许调用的 mode_gate.py 命令（仅进度上报通道）**：
 - room-report <房间名> <阶段> <详情>   —— 上报建模进度
-- room-heartbeat <房间名>              —— 心跳保活（每 60 秒）
+- room-artifact <房间名> <文件路径> [零件名]  —— 【Bug-16/17】登记本房间产物归属
 - room-report-read                     —— 读取进度报告
+- whoami <房间名>                      —— 【Bug#5 修复】自查身份，**无需任何参数**
+- room-heartbeat <房间名>              —— 【Bug-23】兼容保留，**已非必需**
 
-这三条命令**只写入 reports/ 与 heartbeats/ 文件**，不修改 mode_state.json 的
+这些命令**只写入 reports/ 与 heartbeats/ 文件**，不修改 mode_state.json 的
 房间状态、SW 锁、队列，因此不属于编排命令，小屋可安全调用。
 （【B2 修复】旧版铁律笼统写"禁止调用 mode_gate.py"，与 C 模式要求的
  "小屋进度旁路上报" 直接矛盾，导致 C 模式无法合规执行。现按命令语义区分。）
 
 小屋的唯一职责：在本小屋负责的房间内完成建模 / 验证 / 输出文件，并上报进度。
 所有房间登记、锁管理、波次推进、子代理编排，**全部由大屋统一调度**，小屋一概不参与。
+
+### 🆔 身份自查（Bug#5 修复 · 一条命令搞定）
+
+小屋开工第一件事：
+
+```
+python "<工程模式根目录>\tools\mode_gate.py" whoami "<你的房间名>"
+```
+
+**不需要传 --session-id！** 本命令自动从 DSH 注入的环境变量
+（`DSH_SESSION_JSONL` / `DSH_SESSION_ID`）反解出你自己的 sessionId 并就地登记。
+返回的 `subagent_id` 即 `ask_user.py --child` 的值。
+
+> 【Bug#5 修复背景】旧流程要求小屋"知道自己的 sessionId"，但该 id 由 DSH 在
+> fork 时分配、**根本不在小屋 prompt 里可见** → 小屋只能走 `--wait 30` 兜底，
+> 一旦主对话尚未 `subagent-assign` 就超时失败（时序竞态）。
+> 现在 whoami 自给自足，竞态被彻底消除。
+
+### 🔒 并发脚本隔离（Bug-39 修复 · 已自动生效）
+
+**小屋无需做任何事**：`sw_bridge.py run` 已修复并行脚本串号问题。
+
+> 【Bug-39 背景】原实现把执行包装器写成固定名 `_sw_run_wrapper.py` 且放在
+> **脚本同目录** —— 多小屋并行时互相覆盖，导致
+> "执行 build_transmission_6.py 实际跑的是 build_servo_v6.py"（**无任何报错**）。
+> 修复后：① 包装器名含 pid+脚本哈希，写在**临时目录**；
+> ② 包装器内**自校验**脚本路径与内容哈希，不符即拒绝执行（exit 3/4）；
+> ③ 返回值新增 `executed_script` / `executed_script_sha1` 供核对。
+> 若看到 `script_identity_verified: false`，说明脚本在运行前被改动，需排查。
+
+### 📋 零件归属清单（Bug-38 修复 · 大屋 + 小屋都用）
+
+`select` 现在额外返回 `part_ownership`（machine-readable JSON）并落盘到交付目录：
+
+```json
+{
+  "schema": "dsh-engineering/part-ownership@1",
+  "rooms": { "结构件": {"keywords": ["车架底板","横梁","悬架臂"]} },
+  "part_to_room": { "车架底板": "结构件", "电机座": "传动机构" }
+}
+```
+
+**大屋**：把每个房间的 keywords 写进小屋 prompt（"只允许产出这些零件"）。
+**小屋**：保存前自检 —— `python sw_bridge.py check-part <文件> --room <房间名>`；
+越界零件会被**拒绝保存**并记入 `part_ownership_violations.json`。
+**总装前**：`python "<工程模式根目录>\tools\workflow_gate.py" verify-ownership`
+做归属核对与**去重**（递归扫描各小屋子目录，检出同名重复零件）。
+
+> 【Bug-38 背景】实测结构件小屋误产"电机座"（属传动机构）、
+> 传动机构小屋误产"转向支撑座"（属支撑结构），产出目录混入别房间零件；
+> 若小屋不自纠，总装时会出现重复或缺失零件。
+
+### 🧭 产物归属登记（Bug-16/17 修复 · 小屋必做）
+
+小屋每次 `save` 出零件后，**主动登记产物归属**，取代 mode_gate 的 mtime 猜测：
+
+```
+python "<工程模式根目录>\tools\mode_gate.py" room-artifact <房间名> "<文件绝对路径>" [零件名]
+```
+
+> 【Bug-16/17 修复背景】原实现只按"工作目录里最近 mtime 的文件"推断产物归属，
+> 导致结构件刚产出的 `DSH_车架底板.SLDPRT` 被**同时归到 4 个房间**名下
+> （各房间 `disk_artifact=true`、`age_sec=2.5`）。后果：房间完成判定过早、
+> recover 误判、无法追溯"哪个房间造了哪个零件"。
+> 登记后 room-status 只显示**本房间登记过**的文件，归属确定。
+
+### 💓 心跳（Bug-23 修复 · 已降级为可选）
+
+**小屋无需再操心心跳**。存活判定的权威来源是 **DSH 平台状态**：
+大屋在 `list_agents` 后用 `mode_gate.py platform-sync <房间> running` 登记，
+mode_gate 据此判定死活（10 分钟内有效）。
+
+> 【Bug-23 修复背景】旧设计依赖心跳，实测心跳 age 涨到 1222~1777s 而平台侧
+> 始终 running、且持续产出零件 —— 心跳完全失真，据此 recover 只会误杀
+> 正在干活的屋子。`sw_bridge.py` 仍会在取锁/释放时顺手刷新心跳（兼容），
+> 但它**不再是判定死活的前提**。
+
+### 🧹 残留检测（本轮新增 · 开始前 + 结束前各一次）
+
+大屋在**开工前**与**收尾前**各跑一次体检，确保没有上一个对话的子对话残留干扰：
+
+```
+python "<工程模式根目录>\tools\mode_gate.py" residue-check          # 只体检
+python "<工程模式根目录>\tools\mode_gate.py" residue-check --clean  # 体检并清理
+```
+
+- **开始前**：`workflow_gate.py init` 会自动调用。
+  若检出上一轮残留（僵尸房间/孤儿 subagent 映射/step 卡在 user_selected），
+  **自动清理**后放行；若检出仍有**活着的**子对话，则拒绝 init 并告诉你谁在跑。
+- **结束前**：归档 `finished` 之前自动体检。
+  仍有活动的子对话 → **拒绝宣告完成**（防止"活没干完就说结束"）。
+
+> 【修复背景】旧版新任务会被上一轮的 `step=user_selected` 拦截（Bug#1），
+> 或把上一轮的 `ended_at` 误判为本轮完成（假 finished，Bug#6 同源）。
 
 ---
 

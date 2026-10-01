@@ -1,0 +1,44 @@
+{
+  "grants": {
+    "底壳": {
+      "by": "user",
+      "ts": 1790821137.6855447,
+      "time": "2026-10-01 10:18:57",
+      "shown_seen": true,
+      "answer_evidence": null,
+      "verified": true
+    },
+    "上罩": {
+      "by": "user",
+      "ts": 1790821137.7973819,
+      "time": "2026-10-01 10:18:57",
+      "shown_seen": true,
+      "answer_evidence": null,
+      "verified": true
+    },
+    "摄像头座": {
+      "by": "user",
+      "ts": 1790821137.880476,
+      "time": "2026-10-01 10:18:57",
+      "shown_seen": true,
+      "answer_evidence": null,
+      "verified": true
+    },
+    "电池托架": {
+      "by": "user",
+      "ts": 1790821137.962139,
+      "time": "2026-10-01 10:18:57",
+      "shown_seen": true,
+      "answer_evidence": null,
+      "verified": true
+    },
+    "横梁护罩": {
+      "by": "user",
+      "ts": 1790821138.0479674,
+      "time": "2026-10-01 10:18:58",
+      "shown_seen": true,
+      "answer_evidence": null,
+      "verified": true
+    }
+  }
+}

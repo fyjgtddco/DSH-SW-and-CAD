@@ -375,6 +375,128 @@ swapi.select_sketch_by_name(sw, m.model, "轮廓")
   1. 每次 `SelectByID2` 尝试前调用 `clear_selection()` 清除状态
   2. `extrude()` / `cut()` / `revolve()` 创建特征后自动调用 `rebuild()` 刷新模型状态
 
+### Bug #19 — begin_sketch 遇圆柱面后第 3 次必失败（高严重级）
+- **现象**：实体包含圆柱/回转面后，第 3 次调 `begin_sketch("Front Plane")` 抛 RuntimeError
+  （影响所有"先圆柱拉伸再打孔"的流程）
+- **根因**：原 fallback 用固定坐标 `SelectByID2("", "FACE", x, y, z, ...)` 做射线拾取，
+  一旦实体出现曲面，这些固定坐标会落在曲面或边界上（SW 把边界点识别为边/顶点而非面）→ 选择必败
+- **修复**：fallback 第一步改用本项目已有的 `_select_face_by_box()`（按面包围盒精确匹配，
+  不依赖坐标投影，天然免疫"点到曲面/边"）
+- **规避**：若仍失败，可把多轮廓合并到一次 `cut` 完成
+
+### Bug #20 — swapi 缺装配 API，总装只能写裸 COM（高严重级）
+- **现象**：Wave2 总装阶段发现无 `new_assembly()`、无 `AddMate`/`ToolsCheckInterference2` 封装
+- **修复**：补齐装配 API 三件套 + 装配体创建
+  - `SWModel.new_assembly(sw, template=None)` — 新建装配体（含装配体模板探测 `get_asm_template()`）
+  - `add_mate(mate_type, ...)` — 添加配合，自动兼容 `AddMate5`/`AddMate3` 多版本签名
+  - `check_interference()` — 干涉检查（`ToolsCheckInterference2`），返回干涉数量与体积
+  - `circular_pattern(count, ...)` — 环形阵列，依次尝试多种签名，失败时给出替代方案提示
+  - `save_as(path)` — 另存为
+
+### Bug #21 — sw_bridge.py run 吞掉脚本输出（高严重级）
+- **现象**：`run` 返回固定 `{"ok":true,"stdout":"{...}"}`，不返回脚本真实 stdout/stderr；
+  **文件未生成也报成功** → 误判（把失败当成功继续往下走）
+- **根因**：wrapper 只 print 一个 `{"ok":true}`，脚本自身 print 全被丢弃；
+  且只看 `exec` 是否抛异常，不看业务结果
+- **修复**：
+  1. wrapper 用 `StringIO` 捕获脚本真实 stdout/stderr，随结果回传（`script_stdout`/`script_stderr`）
+  2. 支持脚本用 `__RESULT__ = {...}` 显式声明业务结果；脚本自报失败则整体判失败
+  3. **产物校验**：静态提取脚本里的 CAD 产物路径字面量，执行后逐一核对；
+     预期产物缺失时 `ok=False` 并明确报错（根治"静默成功"）
+- **规避（旧行为）**：直接 `python script.py` 执行
+
+### Bug #22 — OpenDoc6 会话缓存读到旧模型（最危险）
+- **现象**：同名文件被打开时，若 SW 会话里已打开过该路径旧版本，
+  `OpenDoc6` 直接返回**缓存的旧文档**；导致 v3 废品与 v4 成品验证结果完全相同，误判 FAIL
+- **修复**：新增 `open_document_fresh(sw, path)` —— 打开前按**规范化绝对路径**
+  查找并关闭已打开的旧文档，再执行 OpenDoc6；`cmd_open` 已切换到该函数
+- **规避（旧行为）**：必须先 `close-all` 再重新打开验证
+
+### Bug #23 — FeatureCircularPattern5 参数签名不匹配
+- **现象**：直接调用返回无效参数
+- **修复**：`circular_pattern()` 按多种已知签名依次尝试（5 参数 / 7 参数 / Pattern4），
+  并把每次失败原因原样返回，避免静默失败
+- **规避**：改用**单草图多段线轮廓一次拉伸**绕过阵列
+
+### Bug #24 — PowerShell GBK 致 Python 输出含 Ø/° 崩溃
+- **现象**：`UnicodeEncodeError`（PowerShell 默认 GBK 代码页）
+- **修复**：`sw_bridge.py` 导入时即强制 `PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1`
+  + `reconfigure(errors='replace')`，**调用方无需再加** `python -X utf8`
+- **规避（旧行为）**：外部加 `python -X utf8`
+
+### Bug #25 — PowerShell 只读变量陷阱（脚本编写规范）
+- **现象**：`foreach($pid in ...)` 直接报错 —— `$pid` 是 PowerShell **内置只读变量**
+- **受影响的只读变量**：`$pid`、`$host`、`$HOME`、`$PSVersionTable`、`$error`、`$args`、`$input`、`$true`、`$false`、`$null`
+- **规范**：循环变量/自定义变量**一律避开上述名称**，改用 `$procId`、`$hostName` 等
+
+### Bug #26 — 抗倾覆校核单位错误（虚高 1000 倍，真实数学 bug）
+- **现象**：壳体机架房间抗倾覆校核 K 虚高 1000 倍 —— 单件 K=33.6（虚高），整机总装核算 K=0.24 FAIL
+- **根因**：**N 与 kN、mm 与 m 混用**（1000 因子），且无任何机制捕获
+- **修复**：在 `physics/domain_validator.py` 新增单位工具
+  - `convert(value, from, to)` — 通用单位换算（大小写/`·`/`*` 写法归一化，未知单位**显式报错**而非静默返回原值）
+  - `check_unit_consistency(quantities)` — 单位一致性 + 量级合理性校验，可抓出 1000 倍错误
+  - `overturning_safety_factor(Mr_nmm, Mo_nmm)` — 抗倾覆安全系数**统一 N·mm 口径**，
+    返回 `K`、分项力矩、判据（K≥2.0 通过 / 1.5~2.0 复核 / <1.5 不通过）
+- **规范**：**所有力学计算统一到 N / mm / MPa / N·mm**；上报结果前先过 `check_unit_consistency()`
+
+### Bug #27 — 遗留文件污染工作目录（Wave2 误复用风险）
+- **现象**：上一波 stale 回收后磁盘遗留参数错误的旧件（旧大臂 750N/300mm/304 不锈钢）
+  + GBK 乱码脚本，**Wave 2 误复用**
+- **修复**：新增【任务纪元 task_epoch】机制
+  - `declare 2` 时记录任务起始时间戳
+  - `mode_gate.py stale-artifacts <目录>` — 扫描并区分 `legacy`（上一轮残留）/ `current`（本轮产物）
+  - `room-start` 时自动提示遗留件数量与文件名，明确禁止总装使用
+- **工具链统一 UTF-8**（见 Bug #24）
+### Bug #28 — SaveAs 返回值不可靠（高危·静默失败）
+- **现象**：`SaveAs2/SaveAs3` 返回 **True 却静默不写**（目标已存在时旧文件原样留着）；
+  也可能写成功后返回非 0。上层看到 ok=True 就继续，磁盘上还是旧模型
+- **修复**：`save()` / `save_as()` 改为 **以磁盘指纹为唯一真相**
+  - 保存前记录 `(size, mtime, md5)` 三元组，保存后重新指纹比对
+  - md5 作为最终裁决（避免同秒内重写被 mtime 精度误判）
+  - 目标文件**未变化**时明确返回 `ok=False` + 原因 + 处置建议，**绝不静默报成功**
+  - 新增 `updated` / `size` / `sw_error_code` 等结构化字段
+
+### Bug #29 — cut(through=True) 双向穿透语义不清（静默失效）
+- **现象**：`through=True` 时只设了 `T1`（正向），`T2` 保持默认 ——
+  同一参数在不同特征上表现不一致，有时只切穿一侧
+- **修复**：新增 `through_both` 参数（默认 True 保持既有双向行为），
+  **两个方向的终止条件都显式赋值**，消除隐式默认
+  - `through_both=True` → T1=T2=完全贯穿（真双向穿透）
+  - `through_both=False` → 仅正向贯穿
+- 同时：`cut()` 失败不再静默返回 None，改为 `_warn()` 留痕
+
+### Bug #30 — ToolsCheckInterference2 在 SW2025 不可用
+- **现象**：该 API 在 SW2025 已移除/改名，调用即抛异常；
+  原实现只把异常塞进 error 就返回，上层看到 `count=0` 会 **误判成无干涉**
+- **修复**：多版本 API 依次兜底（`ToolsCheckInterference2` / `ToolsCheckInterference`），
+  全部不可用时返回 `ok=False` 且 **`available=False`**，
+  **明确区别于"检查通过、无干涉"**，并给出降级建议
+- **返回契约**：`ok=True && count=0` = 真的没干涉；`available=False` = 结果不可采信
+
+### Bug #31 — rect() 与 add_component() 坐标语义混淆
+- **现象**：`rect(cx, cy, w, h)` 是 **中心+宽高**；
+  `add_component(x, y, z)` 是 **包围盒中心**（非零件原点、非角点）
+- **修复**：两个方法的 docstring 写死契约并交叉提示差异，避免混用导致零件偏位
+
+### Bug #32 — Transform2 赋值在 late-binding 下不可用
+- **现象**：`comp.Transform2 = mathTransform` **赋值失败且无报错**
+  （win32com 动态分发下该属性只读，赋值被静默忽略）
+- **修复**：新增 `set_component_transform()`
+  - 用 `comp.SetTransform(mathTransform)` **方法**而非属性赋值
+  - MathTransform 由 `sw.CreateTransform(...)` 构造，`GetTotalTransform()` 兜底
+  - 完成后 **读回校验**，失败给出明确原因与替代方案
+
+### Bug #33 — ArrayData 写入静默失败
+- **现象**：给 `ArrayData` 赋值后 **读回未变且不报错**
+- **修复**：新增 `set_array_data()`
+  - 写入前记录旧值 → 写入 → **读回比对**（`verify=True` 默认开启）
+  - 未变化即判失败并说明（写入被静默忽略），给出改用带参数阵列方法的建议
+
+### Bug #34 — EditRebuild3 / GetTitle / GetBox 是属性不是方法
+- **说明**：late-binding 下无参 COM 成员按 **属性** 访问（`doc.GetTitle`），
+  带参方法才加括号（`doc.GetBox(...)`）；`EditRebuild3` 则是 **方法** 必须加括号
+- **状态**：已在既有实现中统一处理（见 create_sphere / rebuild 内的兼容写法）
+
 ## 6. 建模脚本模板（DSH 生成代码参考）
 
 ```python

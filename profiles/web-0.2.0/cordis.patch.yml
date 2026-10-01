@@ -1,0 +1,47 @@
+# ============================================================================
+# DSH 0.2.0 · web profile 的用户补丁层（profile/cordis.patch.yml 的内容）
+# ============================================================================
+# app-boot 的补丁层顺序：
+#   bundle 层（dsh-base → dsh-web-app → 我们的 bundle）→ 本文件（profile 层）
+#   → ~/.dsh/cordis.patch.yml（home 层，优先级最高）
+#
+# 【为什么只放这一条】
+#   0.2.0 的宿主层只内置了 read-only / workspace-write / danger-full-access 三档
+#   权限预设（见 dsh-base 的 permission 行）。工程模式的「SW单行模式」是自定义档，
+#   必须在这里补齐。
+#
+# 【为什么必须完整重述 4 档】
+#   补丁是「整体替换该行的 config」，不是深合并。少写一档 = 那一档消失。
+#
+# 【为什么不能写进 preset 的 plugins】
+#   @deepseek-ai/dsh-permission-presets 是宿主层(进程级)服务，
+#   dsh-base 已经在宿主组合里注册。放进预设的子作用域会重复注册同名服务，
+#   loader 直接报 "service permissionPresets has been registered"，
+#   整个工程预设挂载失败。历史踩过两次（见 agent.cordis.yml 末尾注释）。
+#
+# 【生效方式】权限预设表是进程级配置 → 改完必须重启 DSH 才生效。
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+        name: 只读
+        description: 只能读取，任何修改都需要审批
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+        name: 工作区可写
+        description: 可在工作区内写入，越界需要审批
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+        name: Full access
+        description: 完全文件访问，不再弹出审批提示
+      # 工程模式专用档：SW 活直接执行，不弹审批
+      sw-single-line:
+        sandbox: danger-full-access
+        approval: never
+        name: SW单行模式
+        description: 工程模式专用（SW活）：关闭沙盒，SolidWorks 与 DSH 相关文件直接执行不再询问

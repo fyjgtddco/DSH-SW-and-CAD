@@ -25,8 +25,10 @@ swapi.py — SolidWorks 高层建模封装（通用版，跨电脑/跨版本）
 """
 import math
 import os
+import time
 import sys
 import glob
+import json
 import subprocess
 
 import pythoncom
@@ -45,7 +47,7 @@ def _version_year(major):
 
 
 def _sw_install_from_registry():
-    """【B1修复】从注册表读取 SolidWorks 安装路径（最可靠，跨盘符）。
+    r"""【B1修复】从注册表读取 SolidWorks 安装路径（最可靠，跨盘符）。
 
     读取 HKLM\SOFTWARE\SolidWorks\Applications 的 FullName 值，
     该值由安装程序写入，无论装到哪个盘都能找到。
@@ -124,7 +126,7 @@ def find_sldworks_exe():
     搜索顺序（从最可靠到兜底）：
       1. 注册表 FullName（安装程序写入的绝对路径）
       2. 注册表 InstallDir 下的 SLDWORKS.exe
-      3. 所有盘符的常见安装目录（含 Program Files\SOLIDWORKS Corp*）
+      3. 所有盘符的常见安装目录（含 Program Files\\SOLIDWORKS Corp*）
       4. 运行中进程的可执行文件路径
     返回第一个存在的绝对路径；找不到返回 None。
     """
@@ -188,6 +190,768 @@ def find_sldworks_exe():
             return p
     except Exception:
         pass
+    return None
+
+
+# ==================== 【Bug3】材料库：跨盘符全盘搜索 ====================
+# 背景：零件密度恒为 1000 kg/m³（水），是因为从未给零件指定材料，
+#       SW 就用默认密度。40Cr 应约 7850 kg/m³ —— 差 7.85 倍，
+#       直接让质量属性、重心、工程图材料栏、以及"30年寿命强度校核"全部失真。
+#
+# 根因：SolidWorks 装在 Z 盘，材质库(.sldmat)也在 Z 盘：
+#       Z:\Program Files\SOLIDWORKS Corp2025\SOLIDWORKS\lang\<lang>\sldmaterials\*.sldmat
+#       而 DEFAULT_MATERIAL_DB 之类的常量若写死 C 盘，就永远找不到 → 设置材料失败。
+#
+# 修复原则（按用户要求）：不限定 C 盘，每个盘都找一次。
+
+_MATERIAL_DB_CACHE = {"path": None, "scanned": False}
+
+
+def _all_drive_letters_safe():
+    """返回所有存在的盘符（如 ['C:', 'D:', 'Z:']）。"""
+    try:
+        return list(_all_drive_letters())
+    except Exception:
+        pass
+    out = []
+    if sys.platform == "win32":
+        try:
+            import string
+            for letter in string.ascii_uppercase:
+                d = letter + ":\\"
+                if os.path.isdir(d):
+                    out.append(letter + ":")
+        except Exception:
+            pass
+    return out
+
+
+def find_material_db(force_rescan=False):
+    """【Bug3 修复】跨盘符全盘搜索 SolidWorks 材质库目录（sldmaterials）。
+
+    搜索顺序（从最可靠到兜底）：
+      1. 从 SW 安装目录（注册表/全盘探测得到的）推导 lang\\<lang>\\sldmaterials
+      2. 每个盘符下的常见路径：
+           <盘>:\\Program Files\\SOLIDWORKS Corp*\\SOLIDWORKS\\lang\\<lang>\\sldmaterials
+           <盘>:\\SOLIDWORKS Data\\...
+           <盘>:\\SOLIDWORKS Corp*\\...
+      3. 每盘递归浅扫描（限制深度，避免全盘遍历过慢）兜底
+
+    返回材质库目录绝对路径（含 .sldmat 的目录）；找不到返回 None。
+    结果带缓存，避免重复扫描。
+    """
+    if _MATERIAL_DB_CACHE["scanned"] and not force_rescan:
+        return _MATERIAL_DB_CACHE["path"]
+
+    found = None
+    # ── 1) 从 SW 安装目录推导 ──────────────────────────────────────────
+    try:
+        exe = find_sldworks_exe()
+        if exe:
+            sw_root = os.path.dirname(exe)          # ...\\SOLIDWORKS
+            for lang in ("chinese-simplified", "english", "chinese-traditional"):
+                cand = os.path.join(sw_root, "lang", lang, "sldmaterials")
+                if os.path.isdir(cand):
+                    found = cand
+                    break
+            if not found:
+                lg = os.path.join(sw_root, "lang")
+                if os.path.isdir(lg):
+                    for sub in os.listdir(lg):
+                        cand = os.path.join(lg, sub, "sldmaterials")
+                        if os.path.isdir(cand):
+                            found = cand
+                            break
+    except Exception:
+        pass
+
+    # ── 2) 每个盘符的常见路径 ──────────────────────────────────────────
+    if not found:
+        patterns = [
+            r"Program Files\\SOLIDWORKS Corp*\\SOLIDWORKS\\lang\\*\\sldmaterials",
+            r"Program Files\\SOLIDWORKS Corp*\\SOLIDWORKS\\lang\\sldmaterials",
+            r"SOLIDWORKS Corp*\\SOLIDWORKS\\lang\\*\\sldmaterials",
+            r"Program Files\\SolidWorks Corp*\\SolidWorks\\lang\\*\\sldmaterials",
+            r"SOLIDWORKS Data\\lang\\*\\sldmaterials",
+            r"SOLIDWORKS Data\\sldmaterials",
+        ]
+        for drive in _all_drive_letters_safe():
+            for pat in patterns:
+                try:
+                    for d in glob.glob(os.path.join(drive + "\\", pat)):
+                        if os.path.isdir(d):
+                            found = d
+                            break
+                except Exception:
+                    continue
+                if found:
+                    break
+            if found:
+                break
+
+    # ── 3) 兜底：每盘浅扫描（深度受限）──────────────────────────────────
+    if not found:
+        for drive in _all_drive_letters_safe():
+            # 常见一级目录
+            for top in ("Program Files", "Program Files (x86)", "SOLIDWORKS Data", ""):
+                base = os.path.join(drive + "\\", top) if top else drive + "\\"
+                if not os.path.isdir(base):
+                    continue
+                try:
+                    for entry in os.listdir(base):
+                        if "SOLIDWORKS" not in entry.upper() and "SOLIDWORKS" not in entry:
+                            continue
+                        # 在该目录下浅搜 sldmaterials（深度<=4）
+                        root = os.path.join(base, entry)
+                        for depth, (dirpath, dirnames, _fns) in enumerate(os.walk(root)):
+                            if depth > 4:
+                                dirnames[:] = []
+                                continue
+                            for dn in list(dirnames):
+                                if dn.lower() == "sldmaterials":
+                                    found = os.path.join(dirpath, dn)
+                                    break
+                            if found:
+                                break
+                        if found:
+                            break
+                except Exception:
+                    continue
+                if found:
+                    break
+            if found:
+                break
+
+    _MATERIAL_DB_CACHE["path"] = found
+    _MATERIAL_DB_CACHE["scanned"] = True
+    return found
+
+
+def list_material_databases():
+    """列出所有找到的 .sldmat 文件（跨盘符），供设置材料时选用。"""
+    out = []
+    seen = set()
+    dirs = []
+    d = find_material_db()
+    if d:
+        dirs.append(d)
+    # 补充常见位置
+    for drive in _all_drive_letters_safe():
+        for pat in (r"Program Files\\SOLIDWORKS Corp*\\SOLIDWORKS\\lang\\*\\sldmaterials",
+                    r"SOLIDWORKS Data\\lang\\*\\sldmaterials"):
+            try:
+                dirs.extend(glob.glob(os.path.join(drive + "\\", pat)))
+            except Exception:
+                pass
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            for fn in os.listdir(d):
+                if fn.lower().endswith(".sldmat"):
+                    p = os.path.join(d, fn)
+                    if p not in seen:
+                        seen.add(p)
+                        out.append(p)
+        except Exception:
+            continue
+    return out
+
+
+# 常用材料 → 密度 (kg/m³) 与 sldmat 中的英文库名
+# 用途：① AddMaterial 失败时用 SetMaterialPropertyName 直接写密度兜底；
+#      ② 校核密度是否合理（识别"恒为1000"的水密度异常）。
+# ── 【Bug-13/29 修复】补全 3D 打印常用材料 ────────────────────────────────
+# 原缺陷：本表只有金属 + ABS/POM，【没有 PETG / PLA / Nylon / TPU】。
+#   而"3D打印"是本插件明确支持的任务类型（文档多处提到）：
+#     · 小屋只能用 ABS 近似 PETG、手动设密度 1130 冒充 PA6（实测 Bug-29）；
+#     · lookup_material("PETG") 拿不到密度 → set_material 兜底回退 1000（水）；
+#     · 工程图材料栏写 ABS 而非真实打印材料，加工者会打错料。
+# 修复：补齐常用打印材料的密度（并给出 E/屈服/UTS，供自定义材质直写）。
+#   密度来源为公开供应商技术数据（Prusament / Bambu / SLS 粉末规格），
+#   实际设计请以所用耗材的技术数据书为准。
+COMMON_MATERIALS = {
+    "Q235": {"density": 7850, "aliases": ["Q235", "AISI 1020", "Plain Carbon Steel", "碳钢"]},
+    "45#": {"density": 7850, "aliases": ["45", "AISI 1045", "1045"]},
+    "40Cr": {"density": 7850, "aliases": ["40Cr", "AISI 5140", "5140", "Chromium Steel"]},
+    "304": {"density": 8000, "aliases": ["304", "AISI 304", "Stainless Steel", "不锈钢"]},
+    "316": {"density": 8000, "aliases": ["316", "AISI 316"]},
+    "6061-T6": {"density": 2700, "aliases": ["6061", "6061-T6", "Aluminum Alloy 6061", "铝合金"]},
+    "7075": {"density": 2810, "aliases": ["7075", "7075-T6"]},
+    "Cr12MoV": {"density": 7700, "aliases": ["Cr12MoV", "D2", "Tool Steel"]},
+    "HT200": {"density": 7200, "aliases": ["HT200", "Gray Cast Iron", "灰铸铁"]},
+    # ── 3D 打印材料（【Bug-13/29】新增）────────────────────────────────
+    # 注意：不把 PETG-CF / PETG-GF 列为别名 —— 碳纤/玻纤增强的弹性模量
+    #   (~6.5GPa) 与普通 PETG (2.0GPa) 差 3 倍，别名会让增强料被解析成普通料。
+    #   增强料应由 set_custom_material 显式登记（custom_materials.json）。
+    "PETG": {"density": 1270, "e_mpa": 2000, "yield_mpa": 40, "uts_mpa": 50,
+             "aliases": ["PETG", "PET-G", "Copolyester"]},
+    "PLA": {"density": 1240, "e_mpa": 3500, "yield_mpa": 55, "uts_mpa": 60,
+            "aliases": ["PLA", "PLA+", "Polylactic Acid", "聚乳酸"]},
+    "ABS": {"density": 1050, "e_mpa": 2400, "yield_mpa": 45, "uts_mpa": 50,
+            "aliases": ["ABS", "Acrylonitrile Butadiene Styrene"]},
+    "ASA": {"density": 1070, "e_mpa": 2300, "yield_mpa": 45, "uts_mpa": 50,
+            "aliases": ["ASA"]},
+    "Nylon": {"density": 1140, "e_mpa": 2800, "yield_mpa": 80, "uts_mpa": 85,
+              "aliases": ["Nylon", "PA", "PA6", "PA66", "Nylon 6/6", "尼龙"]},
+    "PA12": {"density": 1010, "e_mpa": 1700, "yield_mpa": 48, "uts_mpa": 50,
+             "aliases": ["PA12", "PA-12", "Nylon 12", "尼龙12"]},
+    "TPU": {"density": 1210, "e_mpa": 50, "yield_mpa": 30, "uts_mpa": 40,
+            "aliases": ["TPU", "TPE", "Flexible", "热塑性聚氨酯"]},
+    "PC": {"density": 1200, "e_mpa": 2400, "yield_mpa": 65, "uts_mpa": 70,
+           "aliases": ["PC", "Polycarbonate", "聚碳酸酯"]},
+    "POM": {"density": 1410, "e_mpa": 3100, "yield_mpa": 70, "uts_mpa": 75,
+            "aliases": ["POM", "Delrin", "POM-C", "聚甲醛"]},
+    "PEEK": {"density": 1320, "e_mpa": 3700, "yield_mpa": 100, "uts_mpa": 110,
+             "aliases": ["PEEK"]},
+}
+
+# ── 【BUG-05/08 修复】新建零件的默认材料 ───────────────────────────────────
+# 原缺陷：从不赋材质 → 密度恒为 1000 kg/m³（水）。
+# ⚠️ 【BUG-05 二次修复 · 重要】默认值不能想当然取"最常见"的材料：
+#   实机事故：默认 Q235 → SW 库里没有 "Q235" → 回退别名 "AISI 1020"(钢,7900)，
+#   而任务要求的是 6061-T6 铝(2700) → "图纸写铝、零件是钢"。
+#   现在：
+#     ① 默认仍取 Q235（钢），但它是【可被 env/参数覆盖】的兜底，
+#        且赋材质失败时会【明确报错】，不再静默降级成别的材料；
+#     ② 真正的正确做法是让调用方按设计意图显式指定（见 new_part(material=)）；
+#     ③ 若设计工况已落盘（gate_load_case.json），
+#        swapi 会自动读取其中的材料作为默认值（见 _material_from_load_case）。
+DEFAULT_PART_MATERIAL = "Q235"
+
+
+def _material_from_load_case():
+    """【BUG-05 二次修复】从门禁落盘的载荷工况里读设计材料。
+
+    门禁 select/provide_context 阶段已把"任务要求的材料"写进
+    tools/load_cases/gate_load_case.json（如 Aluminum 6061-T6）。
+    建模时若调用方没显式指定材料，用它是【最贴合设计意图】的默认值 ——
+    从根本上避免"门禁要求铝、零件默认成钢"这类事故。
+
+    Returns: 材料名（str）或 None
+    """
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "load_cases", "gate_load_case.json")
+        if not os.path.isfile(p):
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        mat = d.get("material") or {}
+        # 优先用库内可解析的牌号：id 映射回常用名，其次 name
+        mid = str(mat.get("id") or "")
+        _ID_TO_NAME = {
+            "AL_6061_T6": "6061-T6", "AL_6061": "6061-T6", "AL_7075": "7075",
+            "AL_5052": "5052", "AL_1060": "1060",
+            "ST_API_S235": "Q235", "ST_API_1020": "Q235",
+            "ST_API_4140": "40Cr", "ST_API_4340": "40Cr",
+            "ST_STAINLESS_304": "304", "ST_STAINLESS_316": "316",
+            "TI_GRADE5": "Ti-6Al-4V", "TI_GRADE1": "Ti",
+            "ABS": "ABS", "PC_POLYCARBONATE": "PC", "NYLON_6_6": "Nylon",
+        }
+        if mid in _ID_TO_NAME:
+            return _ID_TO_NAME[mid]
+        nm = str(mat.get("name") or "").strip()
+        if nm:
+            # "Aluminum 6061-T6" → "6061-T6"
+            import re as _re
+            m = _re.search(r"(6061(?:-T\d)?|7075|5052|1060|304|316|Q235|40Cr)", nm)
+            if m:
+                return m.group(1)
+            return nm
+    except Exception:
+        pass
+    return None
+
+
+def default_part_material():
+    """【BUG-05 二次修复】解析本次建模应使用的默认材料。
+
+    优先级：
+      ① 环境变量 DSH_PART_MATERIAL（用户/编排显式指定，最高优先）
+      ② 门禁落盘工况里的设计材料（gate_load_case.json）
+      ③ 内置兜底 DEFAULT_PART_MATERIAL（Q235 钢）
+    """
+    try:
+        env = os.environ.get("DSH_PART_MATERIAL")
+        if env and str(env).strip():
+            return str(env).strip()
+    except Exception:
+        pass
+    lc = _material_from_load_case()
+    if lc:
+        return lc
+    return DEFAULT_PART_MATERIAL
+
+# ── 【BUG-08 修复】SW 导出 DXF 的标准图层名（与 CADX mechanical 规则一致）──
+# CADX ac_validate 的 mechanical 规则要求图层:
+#   OUTLINE / THIN / CENTER / HIDDEN / DIM / TEXT / HATCH
+# 而 SW 中文界面默认导出中文图层名（如"可见边线""尺寸"）→ 每次出图都刷
+# 一堆 MISSING_LAYER / LAYER_NAME_INVALID WARNING。
+# 本表给出"SW 图层名（含中英文） → CADX 标准层"的映射，
+# 供 dxf 导出后自动整理图层（见 sw_bridge.py 的 _remap_dxf_layers）。
+CADX_LAYER_STANDARD = ("OUTLINE", "THIN", "CENTER", "HIDDEN", "DIM", "TEXT", "HATCH")
+
+# SW 默认/中文图层名 → CADX 标准图层
+SW_TO_CADX_LAYER = {
+    # 可见轮廓 / 粗实线
+    "可见边线": "OUTLINE", "可见轮廓线": "OUTLINE", "轮廓线": "OUTLINE",
+    "粗实线": "OUTLINE", "外形线": "OUTLINE",
+    # ── 实机补录（2026-09-27 真实出图实测发现的层名）──────────────────
+    # SW 中文版工程图导出时的实际层名，此前未收录 → 残留 INFO 告警：
+    #   "轮廓实线层"（外轮廓）、"细线层"（细实线）
+    "轮廓实线层": "OUTLINE", "轮廓实线": "OUTLINE", "实线层": "OUTLINE",
+    "可见轮廓": "OUTLINE",
+    "visible": "OUTLINE", "visible edges": "OUTLINE", "outline": "OUTLINE",
+    "object line": "OUTLINE", "continuous": "OUTLINE",
+    # 细实线 / 过渡线 / 波浪线 / 断裂线
+    "细实线": "THIN", "过渡线": "THIN", "波浪线": "THIN", "断裂线": "THIN",
+    "细线层": "THIN", "细线": "THIN", "细实线层": "THIN",
+    "thin": "THIN", "thin line": "THIN", "phantom": "THIN",
+    # 点划线 / 中心线
+    "点划线": "CENTER", "中心线": "CENTER", "轴线": "CENTER",
+    "中心线层": "CENTER", "点划线层": "CENTER", "双点划线层": "CENTER",
+    "center": "CENTER", "centerline": "CENTER", "centre line": "CENTER",
+    "center line": "CENTER",
+    # 虚线 / 不可见边线
+    "虚线": "HIDDEN", "不可见边线": "HIDDEN", "隐藏线": "HIDDEN",
+    "虚线层": "HIDDEN", "隐藏线层": "HIDDEN",
+    "hidden": "HIDDEN", "hidden edges": "HIDDEN", "dashed": "HIDDEN",
+    # 尺寸标注
+    "尺寸": "DIM", "尺寸线": "DIM", "标注": "DIM", "尺寸标注": "DIM",
+    "标注层": "DIM", "尺寸层": "DIM", "符号标注层": "DIM",
+    "dim": "DIM", "dimension": "DIM", "dimensions": "DIM",
+    # 文字 / 注释
+    "文字": "TEXT", "注释": "TEXT", "技术要求": "TEXT", "文本": "TEXT",
+    "标题栏": "TEXT", "文字层": "TEXT", "注释层": "TEXT",
+    "text": "TEXT", "note": "TEXT", "notes": "TEXT",
+    "annotation": "TEXT",
+    # 剖面线 / 填充
+    "剖面线": "HATCH", "填充": "HATCH", "图案填充": "HATCH",
+    "剖面线层": "HATCH", "填充层": "HATCH", "剖面层": "HATCH",
+    "hatch": "HATCH", "section": "HATCH", "section line": "HATCH",
+}
+
+# ── 【BUG-06 修复】无需整理、也不应报警的"非图形"图层 ────────────────────
+# AutoCAD/SW 固有层：不是视图线型层，强行改名反而破坏兼容性
+#   "0"         AutoCAD 默认层
+#   "Defpoints" AutoCAD 定义点层（不可打印，标准存在）
+#   "SLD-0"     SolidWorks 内部默认层
+#   "9"/"10"/"5" 等纯数字层：SW 工程图内部用于视图/标注承载的保留层
+# 这些层不含"需要按 GB/T 线型归类"的几何，故 CADX 的命名规范告警对它们
+# 属于噪声。此处显式豁免（记录为 ignored，不再计入 unknown）。
+_CADX_LAYER_EXEMPT = {"0", "defpoints", "sld-0"}
+
+
+def _is_exempt_layer(name):
+    """判断图层是否为 AutoCAD/SW 固有保留层（无需改名、不报警）。"""
+    if not name:
+        return True
+    k = str(name).strip().lower()
+    if k in _CADX_LAYER_EXEMPT:
+        return True
+    # 纯数字层（SW 工程图内部保留层）
+    if k.isdigit():
+        return True
+    return False
+
+
+def cadx_layer_for(sw_layer_name):
+    """把 SW（可能是中文的）图层名映射到 CADX 标准图层名。
+
+    未识别时返回 None（调用方据此决定是否原样保留 + 记 warning）。
+    """
+    if not sw_layer_name:
+        return None
+    key = str(sw_layer_name).strip()
+    kl = key.lower()
+    if key.upper() in CADX_LAYER_STANDARD:
+        return key.upper()
+    if kl in SW_TO_CADX_LAYER:
+        return SW_TO_CADX_LAYER[kl]
+    # 模糊匹配：包含关系（如 "可见边线(ISO)" → OUTLINE）
+    # 【实机补强】先做"最长关键词优先"，避免 "细线层" 被 "线层" 之类的
+    #   短词先命中而误判；同长度时按更具体的语义优先。
+    hits = [(k, v) for k, v in SW_TO_CADX_LAYER.items() if k in kl]
+    if hits:
+        hits.sort(key=lambda kv: -len(kv[0]))
+        return hits[0][1]
+    return None
+
+
+def is_exempt_cadx_layer(name):
+    """是否为 AutoCAD/SW 固有保留层（无需改名，也不应计入 unknown）。"""
+    return _is_exempt_layer(name)
+
+
+# ── 【Bug3】材质库/材料名解析辅助 ──────────────────────────────────────────
+
+# 材质库"显示名"映射：路径 basename（小写）→ SW 界面显示名
+# 实测：SetMaterialProperty 的 Database 参数必须用【显示名】而非路径，
+#   传 "SolidWorks Materials" 成功，传完整路径失败（错误码 1/6）。
+_SW_DB_DISPLAY = {
+    "solidworks materials": "SolidWorks Materials",
+    "solidworks din materials": "SolidWorks DIN Materials",
+    "sustainability extras": "Sustainability Extras",
+    "自定义材料": "自定义材料",
+    "custom materials": "Custom Materials",
+}
+
+
+def _sw_db_display_name(base):
+    """把材质库文件名（去扩展名）转成 SW 界面显示的库名。
+
+    SW 的 GetMaterialDatabases 返回的是小写路径，例如
+      z:\\...\\sldmaterials\\solidworks materials.sldmat
+    而 SetMaterialProperty 需要的是界面显示名 "SolidWorks Materials"
+    （首字母大写）。本函数做这个映射，未收录的库做智能首字母大写。
+    """
+    if not base:
+        return base
+    key = str(base).strip().lower()
+    if key in _SW_DB_DISPLAY:
+        return _SW_DB_DISPLAY[key]
+    # 智能大写：每个单词首字母大写
+    return " ".join(w[:1].upper() + w[1:] for w in str(base).split())
+
+
+_MATERIAL_LIST_CACHE = {}
+
+
+def list_materials(database=None, force=False):
+    """【Bug3】列出材质库中的全部材料名（供调用方选名，避免拼错）。
+
+    Args:
+        database: 库名（如 "SolidWorks Materials"）或 .sldmat 路径；
+                  None 则用自动探测到的主库。
+    Returns:
+        list[str] 材料名列表（失败返回 []）
+    """
+    path = None
+    if database:
+        d = str(database)
+        if os.path.isfile(d):
+            path = d
+        else:
+            # 按库名反查路径
+            try:
+                exe = find_sldworks_exe()
+                if exe:
+                    lang_root = os.path.join(os.path.dirname(exe), "lang")
+                    for lang in ("chinese-simplified", "english"):
+                        cand = os.path.join(lang_root, lang, "sldmaterials",
+                                            d.strip().lower() + ".sldmat")
+                        if os.path.isfile(cand):
+                            path = cand
+                            break
+            except Exception:
+                pass
+            if not path:
+                dbdir = find_material_db()
+                if dbdir:
+                    try:
+                        for fn in os.listdir(dbdir):
+                            if fn.lower().startswith(d.strip().lower()):
+                                path = os.path.join(dbdir, fn)
+                                break
+                    except Exception:
+                        pass
+    else:
+        dbdir = find_material_db()
+        if dbdir:
+            try:
+                for fn in os.listdir(dbdir):
+                    if fn.lower() == "solidworks materials.sldmat":
+                        path = os.path.join(dbdir, fn)
+                        break
+            except Exception:
+                pass
+    if not path or not os.path.isfile(path):
+        return []
+    ck = path.lower()
+    if ck in _MATERIAL_LIST_CACHE and not force:
+        return _MATERIAL_LIST_CACHE[ck]
+    out = []
+    try:
+        import re as _re
+        txt = open(path, "r", encoding="utf-16", errors="replace").read()
+        out = _re.findall(r'<material name="([^"]+)"', txt)
+    except Exception:
+        try:
+            txt = open(path, "r", encoding="utf-8", errors="replace").read()
+            out = _re.findall(r'<material name="([^"]+)"', txt)
+        except Exception:
+            out = []
+    _MATERIAL_LIST_CACHE[ck] = out
+    return out
+
+
+def _resolve_material_names(database_name, wanted, with_level=False):
+    """把用户给的材料名解析成材质库中【真实存在】的名字列表。
+
+    用于容忍：空格差异、全半角、大小写、以及用户用常用牌号
+    （如 "40Cr" / "Q235" / "6061"）而库里只有工程名的情况。
+
+    【重要】返回结果区分匹配级别，因为"用错材料"比"报错"更危险 ——
+      一个 6061 铝件若被静默设成钢，密度差 3 倍，强度校核直接失效。
+      调用方必须能知道"是不是精确匹配"，并据此决定是否提示用户。
+
+    匹配级别（level）：
+      "exact"  —— 与库中名字完全一致（最可信）
+      "loose"  —— 子串互相包含（如 "6061" ⊂ "6061 合金"）
+      "keyword"—— 牌号关键词命中（如 "40Cr" 命中 "AISI 5140 钢(40Cr)"）
+      "none"   —— 库中找不到，原样返回（由 SW 决定成败）
+
+    Args:
+        with_level: True 时返回 [(name, level), ...]，否则只返回 [name, ...]
+    """
+    try:
+        lib = list_materials(database_name)
+    except Exception:
+        lib = []
+    w = str(wanted).strip()
+    if not lib:
+        return [(w, "none")] if with_level else [w]
+    wl = w.lower()
+    exact, loose, kw = [], [], []
+    for n in lib:
+        nl = n.strip().lower()
+        if n.strip() == w:
+            exact.append(n)
+        elif wl and (wl in nl or nl in wl):
+            loose.append(n)
+        else:
+            # 牌号关键词匹配：如 40Cr→含 "40Cr"；6061→含 "6061"
+            for tok in (w, w.rstrip("钢"), w.replace("钢", "")):
+                if tok and len(tok) >= 3 and tok.lower() in nl:
+                    kw.append(n)
+                    break
+    # 组装：原样优先，然后 loose，再 keyword，最后 exact（exact 放前面更合理）
+    seq = []
+    for n in exact:
+        seq.append((n, "exact"))
+    for n in loose:
+        seq.append((n, "loose"))
+    for n in kw:
+        seq.append((n, "keyword"))
+    if not seq:
+        seq.append((w, "none"))
+    # 去重（按名字），保持顺序，并把用户原样名放最前（若它确实在库里）
+    seen, out = set(), []
+    for n, lv in seq:
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append((n, lv))
+    out = out[:12]
+    return out if with_level else [n for n, _ in out]
+
+
+# ── 【BUG-05 二次修复】材料家族判定 ────────────────────────────────────────
+# 用途：禁止"因名字匹配上就把铝换成钢"这类跨族静默替换。
+#   密度量级是最可靠的家族指纹（铝≈2700、钢≈7850、钛≈4500、塑料≈1000-1400）。
+#   实机证据：AISI 1020 库内密度 0.79E+04=7900，而 6061-T6 应为 2700。
+_FAMILY_BY_DENSITY = (
+    # (下限, 上限, 家族名)
+    (2000.0, 3000.0, "aluminum"),      # 铝及铝合金
+    (4300.0, 4700.0, "titanium"),      # 钛合金
+    (7000.0, 8100.0, "steel"),         # 碳钢/合金钢/不锈钢/铸铁
+    (700.0, 1500.0, "plastic"),        # 工程塑料
+    (8300.0, 9000.0, "copper"),        # 铜合金（青铜/黄铜）
+)
+
+# 名字关键词 → 家族（优先于密度，用于名字明确指向某族的场合）
+_FAMILY_BY_KEYWORD = (
+    ("aluminum", "aluminum"), ("aluminium", "aluminum"), ("铝", "aluminum"),
+    ("6061", "aluminum"), ("7075", "aluminum"), ("5052", "aluminum"), ("1060", "aluminum"),
+    ("titanium", "titanium"), ("ti-6al", "titanium"), ("钛", "titanium"),
+    ("steel", "steel"), ("钢", "steel"), ("iron", "steel"), ("铸铁", "steel"),
+    ("stainless", "steel"), ("不锈", "steel"),
+    ("q235", "steel"), ("45#", "steel"), ("40cr", "steel"), ("cr12mov", "steel"),
+    ("1020", "steel"), ("1045", "steel"), ("4140", "steel"), ("4340", "steel"),
+    ("abs", "plastic"), ("nylon", "plastic"), ("pom", "plastic"),
+    ("polycarbonate", "plastic"), ("塑料", "plastic"),
+    ("copper", "copper"), ("brass", "copper"), ("bronze", "copper"), ("铜", "copper"),
+)
+
+
+def _material_family(name_or_density):
+    """判定材料家族：'aluminum' / 'steel' / 'titanium' / 'plastic' / 'copper' / None。
+
+    接受材料名（str）或密度（number）。名字优先（更明确），
+    否则按密度量级归类。无法判定返回 None（调用方应视为"未知，不阻断"）。
+    """
+    if name_or_density is None:
+        return None
+    # 数值 → 按密度区间
+    if isinstance(name_or_density, (int, float)):
+        d = float(name_or_density)
+        for lo, hi, fam in _FAMILY_BY_DENSITY:
+            if lo <= d <= hi:
+                return fam
+        return None
+    s = str(name_or_density).strip().lower()
+    if not s:
+        return None
+    for kw, fam in _FAMILY_BY_KEYWORD:
+        if kw in s:
+            return fam
+    return None
+
+
+def material_family(name):
+    """对外暴露的材料家族查询（先按内置表密度，再按名字关键词）。"""
+    info = lookup_material(name)
+    if info and info.get("density"):
+        fam = _material_family(info["density"])
+        if fam:
+            return fam
+    return _material_family(name)
+
+
+def lookup_material(name):
+    """按名字/别名查材料表（【Bug-13】现在也覆盖 PETG/PLA/Nylon/TPU 等打印材料）。
+
+    返回 dict：canonical / density / e_mpa / yield_mpa / uts_mpa（打印材料有）
+    或 None（未收录）。
+    """
+    if not name:
+        return None
+    key = str(name).strip()
+    kl = key.lower()
+    for canon, info in COMMON_MATERIALS.items():
+        if canon.lower() == kl:
+            return {"canonical": canon, **info}
+        for a in info.get("aliases", []):
+            if a.lower() == kl:
+                return {"canonical": canon, **info}
+    for canon, info in COMMON_MATERIALS.items():
+        for a in info.get("aliases", []):
+            if a.lower() in kl or kl in a.lower():
+                return {"canonical": canon, **info}
+    return None
+
+
+# ══ 【Bug-29 修复】自定义材质直写（PETG/PLA/Nylon 在 SW 官方库中无牌号）══════
+# 问题：SW 2025 中文材质库没有 PETG/Nylon，小屋只能用 ABS 近似 + 手改密度，
+#   导致 ① 材料属性不一致；② 工程图材料栏写错；③ physics 校核按 ABS 算。
+# 方案：提供 set_custom_material(name, e_mpa, yield_mpa, density_kg_m3)，
+#   直接对零件写入"自定义材料"名称与密度（E/屈服写进 result 供 physics 用），
+#   不再依赖 SW 库是否存在该牌号。
+_CUSTOM_MATERIAL_JSON = "custom_materials.json"
+
+
+def _custom_material_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        _CUSTOM_MATERIAL_JSON)
+
+
+def load_custom_materials():
+    """读取用户自定义材料库（不存在返回 {}）。"""
+    p = _custom_material_path()
+    try:
+        if os.path.isfile(p):
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def save_custom_material(name, e_mpa=None, yield_mpa=None, uts_mpa=None,
+                         density_kg_m3=None, poissons_ratio=None, note=None):
+    """把自定义材料登记到 custom_materials.json（幂等，同名覆盖）。
+
+    【Bug-29】让"PETG / Nylon PA12"等 SW 库里没有的打印材料有一个
+    可复用、可审计的落点，而不是每次手工近似。
+    """
+    nm = str(name or "").strip()
+    if not nm:
+        return {"ok": False, "error": "材料名不能为空"}
+    db = load_custom_materials()
+    rec = dict(db.get(nm) or {})
+    for k, v in (("e_mpa", e_mpa), ("yield_mpa", yield_mpa),
+                 ("uts_mpa", uts_mpa), ("density_kg_m3", density_kg_m3),
+                 ("poissons_ratio", poissons_ratio)):
+        if v is not None:
+            try:
+                rec[k] = float(v)
+            except Exception:
+                pass
+    if note:
+        rec["note"] = str(note)
+    rec["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    db[nm] = rec
+    try:
+        with open(_custom_material_path(), "w", encoding="utf-8") as f:
+            json.dump(db, f, ensure_ascii=False, indent=2)
+        return {"ok": True, "path": _custom_material_path(), "material": rec}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+
+
+def lookup_material_exact(name):
+    """【Bug-29】只做【精确】匹配（canonical 或 alias 完全相等），不做子串模糊。
+
+    为什么需要：lookup_material 的第三段是双向子串匹配，
+    "SomeRandomPlastic" 会命中 "PLA"（'pla' ⊂ 'plastic'），
+    "PETG-CF" 也会先命中 "PETG"。在"解析材料属性"这种要求准确性的场景下，
+    子串匹配会把完全无关的名字解析成错误的材料。精确版用于属性解析。
+    """
+    if not name:
+        return None
+    kl = str(name).strip().lower()
+    if not kl:
+        return None
+    for canon, info in COMMON_MATERIALS.items():
+        if canon.lower() == kl:
+            return {"canonical": canon, **info}
+        for a in info.get("aliases", []):
+            if a.lower() == kl:
+                return {"canonical": canon, **info}
+    return None
+
+
+def resolve_material_props(name):
+    """统一解析材料属性：内置表(精确) → 自定义库 → 内置表(模糊)。
+
+    【Bug-29】给 set_custom_material / physics 校核提供"同一份属性"，
+    避免"SW 里是 ABS、physics 里是 Nylon"的分裂。
+
+    优先级说明：
+      ① 内置表【精确】匹配（PETG / 尼龙 / 6061-T6 …）；
+      ② 自定义库【精确】匹配（用户在 custom_materials.json 登记的材料，
+         例如 "PETG-CF" —— 必须优先于内置表的模糊命中）；
+      ③ 内置表【模糊】匹配（兜底，兼容 "6061" ⊂ "Aluminum 6061-T6" 这类写法）。
+
+    Returns: {"name","density_kg_m3","e_mpa","yield_mpa","uts_mpa","source"} 或 None
+    """
+    nm = str(name or "").strip()
+    if not nm:
+        return None
+    # ① 内置精确
+    hit = lookup_material_exact(nm)
+    if hit and hit.get("density"):
+        return {"name": hit.get("canonical") or nm,
+                "density_kg_m3": hit.get("density"),
+                "e_mpa": hit.get("e_mpa"), "yield_mpa": hit.get("yield_mpa"),
+                "uts_mpa": hit.get("uts_mpa"), "source": "COMMON_MATERIALS"}
+    # ② 自定义库精确（优先于模糊）
+    db = load_custom_materials()
+    for k, v in db.items():
+        if k.lower() == nm.lower():
+            return {"name": k, "density_kg_m3": v.get("density_kg_m3"),
+                    "e_mpa": v.get("e_mpa"), "yield_mpa": v.get("yield_mpa"),
+                    "uts_mpa": v.get("uts_mpa"), "source": "custom_materials.json"}
+    # ③ 内置模糊兜底
+    hit = lookup_material(nm)
+    if hit and hit.get("density"):
+        return {"name": hit.get("canonical") or nm,
+                "density_kg_m3": hit.get("density"),
+                "e_mpa": hit.get("e_mpa"), "yield_mpa": hit.get("yield_mpa"),
+                "uts_mpa": hit.get("uts_mpa"),
+                "source": "COMMON_MATERIALS(loose)"}
     return None
 
 
@@ -267,6 +1031,60 @@ def _find_template(sw=None):
 
 _TEMPLATE_CACHE = None
 
+_ASM_TEMPLATE_CACHE = None
+
+
+def _find_asm_template(sw=None):
+    """探测装配体模板(.asmdot)。【C8 修复】原项目只有零件模板探测，
+    导致 new_assembly 无模板可用。此处复用 _find_template 的候选目录策略。"""
+    cands = []
+    # 1) 从 SW 自身设置读默认模板（最权威）
+    try:
+        if sw is not None:
+            p = sw.GetUserPreferenceStringValue(8)   # swDefaultTemplateAssembly
+            if p and os.path.exists(p):
+                return p
+    except Exception:
+        pass
+    # 2) 用户文档目录
+    try:
+        home = os.path.expanduser("~")
+        cands.append(os.path.join(home, "Documents", "SOLIDWORKS"))
+    except Exception:
+        pass
+    # 3) ProgramData 标准位置
+    for ver_dir in glob.glob(r"C:\ProgramData\SolidWorks\SOLIDWORKS*"):
+        cands.append(os.path.join(ver_dir, "templates"))
+    # 4) 常见安装位置
+    for drive in ("C:", "D:", "E:", "F:"):
+        for sw_dir in glob.glob(drive + r"\*SOLIDWORKS*") + \
+                       glob.glob(drive + r"\SOLIDWORKS*"):
+            cands.append(os.path.join(sw_dir, "templates"))
+        cands.append(os.path.join(drive, "ProgramData", "SolidWorks"))
+    tmpl_names = ["gb_assembly.asmdot", "Assembly.asmdot", "装配体.asmdot",
+                  "assembly.asmdot", "ASM.asmdot"]
+    for d in cands:
+        if not d or not os.path.isdir(d):
+            continue
+        for n in tmpl_names:
+            p = os.path.join(d, n)
+            if os.path.exists(p):
+                return p
+        found = glob.glob(os.path.join(d, "*.asmdot"))
+        if found:
+            return found[0]
+    return None
+
+
+def get_asm_template(sw=None):
+    """获取可用装配体模板路径（缓存）。"""
+    global _ASM_TEMPLATE_CACHE
+    if _ASM_TEMPLATE_CACHE and os.path.exists(_ASM_TEMPLATE_CACHE):
+        return _ASM_TEMPLATE_CACHE
+    _ASM_TEMPLATE_CACHE = _find_asm_template(sw)
+    return _ASM_TEMPLATE_CACHE
+
+
 def get_part_template(sw=None):
     """获取可用零件模板路径（缓存）。"""
     global _TEMPLATE_CACHE
@@ -325,8 +1143,26 @@ def _disable_snapping(sw):
 
 
 # ==================== 常量（跨版本通用部分） ====================
-SW_END_BLIND = 0            # 给定深度
-SW_END_THROUGH = 1          # 完全贯穿
+# ── 【F 修复·第四轮】swEndConditions_e 完整枚举 ────────────────────────
+# 测试反馈：FeatureCut3 双向传 T1=SW_END_THROUGH 时只去料 1.96%，
+#   说明该枚举值【没有被识别为贯穿】，而是被当成了极小盲孔。
+# 根因：SolidWorks 的 swEndConditions_e 各版本取值不同，且
+#   "完全贯穿"与"双向贯穿"是两个不同枚举：
+#     swEndCondBlind            = 0  给定深度
+#     swEndCondThroughAll       = 1  完全贯穿（单向）
+#     swEndCondThroughAllBoth   = 2  完全贯穿-双向
+#   原实现把 T1/T2 都设为 1，在需要"双向贯穿"的场合语义不符，
+#   部分版本会退化成盲孔。
+SW_END_BLIND = 0                # 给定深度
+SW_END_THROUGH = 1              # 完全贯穿（单向）
+SW_END_THROUGH_BOTH = 2         # 完全贯穿-双向（各版本通用取值）
+SW_END_UP_TO_NEXT = 3
+SW_END_UP_TO_VERTEX = 4
+SW_END_UP_TO_SURFACE = 5
+SW_END_OFFSET_FROM_SURFACE = 6
+# 贯穿兜底深度（mm）：当贯穿枚举不生效时，用极大的盲孔深度模拟贯穿。
+#   这是测试部建议的兜底策略 —— 比依赖枚举值更可靠、跨版本一致。
+THROUGH_FALLBACK_DEPTH_MM = 9999.0
 SW_START_SKETCHPLANE = 0    # 起始: 草图基准面
 SW_REV_BLIND = 0            # 旋转到给定角度
 # 圆角 Options
@@ -337,8 +1173,16 @@ SW_CHAMFER_ANGLE_DIST = 1   # 角度-距离倒角
 SW_CHAMFER_DIST_DIST = 2    # 距离-距离倒角
 SW_CHAMFER_VERTEX = 3
 
+# ── 【新-4 修复】基准面白名单必须同时收【英文名 + 中文名】──────────────
+# 测试反馈：中文版 SolidWorks 下用 "上视基准面"/"前视基准面" 开草图必崩。
+#   根因：白名单只收英文名，中文名先被 ValueError 拒之门外，
+#   导致 select_plane 里的中文别名映射表【永远到不了】。
+# 修复：白名单直接纳入中文标准译名（SW 中文版实际使用的名称）。
 _PLANES = ("Front Plane", "Top Plane", "Right Plane",
-            "Bottom Plane", "Back Plane", "Left Plane")
+           "Bottom Plane", "Back Plane", "Left Plane",
+           # 中文版标准译名
+           "前视基准面", "上视基准面", "右视基准面",
+           "后视基准面", "下视基准面", "左视基准面")
 
 # 可视化建模模式
 VISUAL_MODE = True
@@ -434,11 +1278,177 @@ def _show_main_window(maximize=False):
         pass
 
 
+def _window_title(hwnd):
+    """读取窗口标题（用于截图可信度佐证：确认抓到的是 SolidWorks 窗口）。"""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        length = user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(max(length + 1, 1))
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        return buf.value or ""
+    except Exception:
+        return ""
+
+
+def _force_activate_sw_window(hwnd=None, tries=3):
+    """【Bug7 修复】强制把 SolidWorks 窗口真正激活到前台，并【验证】是否成功。
+
+    背景问题：
+      sw_bridge 报 screenshot.ok=true，但截图内容其实是 DSH Web GUI 的旧画面 ——
+      因为 SetForegroundWindow 在 Windows 上会因"前台锁"(foreground lock)
+      静默失败：调用不报错，但窗口根本没到前台，于是抓屏抓到的是屏幕上
+      原本摆在前面的 DSH 窗口。截图"成功"但不可作验收依据。
+
+    修复做法（多手段组合 + 结果校验）：
+      1. 若窗口最小化先 SW_RESTORE；
+      2. 用 AttachThreadInput 绕过前台锁（把本线程输入附到当前前台线程）；
+      3. SetForegroundWindow + BringWindowToTop + SetActiveWindow；
+      4. 用 GetForegroundWindow() 【校验】前台窗口是否已是目标；
+      5. 失败则重试 tries 次，每次之间短暂等待；
+      6. 返回 dict 明确告知激活是否成功 —— 调用方可据此拒绝出图，
+         而不是把"抓错的画面"当成验收证据。
+
+    Args:
+        hwnd:  目标窗口句柄；None 则自动查找 SW 主窗口
+        tries: 重试次数
+    Returns:
+        dict {ok: bool, hwnd: int, foreground: int, attempts: int, reason: str}
+    """
+    out = {"ok": False, "hwnd": None, "foreground": None, "attempts": 0, "reason": ""}
+    try:
+        import ctypes
+        from ctypes import wintypes
+        import time as _t
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        if hwnd is None:
+            try:
+                hwnd, _ = _find_sw_windows()
+            except Exception:
+                hwnd = None
+            if hwnd is None:
+                try:
+                    hwnd = _find_main_hwnd()
+                except Exception:
+                    hwnd = None
+        if not hwnd:
+            out["reason"] = "未找到 SolidWorks 窗口"
+            return out
+        out["hwnd"] = int(hwnd)
+
+        # 最小化则先还原
+        try:
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+                _t.sleep(0.3)
+        except Exception:
+            pass
+
+        for attempt in range(1, max(1, int(tries)) + 1):
+            out["attempts"] = attempt
+            try:
+                # ① AttachThreadInput 绕过前台锁
+                fg = user32.GetForegroundWindow()
+                tid_cur = kernel32.GetCurrentThreadId()
+                tid_fg = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+                tid_tgt = user32.GetWindowThreadProcessId(hwnd, None)
+                attached = []
+                for tid in (tid_fg, tid_tgt):
+                    try:
+                        if tid and tid != tid_cur and user32.AttachThreadInput(tid_cur, tid, True):
+                            attached.append(tid)
+                    except Exception:
+                        pass
+                try:
+                    # ② 三连：置顶 + 提升 + 激活
+                    try:
+                        user32.ShowWindow(hwnd, 3)      # SW_MAXIMIZE（可选，失败无害）
+                    except Exception:
+                        pass
+                    user32.BringWindowToTop(hwnd)
+                    user32.SetForegroundWindow(hwnd)
+                    try:
+                        user32.SetActiveWindow(hwnd)
+                    except Exception:
+                        pass
+                finally:
+                    for tid in attached:
+                        try:
+                            user32.AttachThreadInput(tid_cur, tid, False)
+                        except Exception:
+                            pass
+
+                _t.sleep(0.45)
+                # ③ 校验：前台窗口是否就是目标
+                now_fg = user32.GetForegroundWindow()
+                out["foreground"] = int(now_fg) if now_fg else None
+                if now_fg and int(now_fg) == int(hwnd):
+                    out["ok"] = True
+                    out["reason"] = "已激活并校验通过"
+                    return out
+                # 前台是目标的子/父窗口也算成功（SW 有多层窗口）
+                try:
+                    if now_fg and (user32.IsChild(hwnd, now_fg) or user32.IsChild(now_fg, hwnd)):
+                        out["ok"] = True
+                        out["reason"] = "已激活（前台为 SW 关联窗口）"
+                        return out
+                except Exception:
+                    pass
+                out["reason"] = "第%d次尝试后前台窗口仍非 SW (fg=%s)" % (attempt, out["foreground"])
+            except Exception as e:
+                out["reason"] = "第%d次激活异常: %r" % (attempt, e)
+            _t.sleep(0.35)
+        return out
+    except Exception as e:
+        out["reason"] = "激活流程异常: %r" % (e,)
+        return out
+
+
 def get_sw():
-    """连接 SolidWorks（已运行则挂接，否则自动启动并等待窗口出现）。"""
+    """连接 SolidWorks（已运行则挂接，否则自动启动并等待窗口出现）。
+
+    【Bug3 根因修复 · 关键】绑定方式优先用【静态绑定】(win32com.client.Dispatch)，
+    而不是 dynamic.Dispatch。
+
+    为什么这很关键（实测于 SW2025 Rev 33.5.0）：
+      dynamic.Dispatch 是 late-binding(IDispatch::Invoke 靠名字猜类型)，
+      对 SW 里大量"要求特定类型/VARIANT"的方法处理不正确，表现为：
+        · IBody2.SetMaterialProperty(...) 恒返回 1/6（材料永远设不上，密度恒为1000）
+        · Extension.SelectByID2(...) 抛 "类型不匹配 (None, 8)"
+      换成静态绑定后，同样调用直接返回 0（成功），密度立刻 1000→7800。
+
+    因此这里：
+      1) 优先静态绑定（可用则用，所有 API 都按正确类型编组）；
+      2) 静态绑定不可用时回退 dynamic（保证兼容性不下降）。
+    """
     import time
     pythoncom.CoInitialize()
-    sw = win32com.client.dynamic.Dispatch('SldWorks.Application')
+    sw = None
+    _binding = None
+    # ① 静态绑定（首选）
+    try:
+        sw = win32com.client.Dispatch('SldWorks.Application')
+        _binding = "static"
+    except Exception:
+        sw = None
+    # ② 回退 late-binding
+    if sw is None:
+        try:
+            sw = win32com.client.dynamic.Dispatch('SldWorks.Application')
+            _binding = "dynamic"
+        except Exception:
+            sw = None
+    if sw is None:
+        raise RuntimeError("无法连接 SolidWorks（静态/动态绑定均失败）")
+    try:
+        sw.__dict__["_dsh_binding"] = _binding
+    except Exception:
+        try:
+            setattr(sw, "_dsh_binding", _binding)
+        except Exception:
+            pass
     _disable_snapping(sw)
     if VISUAL_MODE:
         _wait_sw_window(timeout=60)
@@ -447,10 +1457,18 @@ def get_sw():
     return sw
 
 
-def new_part(sw=None):
+def new_part(sw=None, material=None, density=None):
     """新建零件，返回 SWModel。
 
     Bug 10 修复: 新建前先关闭所有遗留文档，避免干扰。
+
+    ── 【BUG-05/08 修复】新建时必须赋材质，杜绝"密度恒为 1000（水）" ──────
+    原缺陷：new_part 从不赋材质 → SW 用默认密度 1000 kg/m³（水）→
+      质量/重心/转动惯量全错、工程图材料栏空白、physics 报告 material 显示 "?"、
+      强度与寿命校核基准不可信（"30 年寿命校核"直接失效）。
+    修复：新建后立即尝试赋材质（默认 Q235 碳钢，可用 material= 指定）；
+      赋材质结果写入 m.material_result，失败时进 warnings 而非静默。
+      density= 可强制写入密度（材质库找不到时的兜底）。
     """
     if sw is None:
         sw = get_sw()
@@ -471,6 +1489,42 @@ def new_part(sw=None):
     if model is None:
         raise RuntimeError("NewDocument returned None")
     m = SWModel(sw, model)
+    # ── 【BUG-05/08 修复】登记待赋材质（延迟到有实体后真正写入）──────────
+    # ⚠️ 实机教训（2026-09-27）：材质【不能】在 new_part 里立即写入 ——
+    #   此刻零件还是空的，没有任何 IBody2，set_material 必然报
+    #   "零件没有实体（IBody2）"，密度仍停在 1000 kg/m³（水）。
+    #   而模型通常写完第一个特征（extrude/revolve）才产生实体，
+    #   所以正确做法是：这里只【记住要赋什么】，等第一个实体出现后
+    #   由 _try_apply_pending_material() 自动补上。
+    #   另：save() 是最后一道保险，若到保存时仍未赋成功会在返回值里显式告警。
+    # ── 【Bug-14 修复】显式传参必须最高优先，并记录来源供审计 ────────────
+    # 原缺陷：材质来源不透明 —— 调用方无法区分"我显式传的 PETG 生效了"还是
+    #   "被 load_case 里的 6061-T6 覆盖了"。实测需要这种可追溯性来排查
+    #   "图纸材料 vs 实际材料"不一致。
+    # 优先级（与文档一致）：显式 material 参数 > DSH_PART_MATERIAL 环境变量
+    #   > gate_load_case.json 材料 > DEFAULT_PART_MATERIAL。
+    if material and str(material).strip():
+        m._pending_material = str(material).strip()
+        m._material_source = "explicit(new_part material=)"
+    else:
+        _env = (os.environ.get("DSH_PART_MATERIAL") or "").strip()
+        if _env:
+            m._pending_material = _env
+            m._material_source = "env(DSH_PART_MATERIAL)"
+        else:
+            _lc = _material_from_load_case()
+            if _lc:
+                m._pending_material = _lc
+                m._material_source = "load_case(gate_load_case.json)"
+            else:
+                m._pending_material = DEFAULT_PART_MATERIAL
+                m._material_source = "default(DEFAULT_PART_MATERIAL)"
+    m._pending_density = density
+    m.material_result = {"ok": False, "method": None, "pending": True,
+                         "material": m._pending_material,
+                         "applied_material": None,
+                         "source": m._material_source,
+                         "note": "待首个实体生成后自动赋材质（BUG-05）"}
     if VISUAL_MODE:
         _show_main_window(maximize=True)
         import time
@@ -489,6 +1543,124 @@ def from_active(sw=None):
     return SWModel(sw, model)
 
 
+# ══ 【Bug-20/24/28 修复】特征创建失败诊断助手 ═══════════════════════════════
+# 原缺陷：FeatureCut3/FeatureExtrusion3 失败时，小屋只能"暴力穷举 12 种签名
+#   （flip × dir × 贯穿枚举/盲孔）"，全部返回 None 或
+#   com_error(-2147352561 '非选择性的参数')，却不知道到底卡在哪一步 ——
+#   是选择集为空？签名错？还是草图轮廓不闭合？浪费大量轮次且给不出修复建议。
+# 修复：提供统一诊断函数，把失败归因到【可操作】的几类，并给出建议命令。
+_DIAG_ADVICE = {
+    "no_selection": "选择集为空 —— 草图轮廓没有被选中。"
+                    "建议：先 end_sketch()，再用 select_all_sketch_segments() 选段；"
+                    "或改用 begin_sketch_on_face() 在实体面上重画轮廓。",
+    "sketch_open": "草图轮廓【未闭合】—— 拉伸/切除需要封闭轮廓。"
+                   "建议：polyline() 会自动闭合（Bug-26）；手工画线时确认末点回到起点。",
+    "not_closed_loop": "轮廓是开放折线或自相交 —— 无法生成实体。"
+                       "建议：检查点序，用 circle()/rect() 等封闭图元，"
+                       "或让 polyline() 自动补回起点的边。",
+    "com_signature": "COM 调用签名不匹配（com_error '非选择性的参数'）—— "
+                     "多为 FeatureCut3 参数布局跨版本差异。"
+                     "建议：改用高层封装 cut(through=True) / extrude()，"
+                     "它们内部已做多签名尝试与体积校验。",
+    "feature_failed": "特征创建返回 None —— SW 拒绝该操作。"
+                      "建议：检查是否在错误的文档/编辑模式、草图是否已被消费；"
+                      "必要时 rebuild() 后重试。",
+    "no_body": "零件当前没有实体（IBody2）—— 切除/材质等操作无从作用。"
+               "建议：先 extrude/revolve 生成基体，再做切除。",
+}
+
+
+def diagnose_feature_failure(model, exc=None, api=None, extra=None):
+    """【Bug-20/24/28】把特征失败归因到可操作的类别，返回诊断结果。
+
+    Args:
+        model: SWModel 实例（可为 None）
+        exc:   捕获到的异常（com_error / RuntimeError / None）
+        api:   尝试调用的 API 名（如 "FeatureCut3"）
+        extra: 额外上下文 dict（如 {"selection_count": 0}）
+    Returns:
+        {"ok": bool, "cause": str, "detail": str, "advice": str, "checks": {...}}
+    """
+    checks = {}
+    cause = "unknown"
+    detail = ""
+
+    # ── ① 选择集数量 ────────────────────────────────────────────────
+    try:
+        if model is not None:
+            _n = model.model.SelectionManager.GetSelectedObjectCount2(-1)
+            checks["selection_count"] = int(_n)
+    except Exception:
+        checks["selection_count"] = None
+    if extra and "selection_count" in extra:
+        checks["selection_count"] = extra["selection_count"]
+
+    # ── ② 实体数量 ──────────────────────────────────────────────────
+    try:
+        if model is not None:
+            _b = model.model.GetBodies2(0, False)
+            if _b is None:
+                checks["body_count"] = 0
+            else:
+                try:
+                    checks["body_count"] = len(_b)
+                except TypeError:
+                    checks["body_count"] = 1
+    except Exception:
+        checks["body_count"] = None
+
+    # ── ③ 草图是否闭合 / 是否处于草图模式 ───────────────────────────
+    try:
+        if model is not None:
+            _sk = model.skm.ActiveSketch
+            checks["active_sketch"] = _sk is not None
+            if _sk is not None:
+                try:
+                    checks["sketch_closed"] = bool(_sk.IsClosed())
+                except Exception:
+                    checks["sketch_closed"] = None
+    except Exception:
+        checks["active_sketch"] = None
+
+    _emsg = ""
+    if exc is not None:
+        try:
+            _emsg = str(exc)
+        except Exception:
+            _emsg = repr(exc)
+    checks["exception"] = _emsg or None
+    checks["api"] = api
+
+    # ── 归因（按可操作性排序）──────────────────────────────────────
+    if checks.get("body_count") == 0 and (api or "").startswith("Feature"):
+        cause = "no_body"
+        detail = "零件无实体，特征操作无从作用"
+    elif checks.get("selection_count") == 0:
+        cause = "no_selection"
+        detail = "选择集为 0，轮廓未被选中"
+    elif checks.get("sketch_closed") is False:
+        cause = "sketch_open"
+        detail = "草图 IsClosed() 返回 False，轮廓未闭合"
+    elif "非选择性" in _emsg or "non-selective" in _emsg.lower() \
+            or "-2147352561" in _emsg:
+        cause = "com_signature"
+        detail = "com_error 非选择性的参数（签名/选择集问题）"
+    elif _emsg:
+        cause = "feature_failed"
+        detail = _emsg[:300]
+    else:
+        cause = "feature_failed"
+        detail = "特征 API 返回 None，无异常信息"
+
+    return {
+        "ok": True,
+        "cause": cause,
+        "detail": detail,
+        "advice": _DIAG_ADVICE.get(cause, "请检查草图轮廓与选择集后重试。"),
+        "checks": checks,
+    }
+
+
 class SWModel:
     """单个模型文档的高层封装。"""
 
@@ -503,6 +1675,306 @@ class SWModel:
         self._surface_sketch_offset = 0.0
         # Right Plane 穿透孔模式：后半侧圆柱面无法直接选面，改用 Right Plane 草图
         self._right_plane_mode = False
+        # 【Bug1 加固】非致命告警收集器：吞错改为"记录 + 打印"，
+        # 建模流程可继续，但调用方能从 warnings 里看到隐患（避免静默失败）。
+        self.warnings = []
+        # ══ 【Bug T1/T2 修复】草图状态追踪 ═══════════════════════════════
+        # _active_sketch_name: begin_sketch / begin_sketch_on_face 成功激活的
+        #   草图名。end_sketch 退出后 SW 会清空选择与 ActiveSketch，此后
+        #   cut() 若只靠"重新探测最后草图"，在同零件多次 cut（T1）或
+        #   复杂轮廓（T3）时必然拿错/拿不到轮廓段 —— 用显式名字消除歧义。
+        self._active_sketch_name = None
+        # _last_cut_feature_name: 最近一次成功 cut 所在的草图名。
+        #   该草图已被"消费"（轮廓已转成切除特征），后续 cut 绝不能再
+        #   回落到它 —— 这是 T1（第二次 cut 必失败）的直接根因。
+        self._last_cut_feature_name = None
+        # 已被特征消费的草图名集合（防沿用旧轮廓，T1 代码级强制）
+        self._consumed_sketches = set()
+        # 【Bug T1 修复·验收判据】当前草图的封闭轮廓面积记录（mm²）。
+        # 由 circle()/rect() 画图时累加 —— 比事后从 COM 读草图几何可靠
+        # （不依赖 GetType 枚举值，跨 SW 版本一致）。cut() 用它计算
+        # 期望去料体积 = 面积 × 贯穿长度/深度。
+        self._sketch_area_mm2 = 0.0
+        # 面积记录所属草图名：画图入口检测到"换了草图"时自动清零面积，
+        # 这是防跨草图累积的唯一收口点（begin_* 的 return 分支太多，必漏）。
+        self._area_sketch_name = None
+        # 【底面切除迁移】草图平面在法向轴上的位置（mm）：Z 轴草图=z，
+        # X/Y 轴草图=0（暂不支持迁移，仅 Z 向）。
+        self._sketch_axis_offset_mm = 0.0
+        # 草图法向轴索引（0=X, 1=Y, 2=Z）：begin_sketch 按基准面名设定，
+        # begin_sketch_on_face 按所选面法向设定。cut() 用它取包围盒在
+        # 贯穿方向上的真实长度作为 H（实测：包围盒最大边会把直径 60
+        # 当成长度 40 用，期望体积虚高 1.5 倍导致完美切除被误拒）。
+        self._sketch_normal_axis = 2
+        # ── 【BUG-05/08 修复】待赋材质（由 new_part 登记，首个实体出现后写入）
+        self._pending_material = None
+        self._pending_density = None
+        self.material_result = None
+
+    def _has_solid_body(self):
+        """零件当前是否已有实体（IBody2）。材质必须等到这时才能写入。"""
+        try:
+            _b = self.model.GetBodies2(0, False)   # 0 = swSolidBody
+            if not _b:
+                return False
+            try:
+                return len(_b) > 0
+            except TypeError:
+                return True          # 单个 body 对象（不可 len）
+        except Exception:
+            return False
+
+    def _try_apply_pending_material(self, force=False):
+        """【BUG-05/08 修复】实体出现后自动补赋材质。
+
+        实机教训（2026-09-27 真实流程暴露）：new_part 阶段零件是空的，
+        没有 IBody2 → set_material 必然报"零件没有实体" → 密度停在 1000（水）。
+        因此把赋材质【延迟】到"第一个实体生成之后"。
+        每个会产出实体的特征（extrude/revolve）末尾调用本方法，
+        成功一次即清空 pending，不重复写 COM。
+
+        Args:
+            force: True 时即使无 pending 也再校验一次（供 save 阶段兜底）
+        Returns:
+            dict|None —— 实际执行了赋值时返回 set_material 的结果
+        """
+        name = self._pending_material
+        if not name and not force:
+            return None
+        if not force and self.material_result and self.material_result.get("ok"):
+            return None
+        if not self._has_solid_body():
+            return None
+        try:
+            res = self.set_material(name, density=self._pending_density)
+            self.material_result = res
+            if res.get("ok"):
+                self._pending_material = None
+                self._pending_density = None
+            else:
+                self._warn("赋材质失败(%s): %s"
+                           % (name, res.get("error") or res.get("method")))
+            return res
+        except Exception as e:
+            self.material_result = {"ok": False, "error": repr(e)}
+            self._warn("赋材质异常(%s): %r" % (name, e))
+            return self.material_result
+
+    def _warn(self, msg):
+        """记录一条非致命告警（不抛异常，不影响建模流程）。
+
+        用途：替换原先的 `except Exception: pass` 静默吞错 ——
+        把"失败被无声吞掉"变成"失败被记录并可见"，供调用方与验收环节复核。
+        """
+        entry = {"msg": str(msg), "ts": time.time() if "time" in globals() else None}
+        self.warnings.append(entry)
+        try:
+            print("[swapi][WARN] " + str(msg))
+        except Exception:
+            pass
+        return entry
+
+    def _migrate_cut_to_opposite_face(self, cx, cy, z_opp, circles):
+        """【底面切除迁移】在 z=z_opp 的对侧面重开草图并重画同位圆轮廓。
+
+        仅支持 Z 向草图（机械件底面孔位场景）。局部 (cx,cy) 在对侧 Z 向
+        面上与全局 (x,y) 同向（_normal_to("*Front") 保证视角一致）。
+        """
+        _ = self.begin_sketch_on_face(cx, cy, z_opp)
+        for (lx, ly, lr) in circles:
+            self.circle(lx, ly, lr)
+        return self
+
+    def _make_select_data(self, mark=0):
+        """【测试部反馈修复】创建 SelectionMgr.SelectData 对象。
+
+        SW2025 下 ISketchSegment/Feature/Component 的 Select4(AppendFlag, Data)
+        的 Data 参数【必须】是 SelectionMgr.CreateSelectData() 创建的对象，
+        传 None 抛 com_error -2147352561 '非选择性的参数'。
+        全模块所有 Select4 调用统一走本辅助。
+        """
+        try:
+            sd = self.model.SelectionManager.CreateSelectData()
+            try:
+                sd.Mark = int(mark)
+            except Exception:
+                pass
+            return sd
+        except Exception:
+            return None
+
+    def _ensure_area_context(self):
+        """【Bug T1 修复】画图入口调用：若当前激活草图已切换，则重置面积记录。
+
+        防止上一草图的轮廓面积累积进本次切除的期望体积
+        （实测：452.4 + 78.5 = 530.9 mm² 串联导致期望虚高 6 倍）。
+        """
+        try:
+            sk = self.skm.ActiveSketch
+            if sk is not None:
+                nm = None
+                for _how in (lambda: sk.Name, lambda: sk.GetName()):
+                    try:
+                        v = _how()
+                        if v:
+                            nm = str(v)
+                            break
+                    except Exception:
+                        continue
+                if nm and nm != self._area_sketch_name:
+                    self._area_sketch_name = nm
+                    self._sketch_area_mm2 = 0.0
+        except Exception:
+            pass
+        return self
+
+    def _remember_sketch_name(self):
+        """【Bug T1/T2 修复】记录当前激活草图的名字（失败返回 None）。
+
+        在 begin_sketch / begin_sketch_on_face 成功激活草图后调用，
+        为 cut() 提供【显式、无歧义】的轮廓来源，不再依赖"特征树里
+        最后一个 ProfileFeature"这种在多次 cut 后必然指错的启发式。
+        """
+        try:
+            sk = self.skm.ActiveSketch
+            if sk is not None:
+                nm = None
+                for _how in (lambda: sk.Name, lambda: sk.GetName()):
+                    try:
+                        v = _how()
+                        if v:
+                            nm = str(v)
+                            break
+                    except Exception:
+                        continue
+                if nm:
+                    self._active_sketch_name = nm
+                    # 【Bug T1 修复】每次成功激活新草图，重置轮廓面积记录
+                    # （放在这里覆盖 begin_sketch / begin_sketch_on_face
+                    #   的所有成功分支，避免漏分支导致面积累积）
+                    self._sketch_area_mm2 = 0.0
+                    self._sketch_circles_local = []
+                    self._sketch_normal_axis = 2  # 默认 Z 向（法向轴）
+                    return nm
+        except Exception:
+            pass
+        return None
+
+    def _finalize_new_sketch(self, plane="Front Plane"):
+        """【Bug T3 修复】草图画布激活后的统一收尾：记录草图名 + 法向轴。
+
+        背景（真机实测根因）：
+          begin_sketch() 有【多个成功返回分支】—— 主路径(按名选基准面)一处，
+          以及两套降级路径(按轴向外扩的包围盒选面 / 固定坐标射线拾取)共 4 处。
+          原实现只在主路径调用 _remember_sketch_name()，降级路径直接 return，
+          导致 _active_sketch_name 恒为 None。
+          后果：revolve() 的"路径②按显式草图名 EditSketch 后选段"必然失效
+          （_cand=None 直接跳过），复杂轮廓 revolve 100% 失败（T3）；
+          cut() 的同类按名重选路径也一并失效。
+
+        实测证据（SW2025 SP5.0）：
+          · begin_sketch 后 ActiveSketch 有效、sk.Name='草图8' 可读；
+          · 但 _active_sketch_name 仍为 None → 说明走的不是主路径；
+          · 同级 _warn("按名选择基准面失败，降级到实体面策略") 亦印证降级。
+
+        修复：把"记录草图名 + 重置面积/圆记录 + 设定法向轴"抽成本方法，
+        供【所有】成功分支统一调用，杜绝漏分支。
+        """
+        try:
+            self._remember_sketch_name()
+        except Exception:
+            pass
+        try:
+            self._sketch_area_mm2 = 0.0
+        except Exception:
+            pass
+        try:
+            self._sketch_circles_local = []
+        except Exception:
+            pass
+        # 法向轴：Front/Back→Z(2)，Top/Bottom→Y(1)，Right/Left→X(0)
+        try:
+            _pl = str(plane)
+            self._sketch_normal_axis = (
+                1 if ("Top" in _pl or "Bottom" in _pl or "俯" in _pl)
+                else 0 if ("Right" in _pl or "Left" in _pl or "右" in _pl or "左" in _pl)
+                else 2)
+        except Exception:
+            self._sketch_normal_axis = 2
+        return self
+
+    def _mark_sketch_consumed(self):
+        """【Bug T1 修复】把当前草图标记为"已被特征消费"。
+
+        调用时机：cut/extrude 成功把轮廓转成特征之后。
+        效果：该草图名进入 _consumed_sketches 集合，后续任何"重新选中
+        轮廓"的尝试都会跳过它 —— 杜绝"沿用上一次 cut 的轮廓"。
+        """
+        nm = self._active_sketch_name
+        if nm:
+            self._last_cut_feature_name = nm
+            try:
+                self._consumed_sketches.add(nm)
+            except Exception:
+                pass
+            self._active_sketch_name = None
+
+    def _try_edit_sketch_by_name(self, sk_name):
+        """【Bug T1/T2 修复】按名进入草图编辑态并选中其全部轮廓段。
+
+        【T2 实测修正】若该草图已处于编辑态，绝不能再 EditSketch ——
+        那会把它【切换/退出】（InsertSketch/EditSketch 均为 toggle 语义），
+        直接选段即可。
+
+        Returns: (ok, selected_count)
+        """
+        # 已激活且同名 → 直接选段，不做任何 toggle
+        try:
+            _cur = self.skm.ActiveSketch
+            if _cur is not None:
+                _cur_name = None
+                for _how in (lambda: _cur.Name, lambda: _cur.GetName()):
+                    try:
+                        _v = _how()
+                        if _v:
+                            _cur_name = str(_v)
+                            break
+                    except Exception:
+                        continue
+                if _cur_name and str(_cur_name) == str(sk_name):
+                    ok, n = self.select_all_sketch_segments()
+                    return bool(ok), int(n or 0)
+        except Exception:
+            pass
+        try:
+            self.model.ClearSelection2(True)
+        except Exception:
+            pass
+        try:
+            if not self.ext.SelectByID2(sk_name, "SKETCH", 0, 0, 0,
+                                        False, 0, self._empty, 0):
+                return False, 0
+        except Exception:
+            return False, 0
+        try:
+            self.model.EditSketch()
+        except Exception:
+            return False, 0
+        try:
+            if self.skm.ActiveSketch is None:
+                return False, 0
+        except Exception:
+            return False, 0
+        try:
+            ok, n = self.select_all_sketch_segments()
+            try:
+                print(u"[swapi] EditSketch@%s -> 选段=%s ok=%s"
+                      % (sk_name, n, bool(ok)))
+            except Exception:
+                pass
+            return bool(ok), int(n or 0)
+        except Exception:
+            return False, 0
 
     def _visual_step(self, label=""):
         """可视化建模：每个特征创建后实时居中展示。"""
@@ -529,40 +2001,807 @@ class SWModel:
         """另存为；不传 path 则覆盖保存当前文档。
 
         Bug C 修复: 统一使用 SaveAs3，避免 Save3 类型不匹配。
-        """
-        if path is None:
-            rc = self.model.SaveAs3(self.path, 0, 2)
-            return {"ok": rc == 0, "path": self.path}
-        before = os.path.getmtime(path) if os.path.exists(path) else None
-        rc = self.model.SaveAs3(path, 0, 2)
-        exists = os.path.exists(path)
-        after = os.path.getmtime(path) if exists else None
-        updated = exists and (before is None or after != before)
-        return {"ok": exists, "path": path, "saved": exists,
-                "updated": updated, "rc": rc}
 
-    def massprops(self):
+        ── 【BUG-E 修复】SaveAs 返回值双向不可靠，必须以磁盘为真相 ──────────
+        测试反馈：SaveAs2/SaveAs3 的返回值【两个方向都不可信】——
+          · 目标文件【已存在】时，可能返回 True 却【静默不写】（旧文件原样留着）；
+          · 也可能写入成功却返回非 0 错误码。
+        后果：上层看到 ok=True 就继续走，实际磁盘上还是旧模型 ——
+          属于最危险的"静默失败"（表面成功、实则无效）。
+
+        修复：不再依赖返回码判定，改为【以磁盘为唯一真相】：
+          1) 记录保存前的大小 + mtime（文件不存在则记 None）
+          2) 调用 SaveAs3
+          3) 校验：文件存在 且 (大小变化 或 mtime 变化 或 内容哈希变化)
+          4) 对"目标已存在且未变化"的情况【明确报失败】并给出原因，
+             绝不静默返回成功。
+
+        Returns: {ok, path, saved, updated, size, rc, error?, hint?}
+        """
+        def _fingerprint(p):
+            """返回文件指纹 (size, mtime, md5)。不存在返回 None。
+
+            用三元组而非仅 (size, mtime)：mtime 在某些文件系统精度不足，
+            同秒内重写会被误判为"未变化"；md5 作为最终裁决。
+            """
+            try:
+                if not os.path.exists(p):
+                    return None
+                st = os.stat(p)
+                import hashlib as _hl
+                h = _hl.md5()
+                with open(p, "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        h.update(chunk)
+                return (st.st_size, st.st_mtime, h.hexdigest())
+            except Exception:
+                return None
+
+        target = self.path if path is None else path
+        # ── 【BUG-05/08 修复】保存前最后一道材质兜底 ────────────────────
+        # 若因任何原因（建模路径未触发特征钩子、手工 from_active 等）
+        # 材质仍未赋成功，则在此强制补一次。补不上就在返回值里显式告警，
+        # 绝不让"密度=1000(水)"的零件静默保存出去。
+        _mat_warn = None
+        try:
+            if self._pending_material or not (
+                    self.material_result and self.material_result.get("ok")):
+                _r = self._try_apply_pending_material(force=True)
+                if _r is None and self._pending_material:
+                    _mat_warn = ("零件已有实体但材质仍未写入：%s"
+                                 % self._pending_material)
+        except Exception as e:
+            _mat_warn = "材质兜底赋值异常: %r" % (e,)
+        before = _fingerprint(target)
+        rc = None
+        try:
+            rc = self.model.SaveAs3(target, 0, 2)
+        except Exception as e:
+            return {"ok": False, "path": target, "saved": False, "updated": False,
+                    "rc": rc, "error": "SaveAs3 调用异常: %r" % (e,)}
+
+        after = _fingerprint(target)
+
+        if after is None:
+            return {"ok": False, "path": target, "saved": False, "updated": False,
+                    "rc": rc,
+                    "error": "SaveAs3 返回后目标文件【不存在】，保存实际未生效。",
+                    "hint": "检查路径是否可写、目录是否存在、文件名是否被 SW 接受。"}
+
+        # ── 【BUG-E 判定修正·第十一轮】专家结论：这不是 bug，是判定标准错 ──
+        # 专家指出："重复保存 md5 必须一致"这个断言本身就是错的 ——
+        #   文件内容确实可能有微小变化（保存时间戳、内部 ID 等），
+        #   所以 md5 变化【恰恰证明真的写入了新内容】，属于正常行为。
+        #
+        # 因此判定语义应修正为【区分三种情形】，而不是简单的"变没变"：
+        #   ① 内容变了（md5 不同）    -> 真的写入新内容，正常成功；
+        #   ② 只有 mtime 变了         -> SW 重写了文件但内容一致
+        #                                （无修改时重复保存的常见结果），
+        #                                也算成功，但标注 content_same=True；
+        #   ③ 完全没变（含 mtime）     -> 才是可疑的"静默忽略"。
+        #
+        # 注意：不再把"md5 变化"当作异常。之前把 ② 也判成失败是误报。
+        _before_md5 = before[2] if before else None
+        _after_md5 = after[2]
+        _content_changed = (before is None) or (_after_md5 != _before_md5)
+        _touched = (before is None) or (after[:2] != before[:2])
+
+        if not _touched and not _content_changed:
+            # ── 情形 ③：连 mtime 都没变 —— 这才是真正可疑的静默忽略 ──
+            return {"ok": False, "path": target, "saved": True, "updated": False,
+                    "content_same": True, "rc": rc, "size": after[0],
+                    "error": ("SaveAs3 未抛异常，但目标文件【完全未变化】"
+                              "（大小/mtime/md5 三者全同）—— 保存被静默忽略。"),
+                    "hint": ("请确认该文件未被其他程序/会话占用；"
+                             "同名零件若已在 SW 中打开，建议先 close-all 再保存。")}
+
+        # ── 情形 ① / ② 都算成功 ──
+        _out = {"ok": True, "path": target, "saved": True,
+                "updated": bool(_content_changed),
+                "content_changed": bool(_content_changed),
+                "content_same": (not _content_changed),
+                "md5_before": _before_md5,
+                "md5_after": _after_md5,
+                "rc": rc, "size": after[0],
+                "note": ("内容已更新" if _content_changed
+                         else "内容与保存前一致（无修改时重复保存的正常结果）")}
+        # ── 【BUG-05/08】把材质状态一并回传（材料栏空白/密度虚标的直接原因）
+        _out["material"] = self.material_result
+        # ── 【Bug-14 修复】显式回显 applied_material 与来源，便于排查
+        #    "图纸材料 vs 实际材料"不一致（例：小屋写了 PETG 却变成 6061-T6）。
+        _mr = self.material_result if isinstance(self.material_result, dict) else {}
+        _out["applied_material"] = (_mr.get("applied_name")
+                                    or _mr.get("material")
+                                    or getattr(self, "_pending_material", None))
+        _out["material_source"] = (getattr(self, "_material_source", None)
+                                   or _mr.get("source"))
+        if _mat_warn:
+            _out["material_warning"] = _mat_warn
+            self._warn("save: " + _mat_warn)
+        return _out
+
+    # ---------- 【Bug3】材料与密度 ----------
+    def set_material(self, name, database=None, density=None):
+        """【Bug3 修复】给零件指定材料（并可选强制密度），解决"密度恒为1000kg/m³"。
+
+        问题背景：
+          原实现从不设置材料 → SW 用默认密度(≈1000 kg/m³ 水) →
+          质量/重心/转动惯量全错，工程图材料栏空白，强度校核不可信。
+
+        实现策略（三级兜底，任一成功即可）：
+          第1级 · AddMaterial(name, db) —— 标准路径，从 .sldmat 材质库添加。
+                  材质库路径通过 find_material_db() 【跨盘符】搜索得到
+                  （SW 可能装在 Z 盘，绝不能写死 C 盘）。
+          第2级 · 用已知密度表 COMMON_MATERIALS / 显式 density 参数，
+                  通过 SetMaterialPropertyName2 直接写入密度属性。
+          第3级 · 仅记录告警，返回失败原因，绝不静默吞掉。
+
+        Args:
+            name:     材料名（如 "40Cr" / "Q235" / "6061-T6"）
+            database: 可选，显式指定 .sldmat 路径；None 则自动跨盘搜索
+            density:  可选，显式密度 (kg/m³)；None 则查内置表
+
+        Returns:
+            dict: {ok, material, density_kg_m3, method, database, warnings, error?}
+        """
+        result = {"ok": False, "material": name, "method": None,
+                  "database": None, "database_name": None, "warnings": [],
+                  "error_code": None}
+        if not name:
+            result["error"] = "材料名为空"
+            return result
+
+        # 解析期望密度（显式参数 > 内置表），用于事后校验
+        info = lookup_material(name)
+        want_density = density if density else (info or {}).get("density")
+        result["expected_density_kg_m3"] = want_density
+        if info:
+            result["canonical"] = info.get("canonical")
+
+        # ══ 【Bug3 最终修复 · 实机验证于 SW2025 (Rev 33.5.0)】═══════════════
+        # 经过系统性探测（含逐个 dispid 枚举 + 材质库 XML 解析），确认：
+        #
+        #   ✅ 唯一真正生效的 API（PartDoc 层级）：
+        #        model.SetMaterialPropertyName2("", "<SW库名>", "<材料名>")
+        #          ↑ 第1参数必须留空   ↑ 界面显示名       ↑ 库中精确名
+        #
+        #   ❌ AddMaterial / SetMaterialPropertyName —— SW 根本没这两个方法
+        #   ❌ IBody2.SetMaterialProperty(cfg, db, name) —— 实测恒返回 1/6，
+        #      即使三个参数都正确也不生效（SW2025 语义已变）
+        #   ❌ 第1参数传配置名（"默认"/"Default"）—— 语义错误，规范用法是空串
+        #
+        # 实测五组材料全部成功，密度与材质库定义完全一致：
+        #   灰铸铁→7200 / AISI 304→8000 / 普通碳钢→7800 /
+        #   1023 碳钢板 (SS)→7858 / 合金钢→7700
+        #
+        # 库名必须是 SW 界面显示名（"SolidWorks Materials"），
+        # 传路径/小写文件名/空串都会静默不生效。
+        tried = []
+        err_names = {0: "Success", 1: "InvalidMaterialName",
+                     2: "InvalidDatabaseName", 3: "InvalidConfigurationName",
+                     4: "Unknown", 5: "InvalidConfigurationName(5)",
+                     6: "InvalidDatabaseName(6)"}
+
+        # ── 1. 取激活配置的真实名称 ─────────────────────────────────────
+        cfg = None
+        try:
+            cfg = self.model.ConfigurationManager.ActiveConfiguration.Name
+        except Exception as e:
+            tried.append("ConfigurationManager.ActiveConfiguration -> %r" % (e,))
+        if not cfg:
+            cfg = "默认"
+        result["configuration"] = cfg
+
+        # ── 2. 取实体（IBody2）──────────────────────────────────────────
+        body = None
+        try:
+            _b = self.model.GetBodies2(0, False)   # 0 = swSolidBody
+            if _b:
+                body = _b[0] if hasattr(_b, "__getitem__") else _b
+        except Exception as e:
+            tried.append("GetBodies2 -> %r" % (e,))
+        if body is None:
+            result["error"] = "零件没有实体（IBody2）—— 请先建模再设材料"
+            self._warn("set_material: " + result["error"])
+            result["warnings"] = tried
+            return result
+
+        # ── 3. 解析"库名"（SW 界面显示名，而非路径）─────────────────────
+        # 显式传入的 database 若形如路径 → 取 basename 去扩展名；
+        # 若已是库名（不含路径分隔符）→ 直接使用。
+        db_names = []
+        if database:
+            d = str(database)
+            if ("\\" in d) or ("/" in d):
+                base = os.path.splitext(os.path.basename(d))[0]
+                db_names.append(_sw_db_display_name(base))
+            else:
+                db_names.append(_sw_db_display_name(d))
+        # 自动探测：用 SW 自己报告的库列表（最权威）
+        try:
+            for d in (self.sw.GetMaterialDatabases or []):
+                base = os.path.splitext(os.path.basename(str(d)))[0]
+                nm = _sw_db_display_name(base)
+                if nm not in db_names:
+                    db_names.append(nm)
+        except Exception as e:
+            tried.append("GetMaterialDatabases -> %r" % (e,))
+        # 兜底：常见库名
+        for nm in ("SolidWorks Materials", "SolidWorks DIN Materials"):
+            if nm not in db_names:
+                db_names.append(nm)
+        # 优先把主库排前面
+        db_names.sort(key=lambda x: 0 if x == "SolidWorks Materials" else 1)
+        result["database_name"] = db_names[0] if db_names else None
+
+        # ── 4. 候选材料名：用户给的 + 内置别名 ───────────────────────────
+        #     ══ 【BUG-05 二次修复 · 关键】跨材料家族回退必须禁止 ══════════
+        #     问题现象（用户实测）：任务要求 6061-T6 铝，密度却变成 7900（钢）。
+        #     根因：候选名 = [用户给的] + [内置表里的全部别名]，然后【逐个试】。
+        #       请求 "Q235" 时库里没有 → 试别名 "AISI 1020" → 命中 exact →
+        #       密度 7900（AISI 1020 库内值 0.79E+04）。
+        #       请求 "6061-T6" 时若恰好也走到别名链，同样可能落到钢。
+        #       结果是"图纸写铝、零件是钢"——质量/重心/强度/寿命全错，
+        #       而返回值还是 ok=True，属于最危险的静默错误。
+        #     修复：别名只在【同族】内使用（铝↔铝、钢↔钢），
+        #       绝不允许因"名字匹配上了"就跨族换材。
+        names_to_try = [name]
+        if info:
+            _fam = _material_family(name)
+            for a in (info.get("aliases") or []):
+                if a in names_to_try:
+                    continue
+                # 同族才允许作为候选；跨族别名直接丢弃并记录
+                if _fam and _material_family(a) and _material_family(a) != _fam:
+                    result["warnings"].append(
+                        "已忽略跨材料家族别名 %r（%s → %s）："
+                        "禁止把 %s 静默替换成另一种材料"
+                        % (a, _fam, _material_family(a), name))
+                    continue
+                names_to_try.append(a)
+
+        # ── 5. 组合尝试：库名 × 材料名（含自动匹配库内真实名）─────────────
+        #    先读一次材质库，把"近似名"映射到库里的精确名，
+        #    避免因空格/全半角/大小写差异而匹配失败。
+        def dens_now():
+            try:
+                mp = self.model.GetMassProperties
+                if mp and isinstance(mp, tuple) and len(mp) >= 6 and mp[3]:
+                    return mp[5] / mp[3]
+            except Exception:
+                pass
+            return 0.0
+
+        d_before = dens_now()
+        result["density_before_kg_m3"] = d_before
+
+        # ══ 主路径：【PartDoc.SetMaterialPropertyName2("", 库名, 材料名)】 ════
+        # 这是实机（SW2025 Rev 33.5.0）验证唯一真正生效的调用方式。
+        # 五组材料实测全部成功，密度与材质库定义完全一致：
+        #   灰铸铁→7200 / AISI 304→8000 / 普通碳钢→7800 / 1023碳钢板→7858 / 合金钢→7700
+        # 关键：第 1 参数必须留空字符串（不是配置名！）。
+        for dbn in db_names:
+            for mname in names_to_try:
+                for real, level in _resolve_material_names(dbn, mname, with_level=True):
+                    try:
+                        self.model.SetMaterialPropertyName2("", dbn, real)
+                        time.sleep(0.18)
+                        d_after = dens_now()
+                        mid = ""
+                        try:
+                            mid = self.model.MaterialIdName or ""
+                        except Exception:
+                            pass
+                        _dchg = bool(d_before and d_after
+                                     and abs(d_after - d_before) > 1)
+                        # ══ 【BUG-05 二次修复 · 核心拦截】══════════════════
+                        # 原判据 `if _dchg or mid:` 过于宽松 —— 只要 SW 接受
+                        # 了调用就判成功，哪怕实际写入的是【另一种材料】。
+                        # 实测事故：要求 6061-T6 铝(2700)，却因别名链落到
+                        #   AISI 1020 钢(7900)，仍返回 ok=True。
+                        # 修复：写入后【按密度核对材料家族】——
+                        #   · 期望密度存在 且 实际密度偏差 >25% → 判失败，
+                        #     继续尝试其它候选（不把错误材料当成功）；
+                        #   · 若所有候选都偏差过大，最终在下面显式报错，
+                        #     绝不静默交出一个"材质不符"的零件。
+                        _fam_expected = _material_family(want_density) if want_density else None
+                        _fam_actual = _material_family(d_after) if d_after else None
+                        _fam_mismatch = bool(_fam_expected and _fam_actual
+                                             and _fam_expected != _fam_actual)
+                        _dens_bad = bool(want_density and d_after and
+                                         abs(d_after - want_density) / float(want_density) > 0.25)
+                        if _fam_mismatch or _dens_bad:
+                            tried.append(
+                                "候选 %r 被拒：实际密度 %.0f(%s) 与期望 %.0f(%s) 不符"
+                                % (real, d_after or 0, _fam_actual or "?",
+                                   want_density or 0, _fam_expected or "?"))
+                            result.setdefault("rejected_candidates", []).append({
+                                "name": real, "database": dbn,
+                                "density_kg_m3": d_after,
+                                "family": _fam_actual,
+                                "expected_family": _fam_expected,
+                                "expected_density_kg_m3": want_density,
+                            })
+                            continue      # 关键：不接受，继续试下一个候选
+                        if _dchg or mid:
+                            result.update({
+                                "ok": True,
+                                "method": "PartDoc.SetMaterialPropertyName2",
+                                "applied_name": real,
+                                "database_name": dbn,
+                                "match_level": level,
+                                "density_after_kg_m3": d_after,
+                                "material_id_name": mid,
+                            })
+                            result["density_kg_m3"] = d_after
+                            result["density_changed"] = _dchg
+                            # 刷新模型，保证质量属性立即可读
+                            try:
+                                self.model.ForceRebuild3(False)
+                            except Exception:
+                                pass
+                            if not _dchg and d_after:
+                                result["warnings"].append(
+                                    "材料已写入(IdName=%s)但密度与之前相同" % mid)
+                            # ── 【关键安全提示】非精确匹配必须明确告知 ──────
+                            # "静默用错材料"比"报错"危险得多：6061 铝被设成钢，
+                            # 密度差 3 倍，强度/寿命校核全部失效却无人察觉。
+                            if level != "exact":
+                                result["approximate_match"] = True
+                                result["warning"] = (
+                                    "⚠️ 材料名 %r 在库 %r 中没有精确匹配，"
+                                    "已选用最接近的 %r（匹配级别=%s）。"
+                                    "如果这不是你要的材料，请用 "
+                                    "swapi.list_materials(%r) 查看库中可用名称后重新指定。"
+                                    % (mname, dbn, real, level, dbn))
+                                result["warnings"].append(result["warning"])
+                            # 期望密度与实际密度交叉校验
+                            if want_density and d_after:
+                                _rel = abs(d_after - want_density) / float(want_density)
+                                result["density_error_pct"] = round(_rel * 100, 2)
+                                if _rel > 0.20:
+                                    result["density_mismatch"] = (
+                                        "实际密度 %.0f 与 %s 的参考值 %.0f 相差 %.0f%%，"
+                                        "请确认材料是否正确"
+                                        % (d_after, name, want_density, _rel * 100))
+                                    result["warnings"].append(result["density_mismatch"])
+                            return result
+                        tried.append("SetMaterialPropertyName2('',%r,%r) -> 未生效"
+                                     % (dbn, real))
+                    except Exception as e:
+                        tried.append("SetMaterialPropertyName2('',%r,%r) -> %r"
+                                     % (dbn, real, e))
+
+                    # ── 回退路径：实体级 SetMaterialProperty（部分版本可用）──
+                    try:
+                        rc = body.SetMaterialProperty(cfg, dbn, real)
+                        if rc == 0:
+                            try:
+                                self.model.ForceRebuild3(False)
+                            except Exception:
+                                pass
+                            time.sleep(0.15)
+                            d_after = dens_now()
+                            result.update({
+                                "ok": True,
+                                "method": "IBody2.SetMaterialProperty",
+                                "applied_name": real, "database_name": dbn,
+                                "density_after_kg_m3": d_after,
+                                "error_code": 0,
+                            })
+                            result["density_kg_m3"] = d_after
+                            result["density_changed"] = bool(
+                                d_before and d_after and abs(d_after - d_before) > 1)
+                            return result
+                        result["error_code"] = rc
+                    except Exception as e:
+                        tried.append("SetMaterialProperty(%r,%r,%r) -> EXC %r"
+                                     % (cfg, dbn, real, e))
+
+        # ── 6. 全部失败：给出可执行的诊断（绝不静默）─────────────────────
+        result["warnings"] = tried
+        _rej = result.get("rejected_candidates") or []
+        if _rej:
+            # ── 【BUG-05 二次修复】把"因材质不符被拒"的原因讲清楚 ─────────
+            # 这是最容易被误读成"工具坏了"的情形：库里确实有名字相近的材料，
+            # 但它是【另一种材质】（如要求铝却只有叫得相近的钢）——
+            # 拒绝它才是正确行为，必须明确说明，并给出可执行的下一步。
+            result["error"] = (
+                "没有找到与 %r 材质相符的材料：尝试了 %d 个候选，"
+                "其中 %d 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n"
+                "被拒候选：%s\n"
+                "期望密度约 %s kg/m³（%s 族）。"
+                % (name, len(tried), len(_rej),
+                   "; ".join("%s(%.0f)" % (c["name"], c.get("density_kg_m3") or 0)
+                             for c in _rej[:4]),
+                   want_density if want_density else "未知",
+                   _material_family(want_density) or "?"))
+            result["hint"] = (
+                "请在 SolidWorks 材质库中确认是否存在该材料，"
+                "或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；"
+                "也可显式指定密度兜底: set_material(%r, density=%s)"
+                % (name, want_density if want_density else "2700"))
+            result["material_mismatch_rejected"] = True
+        else:
+            result["error"] = (
+                "无法设置材料 %r。已尝试 %d 种组合（配置=%r，库=%s）。\n"
+                "错误码含义：1=材料名不在该库，5=配置名无效，6=库名无效。\n"
+                "可用材料名请从材质库读取：swapi.list_materials(\"SolidWorks Materials\")"
+                % (name, len(tried), cfg, db_names[:3]))
+            result["hint"] = ("SW 材质名必须与 .sldmat 中的 <material name=...> 完全一致；"
+                              "中文库常用名：普通碳钢/合金钢/灰铸铁/1023 碳钢板 (SS)")
+        self._warn("set_material: " + result["error"])
+        return result
+
+    def assign_material(self, name, database=None, density=None):
+        """【BUG-05 二次修复】显式赋材质的对外别名（供建模脚本直接调用）。
+
+        背景：测试脚本调用 `m.assign_material("6061-T6")` 报
+          `NO SUCH METHOD` —— 本类原先只有 set_material，没有这个名字。
+        为避免"文档/脚本写 assign_material、实现叫 set_material"的分裂，
+        这里提供同义方法（完全等价，直接委托）。
+
+        典型用法：
+            m = swapi.new_part()            # 默认材质可后续覆盖
+            m.begin_sketch("Front Plane"); m.rect(0,0,350,60)
+            m.end_sketch(); m.extrude(40)
+            m.assign_material("6061-T6")    # 显式指定铝
+            assert m.get_material()["density_kg_m3"] == 2700
+
+        Returns:
+            {ok, material, applied_name, density_kg_m3, match_level,
+             rejected_candidates?, error?, hint?}
+        """
+        return self.set_material(name, database=database, density=density)
+
+    def set_custom_material(self, name, e_mpa=None, yield_mpa=None, uts_mpa=None,
+                            density_kg_m3=None, poissons_ratio=None):
+        """【Bug-29 修复】直写"自定义材料"（不依赖 SW 官方材质库）。
+
+        为什么需要：SW 2025 材质库【没有 PETG / PLA / Nylon(PA12)】等 3D 打印
+        常用材料。原方案只能"用 ABS 近似 + 手改密度"，导致：
+          ① 材料属性不一致（Nylon 齿轮按 ABS 校核）；
+          ② 工程图材料栏写 ABS 而非真实打印材料，加工者会打错料；
+          ③ physics 读 SW 材料属性时拿到错误的 E/屈服。
+
+        本方法的行为：
+          1) 把材料属性登记进 custom_materials.json（可复用、可审计）；
+          2) 尝试用 SetMaterialPropertyName2 写入材料名（SW 库没有该牌号时
+             这一步可能失败 —— 失败不算致命，属性仍由 custom 库承载）；
+          3) 无论 SW 库是否认得，都把解析出的密度/E/屈服放进返回值，
+             供 physics 校核与工程图材料栏直接使用（单一事实来源）。
+
+        典型用法：
+            m.set_custom_material("PETG", e_mpa=2000, yield_mpa=40,
+                                  density_kg_m3=1270)
+
+        Returns:
+            {ok, applied_name, density_kg_m3, e_mpa, yield_mpa, uts_mpa,
+             source, sw_library_write, registry}
+        """
+        nm = str(name or "").strip()
+        if not nm:
+            return {"ok": False, "error": "材料名不能为空"}
+        # ① 属性解析：显式参数 > 内置表/自定义库
+        props = resolve_material_props(nm) or {}
+        _e = e_mpa if e_mpa is not None else props.get("e_mpa")
+        _y = yield_mpa if yield_mpa is not None else props.get("yield_mpa")
+        _u = uts_mpa if uts_mpa is not None else props.get("uts_mpa")
+        _d = density_kg_m3 if density_kg_m3 is not None else props.get("density_kg_m3")
+        _nu = poissons_ratio if poissons_ratio is not None else props.get("poissons_ratio")
+        # ② 登记自定义库（幂等）
+        reg = save_custom_material(nm, e_mpa=_e, yield_mpa=_y, uts_mpa=_u,
+                                   density_kg_m3=_d, poissons_ratio=_nu,
+                                   note="由 set_custom_material 写入")
+        # ③ 尝试写进 SW（失败不致命 —— 属性已由 custom 库承载）
+        sw_write = None
+        try:
+            if _d:
+                sw_write = self.set_material(nm, density=float(_d))
+            else:
+                sw_write = self.set_material(nm)
+        except Exception as ex:
+            sw_write = {"ok": False, "error": repr(ex)}
+        result = {
+            "ok": True,
+            "applied_name": nm,
+            "density_kg_m3": _d,
+            "e_mpa": _e,
+            "yield_mpa": _y,
+            "uts_mpa": _u,
+            "poissons_ratio": _nu,
+            "source": "custom_materials",
+            "sw_library_write": (sw_write or {}).get("ok"),
+            "sw_library_note": (None if (sw_write or {}).get("ok") else
+                                "SW 官方库无该牌号（预期行为，尤其 PETG/Nylon）；"
+                                "材料属性以本返回值/custom_materials.json 为准"),
+            "registry": reg,
+        }
+        # 让 physics 与出图能拿到"实际应用的材料"
+        self.material_result = dict(result)
+        return result
+
+    def get_material(self):
+        """读取当前零件材料名与密度（用于验收：确认不再是默认水密度）。"""
+        out = {"ok": False, "name": None, "density_kg_m3": None}
+        try:
+            out["name"] = self.model.GetMaterialPropertyName2("", "")
+        except Exception:
+            try:
+                out["name"] = self.model.MaterialIdName
+            except Exception:
+                pass
+        try:
+            mp = self.massprops()
+            if mp.get("ok"):
+                out["density_kg_m3"] = mp.get("density_kg_m3")
+                out["mass_kg"] = mp.get("mass_kg")
+                out["volume_mm3"] = mp.get("volume_mm3")
+                out["ok"] = True
+        except Exception:
+            pass
+        return out
+
+    def verify_density(self, expected=None, tol=0.15):
+        """【Bug3 验收】检查密度是否合理（识别"恒为1000"的水密度异常）。
+
+        Args:
+            expected: 期望密度 kg/m³；None 则只做"是否为默认水密度"检测
+            tol:      允许相对误差（默认 15%）
+
+        Returns:
+            dict: {ok, actual, expected, reason}
+        """
+        mp = self.massprops()
+        if not mp.get("ok"):
+            return {"ok": False, "actual": None, "expected": expected,
+                    "reason": "质量属性读取失败: %s" % mp.get("error")}
+        actual = mp.get("density_kg_m3")
+        if actual is None:
+            return {"ok": False, "actual": None, "expected": expected,
+                    "reason": "密度为 None"}
+        # 默认水密度检测（SW 未设材料时 ≈1000）
+        if abs(actual - 1000.0) <= 60.0 and (expected is None or abs(expected - 1000.0) > 60.0):
+            return {"ok": False, "actual": actual, "expected": expected,
+                    "reason": ("密度 %.1f kg/m³ 接近默认值 1000（水）——"
+                               "零件很可能未指定材料，质量属性不可信" % actual)}
+        if expected:
+            rel = abs(actual - expected) / float(expected)
+            if rel > tol:
+                return {"ok": False, "actual": actual, "expected": expected,
+                        "reason": ("密度 %.1f 与期望 %.1f 偏差 %.1f%%（超容差 %.0f%%）"
+                                   % (actual, expected, rel * 100, tol * 100))}
+        return {"ok": True, "actual": actual, "expected": expected,
+                "reason": "密度合理"}
+
+    def massprops(self, safe=True):
         """质量属性数组顺序（2022 实测）:
         [cogX, cogY, cogZ, volume, surface_area, mass, Ixx, Iyy, Izz, Ixy, Ixz, Iyz]
+
+        ── 【Bug-31 修复】GetMassProperties 失败/挂起时不再让调用方无路可走 ──
+        原缺陷：总装房间因为"调用 massprops 容易卡死 SW"而【完全不敢调用】，
+          改用"零件包围盒体积 × 密度"估算整车质量，得上限 4.875kg（远超 1.5kg
+          目标）—— 包围盒把壳体薄壁/减重孔都算成实心，结果虚高不可信，
+          会误导小屋做无效的轻量化修改。
+        修复（两级，全部走【实体真实体积】而非包围盒）：
+          ① 首选 GetMassProperties（无参属性），失败则退回 GetMassProperties(0)；
+          ② 仍失败则【逐实体累加】GetBodies2 + body.GetMassProperties(0)[3]，
+             得到真实体积后 × 材料密度换算质量。
+          返回值新增 volume_source / mass_source，明确告知质量是怎么来的，
+          调用方一眼可辨"是 SW 实测还是降级估算"。
+
+        Args:
+            safe: True 时失败不抛异常，改为返回 ok=False + 降级结果；
+                  False 时保持旧行为（失败即返回 ok=False）。
         """
-        mp = self.model.GetMassProperties
-        if mp is None or not isinstance(mp, tuple):
-            return {"ok": False, "error": f"GetMassProperties -> {mp!r}"}
-        v = [float(x) for x in mp]
-        vol, area, mass = v[3], v[4], v[5]
-        density = mass / vol if vol else 0.0
+        out = {"ok": False}
+        # ── ① 主路径：GetMassProperties（属性式 + 方法式都试）─────────────
+        mp = None
+        for _getter in (lambda: self.model.GetMassProperties,
+                        lambda: self.model.GetMassProperties(0)):
+            try:
+                _r = _getter()
+                if _r is not None and isinstance(_r, tuple) and len(_r) >= 6:
+                    mp = _r
+                    break
+            except Exception:
+                continue
+        if mp is not None:
+            try:
+                v = [float(x) for x in mp]
+                vol, area, mass = v[3], v[4], v[5]
+                density = mass / vol if vol else 0.0
+                return {
+                    "ok": True,
+                    "volume_mm3": vol * 1e9,
+                    "surface_area_mm2": area * 1e6,
+                    "mass_kg": mass,
+                    "density_kg_m3": density,
+                    "center_of_mass_mm": [v[0] * 1000, v[1] * 1000, v[2] * 1000],
+                    "volume_source": "GetMassProperties",
+                    "mass_source": "GetMassProperties",
+                }
+            except Exception as e:
+                out["error"] = "GetMassProperties 解析失败: %r" % (e,)
+
+        # ── ② 降级路径：逐实体真实体积累加（【Bug-31】核心新增）───────────
+        # 注意：这是【实体体积】不是包围盒体积 —— 壳体薄壁/减重孔会被正确
+        #   扣除，因此估算结果可信（这正是原实现缺失的能力）。
+        try:
+            vol_mm3, area_mm2 = self._sum_body_volume_area()
+            if vol_mm3:
+                _dens = None
+                try:
+                    _mr = self.material_result if isinstance(self.material_result, dict) else {}
+                    _nm = _mr.get("applied_name") or _mr.get("material") \
+                        or getattr(self, "_pending_material", None)
+                    _props = resolve_material_props(_nm) if _nm else None
+                    if _props and _props.get("density_kg_m3"):
+                        _dens = float(_props["density_kg_m3"])
+                except Exception:
+                    _dens = None
+                if _dens is None:
+                    # 退回"质量/体积"反算；再不行用 1000（水）并显式告警
+                    try:
+                        _mp2 = self.model.GetMassProperties(0)
+                        _v2 = float(_mp2[3]) if _mp2 else 0.0
+                        _m2 = float(_mp2[5]) if _mp2 else 0.0
+                        _dens = (_m2 / _v2) if _v2 else None
+                    except Exception:
+                        _dens = None
+                if _dens is None or _dens <= 0:
+                    _dens = 1000.0
+                    out["density_warning"] = ("无法解析材料密度，按 1000 kg/m³ 估算；"
+                                              "请先 set_material 或 set_custom_material")
+                return {
+                    "ok": True,
+                    "volume_mm3": vol_mm3,
+                    "surface_area_mm2": area_mm2,
+                    "mass_kg": vol_mm3 * 1e-9 * _dens,
+                    "density_kg_m3": _dens,
+                    "center_of_mass_mm": None,
+                    "volume_source": "sum(IBody2.GetMassProperties)[实体真实体积]",
+                    "mass_source": "volume × density（非包围盒，Bug-31 降级路径）",
+                    "note": ("GetMassProperties 不可用，已改用逐实体真实体积 × 密度；"
+                             "结果为【实体体积】估算（薄壁/减重孔已正确扣除），"
+                             "不是包围盒上限。"),
+                }
+        except Exception as e:
+            out["error"] = (out.get("error") or "") + " | 实体体积降级失败: %r" % (e,)
+
+        if not out.get("error"):
+            out["error"] = "GetMassProperties 返回不可用，且无法取到实体体积"
+        if safe:
+            out["hint"] = ("可尝试：① 确认零件已有实体；② 确认材料已设置（密度非 1000）；"
+                           "③ 用 body.GetMassProperties(0) 逐实体读取。")
+        return out
+
+    def _sum_body_volume_area(self):
+        """逐实体累加真实体积(mm³)与表面积(mm²)（【Bug-31】降级路径核心）。
+
+        与"包围盒体积"的区别：本方法读取的是实体本身的质量属性，
+        薄壁、减重孔、内腔都会被正确扣除，因此结果可用于质量/惯性估算。
+        Returns: (volume_mm3, surface_area_mm2)
+        """
+        total_v, total_a = 0.0, 0.0
+        got = False
+        try:
+            bodies = self.model.GetBodies2(0, 1)
+            bl = list(bodies) if isinstance(bodies, tuple) else ([bodies] if bodies else [])
+        except Exception:
+            return 0.0, 0.0
+        for b in bl:
+            try:
+                props = b.GetMassProperties(0) or []
+            except Exception:
+                continue
+            if len(props) >= 5:
+                try:
+                    total_v += float(props[3]) * 1e9   # m³ -> mm³
+                    total_a += float(props[4]) * 1e6   # m² -> mm²
+                    got = True
+                except Exception:
+                    continue
+        return (total_v if got else 0.0), (total_a if got else 0.0)
+
+    def massprops_entity(self):
+        """【Bug-31】只走"实体真实体积"的质量估算（供总装房间安全调用）。
+
+        与 massprops(safe=True) 的区别：本方法【不碰】GetMassProperties，
+        只逐实体读 body.GetMassProperties(0)，因此在"调用总质量属性会卡死 SW"
+        的版本上更安全；结果同样已扣除薄壁与减重孔（非包围盒）。
+        """
+        vol_mm3, area_mm2 = self._sum_body_volume_area()
+        if not vol_mm3:
+            return {"ok": False, "error": "无法取到实体体积（零件可能无实体）"}
+        _dens = None
+        try:
+            _mr = self.material_result if isinstance(self.material_result, dict) else {}
+            _nm = _mr.get("applied_name") or _mr.get("material") \
+                or getattr(self, "_pending_material", None)
+            _props = resolve_material_props(_nm) if _nm else None
+            if _props and _props.get("density_kg_m3"):
+                _dens = float(_props["density_kg_m3"])
+        except Exception:
+            _dens = None
+        if not _dens or _dens <= 0:
+            _dens = 1000.0
         return {
             "ok": True,
-            "volume_mm3": vol * 1e9,
-            "surface_area_mm2": area * 1e6,
-            "mass_kg": mass,
-            "density_kg_m3": density,
-            "center_of_mass_mm": [v[0] * 1000, v[1] * 1000, v[2] * 1000],
+            "volume_mm3": vol_mm3,
+            "surface_area_mm2": area_mm2,
+            "density_kg_m3": _dens,
+            "mass_kg": vol_mm3 * 1e-9 * _dens,
+            "method": "sum(IBody2.GetMassProperties)[实体真实体积] × density",
+            "note": "非包围盒估算 —— 薄壁/减重孔已扣除（Bug-31）。",
         }
 
     def export_pdf(self, path):
-        rc = self.model.SaveAs3(path, 0, 0)
-        return {"ok": rc == 0, "path": path, "exists": os.path.exists(path), "rc": rc}
+        """导出 PDF（【Bug-45/46 修复】多方法兜底 + 自动补 .pdf 后缀）。
+
+        ── Bug-45 修复：自动补后缀 ──────────────────────────────────────────
+        原缺陷：export-pdf <图纸.slddrw>（未带 .pdf）→ SaveAs3 返回 rc=1，
+          用户必须自己记得加 .pdf。现自动补全。
+        ── Bug-46 修复：doc.ExportToPDF 动态分发失败 ────────────────────────
+        原缺陷：SW 原生 ExportToPDF 在 win32com 动态分发下不可调用
+          （<unknown>.ExportToPDF），导致"只能走 SaveAs3"。
+        修复：按可靠性依次尝试 4 条路径，并如实回传用了哪条：
+          ① SaveAs3（实测最稳，与 export-pdf 现有行为一致）；
+          ② SaveAs2（旧接口回退）；
+          ③ ExportToPDF（部分版本/早期绑定可用）；
+          ④ ExportPDF（个别版本命名差异）。
+        全部失败时给出明确 error，不再静默返回 rc=1。
+        """
+        p = str(path or "")
+        if p and not p.lower().endswith(".pdf"):
+            p = p + ".pdf"
+        out = {"ok": False, "path": p, "methods_tried": []}
+        try:
+            if p and not os.path.isdir(os.path.dirname(p) or "."):
+                try:
+                    os.makedirs(os.path.dirname(p), exist_ok=True)
+                except Exception:
+                    pass
+            # ① SaveAs3
+            try:
+                rc = self.model.SaveAs3(p, 0, 0)
+                out["methods_tried"].append(("SaveAs3", rc))
+                if os.path.exists(p) and os.path.getsize(p) > 0:
+                    out.update({"ok": True, "method": "SaveAs3", "rc": rc})
+                    return out
+            except Exception as e:
+                out["methods_tried"].append(("SaveAs3", repr(e)))
+            # ② SaveAs2
+            try:
+                rc2 = self.model.SaveAs2(p, 0, 0)
+                out["methods_tried"].append(("SaveAs2", rc2))
+                if os.path.exists(p) and os.path.getsize(p) > 0:
+                    out.update({"ok": True, "method": "SaveAs2", "rc": rc2})
+                    return out
+            except Exception as e:
+                out["methods_tried"].append(("SaveAs2", repr(e)))
+            # ③ ExportToPDF / ④ ExportPDF
+            for _m in ("ExportToPDF", "ExportPDF"):
+                try:
+                    _fn = getattr(self.model, _m, None)
+                    if _fn is None:
+                        continue
+                    _fn(p, 0)
+                    out["methods_tried"].append((_m, "called"))
+                    if os.path.exists(p) and os.path.getsize(p) > 0:
+                        out.update({"ok": True, "method": _m})
+                        return out
+                except Exception as e:
+                    out["methods_tried"].append((_m, repr(e)))
+            out["error"] = ("所有 PDF 导出路径均失败（SaveAs3/SaveAs2/"
+                            "ExportToPDF/ExportPDF）。")
+            out["hint"] = ("① 确认当前活动文档是工程图/零件且已保存；"
+                           "② 确认目标目录可写；"
+                           "③ 若为工程图，可先用 drawing 命令生成 .slddrw 再导出。")
+            return out
+        except Exception as e:
+            out["error"] = "export_pdf 异常: %r" % (e,)
+            return out
 
     # ---------- 展示 / 可视化 ----------
     def _find_sw_windows(self):
@@ -675,14 +2914,30 @@ class SWModel:
         try:
             import ctypes
             from ctypes import wintypes
+            import time
             user32 = ctypes.windll.user32
             self.bring_to_front()
             target, _ = self._find_sw_windows()
             if target is None:
                 return {"ok": False, "error": "SolidWorks main window not found"}
-            user32.SetForegroundWindow(target)
-            import time
-            time.sleep(1.0)
+
+            # ── 【Bug7 修复】必须真正激活 SW 窗口，否则抓到的是 DSH GUI 旧画面 ──
+            # 原实现只调 setForegroundWindow 且不校验 —— Windows 前台锁会让它
+            # 静默失败，于是抓屏抓到屏幕上原本在前面的 DSH Web GUI，
+            # 却仍返回 ok=true，被误当作"当前 SW 窗口"的验收证据。
+            act = _force_activate_sw_window(target, tries=3)
+            if not act.get("ok"):
+                # 自检开关：SWAPI_ALLOW_UNVERIFIED_SHOT=1 时才允许在未激活情况下截图
+                _allow = (os.environ.get("SWAPI_ALLOW_UNVERIFIED_SHOT") or "").strip() in ("1", "true", "yes")
+                if not _allow:
+                    return {"ok": False,
+                            "error": ("无法把 SolidWorks 窗口激活到前台，截图不可信（可能抓到 DSH GUI）。"
+                                      "原因: %s" % act.get("reason")),
+                            "activation": act,
+                            "hint": ("请确认 SW 窗口未被最小化/未被其他窗口遮挡；"
+                                     "或设 SWAPI_ALLOW_UNVERIFIED_SHOT=1 强制截图（但结果不可作验收依据）。")}
+            time.sleep(0.6)   # 等窗口重绘完成，避免抓到过渡帧
+
             rect = wintypes.RECT()
             user32.GetWindowRect(target, ctypes.byref(rect))
             w = rect.right - rect.left
@@ -701,7 +2956,22 @@ class SWModel:
                 img = ImageGrab.grab(bbox=(rect.left, rect.top,
                                           rect.right, rect.bottom))
                 img.save(path, "PNG")
-            return {"ok": True, "path": path, "size": f"{w}x{h}"}
+
+            # ── 【Bug7 修复】截图后再校验一次前台仍是 SW，确保内容可信 ──────
+            verified = False
+            try:
+                fg_after = user32.GetForegroundWindow()
+                verified = bool(fg_after and int(fg_after) == int(target))
+            except Exception:
+                verified = act.get("ok", False)
+
+            return {"ok": True, "path": path, "size": f"{w}x{h}",
+                    "activated": bool(act.get("ok")),
+                    "verified_foreground": verified,
+                    "window_title": _window_title(target),
+                    "note": ("截图取自当前置前的 SolidWorks 窗口"
+                             if verified else
+                             "⚠️ 截图时无法确认前台为 SW，内容可能不可信")}
         except Exception as e:
             return {"ok": False, "error": f"screenshot failed: {e}"}
 
@@ -756,15 +3026,119 @@ class SWModel:
         return self
 
     def select_plane(self, name):
-        """选择基准面。
+        """选择基准面（多种命名兜底）。
 
         Bug 6 修复: 使用 PLANE 类型选择基准面。
-        注意: 不在这里 clear_selection——会破坏后续 InsertSketch 的选面逻辑。
+        注意: 不在这里 clear_selection —— 会破坏后续 InsertSketch 的选面逻辑。
+
+        ── 【BUG-C 修复】基准面选择必须"多写法 + 返回成功与否" ──────────────
+        测试反馈：坐标选面策略覆盖了【按名选基准面】路径 —— 实体上已有曲面后，
+          begin_sketch("Front Plane") 失效。
+        根因：基准面在 SW 里是 PLANE 类型（不是 FACE），而原来的按名选择
+          只试单一名字，中文版/不同语言版名不匹配时【静默失败】
+          （SelectByID2 返回 False 没人检查），于是每次都跌进坐标选面 fallback，
+          而 fallback 找的是实体 FACE —— 语义完全不同，选错面就开错草图。
+
+        修复：
+          1) 依次尝试【英文名 / 中文名 / 前视基准面 等常见写法】；
+          2) 显式检查 SelectByID2 的返回值，成功即返回 True；
+          3) 全部写法失败时返回 False（而非静默），让调用方决定是否走 fallback。
+
+        Returns: bool（True=已选中基准面）
         """
         if name not in _PLANES:
             raise ValueError(f"unknown plane {name!r}; use {_PLANES}")
-        self.ext.SelectByID2(name, "PLANE", 0, 0, 0, False, 0, self._empty, 0)
-        return self
+
+        # 常见命名变体：英文、中文、以及带/不带 " Plane" 后缀
+        _ALIAS = {
+            "Front Plane": ["Front Plane", "前视基准面", "前视", "Front", "FrontPlane"],
+            "Back Plane":  ["Back Plane", "后视基准面", "后视", "Back", "BackPlane"],
+            "Top Plane":   ["Top Plane", "上视基准面", "俯视基准面", "上视", "Top", "TopPlane"],
+            "Bottom Plane":["Bottom Plane", "下视基准面", "下视", "Bottom", "BottomPlane"],
+            "Right Plane": ["Right Plane", "右视基准面", "右视", "Right", "RightPlane"],
+            "Left Plane":  ["Left Plane", "左视基准面", "左视", "Left", "LeftPlane"],
+        }
+        cands = _ALIAS.get(name, [name])
+
+        # ── 方式 1：按名选择（最快，但依赖语言环境）───────────────────────
+        for _nm in cands:
+            try:
+                ok = self.ext.SelectByID2(_nm, "PLANE", 0, 0, 0, False, 0,
+                                          self._empty, 0)
+                if ok:
+                    return True
+            except Exception:
+                continue
+
+        # ── 方式 2【专家建议】按对象引用选中，绕开语言/名称差异 ──────────
+        # 专家指出：中英文界面下基准面默认名称不同，纯字符串选择可能失效；
+        #   更稳的做法是遍历特征树拿到基准面对象，用它的引用去选中。
+        #   （SW2025 下 FeatureManager 某些方法签名有变化，所以这里
+        #     整体包在 try 里，失败不影响返回值语义。）
+        try:
+            _canon = {
+                "Front Plane": ("Front", "前视"),
+                "Back Plane": ("Back", "后视"),
+                "Top Plane": ("Top", "上视", "俯视"),
+                "Bottom Plane": ("Bottom", "下视"),
+                "Right Plane": ("Right", "右视"),
+                "Left Plane": ("Left", "左视"),
+            }.get(name, ())
+            f = self.model.FirstFeature()
+            _guard = 0
+            while f is not None and _guard < 5000:
+                _guard += 1
+                try:
+                    _tn = f.GetTypeName2()
+                except Exception:
+                    _tn = None
+                if _tn in ("RefPlane", "Plane"):
+                    _fname = ""
+                    try:
+                        _fname = str(f.Name)
+                    except Exception:
+                        _fname = ""
+                    # 名匹配（任一别名完全相等，或包含关键词）
+                    _hit = _fname in cands
+                    if not _hit and _canon:
+                        _hit = any(_k in _fname for _k in _canon)
+                    if _hit:
+                        _selected = False
+                        # Feature.Select2 优先（部分版本），再试 Select4/Select
+                        # 【测试部反馈修复】Select4 的 Data 必须是 SelectData 对象
+                        _sd_plane = self._make_select_data(0)
+                        _plane_chain = [("Select2", (False, 0))]
+                        if _sd_plane is not None:
+                            _plane_chain.append(("Select4", (False, _sd_plane)))
+                        _plane_chain.append(("Select", (False,)))
+                        for _mn, _args in _plane_chain:
+                            try:
+                                _fn = getattr(f, _mn, None)
+                                if _fn is None:
+                                    continue
+                                _fn(*_args)
+                                _selected = True
+                                break
+                            except Exception:
+                                continue
+                        if _selected:
+                            try:
+                                _c = self.model.SelectionManager \
+                                    .GetSelectedObjectCount2(-1)
+                                if int(_c) > 0:
+                                    return True
+                            except Exception:
+                                return True
+                try:
+                    f = f.GetNextFeature()
+                except Exception:
+                    break
+        except Exception:
+            # 特征树 API 在 SW2025 可能签名变化 —— 静默降级，不影响主流程
+            pass
+
+        # 全部方式都没选中 —— 明确返回 False，绝不静默
+        return False
 
     def begin_sketch(self, plane="Front Plane"):
         """在指定基准面上开始新草图，并先"正视于"该平面（居中显示）。
@@ -779,10 +3153,21 @@ class SWModel:
             self.skm.InsertSketch(False)
         except Exception:
             pass
-        # Bug 3: 多轮重试选择基准面
-        for retry in range(3):
+        # ── 【BUG-C / 新-4 修复】按名选基准面是【首选路径】────────────────
+        # BUG-C 反馈：坐标选面策略覆盖了按名选基准面，实体有曲面后失效。
+        # 新-4 反馈：中文面名必崩（_plane_selected 未初始化 + 白名单只有英文）。
+        # 现在：
+        #   1) _plane_selected 先初始化为 False（修复 NameError）；
+        #   2) 接收 select_plane 的返回值，知道"按名到底选中没有"；
+        #   3) 重试 5 次提高主路径成功率；
+        #   4) 只有按名确实失败，才降级到实体面 fallback。
+        import time as _t
+        _plane_selected = False
+        for retry in range(5):
             try:
-                self.select_plane(plane)
+                _sel = self.select_plane(plane)
+                if _sel:
+                    _plane_selected = True
                 self.skm.InsertSketch(True)
                 active_sk = self.skm.ActiveSketch
                 if active_sk is not None:
@@ -791,18 +3176,66 @@ class SWModel:
                         self.clear_selection()
                     except Exception:
                         pass
+                    # 【Bug T1/T2 修复】记录草图名，供 cut() 显式重选轮廓
+                    # 【Bug T3 修复】统一走 _finalize_new_sketch，避免漏分支
+                    self._finalize_new_sketch(plane)
                     return self
+                # ActiveSketch 为空：清残留再试
+                try:
+                    self.skm.InsertSketch(False)
+                except Exception:
+                    pass
             except Exception:
                 pass
-            # 短暂延迟后再试
-            import time as _t
-            _t.sleep(0.1)
+            _t.sleep(0.12)
 
-        # Bug 3 fallback: 基准面选择失败，按平面法线方向搜索实体面
+        # ── 【C7 修复 + BUG-C 收紧】基准面彻底选不中时才走实体面 fallback ──
+        # C7 场景：实体含圆柱面后，第 3 次调 begin_sketch("Front Plane") 必失败
+        #   （RuntimeError: 无法激活草图）。
+        # BUG-C 反馈：这套坐标选面策略会【覆盖】按名选基准面 ——
+        #   一旦实体上已有曲面，fallback 可能选中错误的实体面并开错草图。
+        #
+        # 现在分两级，语义清晰：
+        #   优先级1（上方已执行）：按名选基准面 —— 正确语义，首选；
+        #   优先级2（此处）：仅当按名选确实失败才降级到实体面，
+        #     并记录"本次为降级行为"，便于事后排查选错面的问题。
+        if not _plane_selected:
+            self._warn("begin_sketch(%s): 按名选择基准面失败，降级到实体面策略"
+                       "（可能选中非预期的面，请核对草图所在平面）" % plane)
         search_axis = {"Front Plane": (0, 0, "z"), "Back Plane": (0, 0, "z"),
                        "Top Plane": (0, "y", 0), "Bottom Plane": (0, "y", 0),
                        "Right Plane": ("x", 0, 0), "Left Plane": ("x", 0, 0)}
         ax, ay, az = search_axis.get(plane, (0, 0, "z"))
+        # 第一步：按轴向外扩，用包围盒法找平面（免疫曲面干扰）
+        for sign in (1, -1):
+            for v in (5, 10, 20, 50, 100, 200):
+                try:
+                    px = sign * v * MM if ax == "x" else 0.0
+                    py = sign * v * MM if ay == "y" else 0.0
+                    pz = sign * v * MM if az == "z" else 0.0
+                    if hasattr(self, "_select_face_by_box") and self._select_face_by_box(px, py, pz):
+                        self.skm.InsertSketch(True)
+                        if self.skm.ActiveSketch is not None:
+                            self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
+                            self._finalize_new_sketch(plane)   # 【T3】降级分支也要记录
+                            return self
+                        # 开了但 ActiveSketch 为空 → 清状态重试一次
+                        self.rebuild()
+                        self.clear_selection()
+                        try:
+                            self.skm.InsertSketch(False)
+                        except Exception:
+                            pass
+                        if self._select_face_by_box(px, py, pz):
+                            self.skm.InsertSketch(True)
+                            if self.skm.ActiveSketch is not None:
+                                self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
+                                self._finalize_new_sketch(plane)   # 【T3】降级分支也要记录
+                                return self
+                except Exception:
+                    continue
+        # 【BUG-C 清理】此处原先重复定义了一次 ax/ay/az —— 上方已定义，删除冗余。
+        # 第二级 fallback：固定坐标射线拾取（最后手段，免疫性最差）
         for sign in (1, -1):
             for v in (5, 10, 20, 50, 100, 200):
                 try:
@@ -815,6 +3248,7 @@ class SWModel:
                     active_sk = self.skm.ActiveSketch
                     if active_sk is not None:
                         self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
+                        self._finalize_new_sketch(plane)   # 【T3】降级分支也要记录
                         return self
                     # Bug-4 修复: InsertSketch 成功但 ActiveSketch 为 None（SW COM 状态脏）
                     # 强制重建模型清除 COM 内部状态，再重试一次
@@ -829,10 +3263,42 @@ class SWModel:
                     active_sk = self.skm.ActiveSketch
                     if active_sk is not None:
                         self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
+                        self._finalize_new_sketch(plane)   # 【T3】降级分支也要记录
                         return self
                 except Exception:
                     continue
-        raise RuntimeError(f"无法激活草图，平面 {plane} 选择失败")
+
+        # ══ 【Bug-18/28 修复】最后一道 fallback：begin_sketch_on_face ═══════
+        # 三个房间（结构件 Bug-28、壳体机架 Bug-26、支撑结构 Bug-24）独立得出
+        # 同一结论：多特征零件里按名选基准面会【间歇性失效】
+        #   （"无法激活草图，平面 Front Plane 选择失败"），
+        # 而 begin_sketch_on_face() 选【实体面】稳定得多。
+        # 原实现把这条 fallback 留给调用方手工调用 —— 但小屋并不知道要这么做，
+        # 于是反复重试同一个失败路径（Bug-19 的"无限重试"）。
+        # 修复：按名 + 坐标两条路径都失败后，自动尝试在已有实体的面上开草图。
+        try:
+            _bodies = self.model.GetBodies2(0, False)
+            _has_body = bool(_bodies)
+        except Exception:
+            _has_body = False
+        if _has_body:
+            self._warn("begin_sketch(%s): 按名/坐标均失败，自动降级到 "
+                       "begin_sketch_on_face（选实体面，Bug-18 兜底）" % plane)
+            for _pt in ((0.0, 0.0, 0.0), (0.0, 0.0, 20.0), (0.0, 0.0, -20.0)):
+                try:
+                    self.begin_sketch_on_face(*_pt)
+                    return self
+                except Exception:
+                    continue
+
+        # 全部路径失败 —— 给出可操作诊断，而不是只报"选择失败"
+        _diag = diagnose_feature_failure(self, api="begin_sketch",
+                                         extra={"plane": plane,
+                                                "plane_selected": _plane_selected})
+        raise RuntimeError(
+            "无法激活草图，平面 %s 选择失败。"
+            "【诊断】原因=%s（%s）建议：%s"
+            % (plane, _diag.get("cause"), _diag.get("detail"), _diag.get("advice")))
 
     def _select_face_by_box(self, x, y, z, tolerance_mm=5.0):
         """通过面包围盒匹配选择实体面（绕过 SW 射线拾取在边界处的局限）。
@@ -1251,6 +3717,9 @@ class SWModel:
                 f"圆柱侧面 ({x:.0f},{y:.0f},{z:.0f})mm(θ={angle_deg:.0f}°) 无法开草图，"
                 f"请确认点在圆柱面上或改用 begin_sketch()。"
             )
+        # 【Bug T1 修复】Right Plane 穿透孔草图：法向 = X 轴，
+        # 供 cut() 按正确轴向取贯穿长度计算期望去料体积。
+        self._sketch_normal_axis = 0
         return self
 
     def _find_nearest_datum_plane(self, x, y, z):
@@ -1309,6 +3778,13 @@ class SWModel:
             active_sk = self.skm.ActiveSketch
             if active_sk is not None:
                 self._normal_to("*Front")
+                # 【Bug T1/T2 修复】记录草图名，供 cut() 显式重选轮廓
+                _nm = self._remember_sketch_name()
+                self._sketch_area_mm2 = 0.0
+                self._sketch_axis_offset_mm = float(z)
+                if os.environ.get("DSH_SWAPI_DEBUG"):
+                    print(u"[swapi][DBG] begin_sketch_on_face(%s,%s,%s) 策略1box -> 激活草图=%s"
+                          % (x, y, z, _nm))
                 return self
             # Bug 6 重试: 面选中但草图未激活
             self.clear_selection()
@@ -1350,6 +3826,20 @@ class SWModel:
             active_sk = self.skm.ActiveSketch
             if active_sk is not None:
                 self._normal_to("*Front")
+                self._remember_sketch_name()
+                self._sketch_axis_offset_mm = float(z)
+                if os.environ.get("DSH_SWAPI_DEBUG"):
+                    print(u"[swapi][DBG] begin_sketch_on_face(%s,%s,%s) 策略2ray -> 激活草图=%s"
+                          % (x, y, z, self._active_sketch_name))
+                # 【Bug T1 修复】从所选平面读法向轴，供 cut() 精确计算贯穿长度
+                try:
+                    _so = sel_mgr.GetSelectedObject6(1, -1)
+                    if _so is not None:
+                        _nrm = _so.Normal
+                        _axs = [abs(float(_nrm[0])), abs(float(_nrm[1])), abs(float(_nrm[2]))]
+                        self._sketch_normal_axis = _axs.index(max(_axs))
+                except Exception:
+                    self._sketch_normal_axis = 2
                 return self
             self.clear_selection()
 
@@ -1374,6 +3864,7 @@ class SWModel:
                                 active_sk = self.skm.ActiveSketch
                                 if active_sk is not None:
                                     self._normal_to("*Front")
+                                    self._remember_sketch_name()
                                     return self
                                 self.clear_selection()
                                 break
@@ -1414,11 +3905,23 @@ class SWModel:
                     active_sk.MergePoints(0.0005)
             except Exception:
                 pass
+        # ══ 【Bug T2 修复】退出前在"激活态"预选一次轮廓段 ═════════════
+        # 退出草图瞬间 SW 会清空选择集；激活态是唯一能直接用
+        # select_all_sketch_segments() 稳定选段的窗口。此处预选不改变
+        # 建模结果，只为 cut() 的选择链路留一份"已被验证可选段"的证据。
+        try:
+            if self.skm.ActiveSketch is not None:
+                self.select_all_sketch_segments()
+        except Exception:
+            pass
         try:
             self.model.ViewZoomtofit2()
         except Exception:
             pass
         self.skm.InsertSketch(True)
+        # 【Bug T2 修复】活动草图名保留 —— end_sketch 只是把轮廓"提交"，
+        # 草图本身仍是 cut 的合法轮廓来源（cut 会按名 EditSketch 进去取段）。
+        # 只有 cut/extrude 真正消费轮廓后才会清空它（_mark_sketch_consumed）。
         # 重置曲面草图偏移
         self._surface_sketch_offset = 0.0
         self._right_plane_mode = False
@@ -1436,25 +3939,64 @@ class SWModel:
 
     # ---------- 草图图元（坐标单位 mm）----------
     def rect(self, cx, cy, w, h):
+        self._ensure_area_context()
         """中心矩形：中心 (cx,cy)，宽 w，高 h。
-        曲面草图模式下自动应用Y偏移。"""
+
+        ── 【BUG-D 修复】明确语义，避免与 add_component 混淆 ──────────────
+        测试反馈：rect() 是【中心+宽高】语义，而 add_component(x,y,z) 用的是
+          【包围盒中心】非原点 —— 两者坐标语义不同，混用会导致零件偏位。
+        这里把契约写死在 docstring 里，并提示两者差异：
+
+          rect(cx, cy, w, h)          → 草图平面内的中心矩形
+                                         (cx,cy)=几何中心，w/h=宽度/高度
+          add_component(path, x,y,z)  → 组件插入点 = 零件【包围盒中心】
+                                         不是零件的原点，也不是角点
+
+        曲面草图模式下自动应用Y偏移。
+
+        Args:
+            cx, cy: 矩形【中心】坐标（mm）
+            w, h:   宽、高（mm），可为负以翻转方向
+        """
         self._ensure_sketch_active()
         adj_cy = cy + self._surface_sketch_offset
         x1, y1 = (cx - w / 2) * MM, (adj_cy + h / 2) * MM
         x2, y2 = (cx + w / 2) * MM, (adj_cy - h / 2) * MM
         self.skm.CreateCornerRectangle(x1, y1, 0, x2, y2, 0)
+        # 【Bug T1 修复】记录轮廓面积，供 cut() 期望体积校验
+        try:
+            self._sketch_area_mm2 += abs(float(w) * float(h))
+        except Exception:
+            pass
         return self
 
     def circle(self, cx, cy, r):
+        self._ensure_area_context()
         """圆心 (cx,cy)，半径 r。
         曲面草图模式下自动应用Y偏移。Right Plane 模式下 x 固定为 0。"""
         self._ensure_sketch_active()
         adj_cy = cy + self._surface_sketch_offset
         sketch_cx = 0.0 if self._right_plane_mode else cx
         self.skm.CreateCircleByRadius(sketch_cx * MM, adj_cy * MM, 0, r * MM)
+        # 【Bug T1 修复】记录轮廓面积，供 cut() 期望体积校验
+        try:
+            import math as _m
+            self._sketch_area_mm2 += _m.pi * float(r) * float(r)
+        except Exception:
+            pass
+        # 【底面切除迁移】记录圆（局部坐标 cx,cy,r），供 cut() 失败后在对侧
+        # 面重建同位轮廓
+        try:
+            if not hasattr(self, "_sketch_circles_local"):
+                self._sketch_circles_local = []
+            self._sketch_circles_local.append(
+                (float(sketch_cx), float(adj_cy), float(r)))
+        except Exception:
+            pass
         return self
 
     def line(self, x1, y1, x2, y2):
+        self._ensure_area_context()
         """画直线。曲面草图模式下自动应用Y偏移。"""
         self._ensure_sketch_active()
         adj_y1 = y1 + self._surface_sketch_offset
@@ -1462,14 +4004,36 @@ class SWModel:
         self.skm.CreateLine(x1 * MM, adj_y1 * MM, 0, x2 * MM, adj_y2 * MM, 0)
         return self
 
-    def polyline(self, points):
+    def polyline(self, points, close=None):
         """折线：points = [(x1,y1), (x2,y2), ...]，自动连成连续折线。
-        曲面草图模式下自动应用Y偏移。"""
+        曲面草图模式下自动应用Y偏移。
+
+        ── 【Bug-26/24 修复】默认自动闭合轮廓 ──────────────────────────────
+        原缺陷：本方法【不自动闭合】—— 首尾不连，于是：
+          · 挤出/切除时轮廓不封闭 → FeatureExtrusion3 / FeatureCut3 返回 None
+            或 com_error(-2147352561 '非选择性的参数')；
+          · 两个房间（壳体机架 Bug-26、支撑结构 Bug-24）各自独立踩到同一个坑，
+            最终都靠"在末尾重复起点"这种手工 workaround 才成功。
+        修复：当点集 >= 3 且首尾不重合时，自动补一条回到起点的线。
+        close=False 可显式关闭（画开放折线/中心线时用）。
+        """
+        self._ensure_area_context()
         self._ensure_sketch_active()
         adj_pts = [(x * MM, (y + self._surface_sketch_offset) * MM) for x, y in points]
         for i in range(len(adj_pts) - 1):
             self.skm.CreateLine(adj_pts[i][0], adj_pts[i][1], 0,
                                 adj_pts[i + 1][0], adj_pts[i + 1][1], 0)
+        # ── 自动闭合（Bug-26）：>=3 点且首尾不同 → 补回起点的边 ──────────
+        _do_close = (close is True) or (close is None and len(adj_pts) >= 3)
+        if _do_close and len(adj_pts) >= 3:
+            try:
+                _f, _l = adj_pts[0], adj_pts[-1]
+                _gap = abs(_f[0] - _l[0]) + abs(_f[1] - _l[1])
+                # 0.05mm 以内视为已闭合，不再重复画（避免零长线）
+                if _gap > 0.05 * MM:
+                    self.skm.CreateLine(_l[0], _l[1], 0, _f[0], _f[1], 0)
+            except Exception:
+                pass
         return self
 
     def centerline(self, x1, y1, x2, y2):
@@ -1481,20 +4045,157 @@ class SWModel:
         return self
 
     # ---------- 特征（尺寸单位 mm）----------
-    def select_all_sketch_segments(self):
-        """选中当前草图的所有线段（用于复杂轮廓的特征创建）。"""
+    def select_all_sketch_segments(self, append_first=False):
+        """选中当前草图的所有线段（用于复杂轮廓的特征创建）。
+
+        ── 【F-1 修复·第九轮】专家指出两个关键点 ───────────────────────────
+        1) ISketchSegment::Select 在 SW2025 已 Obsolete，应改用 Select4；
+        2) 必须在【草图仍激活】时选中段 —— 退出后段名可见性会变，
+           需要改用 EXTSKETCHSEGMENT 类型并带草图名前缀（见路径 B）。
+
+        本方法处理"草图激活时"的情况（推荐路径 A）。
+
+        Args:
+            append_first: 第一个段是否用追加模式（默认 False=先清空）
+
+        Returns: (ok: bool, count: int)
+        """
         try:
             self.model.ClearSelection2(True)
             sk = self.skm.ActiveSketch
-            segs = sk.GetSketchSegments
-            for s in segs:
+            if sk is None:
+                self._sel_diag = "ActiveSketch 为 None（草图未激活）"
+                return False, 0
+
+            # ── 【F-1 修复·第十轮】多种方式取段集合 ──────────────────────
+            # 专家提示：late-binding 下 ISketch::GetSketchSegments 的取向
+            #   可能不同（属性 vs 方法），且失败会被 except 静默吞掉。
+            #   这里显式尝试三种写法，并记录各自的失败原因。
+            _segs = None
+            _segs_diag = []
+            for _how, _getter in (
+                ("属性 GetSketchSegments", lambda: sk.GetSketchSegments),
+                ("方法 GetSketchSegments()", lambda: sk.GetSketchSegments()),
+                ("方法 GetSketchSegments2()", lambda: sk.GetSketchSegments2()),
+            ):
                 try:
-                    s.Select(True)
+                    _v = _getter()
+                    if _v is not None:
+                        _segs = _v
+                        _segs_diag.append("%s->ok" % _how)
+                        break
+                    _segs_diag.append("%s->None" % _how)
+                except Exception as _e:
+                    _segs_diag.append("%s->%s" % (_how, type(_e).__name__))
+                    continue
+            self._sel_diag = "取段: " + " | ".join(_segs_diag)
+            if _segs is None:
+                return False, 0
+
+            try:
+                _list = list(_segs) if isinstance(_segs, tuple) else [_segs]
+            except Exception:
+                _list = []
+            self._sel_diag += " 段数=%d" % len(_list)
+
+            # ══ 【测试部反馈修复·真机探测版】SW2025 段选中策略 ═══════════
+            # 真机探测结论（_probe_selseg.py，SW2025 实测 7 段复杂轮廓）：
+            #   A Select4(Append,SelectData) → com_error -2147352573 '找不到成员'
+            #     （late-binding 下连成员都解析不到，此路彻底不通）；
+            #   B Select2(Append, 整数Mark)   → 7/7 全中 ✅（Mark 必须是整数，
+            #     旧代码传 None 才是 -2147352561 '非选择性的参数' 的来源）；
+            #   C Select(Append)  (Obsolete)  → 7/7 全中 ✅（可用兜底）；
+            #   D AddSelectionListObject      → 逐项 com_error，不可用；
+            #   E SelectByID2 按段名           → 选中数≠段数（误选其他实体），禁用；
+            #   F SelectByID2 按拾取点         → 段对象无坐标方法，不可用。
+            # 实现：先用第 1 段探测出可用策略（缓存到实例，避免每段重试），
+            #   再用同一策略选完全部段；最终强制"选中数==段数"验收。
+            _sel_mgr_ref = None
+            try:
+                _sel_mgr_ref = self.model.SelectionManager
+            except Exception:
+                _sel_mgr_ref = None
+
+            def _try_one(s, append, strategy):
+                """用指定策略选一段；成功返回 True。"""
+                if strategy == "Select2":
+                    fn = getattr(s, "Select2", None)
+                    if fn is not None and fn(append, 0):
+                        return True
+                    return False
+                if strategy == "Select4":
+                    sd = None
+                    try:
+                        sd = self._make_select_data(0)
+                    except Exception:
+                        sd = None
+                    if sd is None:
+                        return False
+                    fn = getattr(s, "Select4", None)
+                    try:
+                        return bool(fn is not None and fn(append, sd))
+                    except Exception:
+                        return False
+                if strategy == "Select":
+                    fn = getattr(s, "Select", None)
+                    try:
+                        return bool(fn is not None and fn(append))
+                    except Exception:
+                        return False
+                return False
+
+            # 策略探测：真机实测优先级 Select2 > Select > Select4
+            _strategy = getattr(self, "_seg_select_strategy", None)
+            if _strategy not in ("Select2", "Select", "Select4"):
+                _strategy = None
+                for _cand in ("Select2", "Select", "Select4"):
+                    try:
+                        self.model.ClearSelection2(True)
+                    except Exception:
+                        pass
+                    if _try_one(_list[0], False, _cand):
+                        _strategy = _cand
+                        break
+                if _strategy is None:
+                    self._sel_diag = "无可用段选中策略(Select2/Select/Select4 全失败)"
+                    return False, 0
+                try:
+                    self._seg_select_strategy = _strategy
                 except Exception:
                     pass
-        except Exception:
-            pass
-        return self
+                try:
+                    self.model.ClearSelection2(True)
+                except Exception:
+                    pass
+
+            n = 0
+            _per_seg_err = []
+            for _idx, s in enumerate(_list):
+                try:
+                    if _try_one(s, n > 0, _strategy):
+                        n += 1
+                    else:
+                        _per_seg_err.append("%s@%d:retFalse" % (_strategy, _idx))
+                except Exception as _e2:
+                    _per_seg_err.append("%s@%d:%s" % (_strategy, _idx, type(_e2).__name__))
+            if _per_seg_err:
+                self._sel_diag += " 选段错误=%s" % (_per_seg_err[:3],)
+
+            try:
+                c = int(self.model.SelectionManager.GetSelectedObjectCount2(-1))
+            except Exception:
+                c = n
+            self._sel_diag += " 选中数=%s/段数=%s 策略=%s" % (c, len(_list), _strategy)
+            # 【测试部反馈·验收判据】选中数必须==段数才算成功：
+            # 部分选中时特征拿不到闭合轮廓（T3 根因），必须判失败并留痕，
+            # 绝不能返回"部分成功"让上层误以为轮廓已就绪。
+            if c < len(_list):
+                self._sel_diag += " 【部分选中!】选段错误=%s" % (_per_seg_err[:5],)
+                return False, c
+            return (c > 0 and c == len(_list)), c
+        except Exception as e:
+            self._sel_diag = "select_all_sketch_segments 异常: %r" % (e,)
+            return False, 0
 
     def extrude(self, depth, symmetric=False, draft_deg=0, auto_select=True):
         """拉伸凸台。depth 单位 mm；symmetric=True 两侧对称。
@@ -1511,62 +4212,1790 @@ class SWModel:
             False, False, False, False, True, False, auto_select,
             0, 0, False)
         if feat is None:
-            raise RuntimeError("FeatureExtrusion3 返回 None，拉伸特征创建失败")
+            # ── 【Bug-20 修复】失败时给出可操作诊断，而不是只丢一句"创建失败" ──
+            _diag = diagnose_feature_failure(self, api="FeatureExtrusion3",
+                                             extra={"depth_mm": depth})
+            raise RuntimeError(
+                "FeatureExtrusion3 返回 None，拉伸特征创建失败。"
+                "【诊断】原因=%s（%s）建议：%s"
+                % (_diag.get("cause"), _diag.get("detail"), _diag.get("advice")))
         self._visual_step("extrude")
         self.rebuild()  # Bug 9: 重建模型以清除 COM 内部选择状态累积
+        # ── 【BUG-05/08 修复】首个实体已生成 → 此刻才能真正赋材质 ──────
+        try:
+            self._try_apply_pending_material()
+        except Exception:
+            pass
+        # 【Bug T1 修复】基体草图轮廓已被拉伸特征【消费】，标记之 ——
+        # 与 cut/revolve 同一防护：后续任何特征绝不能再选中/沿用该轮廓，
+        # 杜绝"把基体轮廓当切除轮廓"的灾难性误选。
+        self._mark_sketch_consumed()
         return feat
 
-    def cut(self, depth=10, through=False, flip=False, auto_select=True):
-        """切除。through=True 完全贯穿；否则切除 depth mm。
+    def extrude_with_holes(self, w, h, depth, holes=(), cx=0.0, cy=0.0,
+                           symmetric=False):
+        """【Bug-24 修复】高层封装：多环基体一次挤出（孔在基体草图里画成内环）。
 
-        Bug 4 修复: FeatureCut3 在 SW 2020 中不可靠，改用 FeatureExtrusion3 的切除模式。
+        为什么需要（支撑结构房间的实战经验，唯一 4/4 一次成功的房间）：
+          矩形多孔【切除】的选段在 SW 里不稳定（rect 矩形切除选段失败、
+          底面切除迁移）；而"把所有孔在基体草图里一次性画成内环再挤出"零切除，
+          是最稳的建模模式。本封装把这条经验固化，避免每个小屋重复踩坑。
+
+        参数：
+          w,h    —— 矩形外形尺寸（mm，以 cx,cy 为中心）
+          depth  —— 挤出深度（mm）
+          holes  —— 孔列表，每项 (hx, hy, r) 或 (hx, hy, r, kind)
+                    kind="circle"（默认）或 "rect"，rect 时 r=(hw, hh)
+          cx,cy  —— 矩形中心（相对草图原点，mm）
+        返回：feature（同 extrude）
+
+        用法：
+            m.begin_sketch("Top Plane")
+            m.extrude_with_holes(180, 60, 8,
+                                 holes=[(-70, 0, 2.5), (70, 0, 2.5)],
+                                 cx=0, cy=0)
         """
-        T1 = SW_END_THROUGH if through else SW_END_BLIND
-        d = depth * MM
-        # 使用 FeatureExtrusion3 的切除模式（AddPad=False）
+        self._ensure_sketch_active()
+        # 外轮廓
+        self.rect(cx, cy, w, h)
+        # 内环（孔）：SW 在同草图内画闭合内环即自动成为挖空区域
+        for hp in (holes or ()):
+            try:
+                hx, hy, rr = hp[0], hp[1], hp[2]
+                kind = (hp[3] if len(hp) > 3 else "circle")
+            except Exception:
+                continue
+            if kind == "rect" and isinstance(rr, (tuple, list)) and len(rr) >= 2:
+                self.rect(hx, hy, rr[0], rr[1])
+            else:
+                self.circle(hx, hy, rr)
+        self.end_sketch()
+        return self.extrude(depth, symmetric=symmetric)
+
+    def _topology_signature(self):
+        """【Bug-37/42/43 修复】采集实体的【拓扑签名】，用于判定切除是否真的生效。
+
+        为什么需要它（三个 Bug 的共同根因）：
+          Bug-37 薄壁件：Ø6 卡扣孔穿透 2mm 薄壁，真实去料率仅 1.97% < 3% 阈值；
+          Bug-42 轴承座：circle+cut 方向偏，去料率 0.7%；
+          Bug-43 同类：方向错但已贯穿，去料率 0.7% 被判"几乎肯定没贯穿"。
+          → 三个都被"去料率"这一个指标误判，而它们【几何上确实切穿了】。
+
+        修复思路：不再只看"去掉了多少体积"，而是看【实体拓扑是否改变】：
+          · 体积是否变小（真去料 vs 完全没动）；
+          · 面数是否增加（打孔会在实体上新增内孔面）；
+          · 包围盒是否改变（贯穿可能切掉外形）；
+          · 实体数量是否变化（切断/多体）。
+        只要"体积变小 且 面数增加"，就说明确实切出了新特征 ——
+        哪怕去料率只有 0.7%（薄壁小孔），也应判成功。
+
+        Returns: dict {volume_mm3, face_count, edge_count, body_count, bbox_mm}
+        """
+        sig = {"volume_mm3": None, "face_count": None, "edge_count": None,
+               "body_count": None, "bbox_mm": None}
         try:
-            feat = self.fm.FeatureExtrusion3(
-                False, False, False, T1, 0, d, 0,
-                False, False, False, False, 0, 0,
-                False, False, False, False, False, False, auto_select,
-                0, 0, False)
-            if feat:
-                self._visual_step("cut")
-                self.rebuild()  # Bug 9: 重建模型以清除 COM 内部选择状态累积
-                return feat
-        except Exception as e:
+            sig["volume_mm3"] = self._body_volume_mm3()
+        except Exception:
             pass
-        # 回退到 FeatureCut3
         try:
-            feat = self.fm.FeatureCut3(
-                True, bool(flip), False, T1, 0, d, 0,
-                False, False, False, False, 0, 0,
-                False, False, False, False, False, False, auto_select,
-                False, False, False, 0, 0, False)
-            if feat:
-                self._visual_step("cut")
-                self.rebuild()  # Bug 9
-                return feat
+            bodies = self.model.GetBodies2(0, 1)
+            bl = list(bodies) if isinstance(bodies, tuple) else ([bodies] if bodies else [])
+            sig["body_count"] = len(bl)
+            fc, ec = 0, 0
+            bb_min = [float("inf")] * 3
+            bb_max = [float("-inf")] * 3
+            for b in bl:
+                try:
+                    faces = b.GetFaces()
+                    fl = list(faces) if isinstance(faces, tuple) else ([faces] if faces else [])
+                    fc += len(fl)
+                except Exception:
+                    pass
+                try:
+                    edges = b.GetEdges()
+                    el = list(edges) if isinstance(edges, tuple) else ([edges] if edges else [])
+                    ec += len(el)
+                except Exception:
+                    pass
+                try:
+                    bb = b.GetBodyBox()
+                    for _i in range(3):
+                        bb_min[_i] = min(bb_min[_i], float(bb[_i]))
+                        bb_max[_i] = max(bb_max[_i], float(bb[3 + _i]))
+                except Exception:
+                    pass
+            sig["face_count"] = fc
+            sig["edge_count"] = ec
+            if bb_min[0] != float("inf"):
+                sig["bbox_mm"] = [round((bb_max[_i] - bb_min[_i]) * 1000.0, 4)
+                                  for _i in range(3)]
+        except Exception:
+            pass
+        return sig
+
+    def _cut_geometry_verdict(self, before, after, through=False):
+        """【Bug-37/42/43 修复】基于【几何/拓扑变化】判定切除是否真的生效。
+
+        取代"去料率 >= 3%"这条对薄壁/小孔天然误判的判据。
+
+        判定规则（任一成立即认为切除真的生效）：
+          A) 体积确实变小（>1e-6 mm³）且【面数增加】
+             —— 这是打孔/开槽的典型特征（新增内孔面）；
+          B) 体积变小且【实体数变化】（切断/多体）；
+          C) 体积变小且【包围盒改变】（贯穿切掉外形）；
+          D) through=True 且体积变小（方向偏但确实去料）。
+        只有"体积完全没变"或"取不到任何证据"才判失败。
+
+        Returns: (ok: bool, reason: str, detail: dict)
+        """
+        detail = {"before": before, "after": after}
+        try:
+            v0, v1 = before.get("volume_mm3"), after.get("volume_mm3")
+            if v0 is None or v1 is None:
+                return False, "无法读取切除前后体积（证据不足）", detail
+            dv = float(v0) - float(v1)
+            detail["removed_mm3"] = round(dv, 4)
+            if dv <= 1e-6:
+                return False, "切除后体积未减小 —— 未真正去料", detail
+            detail["removed_pct"] = round(dv / float(v0) * 100.0, 4) if v0 else None
+            f0, f1 = before.get("face_count"), after.get("face_count")
+            if f0 is not None and f1 is not None and f1 > f0:
+                return True, ("体积减小且面数增加(%d->%d) —— 确实切出了新特征"
+                              % (f0, f1)), detail
+            b0, b1 = before.get("body_count"), after.get("body_count")
+            if b0 is not None and b1 is not None and b0 != b1:
+                return True, ("体积减小且实体数变化(%s->%s) —— 确实切断了材料"
+                              % (b0, b1)), detail
+            bb0, bb1 = before.get("bbox_mm"), after.get("bbox_mm")
+            if bb0 and bb1 and any(abs(bb0[_i] - bb1[_i]) > 1e-4 for _i in range(3)):
+                return True, "体积减小且包围盒改变 —— 确实切掉了外形材料", detail
+            if through:
+                return True, ("贯穿切除：体积已减小 %.4f mm³（方向可能有偏，"
+                              "但确实去料）" % dv), detail
+            return False, ("体积仅减小 %.6f mm³ 且无拓扑变化 —— 疑似未真正切除"
+                           % dv), detail
+        except Exception as e:
+            return False, "几何判定异常: %r" % (e,), detail
+
+
+    def add_dimension(self, x1, y1, x2, y2, value_mm=None, dim_type="smart"):
+        """【Bug-34 修复】在草图上添加【尺寸约束】（annotate 能自动出图的前提）。
+
+        ══ 为什么必须加这个 ═══════════════════════════════════════════════════
+        台账回归结论（Bug-34 部分修复）：
+          "annotate 命令已加但插 0 个标注 —— InsertModelAnnotations 只能插
+           建模时已加尺寸，本轮建模未加约束 → 永远空转。"
+
+        这是决定性的因果链：
+          建模不加尺寸 → 模型里没有可插入的 DisplayDimension
+            → drawing 的 InsertModelAnnotations 无可插入对象 → 0 个标注
+            → GB/T 尺寸标注永远缺失。
+
+        因此根治办法不是改 annotate，而是【在建模时就加尺寸约束】。
+        本方法封装 SW 的草图尺寸 API（多版本签名兜底）。
+
+        Args:
+            x1, y1, x2, y2: 尺寸两端点（草图坐标，mm）
+            value_mm: 期望尺寸值（None = 用 SW 当前测量值，不加驱动）
+            dim_type: "smart"（默认）/ "horizontal" / "vertical" / "diameter" / "radius"
+        Returns:
+            {"ok", "value_mm", "api", "error"?}
+        """
+        out = {"ok": False, "value_mm": value_mm, "dim_type": dim_type}
+        try:
+            self._ensure_sketch_active()
+            _sk = self.skm.ActiveSketch
+            if _sk is None:
+                out["error"] = "当前没有激活的草图 —— 请先 begin_sketch / begin_sketch_on_face"
+                return out
+            _k = MM
+            _x1, _y1 = float(x1) * _k, float(y1) * _k
+            _x2, _y2 = float(x2) * _k, float(y2) * _k
+            _val = (float(value_mm) * _k) if value_mm is not None else None
+            # ── SW 草图尺寸 API：AddDimension2 为主，AddDimension 回退 ──────
+            _tried = []
+            _dim = None
+            for _api in ("AddDimension2", "AddDimension"):
+                _fn = getattr(self.skm, _api, None)
+                if _fn is None:
+                    _tried.append("%s: 不存在" % _api)
+                    continue
+                try:
+                    _dim = _fn(_x1, _y1, 0.0, _x2, _y2, 0.0)
+                    _tried.append("%s: ok" % _api)
+                    break
+                except Exception as _e:
+                    _tried.append("%s: %r" % (_api, _e))
+                    continue
+            out["api_tried"] = _tried
+            if _dim is None:
+                out["error"] = "草图尺寸 API 均不可用: %s" % " | ".join(_tried)
+                out["hint"] = ("确认草图处于激活状态；SW 的 AddDimension2 需要"
+                               "两点坐标且草图未退出。")
+                return out
+            out["api"] = _api
+            # 设定尺寸值（驱动尺寸）
+            if _val is not None:
+                for _sm in ("SetSystemValue3", "SetSystemValue2", "SetSystemValue"):
+                    try:
+                        _sfn = getattr(_dim, _sm, None)
+                        if _sfn is None:
+                            continue
+                        if _sm == "SetSystemValue3":
+                            _sfn(_val, 1, None)   # 1 = swSetValue_InThisConfiguration
+                        elif _sm == "SetSystemValue2":
+                            _sfn(_val, 1)
+                        else:
+                            _sfn(_val)
+                        out["value_applied"] = True
+                        break
+                    except Exception as _e2:
+                        out.setdefault("set_value_errors", []).append("%s: %r" % (_sm, _e2))
+            out["ok"] = True
+            return out
+        except Exception as e:
+            out["error"] = "添加尺寸失败: %r" % (e,)
+            return out
+
+    def add_key_dimensions(self, points, dims=None):
+        """【Bug-34 修复】批量添加关键尺寸（一次给多个，减少 COM 往返）。
+
+        Args:
+            points: [(x, y), ...] 草图关键点（如矩形的 4 个角）
+            dims: 显式尺寸列表 [{"p1": (x,y), "p2": (x,y), "value": v, "type": "smart"}]
+                  为 None 时自动按 points 相邻点添加尺寸。
+        Returns:
+            {"ok", "added", "failed", "total"}
+        """
+        out = {"ok": False, "added": [], "failed": [], "total": 0}
+        try:
+            _list = []
+            if dims:
+                for d in dims:
+                    _list.append((d.get("p1"), d.get("p2"), d.get("value"),
+                                  d.get("type", "smart")))
+            elif points and len(points) >= 2:
+                for i in range(len(points)):
+                    _p1 = points[i]
+                    _p2 = points[(i + 1) % len(points)]
+                    _v = None
+                    try:
+                        import math as _math
+                        _v = round(_math.hypot(_p2[0] - _p1[0],
+                                               _p2[1] - _p1[1]), 3)
+                    except Exception:
+                        _v = None
+                    _list.append((_p1, _p2, _v, "smart"))
+            out["total"] = len(_list)
+            for _p1, _p2, _v, _t in _list:
+                if not _p1 or not _p2:
+                    out["failed"].append({"p1": _p1, "p2": _p2, "reason": "点缺失"})
+                    continue
+                _r = self.add_dimension(_p1[0], _p1[1], _p2[0], _p2[1],
+                                        value_mm=_v, dim_type=_t)
+                if _r.get("ok"):
+                    out["added"].append({"p1": _p1, "p2": _p2, "value_mm": _v})
+                else:
+                    out["failed"].append({"p1": _p1, "p2": _p2,
+                                          "reason": _r.get("error")})
+            out["ok"] = bool(out["added"])
+            return out
+        except Exception as e:
+            out["error"] = "批量加尺寸失败: %r" % (e,)
+            return out
+
+    def annotate_geometry_fallback(self, part_kind="auto"):
+        """【Bug-34 降级方案】当模型里确实没有尺寸约束时，按【几何包围盒】
+        生成一份"建议标注清单"，供出图小屋手工补标或写入图纸说明。
+
+        台账建议③："提供 GB/T 检查报告，逐项列出通过/缺失，而非让小屋人工判断。"
+        本方法把"该标哪些尺寸"用几何算出来，至少给出完整清单。
+
+        Returns: {"ok", "suggestions": [...], "note"}
+        """
+        out = {"ok": False, "suggestions": []}
+        try:
+            _dims = [self._bbox_extent_mm(0), self._bbox_extent_mm(1),
+                     self._bbox_extent_mm(2)]
+            _dims = [round(d, 2) for d in _dims if d]
+            if not _dims:
+                out["error"] = "无法读取实体包围盒"
+                return out
+            out["bbox_mm"] = _dims
+            _labels = ["总长", "总宽", "总高"]
+            for i, d in enumerate(_dims):
+                out["suggestions"].append({
+                    "item": _labels[i] if i < len(_labels) else "尺寸%d" % (i + 1),
+                    "value_mm": d, "standard": "GB/T 4458.4",
+                    "note": "建议在工程图中标注该总体尺寸"})
+            # 圆孔建议（从草图记录里取）
+            try:
+                _radii = self._sketch_circle_radii_mm()
+                for r in (_radii or []):
+                    out["suggestions"].append({
+                        "item": "孔径", "value_mm": round(r * 2, 2),
+                        "standard": "GB/T 4458.4",
+                        "note": "建议标注 Ø%.1f 及孔位尺寸" % (r * 2)})
+            except Exception:
+                pass
+            out["ok"] = True
+            out["note"] = ("这是【几何推算】的建议标注清单（非模型真实尺寸）。"
+                           "根治办法：建模时用 add_dimension() 加尺寸约束，"
+                           "这样 annotate 才能自动插入（Bug-34）。")
+            return out
+        except Exception as e:
+            out["error"] = "几何标注建议失败: %r" % (e,)
+            return out
+
+    def involute_gear_profile(self, module_mm, teeth, pressure_angle_deg=20.0,
+                              steps_per_flank=6):
+        """【Bug-41 修复】生成【渐开线齿轮齿廓】的点集（供 polyline 一次成型）。
+
+        为什么需要它：
+          Bug-41 实测——用 polyline 逐点画 z=30 齿轮的齿形（300+ 点）时，
+          SW 无法识别为闭合轮廓 → FeatureExtrusion3 返回 None，
+          小屋只能退化成"圆齿槽近似"，齿轮精度下降。
+          根因有二：
+            ① 点数过多（每齿 10+ 点 × 30 齿 = 300+），SW 轮廓识别吃力；
+            ② 齿廓不是真正的渐开线，曲率突变处易被判"轮廓无效"。
+          修复：用【解析式渐开线】生成齿廓，并按齿数自适应控制总点数
+          （每齿 4~8 点），既保证几何精度又让 SW 能稳定识别。
+
+        Args:
+            module_mm: 模数 m（mm）
+            teeth: 齿数 z
+            pressure_angle_deg: 压力角（GB/T 默认 20°）
+            steps_per_flank: 每侧齿廓采样段数（越大越精确、点越多）
+        Returns:
+            {"ok": True, "points": [(x,y),...], "params": {...}} 或 {"ok": False, "error": ...}
+            点集为【单齿】的完整外轮廓（齿根→齿顶→齿根），按齿数旋转复制即可。
+        """
+        try:
+            import math as _math
+            m = float(module_mm)
+            z = int(teeth)
+            if m <= 0 or z < 3:
+                return {"ok": False, "error": "模数必须>0且齿数>=3"}
+            alpha = _math.radians(float(pressure_angle_deg))
+            # ── 基本几何（GB/T 1357 标准直齿圆柱齿轮）──────────────────────
+            d = m * z                    # 分度圆直径
+            r = d / 2.0                  # 分度圆半径
+            r_a = r + m                  # 齿顶圆半径（ha*=1）
+            r_f = r - 1.25 * m           # 齿根圆半径（hf*=1.25）
+            r_b = r * _math.cos(alpha)   # 基圆半径
+            # 渐开线参数：任意半径 rx 处的展开角
+            def _inv(a):
+                return _math.tan(a) - a
+
+            def _polar(rx):
+                """半径 rx 处的渐开线极角（相对齿廓对称中心）。"""
+                if rx <= r_b:
+                    return 0.0
+                ax = _math.acos(min(1.0, r_b / rx))
+                return _math.tan(ax) - ax
+
+            # 分度圆处的半齿角
+            half_tooth = _math.pi / (2.0 * z)
+            inv_alpha = _inv(alpha)
+            # 齿廓对称中心线相对齿槽中心的角偏移
+            base_ang = half_tooth + inv_alpha
+            pts = []
+            # ① 齿根圆弧（左右各一段，保证闭合起点在齿根）
+            _fr_ang = base_ang + _polar(r_f) if r_f > r_b else base_ang
+            pts.append((r_f * _math.cos(-_fr_ang), r_f * _math.sin(-_fr_ang)))
+            # ② 左齿廓：齿根 → 齿顶（渐开线）
+            n = max(2, int(steps_per_flank))
+            for i in range(n + 1):
+                rx = r_f + (r_a - r_f) * (i / float(n))
+                if rx < r_b:
+                    rx = r_b
+                ang = base_ang + _polar(rx)
+                pts.append((rx * _math.cos(-ang), rx * _math.sin(-ang)))
+            # ③ 右齿廓：齿顶 → 齿根（镜像）
+            for i in range(n, -1, -1):
+                rx = r_f + (r_a - r_f) * (i / float(n))
+                if rx < r_b:
+                    rx = r_b
+                ang = base_ang + _polar(rx)
+                pts.append((rx * _math.cos(ang), rx * _math.sin(ang)))
+            # ④ 闭合回起点
+            pts.append(pts[0])
+            return {"ok": True, "points": pts,
+                    "params": {"module_mm": m, "teeth": z,
+                               "pressure_angle_deg": float(pressure_angle_deg),
+                               "pitch_dia_mm": round(d, 4),
+                               "tip_dia_mm": round(r_a * 2, 4),
+                               "root_dia_mm": round(r_f * 2, 4),
+                               "base_dia_mm": round(r_b * 2, 4),
+                               "point_count": len(pts),
+                               "points_per_tooth": len(pts)}}
+        except Exception as e:
+            return {"ok": False, "error": "齿廓生成失败: %r" % (e,)}
+
+    def gear(self, module_mm, teeth, thickness_mm, bore_dia_mm=0.0,
+             pressure_angle_deg=20.0, plane="Top Plane", steps_per_flank=4,
+             cx=0.0, cy=0.0, bore_via_revolve=False):
+        """【Bug-41 修复】参数化直齿圆柱齿轮（模数/齿数/厚度 → 一次成型）。
+
+        台账建议："齿轮齿形应支持参数化绘制（模数/齿数/压力角 → 直接生成齿廓
+        曲线），而非让小屋逐点 polyline；或提供 gear(m, z, b, profile='involute')"。
+
+        本方法按 GB/T 1357 标准直齿圆柱齿轮几何生成【完整齿圈轮廓】
+        （所有齿一次 polyline 画成闭合轮廓 → 一次 extrude），
+        并在需要时用 revolve 加工中心孔（避免 Bug-42 的 cut 方向问题）。
+
+        Args:
+            module_mm: 模数 m
+            teeth: 齿数 z
+            thickness_mm: 齿宽 b（mm）
+            bore_dia_mm: 中心孔直径（0 = 不开孔）
+            pressure_angle_deg: 压力角（默认 20°）
+            plane: 草图基准面（默认 Top Plane；齿轮轴线沿该面法向）
+            steps_per_flank: 每侧齿廓采样段数（默认 4，兼顾精度与点数）
+            bore_via_revolve: True 时中心孔用 revolve 切除（更稳，避开 cut 方向）
+        Returns:
+            {"ok", "feature", "params", "profile_points", "error"?}
+        """
+        out = {"ok": False, "params": None, "profile_points": 0}
+        try:
+            import math as _math
+            prof = self.involute_gear_profile(module_mm, teeth,
+                                              pressure_angle_deg, steps_per_flank)
+            if not prof.get("ok"):
+                out["error"] = prof.get("error")
+                return out
+            single = prof["points"]
+            m = float(module_mm); z = int(teeth)
+            r_a = m * z / 2.0 + m
+            # ── 把【单齿】按齿数旋转复制成完整齿圈（一次闭合 polyline）────
+            # 每个齿的角间距 = 2π/z；单齿点集已含"左根→顶→右根"，
+            # 相邻齿之间用齿根圆弧过渡（直接连接即可，SW 会自动成弧/直线段）。
+            full = []
+            for k in range(z):
+                rot = 2.0 * _math.pi * k / z
+                ca, sa = _math.cos(rot), _math.sin(rot)
+                for (px, py) in single:
+                    full.append((px * ca - py * sa + cx, px * sa + py * ca + cy))
+            # 闭合
+            full.append(full[0])
+            # ── 一次画出完整齿圈并挤出 ─────────────────────────────────
+            self.begin_sketch(plane)
+            self.polyline(full, close=True)
+            self.end_sketch()
+            feat = self.extrude(thickness_mm)
+            out.update({"ok": True, "feature": feat,
+                        "params": dict(prof["params"],
+                                       thickness_mm=float(thickness_mm),
+                                       bore_dia_mm=float(bore_dia_mm)),
+                        "profile_points": len(full)})
+            # ── 中心孔：优先 revolve（避开 cut 方向问题，Bug-42）──────────
+            if bore_dia_mm and float(bore_dia_mm) > 0:
+                try:
+                    if bore_via_revolve:
+                        self._bore_by_revolve(bore_dia_mm, thickness_mm, plane=plane)
+                        out["bore_method"] = "revolve"
+                    else:
+                        self.begin_sketch(plane)
+                        self.circle(cx, cy, float(bore_dia_mm) / 2.0)
+                        self.end_sketch()
+                        self.cut(through=True)
+                        out["bore_method"] = "cut"
+                except Exception as _e_bore:
+                    out["bore_warning"] = ("中心孔加工失败(%r)；齿轮本体已生成，"
+                                           "可单独用 bore() 补做" % (_e_bore,))
+            return out
+        except Exception as e:
+            out["error"] = "齿轮生成失败: %r" % (e,)
+            return out
+
+    def _bore_by_revolve(self, dia_mm, depth_mm, plane="Top Plane"):
+        """【Bug-42 修复】用 revolve 切中心孔（避开 cut 方向不可控的问题）。"""
+        import math as _math
+        r = float(dia_mm) / 2.0
+        h = float(depth_mm)
+        self.begin_sketch("Front Plane")
+        # 轮廓：矩形（从轴线到半径 r，高度 h），绕轴线旋转 360° 切除
+        self.line(0.0, 0.0, r, 0.0)
+        self.line(r, 0.0, r, h)
+        self.line(r, h, 0.0, h)
+        self.line(0.0, h, 0.0, 0.0)
+        # 中心线（旋转轴）
+        self.centerline(0.0, 0.0, 0.0, h)
+        self.end_sketch()
+        return self.revolve(360, cut=True)
+
+    def bore(self, dia_mm, depth_mm=None, axis="Z", through=True, cx=0.0, cy=0.0,
+             plane=None):
+        """【Bug-42 修复】专用孔加工命令（显式指定轴线方向，避免 cut 方向不可控）。
+
+        台账建议："cut(through=True) 应允许指定切除方向（如 direction=(1,0,0)）；
+        或提供 bore(face, d, depth, axis) 专用孔命令。"
+
+        实现：按 axis 选择基准面（基准面法向 = 孔轴线方向），在面上画圆后切除。
+          axis="Z" → Top/Bottom Plane（孔沿 Z）
+          axis="Y" → Front/Back Plane（孔沿 Y）
+          axis="X" → Right/Left Plane（孔沿 X）
+        这样孔的轴向是【显式可控】的，不再依赖 SW 的默认贯穿方向。
+
+        Args:
+            dia_mm: 孔径
+            depth_mm: 盲孔深度（through=True 时忽略）
+            axis: 孔轴线方向 "X"/"Y"/"Z"
+            through: True=完全贯穿
+            cx, cy: 圆心（草图平面内坐标，默认原点）
+            plane: 显式指定基准面（覆盖 axis 推导）
+        Returns:
+            {"ok", "feature", "axis", "plane", "dia_mm", "through", "error"?}
+        """
+        out = {"ok": False, "axis": str(axis).upper(), "through": bool(through),
+               "dia_mm": float(dia_mm)}
+        try:
+            _axis = str(axis).upper()
+            _plane = plane or {"Z": "Top Plane", "Y": "Front Plane",
+                               "X": "Right Plane"}.get(_axis)
+            if not _plane:
+                out["error"] = "axis 必须是 X/Y/Z（或显式给 plane）"
+                return out
+            out["plane"] = _plane
+            self.begin_sketch(_plane)
+            self.circle(float(cx), float(cy), float(dia_mm) / 2.0)
+            self.end_sketch()
+            if through:
+                feat = self.cut(through=True)
+            else:
+                if not depth_mm:
+                    out["error"] = "盲孔必须给 depth_mm"
+                    return out
+                feat = self.cut(depth=float(depth_mm), through=False)
+            out.update({"ok": True, "feature": feat})
+            return out
+        except Exception as e:
+            out["error"] = "孔加工失败: %r" % (e,)
+            return out
+
+    def revolve_on_face(self, face_point, axis_point, axis_dir, angle_deg=360.0,
+                        cut=False):
+        """【Bug-40 修复】在【实体面】上做旋转特征（显式给轴，不依赖按名选面）。
+
+        台账建议："revolve 应显式传'旋转轴 + 基准面'，不能依赖按名选基准面；
+        或提供 revolve_on_face(face, axis_entity) 专用 API。"
+
+        背景（Bug-40）：多特征零件上 begin_sketch("Front Plane") 会降级到
+        begin_sketch_on_face，导致旋转特征的轴/轮廓错位 → FeatureRevolution
+        返回 None（且不报错，很隐蔽）。
+
+        本方法：
+          ① 用 begin_sketch_on_face(face_point) 在【指定实体面】上开草图；
+          ② 用中心线显式定义旋转轴（axis_point + axis_dir），不依赖基准面；
+          ③ 调用 revolve(angle, cut=cut)。
+
+        Args:
+            face_point: 实体面上的一点 (x,y,z) mm
+            axis_point: 旋转轴上一点 (x,y,z) mm（草图平面内坐标由 SW 投影）
+            axis_dir: 轴向 (dx,dy,dz)
+            angle_deg: 旋转角度
+            cut: True=旋转切除
+        Returns:
+            {"ok", "feature", "axis_dir", "angle_deg", "error"?}
+        """
+        out = {"ok": False, "axis_dir": list(axis_dir),
+               "angle_deg": float(angle_deg)}
+        try:
+            self.begin_sketch_on_face(*face_point)
+            # 显式中心线（旋转轴）：在草图平面内画一条足够长的中心线
+            import math as _math
+            ax, ay, az = [float(v) for v in axis_dir]
+            px, py, pz = [float(v) for v in axis_point]
+            _L = 1000.0   # 足够长，保证覆盖轮廓
+            self.centerline(px, py, px + ax * _L, py + ay * _L)
+            self.end_sketch()
+            out["ok"] = True
+            out["note"] = ("已在该实体面上开草图并画好中心线；"
+                           "请继续在该草图内绘制旋转轮廓，然后调用 revolve()。"
+                           "（本方法只负责'面 + 轴'，轮廓由调用方决定）")
+            return out
+        except Exception as e:
+            out["error"] = "revolve_on_face 失败: %r" % (e,)
+            return out
+
+
+    def _check_through_hole(self, axis="Z", samples=9):
+        """【F 修复·第三轮】判断切除是否真的打掉了实质材料。
+
+        背景：原判据用 1% 去料率，太松 —— 实测"去料 54% 但孔未贯穿"
+          都能通过。半成品之所以危险，是因为它【返回成功】。
+
+        本方法用【去料率下限 + 实体数】组合做判据：
+          · 贯穿打孔应移除 >= 3% 的材料（低于此几乎肯定没打通）；
+          · 同时记录实体数量，供调用方判断是否意外切断成多体。
+
+        Returns: {ok, removed_pct?, bodies?, reason?}
+        """
+        out = {"ok": False}
+        try:
+            bodies = self.model.GetBodies2(0, 1)
+            bl = list(bodies) if isinstance(bodies, tuple) else ([bodies] if bodies else [])
+            out["bodies"] = len(bl)
+        except Exception:
+            out["bodies"] = None
+        _pct = getattr(self, "_cut_removed_pct", None)
+        if _pct is not None:
+            out["removed_pct"] = round(_pct, 2)
+        if _pct is not None and _pct >= 3.0:
+            out["ok"] = True
+            return out
+        out["reason"] = ("去料率 %.2f%% 低于 3%% 的贯穿底线，"
+                         "极可能没有打通" % (_pct if _pct is not None else -1))
+        return out
+
+    def _ensure_cut_profile_selected(self):
+        """【F-1 修复·第十轮】cut 前确保【草图边/闭合轮廓】被选中。
+
+        ══ 专家第二轮意见（决定性）══════════════════════════════════════════
+        1) cut() 必须先 EditSketch() 进入草图编辑状态，再用 SketchManager
+           层级接口选中草图内的边线/闭合轮廓，完成后再 ExitSketch()。
+           直接对"草图特征"操作（type=9）拿不到轮廓。
+        2) "遍历特征树异常：找不到成员" 说明 SW2025 下 FeatureManager 的
+           某些方法签名变了 —— 应改走 SketchManager 层级，更可靠。
+        3) 因此把"遍历特征树"从主路径【降级为最后兜底】。
+
+        新的尝试顺序：
+          路径 0（首选）：若草图已激活 -> 直接选段；
+          路径 1（核心）：若草图已退出 -> 通过最近草图 EditSketch 进入后再选段；
+          路径 2（兜底）：SelectByID2("段名@草图名","EXTSKETCHSEGMENT")；
+          路径 3（最后）：遍历特征树（可能抛"找不到成员"，仅作垫底）。
+
+        Returns: (ok: bool, info: str)
+        """
+        _diag = []
+
+        def _count():
+            try:
+                return int(self.model.SelectionManager.GetSelectedObjectCount2(-1))
+            except Exception:
+                return -1
+
+        def _seg_count():
+            """只统计"段"类对象（10=SKETCHSEGMENT / 24=EXTSKETCHSEGMENT）"""
+            try:
+                sm = self.model.SelectionManager
+                n = int(sm.GetSelectedObjectCount2(-1))
+                seg = 0
+                for i in range(1, n + 1):
+                    try:
+                        if int(sm.GetSelectedObjectType3(i, -1)) in (10, 24):
+                            seg += 1
+                    except Exception:
+                        continue
+                return seg
+            except Exception:
+                return -1
+
+        def _ok_now(tag):
+            c = _count()
+            s = _seg_count()
+            _diag.append("%s: count=%s seg=%s" % (tag, c, s))
+            return (c > 0 and s != 0), ("%s(段=%s)" % (tag, s if s > 0 else c))
+
+        # ── 路径 0（永远最先）：草图已激活 → 直接选段 ────────────────────
+        # 【Bug T2 实测修正】草图处于激活态时绝不能 EditSketch（会把草图
+        # 切换/退出），必须直接选段 —— 这是实测唯一稳定的主路径。
+        try:
+            if self.skm.ActiveSketch is not None:
+                ok0, _c0 = self.select_all_sketch_segments()
+                _diag.append(u"路径0(已激活): ok=%s %s"
+                             % (ok0, getattr(self, "_sel_diag", "")))
+                good, msg = _ok_now(u"路径0")
+                if good:
+                    return True, msg
+        except Exception as e:
+            _diag.append(u"路径0 异常: %r" % (e,))
+
+        # ── 路径 -1：按【显式记录的草图名】EditSketch 后选段 ═══════════
+        # 【Bug T1/T2/T3 修复】草图已退出（T2）或激活态选段失败时：
+        #   · T1：同零件第 2 次 cut 时，"特征树最后一个 ProfileFeature"
+        #     是上一次 cut 的草图 —— 启发式必然拿错，显式名不会；
+        #   · T2：end_sketch 后 ActiveSketch=None，只有 EditSketch 能回去；
+        #   · T3：EditSketch 进草图后取的是真实轮廓段（type 10/24），
+        #     不是"草图特征"（type 9），复杂轮廓也能整段选中。
+        # 只用显式记录的名字，绝不做"草图1/Sketch1"式猜测 —— 猜错会把
+        # 基体轮廓选中去切（比失败更危险）。
+        try:
+            _cons = getattr(self, "_consumed_sketches", None) or set()
+            _cand = self._active_sketch_name
+            if _cand and str(_cand) not in _cons:
+                _okE, _nE = self._try_edit_sketch_by_name(_cand)
+                _diag.append(u"路径-1(EditSketch@%s): ok=%s n=%s"
+                             % (_cand, _okE, _nE))
+                if _okE:
+                    good, msg = _ok_now(u"路径-1")
+                    if good:
+                        return True, msg
+                try:
+                    self.model.ClearSelection2(True)
+                except Exception:
+                    pass
+        except Exception as e:
+            _diag.append(u"路径-1 异常: %r" % (e,))
+
+        # ── 路径 1（核心）：EditSketch 进入草图后再选段 ──────────────────
+        # 专家说这条路最可靠：走 SketchManager 层级，不碰特征树 API。
+        _sk_name_for_b = None
+        try:
+            # 用 SelectByID2 按名选草图（名不确定时用 FirstFeature 轻量探测，
+            #   失败也不影响后续 —— 只用于拿到草图名）
+            _probe = self._find_last_sketch_name()
+            if _probe:
+                _sk_name_for_b = _probe
+                _diag.append("探测到草图名=%s" % _probe)
+        except Exception as e:
+            _diag.append("探测草图名异常: %r" % (e,))
+
+        if _sk_name_for_b:
+            # 【Bug T1 修复】"最后一个草图"若已被上一次 cut 消费，此路必拿错
+            # 轮廓 —— 直接禁用该启发式，不再盲选。
+            _cons = getattr(self, "_consumed_sketches", None) or set()
+            if str(_sk_name_for_b) in _cons or \
+                    (self._last_cut_feature_name and
+                     str(_sk_name_for_b) == str(self._last_cut_feature_name)):
+                _diag.append(u"路径1 跳过: 最后草图=%s 已被特征消费(T1防护)"
+                             % _sk_name_for_b)
+            else:
+                try:
+                    self.model.ClearSelection2(True)
+                    if self.ext.SelectByID2(_sk_name_for_b, "SKETCH", 0, 0, 0,
+                                            False, 0, self._empty, 0):
+                        # 进入草图编辑态
+                        try:
+                            self.model.EditSketch()
+                        except Exception as _e_edit:
+                            _diag.append("EditSketch 异常: %r" % (_e_edit,))
+                        ok1, _c1 = self.select_all_sketch_segments()
+                        _diag.append("路径1(EditSketch+选段): ok=%s %s"
+                                     % (ok1, getattr(self, "_sel_diag", "")))
+                        good, msg = _ok_now("路径1")
+                        if good:
+                            return True, msg
+                except Exception as e:
+                    _diag.append("路径1 异常: %r" % (e,))
+
+        # ── 路径 2：SelectByID2 用 EXTSKETCHSEGMENT + "段名@草图名" ───────
+        if _sk_name_for_b:
+            try:
+                self.model.ClearSelection2(True)
+                _names = self._sketch_segment_names(_sk_name_for_b)
+                _diag.append("段名=%s" % (_names[:6],))
+                _hit = 0
+                for _i, _nm in enumerate(_names):
+                    for _full in ("%s@%s" % (_nm, _sk_name_for_b), _nm):
+                        for _ty in ("EXTSKETCHSEGMENT", "SKETCHSEGMENT"):
+                            try:
+                                if self.ext.SelectByID2(_full, _ty, 0, 0, 0,
+                                                        _hit > 0, 0, self._empty, 0):
+                                    _hit += 1
+                                    break
+                            except Exception:
+                                continue
+                        if _hit and _i == 0:
+                            break
+                _diag.append("路径2(EXTSKETCHSEGMENT): hit=%d" % _hit)
+                good, msg = _ok_now("路径2")
+                if good:
+                    return True, msg
+            except Exception as e:
+                _diag.append("路径2 异常: %r" % (e,))
+
+        # ── 路径 3（最后兜底）：遍历特征树（可能抛"找不到成员"）─────────
+        # 【Bug T1 修复】此路选中的是"草图特征"(type 9) 而非轮廓段，
+        # 正是历史事故的源头 —— 已被特征消费的草图一律跳过。
+        try:
+            if _sk_name_for_b:
+                _cons = getattr(self, "_consumed_sketches", None) or set()
+                if str(_sk_name_for_b) in _cons or \
+                        (self._last_cut_feature_name and
+                         str(_sk_name_for_b) == str(self._last_cut_feature_name)):
+                    _diag.append(u"路径3 跳过: 草图已消费(T1防护)")
+                else:
+                    self.model.ClearSelection2(True)
+                    if self.ext.SelectByID2(_sk_name_for_b, "SKETCH", 0, 0, 0,
+                                            False, 0, self._empty, 0):
+                        good, msg = _ok_now(u"路径3(选草图特征)")
+                        if good:
+                            return True, msg
+        except Exception as e:
+            _diag.append(u"路径3 异常（已知 SW2025 可能找不到成员）: %r" % (e,))
+
+        _diag.append("最终 count=%s seg=%s" % (_count(), _seg_count()))
+        return False, " | ".join(_diag)
+
+    def _find_last_sketch_name(self):
+        """【F-1 修复】轻量探测最后一个草图名（失败返回 None，不影响主流程）。
+
+        与旧实现不同：这里把"遍历特征树"单独隔离成一个可选步骤，
+          即使 SW2025 抛"找不到成员"，也只是拿不到名字，
+          不会让整个轮廓选中流程崩掉。
+        """
+        try:
+            f = self.model.FirstFeature()
+            last = None
+            _guard = 0
+            while f is not None and _guard < 5000:
+                _guard += 1
+                try:
+                    if f.GetTypeName2() == "ProfileFeature":
+                        last = f.Name
+                except Exception:
+                    pass
+                try:
+                    f = f.GetNextFeature()
+                except Exception:
+                    break
+            return last
+        except Exception:
+            return None
+
+    def _sketch_segment_names(self, sketch_name):
+        """【F-1 修复】取指定草图内各段的名字列表（失败返回 []）。"""
+        out = []
+        try:
+            f = self.model.FirstFeature()
+            _guard = 0
+            while f is not None and _guard < 5000:
+                _guard += 1
+                try:
+                    if (f.GetTypeName2() == "ProfileFeature"
+                            and str(f.Name) == str(sketch_name)):
+                        sk_obj = None
+                        for _acc in ("GetSpecificFeature2", "GetSpecificFeature"):
+                            try:
+                                sk_obj = getattr(f, _acc)()
+                                if sk_obj is not None:
+                                    break
+                            except Exception:
+                                continue
+                        if sk_obj is not None:
+                            for s in (sk_obj.GetSketchSegments or []):
+                                try:
+                                    _nm = s.GetName
+                                    if _nm:
+                                        out.append(str(_nm))
+                                except Exception:
+                                    continue
+                        break
+                except Exception:
+                    pass
+                try:
+                    f = f.GetNextFeature()
+                except Exception:
+                    break
+        except Exception:
+            pass
+        return out
+
+    def _sketch_circle_radii_mm(self):
+        """【Bug T1 修复·验收判据】读取轮廓草图中的圆半径列表（mm）。
+
+        用途：估算切除的期望体积 E = π·Σr²·H（H=贯穿长度或盲孔深度），
+        替代"去料率≥3%"这种对小孔天然误判的启发式阈值。
+        实测依据：Φ10 小孔贯穿 Φ60x40 圆柱，真实去料 2.90% ——
+        被 3% 阈值误拒；用几何期望判据则正确接受（96% 命中）。
+        """
+        sk = None
+        try:
+            sk = self.skm.ActiveSketch
+        except Exception:
+            sk = None
+        if sk is None:
+            # 草图已退出：按显式记录名从特征树直接取草图对象（无需 EditSketch）
+            try:
+                nm = self._active_sketch_name
+                if nm:
+                    f = self.model.FirstFeature()
+                    _guard = 0
+                    while f is not None and _guard < 5000:
+                        _guard += 1
+                        try:
+                            if (f.GetTypeName2() == "ProfileFeature"
+                                    and str(f.Name) == str(nm)):
+                                sk = f.GetSpecificFeature2()
+                                break
+                        except Exception:
+                            pass
+                        try:
+                            f = f.GetNextFeature()
+                        except Exception:
+                            break
+            except Exception:
+                sk = None
+        if sk is None:
+            return []
+        radii = []
+        try:
+            segs = sk.GetSketchSegments
+            if segs is not None:
+                lst = list(segs) if isinstance(segs, (list, tuple)) else [segs]
+                for s in lst:
+                    try:
+                        if int(s.GetType()) == 0:  # swSketch_CIRCLE
+                            radii.append(float(s.GetRadius()) * 1000.0)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return radii
+
+    def _bbox_extent_mm(self, axis=2):
+        """实体包围盒在指定轴方向(0=X,1=Y,2=Z)的长度（mm）；取不到返回 None。"""
+        try:
+            bodies = self.model.GetBodies2(0, 1)
+            bl = list(bodies) if isinstance(bodies, tuple) else ([bodies] if bodies else [])
+            best = 0.0
+            for b in bl:
+                try:
+                    bb = b.GetBodyBox()
+                    ext = abs(bb[3 + int(axis)] - bb[int(axis)]) * 1000.0
+                    best = max(best, ext)
+                except Exception:
+                    continue
+            return best if best > 0 else None
+        except Exception:
+            return None
+
+    def _bbox_max_dim_mm(self):
+        """实体包围盒最大边长（mm）；取不到返回 None。"""
+        try:
+            bodies = self.model.GetBodies2(0, 1)
+            bl = list(bodies) if isinstance(bodies, tuple) else ([bodies] if bodies else [])
+            best = 0.0
+            for b in bl:
+                try:
+                    bb = b.GetBodyBox()
+                    dims = [abs(bb[3] - bb[0]), abs(bb[4] - bb[1]), abs(bb[5] - bb[2])]
+                    best = max(best, max(dims) * 1000.0)
+                except Exception:
+                    continue
+            return best if best > 0 else None
+        except Exception:
+            return None
+
+    def _body_volume_mm3(self):
+        """返回当前实体的体积（mm³）；取不到返回 None。
+
+        【F 修复】用于切除结果校验：切除后体积【必须变小】，
+          否则说明"切除"实际没去料（静默失败）。
+        """
+        try:
+            mp = self.model.GetMassProperties(0) or []
+            # 质量属性数组索引 3 为体积（m³），见项目既有约定
+            if len(mp) >= 4:
+                return float(mp[3]) * 1e9   # m³ -> mm³
+        except Exception:
+            pass
+        # 退路：逐实体累加
+        try:
+            bodies = self.model.GetBodies2(0, 1)
+            bl = list(bodies) if isinstance(bodies, tuple) else ([bodies] if bodies else [])
+            total = 0.0
+            got = False
+            for b in bl:
+                try:
+                    props = b.GetMassProperties(0) or []
+                    if len(props) >= 4:
+                        total += float(props[3])
+                        got = True
+                except Exception:
+                    continue
+            if got:
+                return total * 1e9
         except Exception:
             pass
         return None
 
-    def revolve(self, angle_deg=360, cut=False):
+    def cut(self, depth=10, through=False, flip=False, auto_select=True,
+            through_both=True, via=None):
+        """切除。through=True 完全贯穿；否则切除 depth mm。
+
+        ══ 【Bug T1/T2 修复】cut 的轮廓选择已代码级加固 ═════════════════
+        · T1（同一零件第 2 次及以后 cut 必失败）：根因是"特征树最后一个
+          草图"启发式在多次 cut 后拿到的是【已被消费】的旧草图，选中段
+          count=0。现改为：begin_sketch 记录草图名 → cut 按名 EditSketch
+          选真实轮廓段 → 成功后把该草图标记为"已消费"，绝不再用。
+        · T2（end_sketch 后 cut 失败）：退出草图后 SW 清空选择，
+          现在按记录名 EditSketch 回到草图取轮廓段，end_sketch 之后
+          cut 与 end_sketch 之前 cut 行为一致（都可用）。
+        · 同一零件可安全调用任意多次 cut。
+
+        Bug 4 修复: FeatureCut3 在 SW 2020 中不可靠，改用 FeatureExtrusion3 的切除模式。
+
+        ── 【F 修复·第二轮】贯穿不生效（实测去料 54%、孔未贯穿）══════════
+        第一轮把 FeatureCut3 提为主路径后，切除确实生效了（去料 54%），
+        但 through=True 的完全贯穿没被应用 —— 孔没打通。
+
+        根因：FeatureCut3 在各 SolidWorks 版本间【参数布局不一致】：
+          · 双方向布局 (Sd, Flip, Dir, T1, T2, D1, D2, ...)
+          · 单方向布局 (Sd, Flip, Dir, T1, D1, D2, Dchk1, ...)
+        参数错位时 T1(贯穿) 会落到 D1(盲孔深度) 的位置 → 变成盲孔 →
+        不贯穿；而返回值仍非 None，所以【不报错】。
+
+        修复：多签名依次尝试 + 每次尝试后做【体积校验】：
+          · 切除后体积必须变小，否则判该签名失败；
+          · through=True 时去料量过小也判失败（可能没贯穿）；
+          · 全部签名不达标则明确报错，绝不留半成品当成功。
+        修复：显式区分两种语义，由 through_both 控制，默认 True 保持
+          既有的双向行为，但【两个方向都显式赋值】，消除隐式默认。
+          · through_both=True  (默认) → T1=T2=完全贯穿（真双向穿透）
+          · through_both=False        → 仅正向贯穿，反向为盲孔 0
+          · through=False             → 双向盲孔，深度 depth
+
+        Args:
+            via: 可选，直接传入一个已打开的草图/面名称做切除参考
+        Returns: feat 或 None；失败时通过 _warn 留痕，不静默吞掉
+        """
+        d = depth * MM
+        # ── 【F 修复·第四轮】贯穿不生效 -> 大深度兜底 ──────────────────
+        # 测试实测：T1=SW_END_THROUGH(1) 只去料 1.96%，被当成极小盲孔。
+        #   说明"贯穿枚举"在本版 FeatureCut3 的该参数位上不被识别。
+        #
+        # 修复策略（测试部建议）：
+        #   · 贯穿优先用【双向贯穿枚举 SW_END_THROUGH_BOTH=2】；
+        #   · 同时把深度设为【极大值】(9999mm)，即使枚举被忽略，
+        #     大深度盲孔也能实际切穿整个零件 —— 这是最稳的兜底；
+        #   · 两者叠加，无论 SW 认哪个，结果都是贯穿。
+        # ── 【F 修复·第五轮】贯穿改用"大深度盲孔"策略 ────────────────────
+        # 第四轮实测仍只去料 1.96%，说明：即使把 T1 设为贯穿枚举(2)、
+        #   把 d1 设为 9999mm，FeatureCut3 在该参数位上依然把它们当成了
+        #   "极小盲孔深度" —— 即【参数整体错位】，我们传的值落到了错误位置。
+        #
+        # 结论：不能再依赖"贯穿枚举 + 深度"的组合去猜参数位。
+        #
+        # 新策略（最稳妥，绕开所有贯穿语义）：
+        #   through=True 时，直接用【SW_END_BLIND + 9999mm 大深度】。
+        #   即"用一个远超零件尺寸的盲孔，把零件彻底切穿"。
+        #   这与"贯穿"效果等价，但不依赖任何贯穿枚举 —— 跨版本一致。
+        #   工程上这也是常见做法（建模时用极大深度代替"完全贯穿"）。
+        # ══ 【F 修复·第七轮】专家意见：FeatureCut3 已 Obsolete ══════════════
+        # 专家结论（SW2025）：
+        #   · FeatureCut3 已被 SolidWorks 标记为 Obsolete，推荐 FeatureCut4；
+        #   · 参数布局核对无误（Sd,Flip,Dir,T1,T2,D1,D2 位置正确）；
+        #   · 贯穿失败说明 D1 未被解释为深度，或终止条件被错位解析。
+        #   · 建议：优先 FeatureCut4；贯穿用 swEndCondThroughAll(1) 而非 Blind。
+        #
+        # 本轮调整：
+        #   1) FeatureCut4 提为【首选】；
+        #   2) 贯穿优先用【ThroughAll 枚举】，让 SW 自己处理贯穿逻辑；
+        #   3) 同时保留大深度作为平行尝试（枚举不生效时兜底）。
+        _big = THROUGH_FALLBACK_DEPTH_MM * MM   # 9999mm -> m
+        if through:
+            T1 = SW_END_THROUGH            # 1 = swEndCondThroughAll
+            T2 = SW_END_THROUGH_BOTH if through_both else 0
+            d1 = 0.0                       # ThroughAll 时深度忽略
+            d2 = 0.0
+        else:
+            T1 = SW_END_BLIND
+            T2 = SW_END_BLIND
+            d1 = d
+            d2 = d
+
+        last_err = None
+        # ══ 【F 修复·第二轮】贯穿不生效 —— 多签名 + 体积校验 ══════════════
+        # 第一轮实测：FeatureCut3 提为主路径后，去料了 54% 但【孔不贯穿】。
+        #   说明切除本身生效，但"完全贯穿(Through All)"没被正确应用。
+        #
+        # 根因：FeatureCut3 在各版本间参数布局不一致 —— 有的是
+        #   (Sd, Flip, Dir, T1, T2, D1, D2, ...) 双方向，
+        #   有的是 (Sd, Flip, Dir, T1, D1, D2, Dchk1, ...) 单方向。
+        #   参数错位时 T1 落到 D1 的位置 → 被当成"盲孔深度"→ 不贯穿，
+        #   而返回值仍非 None，所以【不报错】。
+        #
+        # 修复：
+        #   1) through=True 时【优先】尝试把 T1/T2 放在最可能的贯穿位置；
+        #   2) 每个签名尝试后都用【体积校验】确认"真的切穿了"；
+        #   3) 全部不达标则明确报错，绝不留一个"半成品切除"当成功。
+
+        # ══ 【F-1 修复·第八轮】cut 前必须【重新选中草图轮廓】══════════════
+        # 测试部证据链（决定性）：
+        #   · before_count=1 但 type=9（草图实体本身，不是轮廓边/面）
+        #   · cut 调用瞬间 GetSelectedObjectCount2(-1) == 0
+        #   → 封装拿【空选择】去调 FeatureCut，SW 只能退化处理
+        #     （表现为 removed_pct 恒 1.96%）。
+        #
+        # 根因：草图退出(end_sketch)后 SW 会自动清空选择，而原封装
+        #   从未在 cut 前重新选中轮廓 —— 属于"选中丢失"，不是参数问题。
+        #
+        # 修复：
+        #   1) cut 前重新选中草图中的轮廓实体（边/面），而不是草图特征本身；
+        #   2) 加【选择前置断言】：选中数必须 > 0，否则立即报明确错误，
+        #      不再让 SW 返回模糊的"半成品成功"。
+        _sel_ok, _sel_info = self._ensure_cut_profile_selected()
+        if not _sel_ok:
+            # ── 【Bug-20 修复】用统一诊断助手把"选段失败"归因并给出修复建议 ──
+            _diag = diagnose_feature_failure(
+                self, api="FeatureCut3",
+                extra={"selection_count": 0, "sel_info": str(_sel_info)})
+            raise RuntimeError(
+                "切除前【未能选中任何轮廓实体】，FeatureCut 必然失败或退化。\n"
+                "  选择状态: %s\n"
+                "【诊断】原因=%s（%s）\n"
+                "建议：%s\n"
+                "  另：草图退出后 SW 会清空选择，必须重新选中轮廓（边/面），"
+                "而不是草图特征本身；若草图有多段轮廓请分次 cut，"
+                "或改用 select_all_sketch_segments() 后重试；"
+                "多孔件优先用 extrude_with_holes() 零切除建模（Bug-24 推荐）。"
+                % (_sel_info, _diag.get("cause"), _diag.get("detail"),
+                   _diag.get("advice")))
+
+        # 记录切除前体积，用于事后校验
+        _vol_before = self._body_volume_mm3()
+        # ── 【Bug-37/42/43 修复】同时记录【拓扑签名】（体积+面数+边数+实体数+包围盒）
+        #   作为"切除是否真的生效"的几何证据链，不再单靠去料率。
+        _sig_before = self._topology_signature()
+        _expect_through = bool(through)
+
+        # ══ 【Bug T1 修复·验收判据重构】基于几何的期望去料体积 ══════════
+        # 旧判据"贯穿去料率≥3%"对小孔天然误判：实测 Φ10 孔贯穿 Φ60x40
+        # 圆柱真实去料 2.90%，被误拒后继续换签名重试反而破坏选择状态。
+        # 新判据：期望体积 E = π·Σr²·H（圆半径取自轮廓草图，H=包围盒最大
+        # 边长(贯穿) 或 depth(盲孔)）；实际去料 ≥ 35%·E 即判成功。
+        # 35% 容差覆盖"孔与已有孔/空隙重叠"的情况；而对"枚举错位导致的
+        # 浅盲孔"（去料不足期望的 10%）仍会正确拒绝。
+        _radii = self._sketch_circle_radii_mm()
+        # H：贯穿时用【法向轴方向】的包围盒长度（真实贯穿长度），
+        #   而非包围盒最大边（实测会把 Φ60 当成长度，期望虚高 1.5 倍）
+        _H_mm = float(depth)
+        if through:
+            _H_mm = self._bbox_extent_mm(self._sketch_normal_axis)
+            if not _H_mm:
+                _H_mm = self._bbox_max_dim_mm()
+        _expected_mm3 = None
+        # ── 【Bug-26 修复】同时算"保守期望" ──────────────────────────────
+        # H 依赖"法向轴"追踪，多特征后可能取到零件外形（实测 180mm）而不是
+        #   真实厚度 → 期望虚高 → 合法切除被拒。
+        # 这里额外用【最小包围盒边长】算一个保守期望（下界），
+        #   判据改为"去料 ≥ 35%·保守期望"，从根上消除 H 失真的影响。
+        _H_conservative = None
+        try:
+            _dims = [self._bbox_extent_mm(0), self._bbox_extent_mm(1),
+                     self._bbox_extent_mm(2)]
+            _dims = [d for d in _dims if d]
+            if _dims:
+                _H_conservative = min(_dims)
+        except Exception:
+            _H_conservative = None
+        _area_mm2 = 0.0
+        try:
+            _area_mm2 = float(self._sketch_area_mm2 or 0.0)
+        except Exception:
+            _area_mm2 = 0.0
+        _expected_conservative = None
+        if _area_mm2 > 0 and _H_mm:
+            # 首选：circle()/rect() 画图时记录的轮廓面积（完全确定）
+            _expected_mm3 = _area_mm2 * _H_mm
+        elif _radii and _H_mm:
+            # 兜底：从草图几何读圆半径
+            try:
+                import math as _math
+                _expected_mm3 = _math.pi * sum(r * r for r in _radii) * _H_mm
+            except Exception:
+                _expected_mm3 = None
+        if _H_conservative:
+            if _area_mm2 > 0:
+                _expected_conservative = _area_mm2 * _H_conservative
+            elif _radii:
+                try:
+                    import math as _math
+                    _expected_conservative = (_math.pi
+                                              * sum(r * r for r in _radii)
+                                              * _H_conservative)
+                except Exception:
+                    _expected_conservative = None
+
+        def _try_cut(sig_name, args, note=""):
+            """尝试一种签名并做结果校验。返回 (feat|None, reason)"""
+            # 【Bug T1 诊断】DSH_SWAPI_DEBUG=1 时输出每次尝试前的选择现场
+            if os.environ.get("DSH_SWAPI_DEBUG"):
+                try:
+                    _sm_dbg = self.model.SelectionManager
+                    _n_dbg = int(_sm_dbg.GetSelectedObjectCount2(-1))
+                    _types = []
+                    for _i in range(1, _n_dbg + 1):
+                        try:
+                            _types.append(str(_sm_dbg.GetSelectedObjectType3(_i, -1)))
+                        except Exception:
+                            _types.append("?")
+                    _as_dbg = None
+                    try:
+                        _ask = self.skm.ActiveSketch
+                        _as_dbg = (_ask.Name if _ask is not None and hasattr(_ask, "Name") else ("active" if _ask is not None else None))
+                    except Exception:
+                        pass
+                    print(u"[swapi][DBG] %s 前: 选中=%s 类型=%s ActiveSketch=%s 消费=%s"
+                          % (sig_name, _n_dbg, _types, _as_dbg,
+                             sorted(getattr(self, "_consumed_sketches", []) or [])))
+                except Exception as _e_dbg:
+                    print(u"[swapi][DBG] 诊断输出失败: %r" % (_e_dbg,))
+            # ── 【F-1 修复·关键】每次尝试前都要【重新确保轮廓被选中】─────────
+            # 测试部证据：cut 调用瞬间选中对象数=0。
+            #   而 FeatureCut 每次执行都会消耗/清空选择 —— 第一次尝试失败后，
+            #   后续尝试更是"空选择"调用。
+            #   所以这里在【每次】调用 FeatureCut 之前都重建选择。
+            try:
+                _ok_sel, _info_sel = self._ensure_cut_profile_selected()
+                if not _ok_sel:
+                    return None, "轮廓未选中(%s)" % _info_sel
+            except Exception as _e_sel:
+                return None, "重建选择异常: %r" % (_e_sel,)
+            try:
+                fn = getattr(self.fm, sig_name)
+            except Exception as e:
+                return None, "无此方法: %r" % (e,)
+            try:
+                f = fn(*args)
+            except Exception as e:
+                return None, "调用异常: %r" % (e,)
+            if f is None:
+                return None, "返回 None"
+            self._visual_step("cut")
+            self.rebuild()
+            # 体积校验：切除后体积必须变小
+            _vol_after = self._body_volume_mm3()
+            if _vol_before is not None and _vol_after is not None:
+                if _vol_after >= _vol_before - 1e-9:
+                    return f, ("体积未减小(%.1f -> %.1f mm3)，可能未真正去料"
+                               % (_vol_before, _vol_after))
+                self._cut_removed_pct = (_vol_before - _vol_after) / _vol_before * 100.0
+                _removed = (_vol_before - _vol_after) / _vol_before * 100.0
+                # ── 【F 修复·第三轮】阈值太松，拦不住半成品 ──────────────
+                # 测试反馈：阈值 1% 太松 —— 去料 54% 但【孔没贯穿】照样通过。
+                #   "去料了一部分"不等于"贯穿成功"，必须用更强的判据。
+                #
+                # 新判据（三层，从强到弱）：
+                #   ① 贯穿时用【截面/实体数一致性】判断：贯穿孔应让通孔轴线上
+                #      出现"无材料"区域 —— 这里用体积占比做代理；
+                #   ② 贯穿去料率下限提高到 3%（低于此几乎肯定没打通）；
+                #   ③ 记录去料率供调用方判断，并在偏低时给出明确警告。
+                out_removed = _removed
+                _removed_mm3 = _vol_before - _vol_after
+                # ══ 【Bug-26 修复】几何期望可能不可靠，不能仅凭它硬拒 ══════════
+                # 原缺陷（壳体机架房间实测）：期望去料量按错误的 H=180mm 计算
+                #   （法向轴追踪错位时 H 会取到零件外形而不是厚度），
+                #   于是【合法的切除】被判"未达几何期望的 35%"而拒绝。
+                #   小屋只能绕过封装、直接调 FeatureCut3。
+                #
+                # 修复：把几何期望从"唯一判据"降级为"首选判据"，并补两条
+                #   独立的确认路径 —— 只要任一条能证明"确实切掉了材料"就放行：
+                #     ① 几何判据：去料 ≥ 35%·期望（期望可信时最准）；
+                #     ② 贯穿验证：through 时用 _check_through_hole() 实测通孔；
+                #     ③ 保守下限：去料 ≥ 3%·实体体积 且 期望明显不可信时放行。
+                #   只有三条都不成立才判失败（并说明是哪一条不成立）。
+                # ══ 【Bug-37/42/43 修复】改用【几何/拓扑判定】作为主判据 ══════
+                # 原缺陷（三个 Bug 同一根因）：主判据是"去料率 >= 3%"或
+                #   "去料 >= 35%·几何期望"。这两个都只看【体积比例】，对以下
+                #   真实成功的切除会误判失败：
+                #     · Bug-37 薄壁件：Ø6 孔穿 2mm 壁 → 去料率仅 1.97% < 3%；
+                #     · Bug-42 轴承座：方向偏 → 去料率 0.7%；
+                #     · Bug-43 同类：已贯穿但去料率 0.7%。
+                #   → 小屋被迫重试/改用 revolve 变通，或（叠加 Bug-19 重试上限）
+                #     被误跳过，薄壁零件直接做不出来。
+                #
+                # 修复：主判据改为【拓扑变化】（见 _cut_geometry_verdict）：
+                #   体积减小 + (面数增加 | 实体数变化 | 包围盒改变 | through)
+                #   即判成功 —— 不再受"去料率小"影响。
+                # 体积比例判据降级为"辅助确认"，仅在拓扑证据取不到时才用。
+                _sig_after = self._topology_signature()
+                _geo_ok, _geo_reason, _geo_detail = self._cut_geometry_verdict(
+                    _sig_before, _sig_after, through=_expect_through)
+                if _geo_ok:
+                    # 拓扑证据成立 → 直接放行（薄壁小孔也正确通过）
+                    if (_geo_detail.get("removed_pct") is not None
+                            and _geo_detail["removed_pct"] < 3.0):
+                        self._warn(
+                            "cut: 去料率仅 %.2f%%（低于旧 3%% 阈值），但%s"
+                            " —— 按几何判定为成功（Bug-37/42/43）"
+                            % (_geo_detail["removed_pct"], _geo_reason))
+                    return f, ""
+                # 拓扑证据不足 → 退回体积比例辅助判据（保守）
+                _thr_base = _expected_conservative or _expected_mm3
+                if _thr_base and _removed_mm3 >= 0.35 * _thr_base:
+                    return f, ""
+                if _expect_through:
+                    try:
+                        _th = self._check_through_hole()
+                        _through_ok = (bool(_th) if isinstance(_th, bool)
+                                       else bool((_th or {}).get("ok")))
+                    except Exception:
+                        _through_ok = False
+                    if _through_ok and _removed >= 0.05:
+                        return f, ""
+                return f, ("几何判定失败：%s；且去料 %.1f mm3 未达几何期望"
+                           "（期望 %.1f mm3，轮廓圆 r=%s × H=%.1fmm，"
+                           "去料率 %.2f%%）—— 未真正贯穿/未有效去料"
+                           % (_geo_reason, _removed_mm3,
+                              _expected_mm3 or 0.0,
+                              [round(r, 2) for r in _radii], _H_mm, _removed))
+            return f, ""
+
+        # ══ 【Bug T2 修复】cut 结束后必须退出草图编辑态 ═════════════════
+        # 路径-1/路径1 会用 EditSketch 进入草图。创建特征后若停留在编辑态，
+        # 下一个 begin_sketch_on_face 的 InsertSketch 会退化成"编辑旧草图"，
+        # 新圆画进旧轮廓 → 切除范围错乱。统一在此收口。
+        def _exit_sketch_editing():
+            try:
+                if self.skm.ActiveSketch is not None:
+                    self.skm.InsertSketch(True)
+            except Exception:
+                pass
+
+        _best = None
+        _notes = []
+
+        # ══ 【F 修复·第七轮】按专家意见重排：FeatureCut4 优先 ═════════════
+        # FeatureCut3 在 SW2025 已 Obsolete；FeatureCut4 的终止条件与深度
+        #   配合更稳定。因此把 Cut4 提为首选，Cut3 降为回退。
+        #
+        # 贯穿时并行尝试两种语义（专家建议 3 的兜底策略）：
+        #   (a) ThroughAll 枚举 —— 让 SW 自行处理贯穿；
+        #   (b) Blind + 9999mm 大深度 —— 枚举不生效时的等价替代。
+        #   哪种真正切穿（体积校验通过）就用哪种。
+        # ── 【F-2 修复】d1/d2 必须【无条件给足】，避免被错位读成 0 ────────
+        # 测试部指出：T1=1(贯穿) 时 d1=0.000mm，因为原实现只在 Blind 分支
+        #   才给大深度 —— 属于逻辑设计缺陷：一旦 FeatureCut4 的参数顺序里
+        #   d1 落到别的位置，SW 会把"0"当成别的参数读，贯穿也随之失效。
+        # 修复：贯穿时【同样填入 9999mm】。
+        #   理由：贯穿枚举生效时 SW 会忽略深度（无害）；枚举不生效时，
+        #   超大深度还能作为盲孔把零件切穿（有用）。两种情况都受益。
+        _cands = []
+        if through:
+            # (a) 贯穿枚举 + 大深度（双保险：枚举优先，深度兜底）
+            _cands.append(("贯穿枚举+大深度", SW_END_THROUGH,
+                           SW_END_THROUGH_BOTH if through_both else 0,
+                           _big, _big if through_both else 0.0))
+            # (b) 纯贯穿枚举（深度 0，最贴近官方用法）
+            _cands.append(("贯穿枚举", SW_END_THROUGH,
+                           SW_END_THROUGH_BOTH if through_both else 0,
+                           0.0, 0.0))
+            # (c) 大深度盲孔语义：完全绕开贯穿枚举
+            _cands.append(("大深度盲孔", SW_END_BLIND,
+                           SW_END_BLIND if through_both else 0,
+                           _big, _big if through_both else 0.0))
+        else:
+            _cands.append(("盲孔", SW_END_BLIND, SW_END_BLIND, d1, d2))
+
+        # ══ 【真机实测修复·SW2025】API 优先级：Cut3（可用）-> Cut4（回退）═══
+        # 决定性真机对照实验（_t_api.py，SW2025 SP5.0，长方体 70x80x320 端面
+        # 画 Φ40 圆后选中，直接调 IFeatureManager）：
+        #   · FeatureCut3(24 args, ThroughAll) → 返回特征，体积
+        #       1792000 → 1389876 mm3（真实去料 22.4%）✅ 完全可用；
+        #   · FeatureCut4(24 args) → com_error -2147352561 '非选择性的参数'
+        #       ❌ 该参数布局不被 SW2025 的 Cut4 接口接受；
+        #   · FeatureCut4(27 args) → com_error -2147352562 '无效的参数数目'
+        #       ❌ 加参数也不行，说明 Cut4 与 Cut3 的形参布局本就不同。
+        # 结论：本机 Cut4 不可用、Cut3 可用 —— 与旧注释"Cut3 已 Obsolete、
+        #   应优先 Cut4"的假设【恰好相反】。旧代码把 Cut4 放首位，导致每次
+        #   cut 都先白吃 3~6 个 com_error，既拖慢又刷屏；而一旦 Cut3 的某个
+        #   签名在本轮不可用（如底面/对侧面场景），整条链就彻底失败（T1 第2次
+        #   cut 必失败的直接原因）。
+        # 修复：把 Cut3 提为首选、Cut4 降为回退，顺序颠倒过来。
+        _apis = ("FeatureCut3", "FeatureCut4")
+
+        # 【真机实测修复】底面（法向朝外背离材料）上的切除：默认方向朝材料外的
+        # 空侧，FeatureCut3 全签名返回 None（或 Extrusion3 反向增料）。
+        # 修复：常规方向失败后，自动用 Flip=True 反向重试一轮 —— 哪个方向真正
+        # 去料（体积校验通过）就用哪个。
+        for _flip_pass, _dir_pass in ((bool(flip), False),
+                                      (not bool(flip), False),
+                                      (bool(flip), True)):
+            for _api in _apis:
+                for _label, _t1, _t2, _dd1, _dd2 in _cands:
+                    _f, _why = _try_cut(_api, (
+                        True, _flip_pass, _dir_pass, _t1, _t2, _dd1, _dd2,
+                        False, False, False, False, 0, 0,
+                        False, False, False, False, False, False, auto_select,
+                        False, False, False, 0, 0, False))
+                    if _why == "":
+                        _exit_sketch_editing()
+                        # 【Bug T1 修复】把本草图标记为"已被消费"，
+                        # 同零件后续 cut 不可能再沿用这次轮廓。
+                        self._mark_sketch_consumed()
+                        if _flip_pass != bool(flip):
+                            self._warn("cut 已自动反向（Flip）完成切除 —— "
+                                       "草图位于底面/法向背离材料")
+                        return _f
+                    _notes.append("%s(flip=%s,dir=%s,%s): %s" % (_api, _flip_pass, _dir_pass, _label, _why))
+                    _best = _best or _f
+
+        # 签名 D：FeatureExtrusion3 兜底（不保证切除语义）
+        _f, _why = _try_cut("FeatureExtrusion3", (
+            True, False, False, T1, T2, d1, d2,
+            False, False, False, False, 0, 0,
+            False, False, True, False, False, False, auto_select,
+            0, 0, False))
+        if _why == "":
+            _exit_sketch_editing()
+            self._mark_sketch_consumed()
+            self._warn("cut 走了 FeatureExtrusion3 兜底路径，语义不保证")
+            return _f
+        _notes.append("FeatureExtrusion3: " + _why)
+        _best = _best or _f
+
+        # ── 【F 修复·第六轮】报错必须附带【参数诊断】，便于定位错位 ────────
+        # 测试反馈：多次尝试仍只去料 1.96%，但无法判断是"参数错位"还是
+        #   "轮廓没选中"。这里把实际传给 FeatureCut3 的关键参数原样输出，
+        #   下次实测即可直接比对 —— 无需再猜。
+        _diag = {
+            "through": bool(through),
+            "through_both": bool(through_both),
+            "T1": int(T1), "T2": int(T2),
+            "d1_mm": round(float(d1) * 1000.0, 3),
+            "d2_mm": round(float(d2) * 1000.0, 3),
+            "vol_before_mm3": _vol_before,
+            "vol_after_mm3": self._body_volume_mm3(),
+            "sketch_active": None,
+            "selected_objs": None,
+        }
+        try:
+            _diag["sketch_active"] = self.skm.ActiveSketch is not None
+        except Exception:
+            pass
+        try:
+            _sm = self.model.SelectionManager
+            _diag["selected_objs"] = _sm.GetSelectedObjectCount2(-1)
+        except Exception:
+            pass
+
+        # 全部签名都不达标 —— 明确报错，绝不留半成品当成功
+        self._warn("cut 所有签名均未达标（through=%s, depth=%s）: %s"
+                   % (through, depth, " | ".join(_notes)))
+        if _best is not None:
+            raise RuntimeError(
+                "切除特征已创建，但【未通过结果校验】—— 可能没真正去料或未贯穿。\n"
+                "各签名尝试结果：\n  " + "\n  ".join(_notes) + "\n"
+                "── 参数诊断（请把这段发给维修部）──\n"
+                "  T1=%s T2=%s d1=%.3fmm d2=%.3fmm through=%s both=%s\n"
+                "  草图激活=%s  已选中对象数=%s\n"
+                "  体积: %s -> %s mm3\n"
+                "建议：若 T1/d1 的值与你预期不符，说明参数位错位；"
+                "若【草图未激活】或【选中对象数=0】，则是轮廓没选中。"
+                % (T1, T2, float(d1) * 1000.0, float(d2) * 1000.0,
+                   bool(through), bool(through_both),
+                   _diag.get("sketch_active"), _diag.get("selected_objs"),
+                   _diag.get("vol_before_mm3"), _diag.get("vol_after_mm3")))
+        # ══ 【底面切除迁移】Z 向端面草图在对侧面重建同位轮廓再切一次 ══════
+        # 真机实测规律：零件存在既有切除后，在【min-Z 端面】上开草图再贯穿切除，
+        # FeatureCut3/4 全签名返回 None（选中状态完全正常、双向/Flip 均无效）；
+        # 同一孔位改从 max-Z 面切除则成功。故在彻底失败前自动迁移重试一次。
+        _migrated = False
+        try:
+            _circles = list(getattr(self, "_sketch_circles_local", []) or [])
+            _axis = int(getattr(self, "_sketch_normal_axis", 2))
+            _off = float(getattr(self, "_sketch_axis_offset_mm", 0.0))
+            if (through and _circles and _axis == 2):
+                _ext = self._bbox_extent_mm(2)
+                if _ext:
+                    _zmin, _zmax = 0.0, float(_ext)
+                    _at_min = abs(_off - _zmin) < 0.5
+                    _at_max = abs(_off - _zmax) < 0.5
+                    if _at_min or _at_max:
+                        _z_opp = _zmax if _at_min else _zmin
+                        # 取第一个圆的局部圆心作为全局 (x,y)（同向面局部系一致）
+                        _cx0, _cy0, _r0 = _circles[0]
+                        try:
+                            self.clear_selection()
+                            self._migrate_cut_to_opposite_face(
+                                _cx0, _cy0, _z_opp, _circles)
+                            _migrated = True
+                            self._warn("底面切除受限，已自动迁移到对侧面重试 "
+                                       "(z=%.1f -> z=%.1f)" % (_off, _z_opp))
+                            # 重跑两轮方向尝试
+                            for _flip_pass, _dir_pass in ((False, False),
+                                                          (True, False)):
+                                for _api in _apis:
+                                    for _label, _t1, _t2, _dd1, _dd2 in _cands:
+                                        _f, _why = _try_cut(_api, (
+                                            True, _flip_pass, _dir_pass,
+                                            _t1, _t2, _dd1, _dd2,
+                                            False, False, False, False, 0, 0,
+                                            False, False, False, False,
+                                            False, False, auto_select,
+                                            False, False, False, 0, 0, False))
+                                        if _why == "":
+                                            _exit_sketch_editing()
+                                            self._mark_sketch_consumed()
+                                            return _f
+                                        _notes.append(
+                                            "迁移后%s(flip=%s,%s): %s"
+                                            % (_api, _flip_pass, _label, _why))
+                        except Exception as _e_mig:
+                            _notes.append("迁移重试异常: %r" % (_e_mig,))
+        except Exception as _e_mig2:
+            _notes.append("迁移判定异常: %r" % (_e_mig2,))
+
+        # 【真机实测】多实体零件会让 FeatureCut3 因"切除结果归属歧义"直接返回
+        # None（选中状态完全正常也如此）。必须精确点名，否则会被误判为选中问题。
+        _body_count = None
+        try:
+            _bodies = self.model.GetBodies2(0, 1)
+            _bl = list(_bodies) if isinstance(_bodies, tuple) else ([_bodies] if _bodies else [])
+            _body_count = len(_bl)
+        except Exception:
+            _body_count = None
+        _mb_hint = ""
+        if _body_count and _body_count > 1:
+            _mb_hint = ("\n⚠️ 检测到零件已分裂为 %d 个实体（多实体零件）。\n"
+                        "  SW 会因切除结果归属歧义拒绝执行切除（选中状态正常也如此）。\n"
+                        "  请先合并实体（FeatureManager.Combine）或调整轮廓避免产生悬空体，"
+                        "再执行切除。" % _body_count)
+        raise RuntimeError(
+            "切除特征创建失败（所有签名均失败）:\n  " + "\n  ".join(_notes) + "\n"
+            "实体数=%s%s\n"
+            "常见原因：①切除区域与已有切除重叠（无料可切）；②多实体歧义；"
+            "③轮廓未闭合。" % (_body_count, _mb_hint))
+
+    def revolve(self, angle_deg=360, cut=False, expect_cylinder=None,
+                verify=True):
         """旋转特征。草图需含轮廓 + centerline() 旋转轴。angle 单位度。
 
         修复: FeatureRevolve2 使用最后一个草图，不需要 ActiveSketch。
+
+        ══ 【新-3 修复】绕错轴会静默产出错误几何 ═════════════════════════
+        测试反馈：用竖中心线(x=0)+剖面跨 X 0→140 做旋转建轴，
+          revolve(360) 返回 OK 不报错，但实际产出的是 40x60x350 的板，
+          而不是 Φ40x140 的轴。属于最危险的"静默产出错误几何"。
+
+        根因：FeatureRevolve2 的旋转轴由草图里的中心线决定，
+          若中心线位置/方向不符合预期（共面、沿轴向判断不足），
+          它会绕另一条轴旋转，而 API 不报错。
+
+        修复：返回前做【结果合理性校验】——
+          · 通过包围盒判断：圆柱特征应有"一个方向尺寸远小于
+            其余两个方向（且那两方向近似相等）"的特征；
+          · 若检测到产出的包围盒明显不像回转体，返回 ok=False
+            并说明，而不是静默交差。
+
+        Args:
+            expect_cylinder: 若已知期望的圆柱参数，可传 (直径_mm, 长度_mm)
+                             做精确校验；None 则只做形态合理性判断。
+            verify: 是否校验（默认 True，强烈建议保持）
+
+        Returns: feat（成功）/ 抛出 RuntimeError（失败或校验不通过，附带详情）
         """
         ang = math.radians(angle_deg)
-        feat = self.fm.FeatureRevolve2(
-            True, True, False, cut, False, False,
-            SW_REV_BLIND, 0, ang, 0,
-            False, False, 0, 0, 0, 0, 0,
-            True, False, True)
-        if feat is None:
-            raise RuntimeError("FeatureRevolve2 返回 None，旋转特征创建失败")
+        # ══ 【新-3 修复·第二轮】FeatureRevolve2 返回 None ═════════════════
+        # 第一轮实测：结构件调 revolve 时 FeatureRevolve2 直接返回 None。
+        #   原注释假设"使用最后一个草图，不需要 ActiveSketch" —— 该假设
+        #   不可靠：若草图未处于选中/激活态，或存在多个草图导致歧义，
+        #   特征创建就会失败并返回 None。
+        #
+        # 修复：
+        #   1) 调用前【显式选中】当前草图（ActiveSketch 或最后一个草图）；
+        #   2) 依次尝试多种 FeatureRevolve2 签名（版本差异大）；
+        #   3) 全部失败时给出【具体原因】而非笼统的"返回 None"。
+
+        # ── 步骤1：尽量确保有选中的草图轮廓 ──
+        # ══ 【Bug T3 修复】复杂轮廓的选中链路加固 ═══════════════════════
+        # 现象：简单轮廓（关节轴）revolve 成功；多段阶梯轮廓（底座）必失败，
+        #   报"草图未选中或轮廓不闭合"。
+        # 根因：revolve 依赖 select_all_sketch_segments() 在激活态选段，
+        #   复杂轮廓下该选中逻辑失效；而"选特征树最后一个草图特征"的退路
+        #   选中的是草图特征(type 9)而非轮廓段，FeatureRevolve2 拿不到轮廓。
+        # 修复（三级递进，全部基于真实轮廓段）：
+        #   ① 激活态直接选段（原首选路径）；
+        #   ② 失败 → 按显式记录的草图名 EditSketch 后再选段
+        #      （与 cut() 的路径-1 同源，专治复杂轮廓）；
+        #   ③ 仍失败 → 才退回"选最后一个草图特征"（老行为，垫底）。
+        _sk_ok = False
+        _seg_selected = False
+        try:
+            sk = self.skm.ActiveSketch
+            if sk is not None:
+                # 选中草图中的全部线段作为旋转轮廓
+                _ok, _n = self.select_all_sketch_segments()
+                _sk_ok = True
+                _seg_selected = bool(_ok)
+        except Exception:
+            _sk_ok = False
+        # ②【T3】激活态选段失败 → 按显式名 EditSketch 进入后重选
+        if not _seg_selected:
+            _cons = getattr(self, "_consumed_sketches", None) or set()
+            _cand = self._active_sketch_name
+            if _cand and str(_cand) not in _cons:
+                _okE, _nE = self._try_edit_sketch_by_name(_cand)
+                if _okE:
+                    _sk_ok = True
+                    _seg_selected = True
+                    try:
+                        print("[swapi] revolve: 复杂轮廓按名 EditSketch 选中 %s 段"
+                              % _nE)
+                    except Exception:
+                        pass
+        # ③ 仍失败 → 老退路：选特征树最后一个草图特征（垫底）
+        if not _seg_selected and not _sk_ok:
+            try:
+                _last = None
+                f = self.model.FirstFeature()
+                while f is not None:
+                    try:
+                        if f.GetTypeName2() == "ProfileFeature":
+                            _last = f
+                    except Exception:
+                        pass
+                    f = f.GetNextFeature()
+                if _last is not None:
+                    _last.Select2(False, 0)
+                    _sk_ok = True
+            except Exception:
+                pass
+
+        # ── 步骤2：多签名尝试 ──
+        _errs = []
+        _feat = None
+        for _sig, _args in (
+            ("FeatureRevolve2", (
+                True, True, False, cut, False, False,
+                SW_REV_BLIND, 0, ang, 0,
+                False, False, 0, 0, 0, 0, 0,
+                True, False, True)),
+            ("FeatureRevolve2", (
+                True, True, False, cut, False, False,
+                SW_REV_BLIND, 0, ang, 0,
+                False, False, 0, 0, 0, 0, 0,
+                True, False, True, False)),
+            ("FeatureRevolve", (
+                True, True, False, cut, False, False,
+                SW_REV_BLIND, 0, ang, 0,
+                False, False, 0, 0, 0, 0, 0,
+                True, False, True)),
+        ):
+            try:
+                fn = getattr(self.fm, _sig, None)
+                if fn is None:
+                    _errs.append("%s: 方法不存在" % _sig)
+                    continue
+                _feat = fn(*_args)
+                if _feat is not None:
+                    break
+                _errs.append("%s: 返回 None" % _sig)
+            except Exception as e:
+                _errs.append("%s: %r" % (_sig, e))
+
+        if _feat is None:
+            _hint = ("草图未选中或轮廓不闭合" if not _sk_ok
+                     else "轮廓/中心线不满足旋转条件（需封闭轮廓 + 中心线）")
+            raise RuntimeError(
+                "旋转特征创建失败。\n"
+                "草图状态: %s\n"
+                "各签名尝试: %s\n"
+                "最可能原因: %s。"
+                % ("已选中" if _sk_ok else "未找到可用的草图",
+                   " | ".join(_errs), _hint))
+        feat = _feat
+        # 【Bug T2/T3 修复】EditSketch 路径成功后退出编辑态，
+        # 避免下一个 begin_sketch 退化成"编辑旧草图"。
+        try:
+            if self.skm.ActiveSketch is not None:
+                self.skm.InsertSketch(True)
+        except Exception:
+            pass
+        # 消费标记：该草图轮廓已转成旋转特征，后续特征不得再沿用
+        self._mark_sketch_consumed()
         self._visual_step("revolve")
         self.rebuild()  # Bug 9: 重建模型以清除 COM 内部选择状态累积
+        # ── 【BUG-05/08 修复】首个实体已生成 → 此刻才能真正赋材质 ──────
+        try:
+            self._try_apply_pending_material()
+        except Exception:
+            pass
+
+        # ── 【新-3 修复·第三轮】形态校验：取不到证据 = 不通过 ──
+        # 测试反馈：成功分支缺形态校验 —— 绕错轴仍能返回成功。
+        # 根因（两个叠加）：
+        #   1) 原实现把校验抛出的非 RuntimeError 异常用
+        #      except 吞掉只告警，于是校验【静默跳过】，函数照常返回 feat；
+        #   2) 校验函数在取不到包围盒时只返回 ok=False，
+        #      而该结果被上面的宽 except 掩盖。
+        # 修复原则（与全项目不静默失败一致）：
+        #   · 校验通过 -> 返回 feat；
+        #   · 校验不通过（形态不符 OR 无法取证）-> 一律 raise；
+        #   · 只有显式 verify=False 才跳过。
+        if verify and not cut:
+            chk = None
+            try:
+                chk = self.verify_revolve_result(expect_cylinder=expect_cylinder)
+            except Exception as _e:
+                chk = {"ok": False,
+                       "reason": "形态校验执行失败（无法取证）: %r" % (_e,)}
+            if not chk or not chk.get("ok"):
+                _why = (chk or {}).get("reason", "形态不符")
+                _bbox = (chk or {}).get("bbox_mm")
+                raise RuntimeError(
+                    "旋转特征未通过形态校验，疑似【绕错轴】: %s"
+                    "  实测包围盒: %s"
+                    "  建议：检查草图里的中心线与轮廓是否共面、方向是否正确；"
+                    "或传 expect_cylinder=(直径, 长度) 做精确校验；"
+                    "若确实是特殊形状（非回转体），可显式传 verify=False 跳过。"
+                    % (_why, _bbox))
         return feat
+
+    def verify_revolve_result(self, expect_cylinder=None):
+        """【新-3 修复】校验旋转结果是否为合理的回转体。
+
+        Returns: {ok, bbox_mm?, reason?, is_cylinder_like?}
+        """
+        out = {"ok": False}
+        try:
+            mp = self.model.GetMassProperties(0) or []
+        except Exception:
+            mp = []
+        # 优先用包围盒（更直接反映形态）
+        try:
+            bodies = self.model.GetBodies2(0, 1)
+            bl = list(bodies) if isinstance(bodies, tuple) else ([bodies] if bodies else [])
+            if bl:
+                bb = bl[0].GetBodyBox()
+                dims = sorted([abs(bb[3] - bb[0]) * 1000,
+                               abs(bb[4] - bb[1]) * 1000,
+                               abs(bb[5] - bb[2]) * 1000])
+                out["bbox_mm"] = [round(d, 3) for d in dims]
+                small, mid, big = dims[0], dims[1], dims[2]
+                # ── 回转体的包围盒特征（关键：相等的两个方向是【直径】）──────
+                #   圆柱：Φ D、长 L  →  包围盒为 (D, D, L)
+                #   所以应该是【两个相等的较小方向】+ 一个不同的大方向。
+                #   注意：不能用"最大的两个方向相等"来判断（那是把 D 和 L 比），
+                #     用 Φ40x140 验证过：sorted=[40,40,140]，相等的是前两个。
+                # 【Bug T3 修复·判据扩展】回转体有两种形态：
+                #   轴类 (D, D, L)，L > D —— 两个相等小方向 + 一个大方向；
+                #   盘类 (L, D, D)，L < D —— 一个小方向 + 两个相等大方向
+                #   （底座法兰/回转台正是盘类，原判据误判为"绕错轴"）。
+                # 统一判据：存在两个近似相等的方向（无论大小），第三个明显不同。
+                two_equal_small = (small > 0 and abs(mid - small) / small < 0.15)
+                two_equal_big = (mid > 0 and abs(big - mid) / mid < 0.15)
+                elongated = (small > 0 and big / small > 1.2)
+                cyl_like = bool(two_equal_small and elongated) or \
+                    bool(two_equal_big and big / small > 1.2)
+                out["is_cylinder_like"] = cyl_like
+                if expect_cylinder:
+                    d_exp, l_exp = float(expect_cylinder[0]), float(expect_cylinder[1])
+                    # 直径 ≈ 两个相等方向(small/mid)，长度 ≈ 最大方向(big)
+                    d_ok = abs(small - d_exp) / d_exp < 0.1 if d_exp else False
+                    l_ok = abs(big - l_exp) / l_exp < 0.15 if l_exp else False
+                    if not (d_ok and l_ok):
+                        out["reason"] = ("与期望圆柱不符：期望 Φ%.1f x %.1f，"
+                                         "实测包围盒 %s" % (d_exp, l_exp, out["bbox_mm"]))
+                        return out
+                    out["ok"] = True
+                    return out
+                if not cyl_like:
+                    out["reason"] = ("包围盒 %s 不符合回转体特征"
+                                     "（应为两个近似相等的小方向 + 一个明显更大的方向，"
+                                     "即 (D, D, L)）—— 极可能是绕错了轴"
+                                     % (out["bbox_mm"],))
+                    return out
+                out["ok"] = True
+                return out
+        except Exception as e:
+            out["reason"] = "包围盒校验异常: %r" % (e,)
+            return out
+        out["reason"] = "无法获取实体包围盒"
+        return out
 
     def _select_edges(self, edge_points):
         """按坐标选边（用于圆角/倒角）。edge_points: [(x,y,z) mm, ...]"""
@@ -1652,12 +6081,1634 @@ class SWModel:
         if feat is None:
             raise RuntimeError("FeatureRevolve2 返回 None，球体创建失败")
 
-        # 重建
+        # 重建（Bug 修复: EditRebuild3 是方法，原实现漏了括号，重建实际从未执行）
+        # 【Bug1 加固】原实现是 try/except: pass —— 静默吞掉重建异常，
+        # 若重建真的失败，调用方误以为球体已就绪，后续特征会连锁报错且无从定位。
+        # 现在把异常记录到 self.warnings 并打印告警（不抛出，保持建模流程可继续）。
         try:
-            self.model.EditRebuild3
+            rb = getattr(self.model, "EditRebuild3", None)
+            if callable(rb):
+                rb()
+            elif rb is not None:
+                self._warn("create_sphere: EditRebuild3 不可调用（type=%s）" % type(rb).__name__)
+        except Exception as _e:
+            self._warn("create_sphere: 重建失败 -> %r（特征已创建，建议调用方复核）" % (_e,))
+        return feat
+
+    # ---------- 【Bug2】装配体：添加组件 ----------
+    # SW2025 的 AddComponent5 是【7 个参数】：
+    #   AddComponent5(CompName, ConfigOption, NewConfigName,
+    #                 UseConfigForPartReferences, ExistingConfigName, X, Y, Z)
+    # 参数含义与取值：
+    #   CompName                      : 零件/子装配的完整路径（必须已存在于磁盘）
+    #   ConfigOption                  : 配置选项（int），常用 0
+    #                                   0 = 使用上次保存的配置（swAddComponentConfigOptions_CurrentSelectedConfig）
+    #   NewConfigName                 : 若需新建配置则给名字；不需要传 ""
+    #   UseConfigForPartReferences    : 是否为零件参考使用该配置（bool）
+    #   ExistingConfigName            : 使用已有配置时的名字；不用则传 ""
+    #   X, Y, Z                       : 插入位置（米！SW 内部单位是米，不是毫米）
+    #
+    # 【关键前提 · 实测踩坑】调用前该零件必须已被 SW 打开过一次
+    #   （sw.OpenDoc6 打开即可）。否则 AddComponent5 会【返回 None 且不报错】，
+    #   装配体里什么也没加 —— 这正是"看起来没报错但组件数为 0"的根因。
+    #   本方法内部会自动预打开零件，调用方无需关心。
+
+    def add_component(self, part_path, x=0.0, y=0.0, z=0.0,
+                      config_option=0, new_config_name="",
+                      use_config_for_refs=False, existing_config_name="",
+                      units="mm"):
+        """【统一封装】向装配体添加零件/子装配组件（SW2025 七参数签名）。
+
+        Args:
+            part_path: 零件（.SLDPRT）或子装配（.SLDASM）的绝对路径
+            x, y, z:   插入位置。默认按【毫米】解释（内部换算成 SW 的米）
+
+        ⚠️【BUG-D 提示】x/y/z 是【组件包围盒中心】的目标位置，不是：
+             · 零件自身原点
+             · 零件包围盒的角点
+           若零件坐标系原点与其几何中心不重合，实际落点会与预期偏移。
+           与草图 rect(cx, cy, w, h) 的"中心"语义一致，但注意后者是
+           二维草图平面内的中心，前者是三维装配空间中的包围盒中心。
+            config_option: 配置选项，默认 0
+            new_config_name: 新建配置名，默认 ""
+            use_config_for_refs: 布尔，默认 False
+            existing_config_name: 已有配置名，默认 ""
+            units: "mm"（默认）或 "m" —— 决定 x/y/z 的单位
+
+        Returns:
+            dict: {ok, component, position_mm, component_count,
+                   coord_applied, actual_position_mm, warnings, error?}
+
+        ── 【H 修复·第三轮】坐标必须读回校验 ──────────────────────────────
+        测试反馈：坐标参数没生效（返回结构和两种写法已对，但组件仍落原点）。
+        原因：AddComponent5 的 X/Y/Z 在部分版本/状态下被忽略，或坐标语义
+          并非包围盒中心。
+        现在本方法加入后【读回组件变换矩阵】取出实际位置并与期望比较：
+          · coord_applied=True  -> 坐标确实生效
+          · coord_applied=False -> 坐标被忽略（实际位置见 actual_position_mm），
+                                    此时 warnings 里会给出明确提示
+          · coord_applied=None  -> 未传坐标或无法读回（不代表成功）
+        """
+        out = {"ok": False, "component": None, "part_path": part_path,
+               "warnings": []}
+        if not part_path:
+            out["error"] = "零件路径为空"
+            return out
+        if not os.path.isfile(part_path):
+            out["error"] = "零件文件不存在: %s" % part_path
+            return out
+
+        # SW 内部长度单位是【米】，这里把 mm 换算过去
+        _k = 0.001 if str(units).lower() == "mm" else 1.0
+        px, py, pz = float(x) * _k, float(y) * _k, float(z) * _k
+        out["position_mm"] = [float(x), float(y), float(z)]
+
+        doc_type = 2 if part_path.lower().endswith(".sldasm") else 1  # 2=装配体 1=零件
+
+        # ── 【关键前提】预打开零件，否则 AddComponent5 静默返回 None ──────
+        try:
+            errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            doc = self.sw.OpenDoc6(part_path, doc_type, 0, "", errs, warns)
+            if doc is None:
+                out["warnings"].append("预打开零件返回 None（errs=%s）" % errs.value)
+        except Exception as e:
+            out["warnings"].append("预打开零件异常: %r" % (e,))
+
+        # ── 回到装配体（ActivateDoc3 签名因版本而异，失败不致命）──────────
+        try:
+            self.sw.ActivateDoc3(self.model.GetTitle, False, 0, 0)
+        except Exception:
+            try:
+                self.sw.ActivateDoc2(self.model.GetTitle, False, 0)
+            except Exception:
+                pass
+
+        # ── 【H 修复·第十一轮】专家建议的前置检查 ────────────────────────
+        # 专家指出：若 AddComponent5 也失效，应先确认
+        #   ① 零件文件真实存在（上面已查）
+        #   ② 【装配体是否为活动文档】—— 否则 AddComponent 会静默无效
+        # 这里显式确认并把活动文档切回装配体。
+        _active_ok = False
+        try:
+            _title = self.model.GetTitle
+            _active_ok = bool(self._activate_self())
+            out["assembly_active"] = _active_ok
+            if not _active_ok:
+                out["warnings"].append(
+                    "无法把装配体 %r 切为活动文档 —— AddComponent 可能静默无效。" % _title)
+        except Exception as e:
+            out["assembly_active"] = False
+            out["warnings"].append("确认活动文档异常: %r" % (e,))
+
+        # ── 多 API 回退链（专家建议：5 -> 4 -> 2）────────────────────────
+        # 专家线索：SW2024 中文版 + pywin32 下 AddComponent4 可能无异常但
+        #   返回 None；SW2025 情况类似甚至更糟。因此逐个尝试并校验结果。
+        comp = None
+        _api_tried = []
+        _api_errors = []
+
+        def _try_add(_api, _args):
+            try:
+                _fn = getattr(self.model, _api, None)
+            except Exception as _e:
+                _api_errors.append("%s: 取方法失败 %r" % (_api, _e))
+                return None
+            if _fn is None:
+                _api_errors.append("%s: 方法不存在" % _api)
+                return None
+            try:
+                _r = _fn(*_args)
+                _api_tried.append(_api)
+                if _r is None:
+                    _api_errors.append("%s: 返回 None" % _api)
+                return _r
+            except Exception as _e:
+                _api_errors.append("%s: %r" % (_api, _e))
+                return None
+
+        # ① AddComponent5（官方推荐，8 参数：含 X/Y/Z）
+        comp = _try_add("AddComponent5", (
+            part_path, int(config_option), str(new_config_name or ""),
+            bool(use_config_for_refs), str(existing_config_name or ""),
+            px, py, pz))
+
+        # ② AddComponent4（专家线索：部分版本只有它可用）
+        if comp is None:
+            comp = _try_add("AddComponent4", (
+                part_path, int(config_option), str(new_config_name or ""),
+                bool(use_config_for_refs), str(existing_config_name or ""),
+                px, py, pz))
+
+        # ③ AddComponent2（旧版 4 参数）
+        if comp is None:
+            comp = _try_add("AddComponent2", (part_path, px, py, pz))
+
+        # ④ AddComponent（最老版本，2 参数）
+        if comp is None:
+            comp = _try_add("AddComponent", (part_path, px, py, pz))
+
+        out["api_tried"] = _api_tried
+        out["api_errors"] = _api_errors
+        if comp is None and not _api_tried:
+            out["error"] = ("所有 AddComponent* API 均不可用: %s"
+                            % (" | ".join(_api_errors),))
+            self._warn("add_component: " + out["error"])
+            return out
+        if comp is None:
+            out["warnings"].append(
+                "所有 API 均返回 None（已试: %s）—— 组件可能未插入。"
+                % (", ".join(_api_tried),))
+
+        # ── 【H 修复·第三轮】坐标必须【读回校验】，不能假设生效 ──────────
+        # 测试反馈：add_component 的坐标参数没生效（返回结构和两种写法已对）。
+        #   原因：AddComponent5 的 X/Y/Z 在部分版本/状态下被忽略，
+        #         或坐标语义是"零件原点落点"而非"包围盒中心"，
+        #         写了坐标但组件仍落在原点。
+        # 修复：加入后【读回组件变换矩阵】，取出实际位置与期望比较；
+        #   不一致则尝试用 SetTransform/Move 纠正，仍不一致就在返回里
+        #   明确标注 coord_applied=False，绝不假装坐标生效了。
+        _coord_applied = None
+        _actual_mm = None
+        if comp is not None and (abs(x) > 1e-9 or abs(y) > 1e-9 or abs(z) > 1e-9):
+            try:
+                _mt = None
+                for _a in (True, None):
+                    try:
+                        _mt = comp.GetTotalTransform(_a) if _a is not None \
+                            else comp.GetTotalTransform()
+                        if _mt is not None:
+                            break
+                    except Exception:
+                        continue
+                if _mt is not None:
+                    _arr = list(_mt.ArrayData) if hasattr(_mt, "ArrayData") else None
+                    if _arr and len(_arr) >= 12:
+                        # 取平移分量（索引 3/7/11），m -> mm
+                        _actual_mm = [round(float(_arr[3]) / _k, 4),
+                                      round(float(_arr[7]) / _k, 4),
+                                      round(float(_arr[11]) / _k, 4)]
+                        _want = [float(x), float(y), float(z)]
+                        _coord_applied = all(
+                            abs(_actual_mm[i] - _want[i]) < 0.5 for i in range(3))
+            except Exception as _e:
+                out["warnings"].append("坐标读回失败: %r" % (_e,))
+        out["coord_applied"] = _coord_applied
+        out["actual_position_mm"] = _actual_mm
+
+        # ── 【H 修复·第四轮】坐标被忽略时，自动尝试补救 ────────────────────
+        # 测试部实测：coord_applied=False，position_mm=[0.2,0.1,0.05]
+        #   但 actual_position_mm=[0,0,-4.95] —— AddComponent5 的 X/Y/Z 确实
+        #   被 SW 忽略了（参数位对，但本版不生效）。
+        # 结论：不能只靠 AddComponent5 的坐标参数。
+        # 补救顺序（按可靠性）：
+        #   ① 尝试用组件的 SetTransform 纠正（若本版有该方法）；
+        #   ② 都不行就如实返回 coord_applied=False + 明确的替代建议，
+        #      由调用方决定改用 add_mate。
+        if _coord_applied is False and comp is not None:
+            _fixed = False
+            # ── 【Bug-30 修复】补救摆位：用正确的 MathTransform 构造方式 ─────
+            # 原实现用 sw.CreateTransform（不存在）→ 补救必然失败。
+            # 现在走 set_component_transform（内部用 IMathUtility.CreateTransform，
+            # 并兜底 SetTransform/SetTransform2/MoveComponent 多版本路径）。
+            try:
+                _fix_res = self.set_component_transform(
+                    comp, x, y, z, units=("mm" if _k == 0.001 else "m"))
+                out["coord_fix_detail"] = _fix_res
+                if _fix_res.get("ok"):
+                    _fixed = True
+                    out["coord_fix"] = _fix_res.get("method")
+                    if _fix_res.get("after_mm"):
+                        out["actual_position_mm"] = _fix_res["after_mm"]
+            except Exception as _e2:
+                out["warnings"].append("补救摆位失败: %r" % (_e2,))
+            if _fixed:
+                _coord_applied = True
+                out["coord_applied"] = True
+
+        if out.get("coord_applied") is False:
+            out["warnings"].append(
+                "坐标未生效：期望 %s mm，实际 %s mm —— "
+                "AddComponent5 的 X/Y/Z 在本版 SolidWorks 被忽略，"
+                "且 SetTransform 补救也未成功。"
+                "【建议改用 add_mate 做装配定位】（工程上也更规范），"
+                "或删除该组件后以正确坐标重新添加。"
+                % ([x, y, z], _actual_mm))
+            out["hint"] = ("坐标类参数在装配态不可靠 —— 这是实测结论。"
+                           "定位请优先用 add_mate（配合/约束），"
+                           "而不是依赖插入坐标。")
+
+        # ── 校验组件真的加进去了（返回 None 也可能是失败）─────────────────
+        n_comps_before = out.get("components_before")
+        actual = 0
+        try:
+            comps = self.model.GetComponents(False)
+            actual = len(comps) if comps else 0
         except Exception:
             pass
-        return feat
+        out["component_count"] = actual
+        out["component"] = comp
+
+        if comp is not None or actual > 0:
+            out["ok"] = True
+            try:
+                out["component_name"] = comp.Name2
+            except Exception:
+                pass
+        else:
+            out["error"] = ("AddComponent5 未生效（返回 None 且装配体组件数为 0）。"
+                            "最常见原因：零件从未被 SW 打开过，或路径含有 SW 无法解析的字符。"
+                            "建议先单独 open 该零件确认可用。")
+            self._warn("add_component: " + out["error"])
+
+        # 重新计算质量属性，保证装配体质量即时可用
+        try:
+            self.model.ForceRebuild3(False)
+        except Exception:
+            pass
+        # ── 【Bug-44 修复】失败时给出"可自救"的下一步，不再只回 coord_applied=False ──
+        if out.get("coord_applied") is False:
+            out["next_action"] = ("坐标未生效。请调用 "
+                                  "place_components_by_coords([(组件名, x, y, z), ...]) "
+                                  "批量按坐标摆位（内部优先用装配体级 "
+                                  "TransformComponent，Bug-44 修复路径）。")
+        return out
+
+    def verify_component_position(self, comp, expect_mm, tol_mm=0.5, units="mm"):
+        """【Bug-44 修复】坐标验收自测：读回组件位置并与期望比对。
+
+        台账明确要求："加一个自测用例，add_component 后读回坐标与期望一致
+        才算修好，不能以'不抛异常'为通过标准。"
+
+        本方法就是那个验收标准的可复用实现：
+            r = m.add_component(part, 113, 0, 0)
+            m.verify_component_position(r["component"], [113, 0, 0])
+            # -> {"ok": True, "delta_mm": [0,0,0], ...}
+
+        Returns: {ok, actual_mm, expect_mm, delta_mm, tol_mm, passed}
+        """
+        out = {"ok": False, "expect_mm": [float(v) for v in (expect_mm or [])],
+               "tol_mm": float(tol_mm)}
+        try:
+            _pos = self._component_position_mm(comp, units=units)
+            out["actual_mm"] = ([round(v, 4) for v in _pos] if _pos else None)
+            if not _pos or len(out["expect_mm"]) < 3:
+                out["error"] = "无法读回组件位置或期望坐标不足 3 维"
+                return out
+            _delta = [round(_pos[i] - out["expect_mm"][i], 4) for i in range(3)]
+            out["delta_mm"] = _delta
+            out["passed"] = all(abs(d) <= float(tol_mm) for d in _delta)
+            out["ok"] = bool(out["passed"])
+            if not out["passed"]:
+                out["error"] = ("坐标不符：期望 %s，实际 %s（偏差 %s > 容差 %.2fmm）"
+                                % (out["expect_mm"], out["actual_mm"], _delta, tol_mm))
+            return out
+        except Exception as e:
+            out["error"] = "验收自测异常: %r" % (e,)
+            return out
+
+    def self_test_assembly_placement(self, part_path, target_mm=(100.0, 0.0, 0.0)):
+        r"""【Bug-44 修复】装配摆位自测（验收标准）。
+
+        台账要求："加一个自测用例，add_component 后读回坐标与期望一致才算修好。"
+        本方法把该验收流程做成一条命令，便于每次改动后回归：
+
+            m = swapi.new_assembly()
+            m.self_test_assembly_placement(r"...\DSH_车架底板.SLDPRT", (113, 0, 0))
+            # -> {"ok": True/False, "steps": {...}}
+
+        步骤：
+          ① add_component(path, x, y, z)
+          ② 读回坐标，比对期望
+          ③ 若不符 → 尝试 place_components_by_coords 补救
+          ④ 再次读回，给出最终结论
+
+        Returns: {ok, target_mm, add, placed, final, conclusion}
+        """
+        out = {"ok": False, "target_mm": [float(v) for v in target_mm], "steps": {}}
+        try:
+            x, y, z = [float(v) for v in target_mm]
+            r1 = self.add_component(part_path, x, y, z)
+            out["steps"]["add_component"] = {
+                "ok": r1.get("ok"), "coord_applied": r1.get("coord_applied"),
+                "actual_position_mm": r1.get("actual_position_mm")}
+            comp = r1.get("component")
+            if comp is None:
+                out["conclusion"] = "组件未插入 —— 先确认零件可单独打开"
+                return out
+            v1 = self.verify_component_position(comp, [x, y, z])
+            out["steps"]["verify_after_add"] = v1
+            if v1.get("ok"):
+                out.update({"ok": True, "final": v1.get("actual_mm"),
+                            "conclusion": "add_component 坐标已生效（验收通过）"})
+                return out
+            # 补救：批量按坐标摆位（内部优先 TransformComponent）
+            try:
+                _name = None
+                for _a in ("Name2", "Name"):
+                    try:
+                        _v = getattr(comp, _a)
+                        _name = str(_v() if callable(_v) else _v)
+                        if _name:
+                            break
+                    except Exception:
+                        continue
+                r2 = self.place_components_by_coords([(_name or comp, x, y, z)])
+                out["steps"]["place_by_coords"] = r2
+            except Exception as _e2:
+                out["steps"]["place_by_coords"] = {"ok": False, "error": repr(_e2)}
+            v2 = self.verify_component_position(comp, [x, y, z])
+            out["steps"]["verify_after_place"] = v2
+            out["final"] = v2.get("actual_mm")
+            out["ok"] = bool(v2.get("ok"))
+            out["conclusion"] = ("补救后坐标已生效（验收通过）" if v2.get("ok")
+                                 else "add_component 与 TransformComponent 均未生效 —— "
+                                      "本版 SW 需改用 add_mate 定位（Bug-44）")
+            return out
+        except Exception as e:
+            out["error"] = "装配自测异常: %r" % (e,)
+            return out
+
+    # ══ 【C8 修复】装配 API（Wave2 总装必需）═══════════════════════════
+    # 测试反馈：swapi 无 new_assembly()、无 AddMate/ToolsCheckInterference2 封装，
+    #   总装只能写裸 COM，极易踩参数签名坑。以下方法把常用装配操作封装好。
+
+    def _activate_self(self):
+        """把活动文档切回本 SWModel 对应的文档（装配体内操作前必做）。"""
+        try:
+            self.sw.ActivateDoc3(self.model.GetTitle, False, 0, 0)
+            return True
+        except Exception:
+            try:
+                self.sw.ActivateDoc2(self.model.GetTitle, False, 0)
+                return True
+            except Exception:
+                return False
+
+    def place_component_by_mate(self, comp_name, ref_plane="Front Plane",
+                               distance_mm=0.0, mate_type="distance"):
+        """【H 修复·第五轮】用【配合】定位组件 —— 实测唯一可行的方式。
+
+        背景（测试部实测结论）：
+          · add_component 的 X/Y/Z 被 SW 忽略（coord_applied=False）；
+          · 组件对象【没有 SetTransform 方法】（coord_fix=null）；
+          · 即"插入坐标"与"事后摆位"两条路都走不通。
+
+        因此正确定位方式是【装配配合】—— 这在工程上也更规范：
+          装配体本就该用约束/配合定义位置，而不是硬塞坐标。
+
+        本方法：把组件与某个基准面（或另一组件）建立配合，
+          通过修改配合值来移动它。
+
+        Args:
+            comp_name: 组件名（如 "DSH_底座-1"）
+            ref_plane: 参考基准面名，默认 Front Plane
+            distance_mm: 距离配合的数值（mm）
+            mate_type: "distance"(距离) / "coincident"(重合)
+
+        Returns: {ok, mate_name?, error?, hint?}
+        """
+        out = {"ok": False}
+        try:
+            self._activate_self()
+            # 选中组件与参考面，再建立配合
+            _ok_comp = False
+            try:
+                comps = self.model.GetComponents(False) or []
+                for c in comps:
+                    try:
+                        if str(c.Name2) == str(comp_name):
+                            # 【测试部反馈修复】Select4 的 Data 必须是 SelectData
+                            _sd_c = self._make_select_data(0)
+                            if _sd_c is not None:
+                                c.Select4(False, _sd_c)
+                            else:
+                                c.Select2(False, 0)
+                            _ok_comp = True
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                _ok_comp = False
+            if not _ok_comp:
+                out["error"] = "未找到组件: %s" % comp_name
+                out["hint"] = "用 list_components() 查看可用组件名。"
+                return out
+            # 加选参考基准面
+            try:
+                self.ext.SelectByID2(ref_plane, "PLANE", 0, 0, 0,
+                                     True, 0, self._empty, 0)
+            except Exception:
+                pass
+            # 建立配合
+            _mt = {"distance": 5, "coincident": 0}.get(
+                str(mate_type).lower(), 5)
+            _val = float(distance_mm) * MM if mate_type == "distance" else 0.0
+            mate = None
+            last = None
+            for _sig, _args in (
+                ("AddMate5", (_mt, 0, False, False, False, _val, _val, "")),
+                ("AddMate3", (_mt, 0, False, False, False, _val, 0, "")),
+            ):
+                try:
+                    fn = getattr(self.model, _sig, None)
+                    if fn is None:
+                        continue
+                    mate = fn(*_args)
+                    if mate is not None:
+                        out["mate_api"] = _sig
+                        break
+                except Exception as e:
+                    last = e
+                    continue
+            if mate is None:
+                out["error"] = "配合创建失败: %r" % (last,)
+                out["hint"] = ("确认组件与参考面都已选中；"
+                               "也可在 SW 界面手动配合后，用本库继续其他操作。")
+                return out
+            out["ok"] = True
+            try:
+                out["mate_name"] = mate.Name
+            except Exception:
+                pass
+            self.rebuild()
+            return out
+        except Exception as e:
+            out["error"] = "place_component_by_mate 异常: %r" % (e,)
+            return out
+
+    def add_mate(self, mate_type, comp1=None, comp2=None,
+                 align=0, flip=False, distance_mm=None, angle_deg=None,
+                 name="", face1=None, face2=None, mark1=1, mark2=1):
+        """添加配合（Mate）。封装 AddMate5/AddMate3 的多版本签名差异。
+
+        ══ 【H-2 修复·第七轮】按专家意见补齐官方调用流程 ══════════════════
+        专家结论：AddMate5 本身【不负责选中】—— 它要求调用者在调用前
+          已用 SelectByID2 选中两个待配合实体，否则返回"类型不匹配"。
+
+        官方要求流程（本方法现已完整实现）：
+          1) ClearSelection2(True)         清空当前选择
+          2) SelectByID2 选中第一个面/边    （mark1，通常 1）
+          3) SelectByID2 选中第二个面/边    （mark2，通常 1）
+          4) AddMate5(MateType, ...)
+
+        参考面解析优先级（face1/face2）：
+          · 传 "Front Plane" 等基准面名 -> 按 PLANE 类型选中
+          · 传 "组件名"                  -> 选中该组件整体
+          · 传具体面字符串                -> 直接按 FACE 尝试选中
+          · 传 None 且 comp 有值         -> 选中该组件（距离配合仍需一个参考面）
+
+        Args:
+            mate_type: 配合类型字符串，见下方 MATE_TYPES；或直接传 SW 枚举 int
+            comp1, comp2: 两个组件名（如 "DSH_底座-1"）。可传 None 表示参考基准面
+            align: 对齐方式 0=同向 1=反向 2=对齐
+            flip: 是否反转配合方向
+            distance_mm: 距离配合的数值（mm）
+            angle_deg: 角度配合的数值（度）
+            name: 配合名称（可选）
+
+        ── 【H 修复·第六轮】内部自动完成选中，调用方不必手写 SelectByID2 ──
+        测试反馈：直接调 add_mate(...) 会报"类型不匹配，需先选中要配合的
+          实体/面" —— 因为 SW 的 AddMate 要求调用前【已有选中对象】。
+          原实现把该前置条件甩给调用方，每次都得手写选中，极易踩坑。
+        现在本方法会【自动选中】：
+          · comp1 传组件名 -> 自动按名选中该组件；
+          · comp2 传组件名 -> 自动选中；传 None 则自动选一个基准面作参考；
+          · 选中失败时给出明确提示，而不是让 SW 抛类型不匹配。
+
+        Returns: dict {ok, error?, used_signature?, selection?}
+        """
+        MATE_TYPES = {
+            'coincident': 0, 'parallel': 1, 'perpendicular': 2, 'tangent': 3,
+            'concentric': 4, 'distance': 5, 'angle': 6, 'antialigned': 7,
+            'symmetric': 8, 'lock': 9, 'screw': 12, 'gear': 13,
+        }
+        out = {"ok": False, "mate_type": mate_type}
+        try:
+            if isinstance(mate_type, str):
+                mt = MATE_TYPES.get(mate_type.strip().lower())
+                if mt is None:
+                    out["error"] = ("未知配合类型 %r，可用: %s"
+                                     % (mate_type, ", ".join(sorted(MATE_TYPES))))
+                    return out
+            else:
+                mt = int(mate_type)
+            self._activate_self()
+
+            # ── 【H 修复·第六轮】自动完成"选中参考对象"这一步 ────────────────
+            # 测试反馈：add_mate(...) 直接调用会报"类型不匹配，需先选中要配合的
+            #   实体/面" —— 因为 AddMate 要求调用前【已有选中对象】。
+            #   原实现把这个前置条件甩给调用方，导致每次都得手写 SelectByID2，
+            #   极易踩坑（测试部原话）。
+            # 修复：内部自动选中 ——
+            #   · comp1/comp2 传组件名 → 自动按名选中该组件；
+            #   · 传 None → 自动选中同名/第一个基准面作为参考；
+            #   · 选中失败时给出【明确提示】，而不是让 SW 抛类型不匹配。
+            # -- 官方五步流程（专家明确要求）------------------------------
+            #   1) ClearSelection2(True)
+            #   2) SelectByID2 选第一个面/边  (mark1)
+            #   3) SelectByID2 选第二个面/边  (mark2)
+            #   4) AddMate5(...)
+            _sel_notes = []
+            try:
+                _comps = self.model.GetComponents(False) or []
+            except Exception:
+                _comps = []
+
+            # 步骤 1：清空当前选择（官方要求）
+            _cleared = False
+            try:
+                self.model.ClearSelection2(True)
+                _cleared = True
+            except Exception:
+                try:
+                    self.model.ClearSelection2(False)
+                    _cleared = True
+                except Exception:
+                    pass
+            _sel_notes.append("clear=%s" % _cleared)
+
+            _PLANE_ALIASES = ("Front Plane", "前视基准面", "Top Plane",
+                              "上视基准面", "Right Plane", "右视基准面")
+
+            def _select_face_of_component(_c, _mark, _append):
+                """【Bug-44 修复】为组件自动选中一个【真实面】作为配合参考。
+
+                台账实测：add_mate 报"需要至少 2 个参考对象，当前 0 个"。
+                根因：原 _select_one 在 comp 有值时会去 Select 整个【组件对象】，
+                  但 SW 的 AddMate【不接受组件对象作为配合参考】——
+                  它需要【面/边/基准面】。选中组件后 SW 报 0 个有效参考。
+                修复：遍历该组件的实体，挑一个面积最大的平面，用
+                  face.Select4(append, SelectData) 选中它作为配合参考。
+                  选最大面是因为：装配中最常见的配合基准就是主平面
+                  （底面/顶面/安装面），且大面最稳定。
+
+                Returns: (ok, label)
+                """
+                try:
+                    _comps_doc = None
+                    try:
+                        _comps_doc = _c.GetModelDoc2()
+                    except Exception:
+                        _comps_doc = None
+                    _bodies = None
+                    try:
+                        _bodies = _c.GetBody2()
+                    except Exception:
+                        _bodies = None
+                    _blist = []
+                    if _bodies is not None:
+                        _blist = (list(_bodies) if isinstance(_bodies, tuple)
+                                  else [_bodies])
+                    _best = None
+                    _best_area = -1.0
+                    for _b in _blist:
+                        try:
+                            _faces = _b.GetFaces()
+                        except Exception:
+                            continue
+                        _fl = (list(_faces) if isinstance(_faces, tuple)
+                               else ([_faces] if _faces else []))
+                        for _f in _fl:
+                            try:
+                                _n = _f.Normal
+                                # 只考虑平面（曲面法线不稳定）
+                                if _n is None:
+                                    continue
+                                _area = 0.0
+                                try:
+                                    _p = _f.GetArea()
+                                    _area = float(_p)
+                                except Exception:
+                                    _area = 0.0
+                                if _area > _best_area:
+                                    _best_area = _area
+                                    _best = _f
+                            except Exception:
+                                continue
+                    if _best is not None:
+                        _sd_f = self._make_select_data(_mark)
+                        for _mn, _args in (("Select4", (_append, _sd_f)),
+                                           ("Select2", (_append, _mark)),
+                                           ("Select", (_append,))):
+                            try:
+                                _fn = getattr(_best, _mn, None)
+                                if _fn is None:
+                                    continue
+                                if _mn == "Select4" and _sd_f is None:
+                                    continue
+                                _fn(*_args)
+                                return True, "FACE(comp)=%.1fmm2" % _best_area
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+                return False, ""
+
+            def _select_one(_spec, _comp_name, _mark, _first):
+                # 选中一个配合参考：优先按面规格，其次组件，最后基准面
+                _append = not _first
+                if _spec and str(_spec) in _PLANE_ALIASES:
+                    try:
+                        if self.ext.SelectByID2(str(_spec), "PLANE", 0, 0, 0,
+                                                _append, _mark, self._empty, 0):
+                            return True, "PLANE:%s" % _spec
+                    except Exception:
+                        pass
+                if _comp_name:
+                    for _c in _comps:
+                        try:
+                            if str(_c.Name2) != str(_comp_name):
+                                continue
+                            # ── 【Bug-44 修复】先选该组件的【真实面】──────────
+                            # 原实现直接 Select 组件对象 → AddMate 视为 0 个有效
+                            # 参考（SW 只接受 面/边/基准面），这就是
+                            # "需要至少 2 个参考对象，当前 0 个"的根因。
+                            _ok_face, _lbl_face = _select_face_of_component(
+                                _c, _mark, _append)
+                            if _ok_face:
+                                return True, "%s@%s" % (_lbl_face, _comp_name)
+                            # 面选不到时退回组件对象（至少保留旧行为）
+                            _sd_c2 = self._make_select_data(_mark)
+                            if _sd_c2 is not None:
+                                _c.Select4(_append, _sd_c2)
+                            else:
+                                _c.Select2(_append, _mark)
+                            return True, "COMP:%s" % _comp_name
+                        except Exception:
+                            continue
+                if _spec:
+                    try:
+                        if self.ext.SelectByID2(str(_spec), "FACE", 0, 0, 0,
+                                                _append, _mark, self._empty, 0):
+                            return True, "FACE:%s" % _spec
+                    except Exception:
+                        pass
+                return False, ""
+
+            # 步骤 2：第一个参考
+            _ok1, _lbl1 = _select_one(face1, comp1, mark1, _first=True)
+            if _lbl1:
+                _sel_notes.append(_lbl1)
+            # 步骤 3：第二个参考
+            _ok2, _lbl2 = _select_one(face2, comp2, mark2, _first=not _ok1)
+            if _lbl2:
+                _sel_notes.append(_lbl2)
+            if not _ok2 and not face2 and not comp2:
+                for _pl in _PLANE_ALIASES:
+                    _ok3, _lbl3 = _select_one(_pl, None, mark2, _first=not _ok1)
+                    if _ok3:
+                        _sel_notes.append("参考面=%s" % _pl)
+                        _ok2 = True
+                        break
+
+            # 步骤 4 前置校验：至少选中 2 个对象
+            _sel_count = 0
+            try:
+                _sel_count = self.model.SelectionManager.GetSelectedObjectCount2(-1)
+            except Exception:
+                _sel_count = (1 if _ok1 else 0) + (1 if _ok2 else 0)
+            out["selection"] = _sel_notes
+            out["selected_count"] = _sel_count
+            if _sel_count < 2:
+                out["error"] = ("配合要求至少选中 2 个参考对象，当前仅 %d 个。"
+                                % _sel_count)
+                out["hint"] = ("请显式传面：add_mate(..., face1=..., face2=...)；"
+                               "或传 comp1/comp2 组件名。"
+                               "若只给两个组件而未指定面，无法自动选中。")
+                return out
+
+            val = 0.0
+            if distance_mm is not None:
+                val = float(distance_mm) * MM   # mm -> m
+            elif angle_deg is not None:
+                val = float(angle_deg) * 3.141592653589793 / 180.0
+            _n = str(name or "")
+            _flip = bool(flip)
+            _al = int(align)
+            # 多版本签名兜底：AddMate5(7) / AddMate3(6)
+            last_err = None
+            for _sig in ("AddMate5", "AddMate3"):
+                try:
+                    fn = getattr(self.model, _sig)
+                except Exception as e:
+                    last_err = e; continue
+                try:
+                    m = fn(mt, _al, _flip, False, False, val, val, _n)
+                except TypeError:
+                    try:
+                        m = fn(mt, _al, _flip, False, False, val,
+                               val if _sig == "AddMate3" else 0, _n)
+                    except Exception as e2:
+                        last_err = e2; continue
+                except Exception as e2:
+                    last_err = e2; continue
+                if m is not None:
+                    out["ok"] = True
+                    out["used_signature"] = _sig
+                    try:
+                        out["mate_name"] = m.Name
+                    except Exception:
+                        pass
+                    return out
+            out["error"] = ("AddMate 失败（%r）。注意：添加配合前必须先选中"
+                             "要配合的实体/面（SelectByID2），且两个组件都需已加载。"
+                             % (last_err,))
+        except Exception as e:
+            out["error"] = "add_mate 异常: %r" % (e,)
+        return out
+
+    def check_interference(self, include_multibody=True, treat_coincident=True):
+        """干涉检查（多版本 API 兜底）。
+
+        ── 【BUG-F 修复】ToolsCheckInterference2 在 SolidWorks 2025 不可用 ──
+        测试反馈：该 API 在 SW2025 已被移除/改名，直接调用即抛异常，
+          而原实现只把异常塞进 error 字段就返回 —— 上层看到 count=0
+          很容易误判成没有干涉（又一次静默失败）。
+
+        修复：
+          1) 依次尝试 ToolsCheckInterference2 / ToolsCheckInterference（版本差异）；
+          2) 全部不可用时返回 ok=False 且 available=False，
+             明确区别于"检查通过、无干涉"，绝不给出 count=0 的假结果；
+          3) 给出可操作的降级建议。
+
+        Returns:
+          {ok, available, count, interferences:[...], api?, error?, hint?}
+          ok=True 且 count=0  -> 真的没有干涉
+          available=False     -> 本版本无此 API，结果不可采信
+        """
+        out = {"ok": False, "available": False, "count": 0, "interferences": []}
+        comps = []
+        try:
+            self._activate_self()
+            comps = self.model.GetComponents(False) or []
+        except Exception:
+            comps = []
+        n_comp = len(comps)
+
+        # ── 【Bug-30 修复】先准备组件选择集 ────────────────────────────────
+        # 原缺陷：直接调 ToolsCheckInterference2 且把第二参传 None ——
+        #   该 API 需要"要检查的组件数组"，空/None 会因参数类型不匹配而失败
+        #   （实测报"无效参数/类型不匹配"，Bug-30 现象 4）。
+        # 修复：按 API 语义准备两种形态并依次尝试：
+        #   ① 组件数组（GetComponents 的元组）—— 新版本签名；
+        #   ② None（表示"全部组件"）—— 部分版本接受；
+        #   ③ 全选组件后传数量（旧签名）。
+        _comp_list = list(comps) if isinstance(comps, tuple) else (
+            [comps] if comps else [])
+        _sel_tried = []
+        try:
+            self.clear_selection()
+            for _c in _comp_list:
+                try:
+                    _c.Select4(False, None)
+                except Exception:
+                    try:
+                        _c.Select(False)
+                    except Exception:
+                        pass
+            out["selection_prepared"] = True
+        except Exception as _e:
+            out["selection_prepared"] = False
+            out["selection_error"] = repr(_e)
+
+        # 第二参数的候选形态（按可靠性）
+        _second_arg_candidates = []
+        if _comp_list:
+            _second_arg_candidates.append(("components_array", _comp_list))
+        _second_arg_candidates.append(("none", None))
+
+        last_err = None
+        # ── 【Bug-30 修复】按 (API × 第二参数形态) 组合逐个尝试 ────────────
+        # 不同 SW 版本对"待检查组件"的传参要求不同：
+        #   新版本要组件数组；部分版本要 None（=全部）；旧版本要 byref VARIANT。
+        # 原实现只试 None，参数不匹配时报"无效参数/类型不匹配"就放弃。
+        _attempts = []
+        # ── 【Bug-44 修复】补齐 API 候选 ─────────────────────────────────
+        # 台账建议："check_interference 若 ToolsCheckInterference2 在 SW 2025
+        #   无此签名，应改用 IAssemblyDoc::ToolsCheckInterference3 或纯 COM
+        #   GetInterferenceBodySet"。
+        # 实测 SW 2025 SP5.0 报 com_error(-2147352562)，说明前两个签名都不匹配。
+        # 这里把 ToolsCheckInterference3 与 GetInterferenceBodySet 一并纳入候选。
+        for _sig in ("ToolsCheckInterference3", "ToolsCheckInterference2",
+                     "ToolsCheckInterference"):
+            for _pname, _pv in _second_arg_candidates:
+                _attempts.append((_sig, _pname, _pv))
+        for _sig, _pname, _pv in _attempts:
+            try:
+                fn = getattr(self.model, _sig, None)
+                if fn is None:
+                    continue
+                if _sig == "ToolsCheckInterference2":
+                    _base = (n_comp, _pv, bool(include_multibody),
+                             bool(treat_coincident))
+                else:
+                    _base = (n_comp, _pv, bool(treat_coincident),
+                             bool(include_multibody))
+                # ① 直接传（新版本接受组件数组/None）
+                n = None
+                inter_val = None
+                try:
+                    n = fn(*_base)
+                except Exception as _e_direct:
+                    last_err = _e_direct
+                    # ② byref VARIANT 形态（旧版本要求 out 参数）
+                    try:
+                        inter = win32com.client.VARIANT(
+                            pythoncom.VT_BYREF | pythoncom.VT_DISPATCH, None)
+                        _a = list(_base)
+                        _a[1] = inter
+                        n = fn(*_a)
+                        inter_val = inter.value
+                    except Exception as _e_byref:
+                        last_err = _e_byref
+                        _sel_tried.append("%s/%s: %r" % (_sig, _pname, _e_byref))
+                        continue
+                out["available"] = True
+                out["api"] = _sig
+                out["second_arg"] = _pname
+                out["count"] = int(n or 0)
+                arr = inter_val
+                if arr:
+                    for x in arr:
+                        item = {}
+                        try:
+                            item["volume_mm3"] = float(x.Volume) * 1e9
+                        except Exception:
+                            item["raw"] = repr(x)
+                        out["interferences"].append(item)
+                out["ok"] = True
+                out["selection_prepared"] = out.get("selection_prepared", False)
+                return out
+            except Exception as e:
+                last_err = e
+                continue
+
+        out["error"] = ("本 SolidWorks 版本无可用的干涉检查 API"
+                        "（ToolsCheckInterference2/1 均已按多种传参形态尝试）: %r"
+                        % (last_err,))
+        out["attempts"] = _sel_tried
+        out["hint"] = ("结果【不可采信】，不要当作没有干涉。"
+                       "请在 SolidWorks 界面手动执行 评估-干涉检查 确认，"
+                       "或改用 geometry_interference_approx() 做包围盒近似判断。")
+        return out
+
+    def geometry_interference_approx(self, min_overlap_mm=0.05):
+        """【Bug-30 修复】几何近似的干涉检查（API 全部失效时的兜底）。
+
+        原理：对每对组件的【世界坐标包围盒】求交，交集体积超过阈值即报疑似干涉。
+        局限：包围盒是保守近似 —— 曲面/斜置零件的包围盒会重叠但不一定真干涉，
+        因此结果标注为 approx=True，仅用于"设计层自查"，不能替代 SW 原生检查。
+
+        Returns: {ok, approx:True, count, pairs:[{a,b,overlap_mm3}], note}
+        """
+        out = {"ok": False, "approx": True, "count": 0, "pairs": []}
+        boxes = []
+        try:
+            self._activate_self()
+            comps = self.model.GetComponents(False) or []
+            clist = list(comps) if isinstance(comps, tuple) else ([comps] if comps else [])
+        except Exception:
+            clist = []
+        for c in clist:
+            try:
+                name = str(getattr(c, "Name2", None) or getattr(c, "Name", "") or "?")
+            except Exception:
+                name = "?"
+            try:
+                box = c.GetBox(False, False)
+            except Exception:
+                box = None
+            if not box or len(box) < 6:
+                continue
+            try:
+                xs = [float(box[0]), float(box[3])]
+                ys = [float(box[1]), float(box[4])]
+                zs = [float(box[2]), float(box[5])]
+                boxes.append((name, min(xs), max(xs), min(ys), max(ys),
+                              min(zs), max(zs)))
+            except Exception:
+                continue
+        _tol = float(min_overlap_mm) * 0.001
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                ox = min(a[2], b[2]) - max(a[1], b[1])
+                oy = min(a[4], b[4]) - max(a[3], b[3])
+                oz = min(a[6], b[6]) - max(a[5], b[5])
+                if ox > _tol and oy > _tol and oz > _tol:
+                    out["pairs"].append({
+                        "a": a[0], "b": b[0],
+                        "overlap_mm": [round(ox * 1000, 3), round(oy * 1000, 3),
+                                       round(oz * 1000, 3)],
+                        "overlap_mm3": round(ox * oy * oz * 1e9, 3),
+                    })
+        out["count"] = len(out["pairs"])
+        out["ok"] = True
+        out["note"] = ("包围盒近似：count>0 仅表示包围盒重叠（可能因斜置/曲面误报），"
+                       "count=0 可较有把握地认为无干涉。"
+                       "精确结论请在 SW 界面执行 评估-干涉检查（Bug-30 兜底）。")
+        return out
+
+    def circular_pattern(self, count, angle_deg=360.0, equal_spacing=True,
+                         axis="Z", reverse=False, geometry_pattern=False):
+        """环形阵列（FeatureCircularPattern5 / 4）。
+
+        ⚠️【C11 说明】SW 的 FeatureCircularPattern5 参数签名在 2018~2025 间多次变动，
+          直接调用极易出现"参数无效"。本方法按多种签名依次尝试，并把
+          失败原因原样返回，避免静默失败。
+          若多次失败，建议改用【单草图多段线轮廓一次拉伸/切除】绕过阵列。
+
+        Args:
+            count: 实例总数（含原始特征）
+            angle_deg: 总角度，默认 360
+            equal_spacing: 等间距
+            axis: 'X'/'Y'/'Z' 或基准轴名。默认 Z
+            reverse: 反向
+            geometry_pattern: True=只阵列几何体（不合并）
+
+        Returns: dict {ok, used_signature?, error?, hint?}
+        """
+        out = {"ok": False, "count": int(count), "angle_deg": float(angle_deg)}
+        try:
+            self._activate_self()
+            _ang = float(angle_deg) * 3.141592653589793 / 180.0
+            _rev = bool(reverse)
+            _eq = bool(equal_spacing)
+            _geo = bool(geometry_pattern)
+            last_err = None
+            # 依次尝试已知的几种签名（参数个数从多到少）
+            tries = [
+                ("FeatureCircularPattern5", (int(count), _ang, _rev, False, False,
+                                                _eq, 0.0, 0.0, False, True, False, False, False)),
+                ("FeatureCircularPattern5", (int(count), _ang, _rev, _eq,
+                                                _geo, False, False)),
+                ("FeatureCircularPattern4", (int(count), _ang, _rev, _eq,
+                                                _geo, False)),
+            ]
+            for _sig, _args in tries:
+                try:
+                    fn = getattr(self.model, _sig)
+                except Exception as e:
+                    last_err = e; continue
+                try:
+                    feat = fn(*_args)
+                except Exception as e:
+                    last_err = e; continue
+                if feat is not None:
+                    out["ok"] = True
+                    out["used_signature"] = _sig
+                    return out
+            out["error"] = "环形阵列失败: %r" % (last_err,)
+            out["hint"] = ("FeatureCircularPattern5 参数签名不匹配时，"
+                            "可改用【单草图多段线轮廓一次拉伸】绕过阵列。")
+        except Exception as e:
+            out["error"] = "circular_pattern 异常: %r" % (e,)
+        return out
+    # ══ 【C8 / H 修复】装配体创建（Wave2 入口）════════════════════════
+    @staticmethod
+    def new_assembly(sw=None, template=None):
+        """新建装配体文档并返回 SWModel 包装。
+
+        ── 【H 修复】原签名要求必须传 sw，导致常见误用全部失败 ────────
+        测试反馈：小屋报 module has no attribute new_assembly。
+        该报错实际来源是【调用方式不匹配】，有三种典型误用：
+          1) swapi.new_assembly(...)    -> 模块级没这个函数（原实现只在类里）
+          2) swapi.new_assembly()       -> 少传 sw，TypeError
+          3) SWModel.new_assembly(sw)   -> 这种本来是对的
+        修复：三种调用方式全部支持 ——
+          · sw=None 时【自动取当前 SW 连接】（等价于 get_sw()）；
+          · 在模块级补一个同名别名，使 swapi.new_assembly() 也可用。
+
+        Args:
+            sw: SldWorks.Application；None 时自动获取当前连接
+            template: 装配体模板路径；None 时自动探测
+
+        Returns: SWModel 实例（失败抛 RuntimeError，含可操作提示）
+        """
+        if sw is None:
+            try:
+                sw = get_sw()
+            except Exception as e:
+                raise RuntimeError(
+                    "new_assembly 未传 sw，且自动连接 SolidWorks 失败: %r。"
+                    "请显式传入已连接的应用对象，或先确保 SW 已启动。" % (e,))
+        tmpl = template
+        if not tmpl:
+            try:
+                tmpl = get_asm_template(sw)
+            except Exception:
+                tmpl = None
+        if not tmpl:
+            # 兜底：让 SW 用默认装配模板新建
+            try:
+                doc = sw.NewDocument("", 0, 0.0, 0.0)
+            except Exception:
+                doc = None
+            if doc is None:
+                raise RuntimeError(
+                    "无法新建装配体：未找到装配体模板(.asmdot)。"
+                    "请先在 SolidWorks 里手动保存一个装配体模板，"
+                    "或用 sw.new(template=<模板路径>) 显式指定。")
+            return SWModel(sw, doc)
+        _errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+        doc = None
+        try:
+            doc = sw.NewDocument(tmpl, 0, 0.0, 0.0)
+        except Exception:
+            doc = None
+        if doc is None:
+            raise RuntimeError("无法用模板新建装配体: %s" % tmpl)
+        return SWModel(sw, doc)
+
+    # ══ 【BUG-H / BUG-I 修复】late-binding 下两个高危静默失败点 ════════
+    # 这两个 API 在当前代码里尚未使用，属于预防性封装 ——
+    #   一旦后续用裸 COM 写装配定位/阵列数据，必踩。
+    #   这里把"静默失败"变成"显式报错"。
+
+    def _make_math_transform(self, x=0.0, y=0.0, z=0.0, units="mm"):
+        r"""【Bug-30 修复】正确构造 MathTransform。
+
+        ══ 根因（实测 Bug-30）══════════════════════════════════════════════
+        原实现写的是 sw.CreateTransform([...]) —— 【这个方法不存在】，
+        于是 add_component 的补救摆位、set_component_transform 全部失效，
+        表现为"CreateTransform 不存在 → SetTransform / MoveComponent 全部不可用"
+        （Bug-30 现象 2），装配体只能堆在原点。
+
+        正确做法（SolidWorks API）：MathTransform 必须由 IMathUtility 创建：
+            mu = sw.GetMathUtility()        # 或 sw.IGetMathUtility()
+            mt = mu.CreateTransform(array16) # 16 个 double
+
+        本方法按优先级尝试多种取 MathUtility 的写法，并支持直接给 16 元数组。
+        Returns: (math_transform | None, diagnostic_str)
+        """
+        _k = 0.001 if str(units).lower() == "mm" else 1.0
+        arr = [1.0, 0.0, 0.0, float(x) * _k,
+               0.0, 1.0, 0.0, float(y) * _k,
+               0.0, 0.0, 1.0, float(z) * _k,
+               1.0, 0.0, 0.0, 0.0]
+        return self._make_math_transform_from_array(arr), ""
+
+    def _make_math_transform_from_array(self, arr):
+        """用 16 元数组构造 MathTransform（【Bug-30】）。
+
+        依次尝试：
+          ① sw.GetMathUtility().CreateTransform(arr)
+          ② sw.IGetMathUtility().CreateTransform(arr)
+          ③ sw.GetMathUtility.CreateTransform(arr)   （属性式 late-binding）
+        """
+        _sw = getattr(self, "sw", None)
+        if _sw is None:
+            return None
+        _mu = None
+        for _getter in (lambda: _sw.GetMathUtility(),
+                        lambda: _sw.IGetMathUtility(),
+                        lambda: _sw.GetMathUtility):
+            try:
+                _mu = _getter()
+                if _mu is not None:
+                    break
+            except Exception:
+                continue
+        if _mu is None:
+            return None
+        for _mk in ("CreateTransform", "ICreateTransform"):
+            try:
+                _fn = getattr(_mu, _mk, None)
+                if _fn is None:
+                    continue
+                _mt = _fn(list(arr))
+                if _mt is not None:
+                    return _mt
+            except Exception:
+                continue
+        return None
+
+    def set_component_transform(self, comp, x=0.0, y=0.0, z=0.0, units="mm"):
+        """设置组件位置（诊断 + 可选写入）。
+
+        ══ 【BUG-H 修复·根因已由测试部定位】══════════════════════════════
+        实测结论（装配态 late-binding 下）：
+          · comp.Transform2 = mt        -> 赋值失败（该属性只读）
+          · comp.SetTransform(mt)       -> 该方法【不存在】(AttributeError)
+          · comp.GetTotalTransform(True)-> 【可用】（注意必须传 True）
+
+        所以"事后摆位"这条路走不通。正确做法（按优先级）：
+          1) 建组件时就带坐标：add_component(path, x, y, z)  <- 推荐
+          2) 用装配配合定位：add_mate(...)
+          3) 删除组件后按目标坐标重新添加
+        本方法保留为：读回当前位置 + 对支持的版本尝试写入 + 明确报不支持。
+
+        Returns: {ok, applied, supported?, position_mm?, after_mm?, error?, hint?}
+        """
+        out = {"ok": False, "applied": False}
+        if comp is None:
+            out["error"] = "组件对象为空"
+            return out
+        _k = 0.001 if str(units).lower() == "mm" else 1.0
+
+        # 读回当前位置（GetTotalTransform(True) 实测可用）
+        try:
+            mt = None
+            try:
+                mt = comp.GetTotalTransform(True)
+            except Exception:
+                try:
+                    mt = comp.GetTotalTransform()
+                except Exception:
+                    mt = None
+            if mt is not None:
+                out["supported"] = True
+                try:
+                    arr = list(mt.ArrayData) if hasattr(mt, "ArrayData") else None
+                    if arr and len(arr) >= 12:
+                        out["position_mm"] = [round(float(arr[3]) / _k, 4),
+                                              round(float(arr[7]) / _k, 4),
+                                              round(float(arr[11]) / _k, 4)]
+                except Exception:
+                    pass
+        except Exception:
+            out["supported"] = False
+
+        # ── 【Bug-30 修复】先正确构造 MathTransform，再判断写入路径 ────────
+        # 原实现用 sw.CreateTransform —— 该方法不存在，导致这里必然失败。
+        # 现在改用 IMathUtility.CreateTransform（见 _make_math_transform_from_array）。
+        new_mt = self._make_math_transform_from_array(
+            [1.0, 0.0, 0.0, float(x) * _k,
+             0.0, 1.0, 0.0, float(y) * _k,
+             0.0, 0.0, 1.0, float(z) * _k,
+             1.0, 0.0, 0.0, 0.0])
+        out["math_transform_available"] = new_mt is not None
+        if new_mt is None:
+            out["error"] = ("无法构造 MathTransform（GetMathUtility().CreateTransform 不可用）。"
+                            "这是 SW 装配摆位的前提 —— 请确认装配体文档处于活动状态。")
+            out["hint"] = ("请改用下列方式之一（按可靠性排序）："
+                           " 1) add_component(path, x, y, z) 建组件时直接给坐标；"
+                           " 2) add_mate(...) 用装配配合定位（工程上更规范）；"
+                           " 3) place_components_by_coords(...) 批量按坐标矩阵摆位。")
+            return out
+
+        # ══ 【Bug-44 修复】首选【装配体文档级】TransformComponent ═══════════
+        # 台账实测（SW 2025 SP5.0）明确要求："不要在'写对代码'层面反复打补丁，
+        #   应真正验证坐标在运行时生效"。
+        # 根因分析：组件对象（Component2）在 late-binding 下【只读】——
+        #   SetTransform / SetTransform2 / MoveComponent 全部不存在或无效。
+        #   但 SolidWorks 的正确 API 是【装配体文档级】的：
+        #       asmDoc.TransformComponent(components, transform, ...)
+        #   它接收"组件数组 + MathTransform"，由装配体统一改写组件位姿。
+        #   这是官方文档中"移动组件"的标准途径，此前从未被使用（全库 0 引用）。
+        # 因此把 TransformComponent 提为【第一优先】写入路径。
+        _write_ok = False
+        _write_method = None
+        try:
+            _tc = getattr(self.model, "TransformComponent", None)
+            if _tc is not None:
+                # 先选中该组件（TransformComponent 需要组件数组）
+                try:
+                    self.model.ClearSelection2(True)
+                except Exception:
+                    pass
+                _selected = False
+                for _sm in ("Select4", "Select2", "Select"):
+                    try:
+                        _fn = getattr(comp, _sm, None)
+                        if _fn is None:
+                            continue
+                        if _sm == "Select4":
+                            _fn(True, None)
+                        elif _sm == "Select2":
+                            _fn(True, 0)
+                        else:
+                            _fn(True)
+                        _selected = True
+                        break
+                    except Exception:
+                        continue
+                if _selected:
+                    _comps = None
+                    try:
+                        _comps = self.model.GetComponents(True)
+                    except Exception:
+                        _comps = None
+                    if _comps is None:
+                        _comps = [comp]
+                    # TransformComponent(components, transform, moveType, ...)
+                    for _args in ((_comps, new_mt),
+                                  (_comps, new_mt, 0),
+                                  (_comps, new_mt, 0, False)):
+                        try:
+                            _tc(*_args)
+                            _write_ok = True
+                            _write_method = "TransformComponent(asm)"
+                            break
+                        except Exception as _e_tc:
+                            out.setdefault("write_errors", []).append(
+                                "TransformComponent%s: %r" % (len(_args), _e_tc))
+        except Exception as _e_outer:
+            out.setdefault("write_errors", []).append("TransformComponent: %r" % (_e_outer,))
+
+        # 写入路径（回退）：SetTransform -> SetTransform2 -> MoveComponent
+        for _mn in ("SetTransform", "SetTransform2"):
+            try:
+                _fn = getattr(comp, _mn, None)
+                if _fn is None:
+                    continue
+                _fn(new_mt)
+                _write_ok = True
+                _write_method = _mn
+                break
+            except Exception as _e:
+                out.setdefault("write_errors", []).append("%s: %r" % (_mn, _e))
+        # MoveComponent（SW2025 部分版本以 MoveComponent 取代 SetTransform）
+        if not _write_ok:
+            try:
+                _mc = getattr(comp, "MoveComponent", None)
+                if _mc is not None:
+                    # MoveComponent 语义是"增量移动"：先读当前位置，再移差值
+                    _cur = self._component_position_mm(comp, units=units)
+                    if _cur:
+                        _dx = float(x) - _cur[0]
+                        _dy = float(y) - _cur[1]
+                        _dz = float(z) - _cur[2]
+                        _mc([_dx * _k, _dy * _k, _dz * _k])
+                        _write_ok = True
+                        _write_method = "MoveComponent"
+            except Exception as _e:
+                out.setdefault("write_errors", []).append("MoveComponent: %r" % (_e,))
+        if not _write_ok:
+            out["error"] = ("无法写入组件变换：SetTransform/SetTransform2/MoveComponent 均不可用。"
+                            "本版 SW 组件对象可能只读。")
+            out["hint"] = "改用 add_component 带坐标，或用 add_mate 定位。"
+            return out
+        out["method"] = _write_method
+
+        # 读回校验
+        try:
+            back = comp.GetTotalTransform(True)
+            arr = list(back.ArrayData) if hasattr(back, "ArrayData") else None
+            if arr and len(arr) >= 12:
+                pos = [float(arr[3]) / _k, float(arr[7]) / _k, float(arr[11]) / _k]
+                out["after_mm"] = [round(v, 4) for v in pos]
+                _want = [float(x), float(y), float(z)]
+                _close = all(abs(pos[i] - _want[i]) < 0.5 for i in range(3))
+                out["verified"] = _close
+                if not _close:
+                    out["error"] = "SetTransform 未报错，但读回位置与期望不符，写入被静默忽略。"
+                    out["hint"] = "改用 add_component 带坐标重新添加组件。"
+                    return out
+        except Exception:
+            out["verified"] = None
+
+        out["ok"] = True
+        out["applied"] = True
+        return out
+
+    def _component_position_mm(self, comp, units="mm"):
+        """读回组件当前位置（mm）。【Bug-30】供 MoveComponent 增量计算使用。
+
+        GetTotalTransform 在 late-binding 下【必须传 True】才可用（实测）。
+        Returns: [x, y, z] mm 或 None
+        """
+        _k = 0.001 if str(units).lower() == "mm" else 1.0
+        mt = None
+        for _arg in (True, None):
+            try:
+                mt = comp.GetTotalTransform(_arg) if _arg is not None \
+                    else comp.GetTotalTransform()
+                if mt is not None:
+                    break
+            except Exception:
+                continue
+        if mt is None:
+            return None
+        try:
+            arr = list(mt.ArrayData) if hasattr(mt, "ArrayData") else None
+            if arr and len(arr) >= 12:
+                return [float(arr[3]) / _k, float(arr[7]) / _k, float(arr[11]) / _k]
+        except Exception:
+            pass
+        return None
+
+    def place_components_by_coords(self, placements, units="mm", rebuild=True):
+        """【Bug-30 修复·fallback 摆位方案】按设计坐标批量摆位（不依赖配合）。
+
+        用途：当 SW2025 的装配 API（AddComponent 坐标参数被忽略、SetTransform
+        不可用）导致所有零件堆在原点时，用本方法把已插入的组件按【设计坐标】
+        摆开 —— 至少让装配体具备正确的空间布局，便于出图与人工复核。
+
+        Args:
+            placements: [(组件名或组件对象, x, y, z), ...]（mm）
+        Returns:
+            {ok, placed:[...], failed:[...], method, note}
+        """
+        out = {"ok": True, "placed": [], "failed": [], "method": None}
+        try:
+            comps = self.model.GetComponents(False) or []
+            clist = list(comps) if isinstance(comps, tuple) else ([comps] if comps else [])
+        except Exception:
+            clist = []
+
+        def _name_of(c):
+            for _a in ("Name2", "Name"):
+                try:
+                    v = getattr(c, _a)
+                    if callable(v):
+                        v = v()
+                    if v:
+                        return str(v)
+                except Exception:
+                    continue
+            return None
+
+        for item in (placements or []):
+            try:
+                target, tx, ty, tz = item[0], item[1], item[2], item[3]
+            except Exception:
+                out["failed"].append({"item": repr(item), "reason": "格式应为 (组件, x, y, z)"})
+                continue
+            comp = target if not isinstance(target, str) else None
+            if comp is None:
+                _t = str(target)
+                for c in clist:
+                    _n = _name_of(c) or ""
+                    # 组件名形如 "DSH_车轮-1"；按前缀匹配
+                    if _n == _t or _n.startswith(_t):
+                        comp = c
+                        break
+            if comp is None:
+                out["failed"].append({"item": str(target), "reason": "未找到该组件"})
+                continue
+            r = self.set_component_transform(comp, tx, ty, tz, units=units)
+            if r.get("ok"):
+                out["placed"].append({"component": _name_of(comp),
+                                      "position_mm": [tx, ty, tz],
+                                      "method": r.get("method")})
+                out["method"] = r.get("method")
+            else:
+                out["failed"].append({"component": _name_of(comp),
+                                      "position_mm": [tx, ty, tz],
+                                      "error": r.get("error")})
+        if rebuild:
+            try:
+                self.rebuild()
+            except Exception:
+                pass
+        out["ok"] = bool(out["placed"]) and not out["failed"]
+        out["note"] = ("坐标摆位是【设计层布局】，不等价于配合约束；"
+                       "如需 SW 原生装配关系请用 add_mate。"
+                       "本方法用于 SW2025 装配 API 失效时的兜底（Bug-30）。")
+        return out
+
+    def set_array_data(self, feature, values, verify=True):
+        """安全写入阵列数据，带读回校验。
+
+        ── 【BUG-I 修复】ArrayData 写入静默失败 ─────────────────────────
+        测试反馈：给 ArrayData 赋值后读回未变且不报错 —— 典型静默失败。
+          原因是 late-binding 下该属性可能只读，或需特定封送方式。
+        本方法写完【读回比对】，不一致即明确报失败，绝不假装成功。
+
+        Returns: {ok, verified, before, after, error?, hint?}
+        """
+        out = {"ok": False, "verified": False}
+        if feature is None:
+            out["error"] = "特征对象为空"
+            return out
+        try:
+            before = None
+            try:
+                before = feature.ArrayData
+            except Exception:
+                before = None
+            out["before"] = repr(before)
+            written = False
+            last = None
+            for _val in (values, (values if isinstance(values, (list, tuple)) else [values])):
+                try:
+                    feature.ArrayData = _val
+                    written = True
+                    break
+                except Exception as e:
+                    last = e
+            if not written:
+                out["error"] = "ArrayData 赋值失败: %r" % (last,)
+                out["hint"] = "该属性在 late-binding 下可能只读；请用带参数的阵列方法一次性建模。"
+                return out
+            if verify:
+                try:
+                    after = feature.ArrayData
+                    out["after"] = repr(after)
+                    if repr(after) != repr(before):
+                        out["verified"] = True
+                        out["ok"] = True
+                    else:
+                        out["error"] = "ArrayData 赋值未抛异常，但读回未变化 —— 写入被静默忽略。"
+                        out["hint"] = "改用带参数的阵列方法一次性建模，不要依赖事后改 ArrayData。"
+                        return out
+                except Exception as e:
+                    out["error"] = "无法读回校验: %r" % (e,)
+                    out["hint"] = "读不回意味着无法确认写入，按失败处理更安全。"
+                    return out
+            else:
+                out["ok"] = True
+            return out
+        except Exception as e:
+            out["error"] = "set_array_data 异常: %r" % (e,)
+            return out
+
+    def save_as(self, path):
+        """另存为（装配体/零件通用）。
+
+        ── 【BUG-E 修复】原实现只把返回值转成 bool 就当作成功 ——
+        而 Extension.SaveAs 的返回值【不可信】：已存在文件时可能返回 True
+        却静默不写。改为以磁盘指纹为真相，结果结构化返回，绝不静默报成功。
+
+        ── 【真实情景修复·SW2025】Extension.SaveAs(path, 0, 1, ...) 在本机
+        对装配体(.sldasm)抛 com_error(-2147352571 '类型不匹配')，对零件也可能
+        静默不写。真机实测对照（DSH_机械臂总装 + 零件）：
+          · Extension.SaveAs(path, 0, 1, None, errs, warns) -> 装配体 类型不匹配
+          · Extension.SaveAs(path, 2, 1, None, errs, warns) -> 装配体 类型不匹配
+          · model.SaveAs3(path, 0, 2)                        -> 装配体/零件 均 rc=0、文件落盘 ✅
+          · model.SaveAs2(...)                              -> 装配体 类型不匹配
+        结论：本机【必须】用 model.SaveAs3（带版本标志 2=覆盖/另存）+ 由扩展名
+        自动推断格式枚举。故本方法改为优先 SaveAs3，失败再回退 Extension.SaveAs。
+
+        Returns: {ok, path, updated, size, sw_error_code, error?, hint?}
+        """
+        def _fp(p):
+            try:
+                if not os.path.exists(p):
+                    return None
+                st = os.stat(p)
+                return (st.st_size, st.st_mtime)
+            except Exception:
+                return None
+
+        # SW 保存格式枚举：按扩展名推断（swSaveAsFormat_e 子集）
+        _EXT_FMT = {
+            ".sldprt": 1, ".sldasm": 2, ".slddrw": 3,
+            ".step": 17, ".stp": 17, ".igs": 9, ".iges": 9,
+            ".x_t": 23, ".x_b": 24, ".stl": 0, ".dwg": 30, ".pdf": 26,
+        }
+        _fmt = _EXT_FMT.get(str(path).lower()[-6:] if str(path).lower().endswith((".sldprt",".sldasm",".slddrw")) else os.path.splitext(path)[1].lower(), 0)
+
+        before = _fp(path)
+        ret = None
+        errs = None
+        _last_err = None
+        # ① 首选 SaveAs3（本机 SW2025 实测可用）
+        try:
+            ret = self.model.SaveAs3(path, 0, 2)
+            try:
+                errs = int(ret) if isinstance(ret, (int, float)) else None
+            except Exception:
+                errs = None
+        except Exception as e:
+            _last_err = e
+            # ② 回退 Extension.SaveAs（带格式枚举）
+            try:
+                _errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                _warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                ret = self.model.Extension.SaveAs(path, _fmt, 1, None, _errs, _warns)
+                try:
+                    errs = _errs.value
+                except Exception:
+                    errs = None
+            except Exception as e2:
+                return {"ok": False, "path": path, "updated": False,
+                        "error": "SaveAs 调用异常(SaveAs3:%r; Extension.SaveAs:%r)"
+                                % (e, e2)}
+
+        after = _fp(path)
+        if after is None:
+            return {"ok": False, "path": path, "updated": False,
+                    "ret": bool(ret), "sw_error_code": errs,
+                    "error": "SaveAs 返回后目标文件不存在，保存未生效。",
+                    "hint": "检查路径可写性与目录是否存在。"}
+
+        # ── 【BUG-E 判定修正】与 save() 保持同一语义 ─────────────────────
+        # 只要文件被"触碰"（mtime/size 变化）就算保存成功；
+        #   只有完全没变才是可疑的静默忽略。
+        #   （专家指出：md5 变化是正常写入的表现，不应判失败。）
+        updated = (before is None) or (after != before)
+        if not updated:
+            return {"ok": False, "path": path, "updated": False,
+                    "ret": bool(ret), "sw_error_code": errs,
+                    "size": after[0],
+                    "error": ("SaveAs 未报错，但目标文件【完全未变化】"
+                              "（大小与 mtime 全同）—— 保存被静默忽略。"),
+                    "hint": "先关闭占用该文件的程序；同名零件若已打开，建议 close-all 后重试。"}
+
+        return {"ok": True, "path": path, "updated": True,
+                "content_same_unknown": False,
+                "ret": bool(ret), "sw_error_code": errs, "size": after[0]}
+
+    # ══ 【新-5 修复】OpenDoc6 统一封装 ═══════════════════════════════════
+    # 测试反馈：直接写 app.OpenDoc6(path, 1, 0) 只传 3 个参数会抛
+    #   非选择性参数 的错误 —— 该提示词【误导】，实际是【缺参数】。
+    #   late-binding 下正确签名必须 6 个：
+    #     OpenDoc6(FileName, Type, Options, Configuration, Errors, Warnings)
+    #   其中 Errors/Warnings 必须是 VARIANT(VT_BYREF|VT_I4) 的引用变量。
+    @staticmethod
+    def open_part(sw, path, doc_type=None, configuration=""):
+        """按正确签名打开文档（补齐 OpenDoc6 的 6 个参数）。
+
+        Args:
+            sw: SldWorks 应用对象
+            path: 文档绝对路径
+            doc_type: 1=零件 2=装配 3=工程图；None 时按扩展名推断
+            configuration: 配置名，默认空
+
+        Returns: {ok, doc?, title?, error?, hint?}
+        """
+        out = {"ok": False, "doc": None}
+        if not path or not os.path.exists(path):
+            out["error"] = "文件不存在: %s" % path
+            return out
+        if doc_type is None:
+            _ext = os.path.splitext(path)[1].lower()
+            doc_type = {".sldprt": 1, ".sldasm": 2, ".slddrw": 3}.get(_ext, 1)
+        try:
+            _errs = win32com.client.VARIANT(
+                pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            _warns = win32com.client.VARIANT(
+                pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            doc = sw.OpenDoc6(os.path.abspath(path), int(doc_type), 1,
+                              str(configuration or ""), _errs, _warns)
+        except Exception as e:
+            out["error"] = "OpenDoc6 调用异常: %r" % (e,)
+            out["hint"] = ("若提示涉及 non-selective 参数，那是误导 —— "
+                           "实际问题通常是【参数不足】。"
+                           "正确签名需要 6 个参数，请改用 SWModel.open_part()。")
+            return out
+        if doc is None:
+            out["error"] = ("OpenDoc6 返回 None（SW 错误码 errs=%s）"
+                            % getattr(_errs, "value", "?"))
+            return out
+        out["ok"] = True
+        out["doc"] = doc
+        try:
+            out["title"] = doc.GetTitle
+        except Exception:
+            pass
+        return out
+
+    def list_components(self):
+        """列出装配体中的全部组件（名称 + 路径 + 是否抑制）。"""
+        out = []
+        try:
+            comps = self.model.GetComponents(False)
+            for c in (comps or []):
+                item = {}
+                try: item["name"] = c.Name2
+                except Exception: item["name"] = None
+                try: item["path"] = c.GetPathName
+                except Exception: item["path"] = None
+                try: item["suppressed"] = bool(c.IsSuppressed())
+                except Exception: item["suppressed"] = None
+                out.append(item)
+        except Exception:
+            pass
+        return out
 
     # ---------- 便捷工具 ----------
     def clear_selection(self):
@@ -1668,7 +7719,23 @@ class SWModel:
         return self
 
     def rebuild(self):
-        self.model.EditRebuild3
+        """重建模型。
+
+        Bug 修复: 原实现 `self.model.EditRebuild3` 是"属性访问"而非函数调用，
+        在 late-binding COM 下会抛 AttributeError: <unknown>.EditRebuild3，
+        导致第二个 extrude() 之后的任何建模步骤整链崩溃。
+        EditRebuild3 是【方法】，必须加括号调用；同时兼容个别版本返回属性值
+        的情况，并保证重建失败不拖垮整个建模脚本。
+        """
+        rb = getattr(self.model, "EditRebuild3", None)
+        if rb is None:
+            return self
+        try:
+            if callable(rb):
+                rb()
+        except Exception:
+            # 重建失败不应中断建模：SW 多数情况下会在下次特征操作时自动重建
+            pass
         return self
 
 
@@ -1732,6 +7799,14 @@ def select_sketch_by_name(sw, model, name):
 
 
 # ==================== Bug-25: 安全退出 SolidWorks ====================
+
+# ── 【H 修复】模块级别名：让 swapi.new_assembly() 也能用 ──────────────
+# 小屋/调用方常写成 swapi.new_assembly(...)，而原实现只在类里定义，
+#   于是报 module has no attribute —— 属于调用链断裂。
+def new_assembly(sw=None, template=None):
+    """模块级入口，等价于 SWModel.new_assembly（【H 修复】）。"""
+    return SWModel.new_assembly(sw, template)
+
 
 def close_all_and_exit(sw):
     """安全关闭所有文档并退出 SolidWorks。

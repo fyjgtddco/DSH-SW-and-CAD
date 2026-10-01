@@ -20,6 +20,155 @@ import tempfile
 from typing import Any, Optional
 
 
+# ══ 【BUG-02 修复】疲劳/设计寿命校核接入 ══════════════════════════════════
+# 原缺陷：整条工具链只有线性静力（2D 平面应力），完全没有疲劳与 30 年寿命校核，
+#   用户的核心需求无法验证。现把 fatigue.py 接入统一求解出口：
+#   每次 solve_fea 在静力结果之后【自动追加】疲劳校核，
+#   并把结论并入 gates / overall，使其成为交付前必须通过的闸口。
+try:
+    import fatigue as _fatigue
+except ImportError:          # 允许在 sys.path 未注入时降级运行
+    try:
+        from . import fatigue as _fatigue
+    except Exception:
+        _fatigue = None
+
+
+def _material_guard(load_case: dict) -> Optional[dict]:
+    """【BUG-05/08 修复】材料健全性前置检查。
+
+    原缺陷：材料缺失时一路默认（E=200000、ρ=7850），报告 material 显示 '?'，
+      甚至可能拿 SW 的 1000 kg/m³（水）密度当真 —— 结论全部不可信。
+    修复：材料关键字段缺失/等于水密度时，返回【显式的阻断信息】，
+      由调用方决定是报错还是标注 NOT_EVALUATED（绝不静默用默认值）。
+    """
+    mat = load_case.get("material") or {}
+    problems = []
+    if not mat:
+        problems.append("material 字段缺失（完全未指定材料）")
+    else:
+        if not (mat.get("name") or mat.get("id")):
+            problems.append("material 缺 name/id（无法确认材料身份）")
+        if not mat.get("youngs_modulus_mpa"):
+            problems.append("缺 youngs_modulus_mpa")
+        if not mat.get("yield_strength_mpa"):
+            problems.append("缺 yield_strength_mpa")
+        _rho = mat.get("density_kg_m3")
+        if _rho is not None and abs(float(_rho) - 1000.0) < 1.0:
+            problems.append("密度为 1000 kg/m³（等同水）—— 极可能是 SolidWorks "
+                            "未赋材质留下的默认值（BUG-05）")
+    if not problems:
+        return None
+    return {
+        "ok": False,
+        "error": "材料信息不可用于强度/寿命校核",
+        "problems": problems,
+        "hint": ("请先在载荷工况里补齐 material（id/name/E/σy/ρ），"
+                 "或在 swapi.new_part(material=...) 给零件赋材质。"
+                 "材料不确定时任何安全系数与寿命结论都无效。"),
+    }
+
+
+def run_fatigue_check(load_case: dict, fea_result: dict) -> dict:
+    """执行疲劳校核（fatigue.py 不可用时返回明确的 NOT_EVALUATED，绝不静默跳过）。"""
+    if _fatigue is None:
+        return {"ok": False, "verdict": "NOT_EVALUATED",
+                "error": "fatigue.py 不可用，未能执行疲劳/寿命校核"}
+    try:
+        res = _fatigue.analyze_fatigue_from_case(load_case, fea_result)
+    except Exception as e:
+        import traceback
+        return {"ok": False, "verdict": "NOT_EVALUATED",
+                "error": "疲劳校核异常: %s" % e,
+                "traceback": traceback.format_exc()[-1500:]}
+    return res
+
+
+def _attach_fatigue(load_case: dict, result: dict) -> dict:
+    """把疲劳结果并入统一求解结果（gates + overall 判定一并更新）。"""
+    if not isinstance(result, dict) or not result.get("ok"):
+        return result
+    # ── 【BUG-05/08】材料不健全 → 疲劳/寿命结论无意义，显式阻断并标注 ────
+    _mg = _material_guard(load_case)
+    if _mg:
+        result["material_guard"] = _mg
+        result.setdefault("gates", {})["MATERIAL_DATA"] = {
+            "status": "FAIL",
+            "problems": _mg["problems"],
+            "hint": _mg["hint"],
+        }
+        result["fatigue"] = {
+            "ok": False, "verdict": "NOT_EVALUATED",
+            "error": "材料信息不完整，未执行疲劳/寿命校核：%s"
+                     % "；".join(_mg["problems"]),
+        }
+        result["overall"] = "FAIL"
+        result.setdefault("limitations", []).append(
+            "⚠️ 材料不可用（%s）—— 强度与 30 年寿命结论均无效"
+            % "；".join(_mg["problems"][:2]))
+        return result
+    fat = run_fatigue_check(load_case, result)
+    result["fatigue"] = fat
+    # ── 【NEW-01 修复】把验收判据【透传到 fea_result 顶层】 ──────────────
+    # 原缺陷：fea_result 里没有 acceptance，下游想核对"判据是什么"
+    #   必须回头找 load_case；报告顶层 acceptance_criteria 又漏传了
+    #   疲劳参数（已一并修复）。此处让判据随结果走，审计更直接。
+    try:
+        _acc_src = (load_case or {}).get("acceptance") or {}
+        result["acceptance"] = dict(_acc_src)
+    except Exception:
+        pass
+    gates = result.setdefault("gates", {})
+    if isinstance(gates, dict):
+        gates["FATIGUE_STRENGTH"] = {
+            "status": (fat.get("gates", {}).get("FATIGUE_STRENGTH", {}).get("status")
+                       or ("N/A" if fat.get("verdict") == "NOT_EVALUATED" else "FAIL")),
+            "actual_sf": fat.get("fatigue_sf"),
+            "required_min": fat.get("min_required_fatigue_sf"),
+            "endurance_limit_mpa": fat.get("endurance_limit_mpa"),
+        }
+        gates["FATIGUE_LIFE"] = {
+            "status": (fat.get("gates", {}).get("FATIGUE_LIFE", {}).get("status")
+                       or ("N/A" if fat.get("verdict") == "NOT_EVALUATED" else "FAIL")),
+            "required_years": fat.get("design_life_years"),
+            "allowable_life_years": fat.get("life_years_allowable"),
+            "damage_at_required_life": fat.get("damage_design_life"),
+        }
+    # overall 需要重新聚合：静力全 PASS 但疲劳 FAIL → 整体 FAIL
+    # ── 【BUG-02 附带修正】统一 overall 聚合口径 ────────────────────────
+    # 原实现（solve_analytical / solve_feapy）用
+    #   passed = all(status == "PASS")
+    # 于是 SAFETY_FACTOR=WARNING（安全系数过高=过度设计）也被算成 overall=FAIL，
+    # 与代码自身 BUG-21 的结论（"安全系数过高不是 FAIL，应标 WARNING"）矛盾，
+    # 导致"结构明明很安全"却被报告成 FAIL。
+    #
+    # ── 【NEW-02 修复】三档 + OVER_DESIGN 单独处理 ──────────────────────
+    #   任一 FAIL            → overall = FAIL
+    #   有 WARNING / N/A     → overall = REVIEW   （真有需要复核的项）
+    #   仅 OVER_DESIGN       → overall = PASS      （结构安全，只是材料利用率低）
+    #   · 过度设计【不再】把结果拖成 REVIEW —— 它不是缺陷，
+    #     但 over_design 标记与说明会保留，供轻量化优化参考。
+    statuses = [g.get("status") for g in (gates or {}).values()
+                if isinstance(g, dict)]
+    if "FAIL" in statuses:
+        result["overall"] = "FAIL"
+    elif "WARNING" in statuses or "N/A" in statuses:
+        result["overall"] = "REVIEW"
+    else:
+        result["overall"] = "PASS"
+    # 把"过度设计"作为独立信号暴露（不改变 overall，但清晰可见）
+    if "OVER_DESIGN" in statuses:
+        result["over_design"] = True
+        result.setdefault("limitations", []).append(
+            "结构安全但安全系数高于目标上限（过度设计）：材料利用率偏低，"
+            "如需轻量化可减小截面尺寸或换薄壁结构。这不影响交付，仅作优化提示。")
+    # 疲劳未评估必须显式暴露（用户核心需求是 30 年寿命校核）
+    if fat.get("verdict") == "NOT_EVALUATED":
+        result.setdefault("limitations", []).append(
+            "⚠️ 疲劳/寿命校核未执行：%s" % fat.get("error", "未知原因"))
+    return result
+
+
 # ==================== 后端检测 ====================
 
 def _check_cmd(cmd: str) -> bool:
@@ -112,10 +261,21 @@ def solve_analytical(load_case: dict, mesh_stats: dict) -> dict[str, Any]:
     # Bug-21 修复: 安全系数过高不是 FAIL，应标记 WARNING（过于保守=浪费材料，但结构安全）
     # 原逻辑: sf > max_sf → FAIL（错误：92 > 5 被判为超限）
     # 正确逻辑: sf < min_sf → FAIL（强度不足），sf > max_sf → WARNING（过度设计）
-    if safety_factor < acceptance.get("min_safety_factor", 2.0):
+    #
+    # ── 【NEW-02 修复】把"过度设计"与"真告警"语义分开 ─────────────────
+    # 用户反馈：静力 SF=36.42 被标 WARNING，属"过设计"提示（已知行为），
+    #   但混在 WARNING 里会让人以为结构有问题，也会把 overall 拖成 REVIEW。
+    # 修复：过度设计仍无法判 PASS（确实未落在目标区间），但给出
+    #   status="OVER_DESIGN" + over_design=true 的明确标记，
+    #   overall 聚合时将其视为"合格但可优化"，不再简单归入 REVIEW。
+    _min_sf = acceptance.get("min_safety_factor", 2.0)
+    _max_sf = acceptance.get("target_safety_factor_max", 5.0)
+    _over_design = False
+    if safety_factor < _min_sf:
         sf_status = "FAIL"
-    elif safety_factor > acceptance.get("target_safety_factor_max", 5.0):
-        sf_status = "WARNING"
+    elif safety_factor > _max_sf:
+        sf_status = "OVER_DESIGN"     # 结构安全，但材料利用率低（非缺陷）
+        _over_design = True
     else:
         sf_status = "PASS"
 
@@ -124,8 +284,13 @@ def solve_analytical(load_case: dict, mesh_stats: dict) -> dict[str, Any]:
         "SAFETY_FACTOR": {
             "status": sf_status,
             "actual": round(safety_factor, 2),
-            "required_min": acceptance.get("min_safety_factor", 2.0),
-            "required_max": acceptance.get("target_safety_factor_max", 5.0),
+            "required_min": _min_sf,
+            "required_max": _max_sf,
+            "over_design": _over_design,
+            "note": ("结构安全，安全系数高于目标上限 —— 属【过度设计/材料利用率低】，"
+                     "不是缺陷；如需轻量化可减小截面/换薄壁"
+                     if _over_design else
+                     ("强度不足，必须加强" if sf_status == "FAIL" else "落在目标区间")),
         },
         "MAX_DISPLACEMENT": {
             "status": "PASS" if (acceptance.get("max_displacement_mm") is None or
@@ -217,14 +382,19 @@ def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, 
 
         gates = {
             "SAFETY_FACTOR": {
+                # 【NEW-02 修复】过度设计用 OVER_DESIGN 明确区分（同解析解路径）
                 "status": (
                     "FAIL" if safety_factor < min_sf
-                    else "WARNING" if safety_factor > max_sf
+                    else "OVER_DESIGN" if safety_factor > max_sf
                     else "PASS"
                 ),
                 "actual": round(safety_factor, 2),
                 "required_min": min_sf,
                 "required_max": max_sf,
+                "over_design": bool(safety_factor > max_sf),
+                "note": ("结构安全，安全系数高于目标上限 —— 属【过度设计/材料利用率低】，"
+                         "不是缺陷" if safety_factor > max_sf else
+                         ("强度不足，必须加强" if safety_factor < min_sf else "落在目标区间")),
             },
             "MAX_DISPLACEMENT": {
                 "status": (
@@ -375,13 +545,15 @@ def solve_fea(
             backend = "analytical"
 
     # 分发到对应后端
+    # 【BUG-02 修复】每个后端的返回值在出口处统一追加【疲劳/30年寿命校核】，
+    #   保证无论走解析解还是纯 Python FEA，用户都能拿到寿命结论。
     if backend == "analytical":
-        return solve_analytical(load_case, {})
+        return _attach_fatigue(load_case, solve_analytical(load_case, {}))
     elif backend == "feapy":
-        return solve_feapy(load_case, output_dir)
+        return _attach_fatigue(load_case, solve_feapy(load_case, output_dir))
     elif backend == "calculix":
         if mesh_path and os.path.exists(mesh_path):
-            return run_calculix(mesh_path, mesh_path, output_dir)
+            return _attach_fatigue(load_case, run_calculix(mesh_path, mesh_path, output_dir))
         return {"ok": False, "error": "CalculiX requires mesh file; use mesh_adapter first"}
     else:
         return {"ok": False, "error": f"unsupported backend: {backend}"}

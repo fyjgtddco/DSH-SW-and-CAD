@@ -22,6 +22,17 @@ DEFAULT_ACCEPTANCE = {
     "max_mass_kg": None,              # 可选
     "must_remain_in_design_domain": True,
     "mesh_quality_min": 0.1,          # 仅 Level 2/3
+    # ── 【BUG-02 修复】疲劳 / 设计寿命校核参数（默认按 30 年长寿命设备）──
+    "design_life_years": 30.0,        # 目标设计寿命（年）
+    "operating_cycles_per_year": 200000.0,   # 年动作/载荷循环次数
+    "load_type": "cyclic",            # static / cyclic / impact
+    "impact_factor": 1.0,             # 动载系数
+    "fatigue_check_required": True,   # 是否强制疲劳校核
+    "surface_finish": "machined",     # ground/machined/hot_rolled/as_forged
+    "characteristic_diameter_mm": None,
+    "reliability": 0.99,              # 疲劳可靠度
+    "service_temperature_c": 25.0,
+    "fatigue_criterion": "goodman",   # goodman / soderberg / gerber
 }
 
 VALID_LOAD_TYPES = {
@@ -237,6 +248,47 @@ def validate_load_case(data: dict, strict: bool = True) -> dict:
         if "direction" not in load:
             warnings.append(f"load {load.get('id', '?')} missing direction vector")
 
+    # ── 【观察点4 修复】多工况载荷组合校验 ─────────────────────────────
+    # 原缺陷：loads 只支持单一 -Z 重力工况，竞速小车的过弯侧向力/纵向驱动力
+    #   完全没有覆盖，physics 只按重力校核会漏掉最关键的失效模式。
+    #   门禁现在会落盘 load_cases（rated/lateral/longitudinal/combined），
+    #   这里做校验：组合引用的 load_id 必须真实存在。
+    load_cases = data.get("load_cases")
+    if load_cases is not None:
+        if not isinstance(load_cases, list):
+            errors.append("load_cases must be a JSON array (list)")
+        else:
+            _load_ids = {l.get("id") for l in loads
+                         if isinstance(l, dict) and l.get("id")}
+            _seen_case_ids = set()
+            for lc in load_cases:
+                if not isinstance(lc, dict):
+                    errors.append("each load_case must be a JSON object (dict)")
+                    continue
+                _cid = lc.get("id")
+                if not _cid:
+                    errors.append("each load_case must have an 'id'")
+                elif _cid in _seen_case_ids:
+                    errors.append(f"duplicate load_case id: {_cid!r}")
+                else:
+                    _seen_case_ids.add(_cid)
+                _refs = lc.get("load_ids")
+                if not isinstance(_refs, list) or not _refs:
+                    errors.append(f"load_case {_cid!r} must have a non-empty load_ids list")
+                    continue
+                for _rid in _refs:
+                    if _rid not in _load_ids:
+                        errors.append(
+                            f"load_case {_cid!r} references unknown load id {_rid!r}")
+            # required_load_cases 必须都在 load_cases 里
+            _req = (data.get("acceptance") or {}).get("required_load_cases") \
+                if isinstance(data.get("acceptance"), dict) else None
+            if isinstance(_req, list):
+                for _rn in _req:
+                    if _rn not in _seen_case_ids:
+                        warnings.append(
+                            f"acceptance.required_load_cases 引用了未定义的工况 {_rn!r}")
+
     # --- acceptance ---
     acc = data.get("acceptance", dict(DEFAULT_ACCEPTANCE))
     if not isinstance(acc, dict):
@@ -251,6 +303,31 @@ def validate_load_case(data: dict, strict: bool = True) -> dict:
     max_disp = acc.get("max_displacement_mm")
     if max_disp is not None and max_disp <= 0:
         errors.append("acceptance.max_displacement_mm must be positive")
+
+    # ── 【BUG-02 修复】疲劳/寿命字段校验 ────────────────────────────────
+    # 用户核心需求是"30 年寿命校核"，这些字段缺失/非法会让疲劳结论失真，
+    # 因此必须显式校验（缺失时补默认值并给 warning，非法值给 error）。
+    if "design_life_years" in acc:
+        try:
+            _ly = float(acc["design_life_years"])
+            if _ly <= 0:
+                errors.append("acceptance.design_life_years must be positive")
+        except (TypeError, ValueError):
+            errors.append("acceptance.design_life_years must be a number")
+    if "operating_cycles_per_year" in acc:
+        try:
+            _cy = float(acc["operating_cycles_per_year"])
+            if _cy <= 0:
+                errors.append("acceptance.operating_cycles_per_year must be positive")
+        except (TypeError, ValueError):
+            errors.append("acceptance.operating_cycles_per_year must be a number")
+    _lt = acc.get("load_type")
+    if _lt is not None and str(_lt).lower() not in ("static", "cyclic", "impact"):
+        warnings.append("acceptance.load_type %r 非标准值（static/cyclic/impact），"
+                        "疲劳载荷谱将按 cyclic 处理" % (_lt,))
+    if not acc.get("fatigue_check_required", True):
+        warnings.append("acceptance.fatigue_check_required=False：疲劳/寿命校核被显式关闭，"
+                        "交付前请确认这是有意为之")
 
     return {
         "ok": len(errors) == 0,

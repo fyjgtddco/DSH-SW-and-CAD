@@ -48,6 +48,10 @@ import fea_solver
 import simulation_report as sim_report
 import design_state
 import refine_rules
+try:
+    import fatigue as fatigue_mod
+except ImportError:
+    fatigue_mod = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -69,14 +73,27 @@ def cmd_validate_case(case_path: str, relaxed: bool = False) -> dict:
 
 
 def cmd_build(case_path: str) -> dict:
-    """加载工况并初始化仿真环境摘要。"""
+    """加载工况并初始化仿真环境摘要。
+
+    ── 【BUG-05/08 修复】材料必须能解析，否则明确报错（不再返回 '?'）──────
+    原缺陷：material 缺失时 report 里显示 '?'，调用方看不出"材料没赋"，
+      于是拿默认密度 1000（水）算出来的质量/强度当真。
+    修复：resolve_material 失败时把可用材料 ID 一并列出，让调用方能自救。
+    """
     lc_result = load_case.load_from_file(case_path)
     if not lc_result["ok"]:
         return {"ok": False, "error": "invalid load case", "details": lc_result}
 
     mat_resolve = material_db.resolve_material(lc_result["case"])
     if not mat_resolve["ok"]:
-        return {"ok": False, "error": "material resolution failed", "details": mat_resolve}
+        return {"ok": False, "error": "material resolution failed", "details": mat_resolve,
+                "hint": ("材料未指定或 ID 未知。可用 ID 示例: "
+                         + ", ".join(sorted(material_db.ALL_MATERIALS.keys())[:12])
+                         + " …；完整列表见 material_db.list_materials()。"
+                         "【BUG-05/08】材质未赋会导致密度虚标为 1000(水)，"
+                         "质量与强度结论不可信，必须先解决材料问题。")}
+    # 把解析到的材料回写进 case，保证后续 FEA/报告口径一致
+    lc_result["case"]["material"] = mat_resolve["material"]
 
     summary = load_case.load_case_to_summary(lc_result["case"])
     solver_status = fea_solver.get_solver_status()
@@ -345,6 +362,81 @@ def cmd_optimize(case_path: str, max_iter: int = 5) -> dict:
     }
 
 
+def cmd_fatigue(case_path: str = "", stress_mpa: float = None,
+                run_id: str = "") -> dict:
+    """【BUG-02 修复】疲劳 / 设计寿命（默认 30 年）独立校核入口。
+
+    用法：
+      python physics_bridge.py fatigue <case.json>                    # 静力+FEA+疲劳
+      python physics_bridge.py fatigue <case.json> --stress 45        # 指定应力直接校核
+      python physics_bridge.py fatigue --report <run_id>              # 用已有报告的应力
+
+    ── 返回形状统一保证 ──────────────────────────────────────────────────
+    无论走哪条路径，返回体【始终是扁平的疲劳结果】（顶层就有 verdict /
+    fatigue_sf / endurance_limit_mpa / design_life_years …），
+    并把静力结果放在 `static` 子块里。避免调用方在"走 FEA 路径"时
+    读不到顶层 verdict（那正是本函数最初的形状不一致缺陷）。
+    """
+    if fatigue_mod is None:
+        return {"ok": False, "error": "fatigue.py 未找到（无法做疲劳校核）",
+                "verdict": "NOT_EVALUATED"}
+
+    def _flatten(fat: dict, static_part: dict = None, source: str = "") -> dict:
+        """把疲劳结果摊平到顶层，保证任意路径都有同一个读取口径。"""
+        out = dict(fat or {})
+        if static_part:
+            out["static"] = static_part
+        if source:
+            out["source"] = source
+        out["command"] = "fatigue"
+        # ok 语义：以"疲劳是否通过"为准（NOT_EVALUATED 时 ok=False）
+        out["ok"] = (out.get("verdict") not in ("NOT_EVALUATED", None))
+        return out
+
+    # 路径甲：用已有报告的静力应力
+    if stress_mpa is None and run_id:
+        rep = cmd_report(run_id)
+        if not rep.get("ok"):
+            return {"ok": False, "error": "找不到报告: %s" % run_id,
+                    "verdict": "NOT_EVALUATED"}
+        report = rep["report"]
+        fea = report.get("fea_result", {})
+        fat = report.get("fatigue") or fatigue_mod.analyze_fatigue_from_case(
+            report.get("load_case_summary") or {}, fea)
+        return _flatten(fat, {"max_von_mises_mpa": fea.get("max_von_mises_mpa"),
+                              "safety_factor": fea.get("safety_factor")},
+                        source="report:%s" % run_id)
+
+    if not case_path:
+        return {"ok": False, "error": "需要 case_path 或 --report <run_id>",
+                "verdict": "NOT_EVALUATED"}
+
+    lc_result = load_case.load_from_file(case_path)
+    if not lc_result["ok"]:
+        return {"ok": False, "error": "invalid load case", "details": lc_result,
+                "verdict": "NOT_EVALUATED"}
+    case = lc_result["case"]
+
+    # 未显式给应力 → 先跑一次静力求解拿到应力
+    if stress_mpa is None:
+        fea_result = fea_solver.solve_fea(case)
+        stress_mpa = (fea_result.get("max_von_mises_mpa")
+                      or fea_result.get("max_stress_mpa") or 0.0)
+        static_part = {"safety_factor": fea_result.get("safety_factor"),
+                       "max_von_mises_mpa": stress_mpa}
+        # solve_fea 已附带疲劳 → 直接复用，避免重复计算
+        if fea_result.get("fatigue"):
+            out = _flatten(fea_result["fatigue"], static_part, source="fea")
+            out["stress_used_mpa"] = float(stress_mpa)
+            return out
+
+    fat = fatigue_mod.analyze_fatigue_from_case(
+        case, {"max_von_mises_mpa": float(stress_mpa)})
+    out = _flatten(fat, {"max_von_mises_mpa": float(stress_mpa)}, source="given_stress")
+    out["stress_used_mpa"] = float(stress_mpa)
+    return out
+
+
 def cmd_demo(args=None) -> dict:
     """运行悬臂梁演示：自动生成工况 → 解析解 → 报告。"""
     lc = load_case.default_load_case("DEMO_CANTILEVER", "演示悬臂梁")
@@ -429,6 +521,14 @@ Examples:
     p.add_argument("case_path", help="载荷工况 JSON 文件路径")
     p.add_argument("--max-iter", type=int, default=5, help="最大迭代次数")
 
+    # ── 【BUG-02 修复】疲劳 / 设计寿命校核 ────────────────────────────────
+    p = sub.add_parser("fatigue", help="疲劳强度与设计寿命（默认30年）校核")
+    p.add_argument("case_path", nargs="?", default="", help="载荷工况 JSON 文件路径")
+    p.add_argument("--stress", type=float, default=None,
+                   help="已知最大 von Mises 应力 (MPa)，给定则跳过静力求解")
+    p.add_argument("--report", dest="run_id", default="",
+                   help="用已有报告的应力做校核（传 run_id）")
+
     args = parser.parse_args()
     cmd_map = {
         "demo": cmd_demo,
@@ -439,6 +539,9 @@ Examples:
         "report": lambda a: cmd_report(a.run_id),
         "recommend": lambda a: cmd_recommend(a.run_id, getattr(a, "max_iter", 3)),
         "optimize": lambda a: cmd_optimize(a.case_path, getattr(a, "max_iter", 5)),
+        "fatigue": lambda a: cmd_fatigue(getattr(a, "case_path", ""),
+                                         getattr(a, "stress", None),
+                                         getattr(a, "run_id", "")),
     }
     result = cmd_map[args.cmd](args)
     if result is not None:

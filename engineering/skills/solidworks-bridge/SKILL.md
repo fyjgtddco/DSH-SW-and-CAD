@@ -297,20 +297,126 @@ m.fillet(5, [(60, 40, 5), (-60, 40, 5)])
 m.chamfer(1, [(0, 40, 10)], angle_deg=45)
 ```
 
-### 💓 小屋心跳（代码级强制）
+### 🧭 产物归属登记（Bug-16/17 修复 · 小屋必做）
 
-每个小屋必须定期记录存活心跳，防止断联时主对话无法判断状态：
+每次 `m.save(...)` 之后，**主动登记产物归属**（取代 mode_gate 的 mtime 猜测）：
 
 ```powershell
-# 每 60 秒调用一次（放入后台循环或定时任务）
-python "<包目录>\mode_gate.py" room-heartbeat "结构件"
-
-# 检查心跳状态
-python "<包目录>\mode_gate.py" room-heartbeat-check "结构件"
-# 返回: {"alive": true/false, "age_seconds": 45}
+python "<工程模式根目录>\tools\mode_gate.py" room-artifact "结构件" "C:\...\DSH_车架底板.SLDPRT" 车架底板
 ```
 
-⚠️ 若心跳超过 180 秒未更新，主对话会判定该小屋死亡并自动重启（通过 workflow_gate.py restart）
+> 【Bug-16/17】原实现只按"最近 mtime"推断，导致一个房间刚产出的文件被同时
+> 归到 4 个房间名下。登记后 room-status 只显示本房间登记过的文件。
+
+### 💓 心跳（Bug-23 修复 · 已非必需）
+
+**小屋无需再手动跳心跳**。存活判定以 **DSH 平台状态**为权威：
+大屋在 `list_agents` 后调
+`python "<工程模式根目录>\tools\mode_gate.py" platform-sync <房间名> running`，
+mode_gate 据此判定死活（10 分钟内有效）。
+
+- `sw_bridge.py` 仍会在取锁/释放时顺手刷新心跳（兼容旧流程）；
+- `room-heartbeat` 命令保留但**不再是判定死活的前提**；
+- 旧文档"心跳超 180s 就判死并自动重启"的规则**已废除** ——
+  实测心跳会因小屋忙于建模而失真（age 涨到 1222~1777s 而平台侧仍 running）。
+
+```powershell
+# 兼容用法（可选）：
+python "<包目录>\mode_gate.py" room-heartbeat "结构件"
+# 权威做法（大屋执行）：
+python "<包目录>\mode_gate.py" platform-sync "结构件" running
+```
+
+---
+
+## 6.5 【第二轮修复】新增建模 API（Bug-34~46）
+
+> 以下 API 为第二轮回归修复新增，**优先使用它们**，可绕开已踩过的坑。
+
+### 🧩 参数化齿轮（Bug-41）—— 不要再用 polyline 逐点画齿形
+
+```python
+# ✅ 推荐：模数/齿数/齿宽 → 一次成型（渐开线齿廓，点数自适应）
+r = m.gear(module_mm=1, teeth=30, thickness_mm=8, bore_dia_mm=5,
+           plane="Top Plane")
+# r["params"] 含分度圆/齿顶圆/齿根圆/基圆直径，可直接写进图纸说明
+
+# 只想要齿廓点集（自己控制特征时）：
+prof = m.involute_gear_profile(1, 30, pressure_angle_deg=20)
+pts = prof["points"]      # 单齿轮廓，16 点（旧方案 300+ 点必失败）
+```
+
+**为什么**：实测用 polyline 逐点画 z=30 齿形（300+ 点）时 SW 判定"轮廓无效"，
+`FeatureExtrusion3` 返回 None。新 API 用解析渐开线 + 齿数自适应点数
+（16 点/齿），既精确又能被 SW 稳定识别。
+
+### 🔩 专用孔命令（Bug-42）—— 不要再用 circle+cut 赌方向
+
+```python
+# ✅ 显式指定孔轴线方向，不再依赖 SW 默认贯穿方向
+m.bore(dia_mm=10, axis="X", through=True)          # 沿 X 的贯穿孔
+m.bore(dia_mm=6, axis="Y", depth_mm=20, through=False)  # 沿 Y 的盲孔
+```
+
+**为什么**：实测 circle+cut(through=True) 的贯穿方向由 SW 决定，
+在轴承座上开 Ø10 内孔时方向偏了，去料率仅 0.7%，被误判失败。
+
+### 📐 尺寸约束（Bug-34）—— annotate 能自动出图的前提
+
+```python
+# ✅ 建模时就加尺寸约束，工程图的 InsertModelAnnotations 才有东西可插
+m.begin_sketch("Top Plane")
+m.rect(0, 0, 300, 180)
+m.add_dimension(-150, -90, 150, -90, value_mm=300)   # 总长
+m.add_dimension(150, -90, 150, 90, value_mm=180)     # 总宽
+# 或批量：
+m.add_key_dimensions([(-150,-90),(150,-90),(150,90),(-150,90)])
+m.end_sketch(); m.extrude(8)
+```
+
+**为什么**：台账回归结论——"annotate 插 0 个标注，因为本轮建模未加约束"。
+不加尺寸 → 模型无可插入的 DisplayDimension → 工程图永远没有尺寸标注。
+若确实没加，可用 `m.annotate_geometry_fallback()` 得到"建议标注清单"手工补。
+
+### 🔗 旋转特征（Bug-40）—— 显式给轴，不依赖按名选面
+
+```python
+# 多特征零件上按名选基准面会降级到实体面，导致 revolve 拿不到轴
+m.revolve_on_face(face_point=(0,0,20), axis_point=(0,0,0), axis_dir=(0,0,1))
+# 之后在草图内画轮廓，再 m.revolve(360)
+```
+
+### 🏗️ 装配摆位与验收（Bug-30/44）
+
+```python
+# 建组件（坐标可能被 SW 忽略，务必用自测验收）
+m.add_component(r"...\DSH_车架底板.SLDPRT", 113, 0, 0)
+
+# ✅ 验收标准（台账明确要求：读回坐标 == 期望才算修好）
+m.verify_component_position(comp, [113, 0, 0])   # -> {"ok": True, ...}
+
+# 一键自测（含补救）
+m.self_test_assembly_placement(r"...\DSH_车架底板.SLDPRT", (113, 0, 0))
+
+# 批量按坐标摆位（内部优先用装配体级 TransformComponent）
+m.place_components_by_coords([("DSH_车架底板-1", 113, 0, 0),
+                              ("DSH_车轮-1", 100, 75, 30)])
+```
+
+**关键**：组件对象（Component2）在 late-binding 下**只读**，
+SetTransform/MoveComponent 全不可用；正确途径是**装配体文档级**的
+`TransformComponent(组件数组, MathTransform)`（已实现为首选路径）。
+
+### 📦 零件归属自检（Bug-38）
+
+```powershell
+# 保存前校验零件是否属于本房间（越界会被拒绝保存）
+python sw_bridge.py check-part "DSH_电机座.SLDPRT" --room 结构件
+# -> {"allowed": false, "owner_room": "传动机构", ...}
+
+# 总装前核对归属与去重
+python "<工程模式根目录>\tools\workflow_gate.py" verify-ownership
+```
 
 ---
 

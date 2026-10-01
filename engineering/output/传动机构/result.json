@@ -1,0 +1,429 @@
+{
+  "J1回转轴": {
+    "geom": "Ø40 主轴段(长100, 装入底座Ø40H7) + Ø50 上法兰(厚12, 4×Ø6.5@Ø40圆周) + Ø35 下轴承段(长25)",
+    "fit": "轴Ø40k6 / 孔Ø40H7 (过渡配合, 键12×8 GB/T1096); 未注公差 GB/T 1804-m",
+    "key": "12×8 (t=5.0)",
+    "strength": {
+      "part": "DSH_J1回转轴",
+      "mat": "45#",
+      "d_danger": 40.0,
+      "di": 0.0,
+      "M_Nmm": 78000.0,
+      "T_Nmm": 5000.0,
+      "W_mm3": 6283.19,
+      "Wt_mm3": 12566.37,
+      "sigma_bend": 12.41,
+      "tau_tors": 0.4,
+      "Me_Nmm": 78057.7,
+      "sigma_A_Tresca": 12.42,
+      "sigma_B_Mises": 12.43,
+      "sigma_design": 12.43,
+      "allow_stress": 142.0,
+      "n_A": 11.43,
+      "n_B": 11.42,
+      "n_min": 11.42,
+      "two_method_diff_pct": 0.1,
+      "note": "差异源于第三/第四强度理论在扭剪状态下的理论差(纯扭时理论差约30%), 取保守的von Mises为设计值",
+      "verdict": "PASS"
+    },
+    "torsion": {
+      "theta_rad": 3.592290660074004e-05,
+      "theta_rad_B": 3.592290660074004e-05,
+      "err_pct": 0.0,
+      "torsional_stiffness_Nmm_per_rad": 139186955.4,
+      "torsional_stiffness_Nm_per_rad": 139187.0
+    },
+    "bending": {
+      "theta_rad": 9.039382690170755e-05,
+      "theta_rad_B": 9.039382690170755e-05,
+      "err_pct": 0.0
+    },
+    "fatigue": {
+      "sigma_amp_eff": 22.37,
+      "Kf": 1.8,
+      "A_allow_amp": 108.0,
+      "A_n": 4.83,
+      "A_below_fatigue_limit": true,
+      "B_sigma_f_prime": 945.0,
+      "B_b": -0.09,
+      "B_Nf_cycles": 5.78324972894583e+17,
+      "B_miner_D": 0.0,
+      "B_n": 12.07,
+      "required_cycles": 6000000,
+      "verdict": "PASS-无限寿命"
+    }
+  },
+  "J2关节轴": {
+    "geom": "阶梯轴 总长70: Ø25×20(大臂端, 配大臂孔Ø25H7) + Ø32×30(中间加粗) + Ø25×20(减速机端); 退刀槽Ø23×3; 两端C1倒角",
+    "fit": "轴Ø25k6 / 孔Ø25H7 (过渡配合, 键8×7); 轴承档Ø25k6; 未注公差 GB/T 1804-m",
+    "key": "8×7 (t=4.0)",
+    "strength": {
+      "part": "DSH_J2关节轴",
+      "mat": "40Cr",
+      "d_danger": 25.0,
+      "di": 0.0,
+      "M_Nmm": 42900.0,
+      "T_Nmm": 85800.0,
+      "W_mm3": 1533.98,
+      "Wt_mm3": 3067.96,
+      "sigma_bend": 27.97,
+      "tau_tors": 27.97,
+      "Me_Nmm": 67011.9,
+      "sigma_A_Tresca": 43.68,
+      "sigma_B_Mises": 55.93,
+      "sigma_design": 55.93,
+      "allow_stress": 314.0,
+      "n_A": 7.19,
+      "n_B": 5.61,
+      "n_min": 5.61,
+      "two_method_diff_pct": 21.9,
+      "note": "差异源于第三/第四强度理论在扭剪状态下的理论差(纯扭时理论差约30%), 取保守的von Mises为设计值",
+      "verdict": "PASS"
+    },
+    "torsion": {
+      "theta_rad": 0.0014493240855774578,
+      "theta_rad_B": 0.0014493240855774578,
+      "err_pct": 0.0,
+      "torsional_stiffness_Nmm_per_rad": 59200009.8,
+      "torsional_stiffness_Nm_per_rad": 59200.0
+    },
+    "bending": {
+      "theta_rad": 0.00016291137059533343,
+      "theta_rad_B": 0.0001629113705953334,
+      "err_pct": 0.0
+    },
+    "fatigue": {
+      "sigma_amp_eff": 100.67,
+      "Kf": 1.8,
+      "A_allow_amp": 156.8,
+      "A_n": 1.56,
+      "A_below_fatigue_limit": true,
+      "B_sigma_f_prime": 1325.0,
+      "B_b": -0.09,
+      "B_Nf_cycles": 1366534506473.8,
+      "B_miner_D": 4.39e-06,
+      "B_n": 3.89,
+      "required_cycles": 6000000,
+      "verdict": "PASS-无限寿命"
+    }
+  },
+  "J3关节轴": {
+    "geom": "阶梯轴 总长65: Ø20×20(小臂端, 配孔Ø20H7) + Ø26×25(中间加粗) + Ø20×20(减速机端); 退刀槽Ø18×3; C1",
+    "fit": "轴Ø20k6 / 孔Ø20H7 (过渡配合, 键6×6); 未注公差 GB/T 1804-m",
+    "key": "6×6 (t=3.5)",
+    "strength": {
+      "part": "DSH_J3关节轴",
+      "mat": "40Cr",
+      "d_danger": 20.0,
+      "di": 0.0,
+      "M_Nmm": 22100.0,
+      "T_Nmm": 44200.0,
+      "W_mm3": 785.4,
+      "Wt_mm3": 1570.8,
+      "sigma_bend": 28.14,
+      "tau_tors": 28.14,
+      "Me_Nmm": 34521.3,
+      "sigma_A_Tresca": 43.95,
+      "sigma_B_Mises": 56.28,
+      "sigma_design": 56.28,
+      "allow_stress": 314.0,
+      "n_A": 7.14,
+      "n_B": 5.58,
+      "n_min": 5.58,
+      "two_method_diff_pct": 21.9,
+      "note": "差异源于第三/第四强度理论在扭剪状态下的理论差(纯扭时理论差约30%), 取保守的von Mises为设计值",
+      "verdict": "PASS"
+    },
+    "torsion": {
+      "theta_rad": 0.0017365143733634194,
+      "theta_rad_B": 0.0017365143733634192,
+      "err_pct": 0.0,
+      "torsional_stiffness_Nmm_per_rad": 25453287.7,
+      "torsional_stiffness_Nm_per_rad": 25453.3
+    },
+    "bending": {
+      "theta_rad": 0.00020489267431053712,
+      "theta_rad_B": 0.0002048926743105371,
+      "err_pct": 0.0
+    },
+    "fatigue": {
+      "sigma_amp_eff": 101.3,
+      "Kf": 1.8,
+      "A_allow_amp": 156.8,
+      "A_n": 1.55,
+      "A_below_fatigue_limit": true,
+      "B_sigma_f_prime": 1325.0,
+      "B_b": -0.09,
+      "B_Nf_cycles": 1275021795788.8,
+      "B_miner_D": 4.71e-06,
+      "B_n": 3.87,
+      "required_cycles": 6000000,
+      "verdict": "PASS-无限寿命"
+    }
+  },
+  "J4腕转轴": {
+    "geom": "中空轴 总长60: Ø16×60, 中心通孔Ø8(走线); 两端C0.5; 键槽5×5",
+    "fit": "轴Ø16k6 / 孔Ø16H7 (过渡配合, 键5×5); 中心孔Ø8H8; 未注公差 GB/T 1804-m",
+    "key": "5×5 (t=3.0)",
+    "strength": {
+      "part": "DSH_J4腕转轴",
+      "mat": "40Cr",
+      "d_danger": 16.0,
+      "di": 8.0,
+      "M_Nmm": 10400.0,
+      "T_Nmm": 6500.0,
+      "W_mm3": 376.99,
+      "Wt_mm3": 753.98,
+      "sigma_bend": 27.59,
+      "tau_tors": 8.62,
+      "Me_Nmm": 11107.2,
+      "sigma_A_Tresca": 29.46,
+      "sigma_B_Mises": 31.37,
+      "sigma_design": 31.37,
+      "allow_stress": 314.0,
+      "n_A": 10.66,
+      "n_B": 10.01,
+      "n_min": 10.01,
+      "two_method_diff_pct": 6.1,
+      "note": "差异源于第三/第四强度理论在扭剪状态下的理论差(纯扭时理论差约30%), 取保守的von Mises为设计值",
+      "verdict": "PASS"
+    },
+    "torsion": {
+      "theta_rad": 0.0008184391852035758,
+      "theta_rad_B": 0.0008184391852035759,
+      "err_pct": 0.0,
+      "torsional_stiffness_Nmm_per_rad": 7941946.2,
+      "torsional_stiffness_Nm_per_rad": 7941.9
+    },
+    "bending": {
+      "theta_rad": 0.0006695839029756116,
+      "theta_rad_B": 0.0006695839029756116,
+      "err_pct": 0.0
+    },
+    "fatigue": {
+      "sigma_amp_eff": 56.47,
+      "Kf": 1.8,
+      "A_allow_amp": 156.8,
+      "A_n": 2.78,
+      "A_below_fatigue_limit": true,
+      "B_sigma_f_prime": 1325.0,
+      "B_b": -0.09,
+      "B_Nf_cycles": 843251798718760.2,
+      "B_miner_D": 1e-08,
+      "B_n": 6.94,
+      "required_cycles": 6000000,
+      "verdict": "PASS-无限寿命"
+    }
+  },
+  "J5腕摆轴": {
+    "geom": "阶梯轴 总长45: Ø16×45 主体 + Ø20×8 头部限位台肩; C1",
+    "fit": "轴Ø16k6 / 孔Ø16H7 (过渡配合, 键5×5); 未注公差 GB/T 1804-m",
+    "key": "5×5 (t=3.0)",
+    "strength": {
+      "part": "DSH_J5腕摆轴",
+      "mat": "40Cr",
+      "d_danger": 16.0,
+      "di": 0.0,
+      "M_Nmm": 5200.0,
+      "T_Nmm": 3900.0,
+      "W_mm3": 402.12,
+      "Wt_mm3": 804.25,
+      "sigma_bend": 12.93,
+      "tau_tors": 4.85,
+      "Me_Nmm": 5702.2,
+      "sigma_A_Tresca": 14.18,
+      "sigma_B_Mises": 15.42,
+      "sigma_design": 15.42,
+      "allow_stress": 314.0,
+      "n_A": 22.14,
+      "n_B": 20.36,
+      "n_min": 20.36,
+      "two_method_diff_pct": 8.0,
+      "note": "差异源于第三/第四强度理论在扭剪状态下的理论差(纯扭时理论差约30%), 取保守的von Mises为设计值",
+      "verdict": "PASS"
+    },
+    "torsion": {
+      "theta_rad": 0.00030903854413694414,
+      "theta_rad_B": 0.0003090385441369442,
+      "err_pct": 0.0,
+      "torsional_stiffness_Nmm_per_rad": 12619785.1,
+      "torsional_stiffness_Nm_per_rad": 12619.8
+    },
+    "bending": {
+      "theta_rad": 0.00023540059088986338,
+      "theta_rad_B": 0.00023540059088986338,
+      "err_pct": 0.0
+    },
+    "fatigue": {
+      "sigma_amp_eff": 27.76,
+      "Kf": 1.8,
+      "A_allow_amp": 156.8,
+      "A_n": 5.65,
+      "A_below_fatigue_limit": true,
+      "B_sigma_f_prime": 1325.0,
+      "B_b": -0.09,
+      "B_Nf_cycles": 2.2540258228907553e+18,
+      "B_miner_D": 0.0,
+      "B_n": 14.12,
+      "required_cycles": 6000000,
+      "verdict": "PASS-无限寿命"
+    }
+  },
+  "J6腕法兰": {
+    "geom": "Ø63×10 圆盘; 中心Ø12H7 通孔; 4×Ø5.5 均布于Ø45圆周; 背面Ø30×6 定位凸台; 外缘C0.5",
+    "fit": "中心孔Ø12H7 / 夹爪接口轴Ø12g6 (间隙配合); 安装孔Ø5.5H8; 未注公差 GB/T 1804-m",
+    "key": "无键槽(靠4×M5法兰螺栓+Ø12止口传递扭矩)",
+    "strength": {
+      "part": "DSH_J6腕法兰",
+      "mat": "6061-T6",
+      "M_Nmm": 4095.0,
+      "T_Nmm": 3250.0,
+      "b_net_mm": 175.9,
+      "W_mm3": 2932.01,
+      "sigma_A_netsection": 1.397,
+      "sigma_B_radialFEM": 2.583,
+      "sigma_design": 2.583,
+      "allow_stress": 110.4,
+      "n_min": 42.7,
+      "two_method_diff_pct": 45.9,
+      "bolt_M5_perbolt_max_N": 45.5,
+      "bolt_M5_allow_N": 1363.2,
+      "bolt_n": 30.0,
+      "bolt_shear_per_N": 32.5,
+      "verdict": "PASS"
+    },
+    "torsion": {
+      "theta_rad": 8.082541083769348e-07,
+      "theta_rad_B": 8.082541083769348e-07,
+      "err_pct": 0.0,
+      "torsional_stiffness_Nmm_per_rad": 4021012657.2,
+      "torsional_stiffness_Nm_per_rad": 4021012.7
+    },
+    "bending": {
+      "theta_rad": 7.686039068339153e-07,
+      "theta_rad_B": 7.686039068339154e-07,
+      "err_pct": 0.0
+    },
+    "fatigue": {
+      "sigma_amp_eff": 4.65,
+      "Kf": 1.8,
+      "A_allow_amp": 38.4,
+      "A_n": 8.26,
+      "A_below_fatigue_limit": true,
+      "B_sigma_f_prime": 655.0,
+      "B_b": -0.09,
+      "B_Nf_cycles": 3.7540460206388796e+23,
+      "B_miner_D": 0.0,
+      "B_n": 20.65,
+      "required_cycles": 6000000,
+      "verdict": "PASS-无限寿命"
+    }
+  },
+  "J2轴承座": {
+    "geom": "80×80×25 方块座; 座孔Ø52H7(装6205, 深15); 4×Ø6.5 安装孔@Ø64; 4×R6 圆角; 座孔口C1",
+    "fit": "座孔Ø52H7 / 6205外圈(外圈g6游动); 轴颈Ø25k6 / 6205内圈; 未注公差 GB/T 1804-m",
+    "key": "无(轴承座)",
+    "bearing": {
+      "part": "6205 深沟球轴承 (d25/D52/B15, C=14.0kN)",
+      "C_N": 14000.0,
+      "Fr_N": 1200.0,
+      "Fa_N": 240.0,
+      "Fa_Fr_ratio": 0.2,
+      "e": 0.22,
+      "X": 1.0,
+      "Y": 0.0,
+      "P_N": 1200.0,
+      "rpm": 25.0,
+      "L10_rev": 3601548758.907416,
+      "L10_h": 2401032.5,
+      "L10_h_check_B": 2401032.5,
+      "required_h_30y": 36000,
+      "margin_times": 66.7,
+      "cycles_revs_needed": 3000000.0,
+      "margin_cycles": 1200.5,
+      "verdict": "PASS"
+    },
+    "housing": {
+      "part": "DSH_J2轴承座",
+      "mat": "6061-T6",
+      "wall_bearing_pressure_MPa": 8.0,
+      "wall_allow_MPa": 110.4,
+      "wall_n": 13.8,
+      "bolt_M6_allow_N": 1929.6,
+      "bolt_M6_load_N": 122.1
+    },
+    "fatigue": {
+      "sigma_amp_eff": 14.4,
+      "Kf": 1.8,
+      "A_allow_amp": 38.4,
+      "A_n": 2.67,
+      "A_below_fatigue_limit": true,
+      "B_sigma_f_prime": 655.0,
+      "B_b": -0.09,
+      "B_Nf_cycles": 1.3177883008836552e+18,
+      "B_miner_D": 0.0,
+      "B_n": 6.67,
+      "required_cycles": 6000000,
+      "verdict": "PASS-无限寿命"
+    }
+  },
+  "_误差链RSS": {
+    "per_joint": {
+      "J1回转轴": {
+        "theta_tors_rad": 3.592e-05,
+        "theta_bend_rad": 9.039e-05,
+        "arm_mm": 600.0,
+        "tip_tors_mm": 0.0216,
+        "tip_bend_mm": 0.0542,
+        "tip_total_mm": 0.0584
+      },
+      "J2关节轴": {
+        "theta_tors_rad": 0.00144932,
+        "theta_bend_rad": 0.00016291,
+        "arm_mm": 660.0,
+        "tip_tors_mm": 0.9566,
+        "tip_bend_mm": 0.1075,
+        "tip_total_mm": 0.9626
+      },
+      "J3关节轴": {
+        "theta_tors_rad": 0.00173651,
+        "theta_bend_rad": 0.00020489,
+        "arm_mm": 340.0,
+        "tip_tors_mm": 0.5904,
+        "tip_bend_mm": 0.0697,
+        "tip_total_mm": 0.5945
+      },
+      "J4腕转轴": {
+        "theta_tors_rad": 0.00081844,
+        "theta_bend_rad": 0.00066958,
+        "arm_mm": 80.0,
+        "tip_tors_mm": 0.0655,
+        "tip_bend_mm": 0.0536,
+        "tip_total_mm": 0.0846
+      },
+      "J5腕摆轴": {
+        "theta_tors_rad": 0.00030904,
+        "theta_bend_rad": 0.0002354,
+        "arm_mm": 40.0,
+        "tip_tors_mm": 0.0124,
+        "tip_bend_mm": 0.0094,
+        "tip_total_mm": 0.0155
+      },
+      "J6腕法兰": {
+        "theta_tors_rad": 8.1e-07,
+        "theta_bend_rad": 7.7e-07,
+        "arm_mm": 31.5,
+        "tip_tors_mm": 0.0,
+        "tip_bend_mm": 0.0,
+        "tip_total_mm": 0.0
+      }
+    },
+    "rss_mm": 1.1362,
+    "budget_mm": 0.1,
+    "verdict": "FAIL 轴系自身贡献超出±0.1mm预算, 需系统级补偿"
+  },
+  "_交叉验证": {
+    "warnings": "刚度两法完全一致(误差<1e-4%)",
+    "note": "强度两法差异见各零件 two_method_diff_pct 字段说明"
+  }
+}

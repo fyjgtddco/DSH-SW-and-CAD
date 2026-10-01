@@ -48,13 +48,34 @@ TI_ALLOYS = {
 }
 
 # ── 工程塑料 ────────────────────────────────────────────
+# 【Bug-13/29 修复】补齐 3D 打印常用材料（PETG/PLA/PA12/TPU…）。
+# 原缺陷：本表只有 PC / Nylon 6-6 / ABS —— 与 swapi.COMMON_MATERIALS 同样
+#   缺失 PETG/PLA/PA12，导致"3D打印"任务在 physics 侧也拿不到正确材料属性。
+# 属性取自公开供应商技术数据（Prusament / Bambu / SLS 粉末规格），
+# 实际设计请以所用耗材的技术数据书为准。
 PLASTICS = {
     "PC_POLYCARBONATE": {"name": "Polycarbonate (PC)",
                          "E_mpa": 2400, "nu": 0.37, "yield_mpa": 65, "uts_mpa": 70, "density_kg_m3": 1200},
+    "PC": {"name": "Polycarbonate (PC)",
+           "E_mpa": 2400, "nu": 0.37, "yield_mpa": 65, "uts_mpa": 70, "density_kg_m3": 1200},
     "NYLON_6_6": {"name": "Nylon 6/6 (dry)",
                   "E_mpa": 2800, "nu": 0.39, "yield_mpa": 80, "uts_mpa": 85, "density_kg_m3": 1140},
+    "NYLON_PA12": {"name": "Nylon PA12 (SLS/MJF)",
+                   "E_mpa": 1700, "nu": 0.39, "yield_mpa": 48, "uts_mpa": 50, "density_kg_m3": 1010},
+    "PA12": {"name": "Nylon PA12 (SLS/MJF)",
+             "E_mpa": 1700, "nu": 0.39, "yield_mpa": 48, "uts_mpa": 50, "density_kg_m3": 1010},
     "ABS": {"name": "ABS Plastic",
             "E_mpa": 2400, "nu": 0.40, "yield_mpa": 45, "uts_mpa": 50, "density_kg_m3": 1050},
+    "PETG": {"name": "PETG",
+             "E_mpa": 2000, "nu": 0.37, "yield_mpa": 40, "uts_mpa": 50, "density_kg_m3": 1270},
+    "PLA": {"name": "PLA",
+            "E_mpa": 3500, "nu": 0.36, "yield_mpa": 55, "uts_mpa": 60, "density_kg_m3": 1240},
+    "TPU": {"name": "TPU (flexible)",
+            "E_mpa": 50, "nu": 0.48, "yield_mpa": 30, "uts_mpa": 40, "density_kg_m3": 1210},
+    "POM": {"name": "POM (Delrin)",
+            "E_mpa": 3100, "nu": 0.35, "yield_mpa": 70, "uts_mpa": 75, "density_kg_m3": 1410},
+    "PEEK": {"name": "PEEK",
+             "E_mpa": 3700, "nu": 0.38, "yield_mpa": 100, "uts_mpa": 110, "density_kg_m3": 1320},
 }
 
 # ── 合并字典 ────────────────────────────────────────────

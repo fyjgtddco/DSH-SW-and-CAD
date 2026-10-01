@@ -37,15 +37,37 @@ def build_report(
     mat = load_case.get("material", {})
     acc = load_case.get("acceptance", {})
 
+    # ── 【NEW-01 修复】acceptance_criteria 必须【完整透传】全部验收参数 ────
+    # 原缺陷：只透传 SF 上下限 / 位移 / 分析类型 5 个字段，把 30 年寿命、
+    #   年循环次数、负载类型、冲击系数、可靠度、表面加工等【疲劳相关参数
+    #   全部丢掉】。后果：报告顶层 acceptance_criteria 看不到 30 年寿命，
+    #   下游工具（refine_rules / 第三方消费方）无从得知判据 ——
+    #   虽然 fatigue 子模块自己去读 load_case 算对了，但"判据"与"结论"
+    #   分处两地，审计与复现都困难。
+    # 修复：以 load_case.acceptance 为基准【整表透传】，再补默认值兜底。
+    _acc_out = dict(acc) if isinstance(acc, dict) else {}
+    _acc_out.setdefault("min_safety_factor", 2.0)
+    _acc_out.setdefault("max_safety_factor", _acc_out.get("target_safety_factor_max", 5.0))
+    _acc_out.setdefault("max_displacement_mm", None)
+    _acc_out.setdefault("analysis_type", "linear_static")
+
     # 综合判定
     overall = fea_result.get("overall", "UNKNOWN")
     if geometry_check.get("status") == "FAIL":
         overall = "FAIL"
     elif geometry_check.get("status") == "WARNING" and overall != "FAIL":
         overall = "REVIEW"
+    # ── 【BUG-02 修复】疲劳/寿命结论必须参与整体判定 ─────────────────────
+    # 原实现完全不看疲劳，导致"静力过了但 30 年寿命不够"的零件被误判为 PASS。
+    _fat = fea_result.get("fatigue") or {}
+    _fat_verdict = _fat.get("verdict")
+    if _fat_verdict == "FAIL":
+        overall = "FAIL"
+    elif _fat_verdict in ("REVIEW", "NOT_EVALUATED") and overall == "PASS":
+        overall = "REVIEW"
 
     report = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "run_id": run_id,
         "iteration": iteration,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -57,6 +79,9 @@ def build_report(
             "material": mat.get("name", "?"),
             "yield_strength_mpa": mat.get("yield_strength_mpa", 0),
             "E_mpa": mat.get("youngs_modulus_mpa", 0),
+            # ── 【BUG-05/08 修复】material 缺失时必须显式报错，而不是显示 '?' ──
+            "material_resolved": bool(mat.get("name") or mat.get("id")),
+            "density_kg_m3": mat.get("density_kg_m3", 0),
         },
 
         "design_params": design_params,
@@ -65,12 +90,10 @@ def build_report(
 
         "fea_result": fea_result,
 
-        "acceptance_criteria": {
-            "min_safety_factor": acc.get("min_safety_factor", 2.0),
-            "max_safety_factor": acc.get("target_safety_factor_max", 5.0),
-            "max_displacement_mm": acc.get("max_displacement_mm"),
-            "analysis_type": acc.get("analysis_type", "linear_static"),
-        },
+        # ── 【BUG-02 修复】疲劳/设计寿命独立成块，便于直接读取结论 ─────────
+        "fatigue": _fat,
+
+        "acceptance_criteria": _acc_out,
 
         "overall_status": overall,
         "passed_gates": _extract_passed(geometry_check, fea_result),
@@ -81,8 +104,23 @@ def build_report(
             "status": _release_status(overall, fea_result, acc),
             "human_review_required": overall != "PASS",
             "limitations": fea_result.get("limitations", []),
+            # 【BUG-02】交付前必须明确"寿命是否已验证"
+            "fatigue_verified": _fat_verdict in ("PASS", "FAIL", "REVIEW"),
+            "fatigue_verdict": _fat_verdict,
         },
     }
+    # ── 【BUG-05 修复】材料未赋/密度虚标（1000=水）必须作为显式告警 ───────
+    warnings = []
+    if not report["load_case_summary"]["material_resolved"]:
+        warnings.append("材料未解析（material 字段为空）—— 强度/寿命/质量结论均不可信")
+    _rho = mat.get("density_kg_m3") or 0
+    if _rho and abs(_rho - 1000.0) < 1.0:
+        warnings.append("材料密度为 1000 kg/m³（等同水）—— 极可能是 SolidWorks "
+                        "未赋材质导致的默认值，质量属性与强度校核全部失真")
+    if _fat_verdict == "NOT_EVALUATED":
+        warnings.append("疲劳/寿命校核未执行：%s" % _fat.get("error", "未知原因"))
+    if warnings:
+        report["warnings"] = warnings
     return report
 
 
@@ -166,11 +204,37 @@ def report_to_markdown(report: dict) -> str:
         f"- Max Displacement: {report['fea_result'].get('max_displacement_mm', 'N/A')} mm",
         f"- Volume: {report['fea_result'].get('volume_mm3', 'N/A')} mm³",
         f"- Mass: {report['fea_result'].get('mass_kg', 'N/A')} kg",
+    ]
+    # ── 【BUG-02 修复】Markdown 摘要必须包含疲劳/寿命结论 ─────────────────
+    _fat = report.get("fatigue") or (report.get("fea_result") or {}).get("fatigue") or {}
+    if _fat:
+        lines += [
+            "",
+            "## Fatigue / Design Life",
+            f"- Verdict: **{_fat.get('verdict', 'N/A')}**",
+            f"- Endurance Limit Se: {_fat.get('endurance_limit_mpa', 'N/A')} MPa",
+            f"- Fatigue Safety Factor: {_fat.get('fatigue_sf', 'N/A')}"
+            f" (min {_fat.get('min_required_fatigue_sf', 'N/A')})",
+            f"- Design Life: {_fat.get('design_life_years', 'N/A')} years"
+            f" @ {_fat.get('cycles_per_year', 'N/A')} cycles/yr",
+            f"- Miner Damage @ Design Life: {_fat.get('damage_design_life', 'N/A')} (< 1 通过)",
+            f"- Allowable Life: {_fat.get('life_years_allowable', 'N/A')} years",
+        ]
+        if _fat.get("reason"):
+            lines.append(f"- Reason: {_fat['reason']}")
+        if _fat.get("verdict") == "NOT_EVALUATED":
+            lines.append(f"- ⚠️ 未评估原因: {_fat.get('error', '未知')}")
+    lines += [
         "",
         "## Release Readiness",
         f"- Status: {report['release_readiness']['status']}",
         f"- Human Review Required: {report['release_readiness']['human_review_required']}",
+        f"- Fatigue Verified: {report['release_readiness'].get('fatigue_verified')}",
     ]
+    if report.get("warnings"):
+        lines.append("\n### Warnings")
+        for w in report["warnings"]:
+            lines.append(f"- ⚠️ {w}")
     if report["failed_gates"]:
         lines.append("\n### Failed Gates")
         for g in report["failed_gates"]:
