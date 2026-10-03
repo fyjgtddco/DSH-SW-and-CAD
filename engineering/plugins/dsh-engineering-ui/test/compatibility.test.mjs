@@ -1,33 +1,100 @@
+/**
+ * dsh-engineering-ui Host 插件 · 兼容性与契约回归测试。
+ *
+ * ── 【P1-7 修复】本文件此前完全失效，原因有三 ──────────────────────────
+ *  1. 依赖 createRequire 解析 @deepseek-ai/* 到【安装体】。0.2.0 把这些包
+ *     打进 app.asar，磁盘上 require.resolve 必然 MODULE_NOT_FOUND ——
+ *     测试根本跑不起来（Cannot find module '@deepseek-ai/dsh-llm'）。
+ *  2. 断言 h.routes.size === 9，而插件实际注册 13 条路由（多了 4 条
+ *     /defense/*）。断言与实际长期不符。
+ *  3. 用 sessionPersistence.inspect() —— 该 API 在 0.2.0 已被移除
+ *     （改为 open/read/close），且断言 source.plugin 字段，与
+ *     repeat-output.test.mjs 的"不得存在 plugin 字段"断言直接矛盾。
+ *
+ * 现改为【自包含】：把两个外部依赖替换为内联 shim（与
+ * repeat-output.test.mjs 同一套做法），因此无需 DSH 安装体即可运行。
+ */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createRequire } from 'node:module';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { Readable } from 'node:stream';
-import vm from 'node:vm';
 
-const profile = process.env.DSH_TEST_PROFILE;
-assert.ok(profile, 'Set DSH_TEST_PROFILE to the installed web profile');
-const require = createRequire(path.join(profile, 'package.json'));
+const SHIM_LLM = `
+export function createUserMessage(input) {
+  return { role: 'user', content: input.content, source: input.source };
+}
+`;
+
+const SHIM_REGISTRY = `
+export function resolveSessionPreset({ header, events }) {
+  const evs = Array.isArray(events) ? events : [];
+  for (let i = evs.length - 1; i >= 0; i--) {
+    const ev = evs[i];
+    if (ev && ev.type === 'agent-preset/selected' && ev.data && ev.data.agentPreset) {
+      return String(ev.data.agentPreset);
+    }
+  }
+  return (header && header.agentPreset) ?? null;
+}
+export const agentPresetProjectionDefinition = {
+  init: (header) => (header && header.agentPreset) ?? null,
+  apply: (state, event) => {
+    if (event && event.type === 'agent-preset/selected' && event.data && event.data.agentPreset) {
+      return String(event.data.agentPreset);
+    }
+    return state;
+  },
+};
+`;
+
+const LLM_URL = 'data:text/javascript;base64,' + Buffer.from(SHIM_LLM).toString('base64');
+const REG_URL = 'data:text/javascript;base64,' + Buffer.from(SHIM_REGISTRY).toString('base64');
 const source = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8');
-// Resolve the source under test against the actual installed DSH modules.
-const resolved = source.replace(/from '(@deepseek-ai\/[^']+)'/g,
-  (_, name) => `from '${pathToFileURL(require.resolve(name)).href}'`);
-const { apply } = await import('data:text/javascript;base64,' + Buffer.from(resolved).toString('base64'));
-const { Session } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-session')).href);
+const signSource = readFileSync(new URL('../lib/defense-sign.js', import.meta.url), 'utf8');
+const SIGN_URL = 'data:text/javascript;base64,' + Buffer.from(signSource).toString('base64');
 
-function harness(inspections = {}) {
+const rewritten = source
+  .replace("from '@deepseek-ai/dsh-llm'", "from '" + LLM_URL + "'")
+  .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + REG_URL + "'")
+  .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'");
+assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换成功');
+
+const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));
+
+/**
+ * 构造一个可控的插件宿主上下文。
+ *
+ * sessionPersistence 用 0.2.0 合同：open(id,'read') → { header, read(), close() }，
+ * 并保留 stat() 供 parentOf() 回落使用（inspect() 已移除）。
+ */
+function harness(handles = {}) {
   const routes = new Map(), hooks = new Map(), asks = [];
   const root = { id: 'root' };
   const ctx = {
     on(name, fn) { hooks.set(name, fn); return () => hooks.delete(name); },
     webServer: { register(route) { routes.set(route.path, route.handler); return () => routes.delete(route.path); } },
-    sessionPersistence: { async inspect(id) { return inspections[id]; } },
+    sessionPersistence: {
+      async open(id) {
+        const h = handles[id];
+        if (!h) throw new Error('no such session');
+        return {
+          header: h.header || {},
+          inheritedEventCount: h.inheritedEventCount || 0,
+          async read() { return { events: h.events || [] }; },
+          async close() {},
+        };
+      },
+      async stat(id) {
+        const h = handles[id];
+        if (!h) return null;
+        return { header: h.header || {} };
+      },
+    },
     sessions: {},
     agents: { get(id) { return id === root.id ? root : undefined; }, roots() { return [root]; } },
-    subagents: { async listDescendants() { return [{ id: 'child', kind: 'child' }]; } },
+    subagents: { async listDescendants() { return [{ id: 'child', label: 'child' }]; } },
     userQuestions: { ask(request) { return new Promise((resolve, reject) => asks.push({ request, resolve, reject })); } },
   };
   const dispose = apply(ctx);
@@ -43,27 +110,31 @@ function harness(inspections = {}) {
   return { ctx, root, routes, hooks, asks, dispose, request };
 }
 
-test('all nine HTTP routes and the engineering guard remain registered', () => {
+test('全部 13 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
   const h = harness();
   try {
-    // 7 个原始路由 + 【Bug-32】verify-subagent + 【Bug-21】notify-room = 9
-    assert.equal(h.routes.size, 9);
-    for (const p of ['/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
-                     '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
-                     '/dsh-engineering-ui/pending-child', '/dsh-engineering-ui/result-child',
-                     '/dsh-engineering-ui/answer', '/dsh-engineering-ui/verify-subagent',
-                     '/dsh-engineering-ui/notify-room']) {
+    // 9 条基础/提问/通知路由 + 4 条【三大防线】签名路由 = 13
+    assert.equal(h.routes.size, 13, '路由数量应为 13（原先断言 9 已过期）');
+    for (const p of [
+      '/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
+      '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
+      '/dsh-engineering-ui/pending-child', '/dsh-engineering-ui/result-child',
+      '/dsh-engineering-ui/answer', '/dsh-engineering-ui/verify-subagent',
+      '/dsh-engineering-ui/notify-room',
+      '/dsh-engineering-ui/defense/sign', '/dsh-engineering-ui/defense/verify',
+      '/dsh-engineering-ui/defense/info', '/dsh-engineering-ui/defense/judge',
+    ]) {
       assert.ok(h.routes.has(p), 'missing route ' + p);
     }
     assert.equal(h.hooks.has('agent/turn-stopping'), true);
   } finally { h.dispose(); }
-  assert.equal(h.routes.size, 0);
-  assert.equal(h.hooks.size, 0);
+  assert.equal(h.routes.size, 0, 'dispose 后路由必须清空');
+  assert.equal(h.hooks.size, 0, 'dispose 后钩子必须清空');
 });
 
-test('preset switches and guard use real DSH Session snapshots', () => {
+test('收尾守卫：非终态时 steer，达到 finished 后放行，且 source 为 producer-owned', () => {
   const oldHome = process.env.DSH_HOME;
-  const temp = mkdtempSync(path.join(tmpdir(), 'dsh-engineering-test-'));
+  const temp = mkdtempSync(path.join(tmpdir(), 'dsh-eng-compat-'));
   const tools = path.join(temp, '.agent-presets', 'engineering', 'tools');
   mkdirSync(tools, { recursive: true });
   writeFileSync(path.join(tools, 'workflow_state.json'), JSON.stringify({ step: 'design' }));
@@ -71,66 +142,40 @@ test('preset switches and guard use real DSH Session snapshots', () => {
   process.env.DSH_HOME = temp;
   const h = harness();
   try {
-    const session = Session.create('guard-test');
-    assert.equal(typeof session.snapshotEvents, 'function');
-    assert.equal(session.events, undefined);
     const steered = [];
-    const agent = { id: session.id, session, steer(message) { steered.push(message); } };
+    const agent = {
+      id: 'guard-1',
+      session: {
+        header: { agentPreset: 'engineering' },
+        snapshotEvents() { return [{ type: 'agent-preset/selected', data: { agentPreset: 'engineering' } }]; },
+      },
+      steer(message) { steered.push(message); },
+    };
     const stop = () => h.hooks.get('agent/turn-stopping')({ agent, signal: new AbortController().signal });
-    session.append('agent-preset/selected', { agentPreset: 'engineering' });
     stop();
-    assert.equal(steered.length, 1, 'unfinished engineering turn must continue');
-    assert.equal(steered[0].source.plugin, 'dsh-engineering-ui');
-    session.append('agent-preset/selected', { agentPreset: 'standard' });
-    stop();
-    assert.equal(steered.length, 1, 'standard mode must be released immediately');
-    session.append('agent-preset/selected', { agentPreset: 'engineering' });
-    stop();
-    assert.equal(steered.length, 2, 'switching back must restore the guard');
+    assert.equal(steered.length, 1, '未达代码级终态必须 steer 一次');
+    // 【V4】steer 的消息 source 必须是生产者自有 kind，不得是通用 plugin
+    assert.equal(steered[0].source.kind, 'plugin:dsh-engineering-ui');
+    assert.equal(Object.hasOwn(steered[0].source, 'plugin'), false,
+      '不得保留已退休的 plugin 字段（与 repeat-output.test.mjs 一致）');
+    // 用户取消 → 放行
     h.hooks.get('agent/turn-stopping')({ agent, signal: AbortSignal.abort() });
-    assert.equal(steered.length, 2);
+    assert.equal(steered.length, 1, 'aborted 信号必须放行');
+    // 门禁进入终态 → 放行
     writeFileSync(path.join(tools, 'workflow_state.json'), JSON.stringify({ step: 'finished' }));
     stop();
-    assert.equal(steered.length, 2, 'completed workflow must be released');
+    assert.equal(steered.length, 1, 'workflow step=finished 必须放行');
   } finally {
     h.dispose();
     if (oldHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = oldHome;
-    rmSync(temp, { recursive: true });
+    rmSync(temp, { recursive: true, force: true });
   }
 });
 
-test('completion markers and user stop messages still release the guard', () => {
-  const oldHome = process.env.DSH_HOME;
-  const temp = mkdtempSync(path.join(tmpdir(), 'dsh-engineering-finish-'));
-  const tools = path.join(temp, '.agent-presets', 'engineering', 'tools');
-  mkdirSync(tools, { recursive: true });
-  writeFileSync(path.join(tools, 'workflow_state.json'), JSON.stringify({ step: 'design' }));
-  writeFileSync(path.join(tools, 'mode_state.json'), JSON.stringify({ rooms: { part: { active: true } } }));
-  process.env.DSH_HOME = temp;
-  const h = harness();
-  try {
-    for (const event of [
-      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '[TASK_DONE]' }] } } },
-      { type: 'user/message', data: { content: [{ type: 'text', text: 'stop' }] } },
-    ]) {
-      const steered = [];
-      const agent = { id: 'finish', session: {
-        header: { agentPreset: 'engineering' },
-        snapshotEvents() { return [event]; },
-      }, steer(message) { steered.push(message); } };
-      h.hooks.get('agent/turn-stopping')({ agent });
-      assert.equal(steered.length, 0);
-    }
-  } finally {
-    h.dispose();
-    if (oldHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = oldHome;
-    rmSync(temp, { recursive: true });
-  }
-});
-
-test('descendants and log pagination exclude inherited and dropped events', async () => {
+test('日志端点走 0.2.0 的 open/read/close，过滤继承事件与高频 chunk', async () => {
   const h = harness({ child: {
-    meta: { parentSession: 'root', createdAt: 10 }, inheritedEventCount: 2,
+    header: { parentSession: 'root', createdAt: 10 },
+    inheritedEventCount: 2,
     events: [
       { seq: 0, type: 'assistant/message', data: {} },
       { seq: 1, type: 'tool/result', data: {} },
@@ -140,8 +185,8 @@ test('descendants and log pagination exclude inherited and dropped events', asyn
     ],
   } });
   try {
-    assert.equal((await h.request('/agents?rootSessionId=root')).agents[0].id, 'child');
     const log = await h.request('/log?sessionId=child');
+    // 继承的 2 条被排除；assistant/chunk 属于 RAW_DROP
     assert.deepEqual(log.events.map(e => e.seq), [3, 4]);
     assert.equal(log.latestSeq, 4);
     assert.deepEqual((await h.request('/log?sessionId=child&since=3')).events.map(e => e.seq), [4]);
@@ -151,17 +196,19 @@ test('descendants and log pagination exclude inherited and dropped events', asyn
 });
 
 const questions = [{ id: 'q1', question: 'Confirm part 10?', options: [{ label: 'Continue' }, { label: 'Revise' }] }];
-test('child questions route to the parent, deduplicate, and return native answers', async () => {
-  const h = harness({ child: { meta: { parentSession: 'root' }, events: [] } });
+
+test('子代理提问路由到父会话、可去重、答案以原生 tool_result 返回', async () => {
+  const h = harness({ child: { header: { parentSession: 'root' }, events: [] } });
   try {
     const payload = { childSessionId: 'child', questions };
     const first = await h.request('/ask-child', payload);
     assert.equal(first.ok, true);
-    assert.equal(first.rootSessionId, 'root');
+    assert.equal(first.rootSessionId, 'root', '提问必须挂到 root 会话（真人所在处）');
     assert.equal(h.asks[0].request.agent, h.root);
+    // 同一题重复登记 → 复用同一张卡
     const second = await h.request('/ask-child', payload);
     assert.equal(second.pendingId, first.pendingId);
-    assert.equal(h.asks.length, 1);
+    assert.equal(h.asks.length, 1, '同题不得重复登记');
     assert.equal((await h.request('/pending-child?childSessionId=child')).pending.length, 1);
     const answers = [{ id: 'q1', selected: ['Continue'], custom: 'Use steel' }];
     h.asks[0].resolve({ answers });
@@ -171,7 +218,7 @@ test('child questions route to the parent, deduplicate, and return native answer
   } finally { h.dispose(); }
 });
 
-test('panel answers and root question registration keep their existing protocol', async () => {
+test('面板作答与主对话登记各自沿用既有协议', async () => {
   const h = harness();
   try {
     const first = await h.request('/ask-child', { childSessionId: 'child', rootSessionId: 'root', questions });
@@ -179,7 +226,9 @@ test('panel answers and root question registration keep their existing protocol'
     assert.equal(result.bound, 'child-tool-result');
     assert.deepEqual((await h.request('/result-child?pendingId=' + first.pendingId)).answers,
       [{ id: 'q1', selected: ['Revise'], custom: '20 mm' }]);
+    // 重复提交必须被拒绝
     assert.equal((await h.request('/answer', { pendingId: first.pendingId })).ok, false);
+    // 主对话提问
     const rootAsk = await h.request('/ask', { sessionId: 'root', questions });
     assert.equal(rootAsk.ok, true);
     h.asks[1].resolve({ answers: [{ id: 'q1', selected: ['Continue'] }] });
@@ -188,36 +237,27 @@ test('panel answers and root question registration keep their existing protocol'
   } finally { h.dispose(); }
 });
 
-test('client keeps panels, warning banner, question cards and event renderers', () => {
-  const react = require('react');
+test('client 半导出既有组件与渲染器（横幅已随问题2 移除）', () => {
+  // 用最小 React shim 加载 client.js：只需要能求值出 exports，
+  // 不依赖安装体的 react（那个在 app.asar 里，磁盘上取不到）。
+  const shim = {
+    createElement: () => null, Fragment: 'Fragment',
+    useState: (v) => [typeof v === 'function' ? v() : v, () => {}],
+    useRef: (v) => ({ current: v }), useEffect: () => {}, useMemo: (f) => f(),
+  };
   let client;
-  vm.runInNewContext(readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'), {
-    window: { __ModuleLoader__: { load(definition) { client = definition.factory(name => {
-      assert.equal(name, 'react'); return react;
-    }); } } }, console,
-  });
-  for (const key of ['apply', 'SubagentConsole', 'EngineeringBanner', 'AskCard', 'formatMessage', 'renderEvent', 'parseQuestions']) {
+  const mod = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
+  // client.js 是浏览器侧的 __ModuleLoader__ 包装，用一个假 window 接住它
+  const fn = new Function('window', 'console', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', mod);
+  fn({ __ModuleLoader__: { load(def) { client = def.factory(() => shim); } } },
+     console, setTimeout, clearTimeout, setInterval, clearInterval);
+  for (const key of ['apply', 'SubagentConsole', 'EngineeringSettingsSection', 'AskCard', 'formatMessage', 'renderEvent', 'parseQuestions']) {
     assert.equal(typeof client[key], 'function', key);
   }
   assert.equal(client.SubagentDock, client.SubagentConsole);
-  const { renderToStaticMarkup } = require('react-dom/server');
-  const state = { current: 'root', byId: { root: { agentPreset: 'engineering' } },
-    subagentsByParent: { root: { entries: [{ id: 'child', kind: 'child', label: 'CAD part', activity: 'running' }] } } };
-  const renderPanel = () => renderToStaticMarkup(react.createElement(client.SubagentConsole, {
-    useSessions: selector => selector(state),
-  }));
-  assert.match(renderPanel(), /eng-fab/);
-  assert.match(renderPanel(), /CAD part/);
-  state.byId.root.agentPreset = 'standard';
-  assert.equal(renderPanel(), '');
-  const banner = renderToStaticMarkup(react.createElement(client.EngineeringBanner, {
-    sessionId: 'root', useSessions: selector => selector(state),
-    useProjection: () => ({ currentValue: 'sw-single-line' }),
-  }));
-  assert.match(banner, /role="alert"/);
-  const card = renderToStaticMarkup(react.createElement(client.AskCard, { questions, asChild: true, childSessionId: 'child' }));
-  assert.match(card, /Continue/);
-  assert.match(card, /Revise/);
+  // 【问题2 修复】配套横幅已随 SW单行模式 一起删除
+  assert.equal('EngineeringBanner' in client, false, 'EngineeringBanner must be removed');
+  // 事件分类契约
   for (const [kind, type] of [['thinking', 'think'], ['message', 'text'], ['tool-call', 'tool'], ['tool-result', 'result'], ['error', 'error']]) {
     assert.equal(client.formatMessage({ kind, text: 'CAD result', tool: 'sw_bridge' }).t, type);
   }

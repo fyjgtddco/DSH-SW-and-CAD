@@ -102,6 +102,50 @@ def load_domain_rules(domain_id: str) -> dict:
         return {"ok": False, "error": f"failed to load {json_path}: {e}"}
 
 
+# ── 【Bug12 复发修复】无法由几何/物理自动推导的【设计意图/工艺参数】──────
+# 这些必须由用户或上游显式提供；缺失时应明确提示"需人工提供"，
+#   而不是笼统报"未识别目标"（那会让人以为代码有 bug）。
+MANUAL_PARAM_HINTS = {
+    "gear_module": "齿轮模数（GB/T 1357，由传动比/强度设计决定）",
+    "draft_angle_deg": "拔模斜度（注塑/压铸工艺参数）",
+    "surface_roughness_um": "表面粗糙度 Ra（加工工艺决定，GB/T 131）",
+    "cavity_depth_mm": "型腔深度（模具设计参数）",
+    "shaft_diameter_mm": "轴径（由扭矩/弯矩设计决定）",
+    "rib_height_mm": "加强筋高度（结构设计参数）",
+}
+
+# ── 【Bug12 二次修复】"不适用"与"缺数据"必须区分 ──────────────────────
+# 测试部原话："对当前零件类型不适用的参数置『不适用』而非『无数据』报
+#   CRITICAL。"
+#
+# 为什么必须区分：四项领域规则是【按领域全覆盖】写的（transmission 里有
+#   轴径/模数，mold 里有拔模角/粗糙度），但一个【结构件房间】的零件本就不
+#   该有齿轮模数 —— 对它报 CRITICAL 属于误报，会让"防线拦截"变成噪音，
+#   真违规反而被淹没。
+#
+# 判定口径（保守）：只有当【本领域】声明的规则里，该 target 属于
+#   MANUAL_PARAM_HINTS（人工设计输入），且调用方【未提供】时，
+#   才降级为 NOT_APPLICABLE（WARNING + 明确指引），不计入 violations。
+#   其余未知 target 仍然报 CRITICAL —— 那才真的可能是代码/数据接线出错。
+NOT_APPLICABLE_PARAMS = set(MANUAL_PARAM_HINTS.keys())
+
+
+def _param_applicability(target, domain_id, design_params):
+    """判断一个"无数据"的 target 该判 NOT_APPLICABLE 还是 DATA_MISSING。
+
+    Returns: (is_not_applicable: bool, note: str)
+    """
+    if target not in NOT_APPLICABLE_PARAMS:
+        return False, ""
+    hint = MANUAL_PARAM_HINTS.get(target, "")
+    return True, (
+        "该参数无法由零件几何推导（属人工设计输入），当前未提供 → 判【不适用】，"
+        "不计为违规。如需校验，请显式提供："
+        "python physics_bridge.py set-design-params --param %s=<值>"
+        "（或 validate-domain --param %s=<值>）。说明：%s"
+        % (target, target, hint))
+
+
 def validate_with_domain(
     design_params: dict,
     fea_result: dict,
@@ -130,6 +174,7 @@ def validate_with_domain(
 
     rules = loaded.get("rules", [])
     passed, warnings, violations = [], [], []
+    not_applicable = []      # 【Bug12 二次修复】"对本领域不适用"的规则
 
     for rule in rules:
         rid = rule.get("id", "?")
@@ -151,14 +196,60 @@ def validate_with_domain(
         elif target == "mass_kg":
             value = fea_result.get("mass_kg", 0)
         else:
-            warnings.append({
+            # ── 【Bug12 修复】未识别的验证目标必须报 CRITICAL ────────────
+            # 原实现记为 INFO，于是"规则压根没跑起来"看起来像"没有违规"。
+            #   规则声明的 target 找不到对应数据源 = 该规则【未被验证】，
+            #   这是防线失效的信号，必须显式拦下而不是静默放过。
+            # ── 【Bug12 二次修复】但"人工设计输入且未提供" ≠ 代码接线出错 ──
+            #   后者才是 CRITICAL；前者对本零件/领域本就【不适用】，
+            #   报 CRITICAL 会让真违规被噪音淹没（见 _param_applicability）。
+            _na, _na_note = _param_applicability(target, domain_id, design_params)
+            if _na:
+                not_applicable.append({
+                    "rule_id": rid,
+                    "target": target,
+                    "severity": "NOT_APPLICABLE",
+                    "applicable": False,
+                    "message": (f"验证目标 {target} 对当前领域不适用（未提供人工设计输入）"
+                                f"—— 该规则未参与判定，不计为违规。{_na_note}"),
+                })
+                continue
+            violations.append({
                 "rule_id": rid,
                 "target": target,
-                "severity": "INFO",
-                "message": f"未识别的验证目标: {target}",
+                "severity": "CRITICAL",
+                "message": (
+                    f"验证目标 {target} 无数据 —— 该规则未被验证，不得判为合规。"
+                    + (f"【需人工提供】{MANUAL_PARAM_HINTS[target]}"
+                       if target in MANUAL_PARAM_HINTS else
+                       "请确认该参数是否已传入 design_params/fea_result。")
+                ),
+            })
+            continue   # 已记 CRITICAL，不再进入数值判定
+
+        # ── 【Bug12 修复】数据缺失（0/None）不得当作"合规" ──────────────
+        # 原实现：value 取不到就用 0（`fea_result.get(..., 0)`），而 0 通常
+        #   不在违规区间内 → 该规则"通过"，最终 violations=[] 被误读为合规。
+        #   实测（测试部）：max_von_mises/displacement/mass/SF 全 0 却 score=0.5、
+        #   violations=[] —— 典型的"空数据不违规"。
+        # 现在：值为 0/None/非数值时，判为 DATA_MISSING（CRITICAL），
+        #   因为"没数据"和"数据合格"是两件完全不同的事。
+        _val_missing = (value is None)
+        if not _val_missing:
+            try:
+                _val_missing = (float(value) == 0.0)
+            except Exception:
+                _val_missing = True
+        if _val_missing:
+            violations.append({
+                "rule_id": rid,
+                "target": target,
+                "value": value,
+                "severity": "CRITICAL",
+                "message": (f"验证目标 {target} 无有效数据（value={value!r}）—— "
+                            f"该规则未被真正验证，不得判为合规（Bug12）"),
             })
             continue
-
         # 应用条件检查
         violation = _check_condition(value, condition)
         if violation is None:
@@ -188,12 +279,15 @@ def validate_with_domain(
         "passed": passed,
         "warnings": warnings,
         "violations": violations,
+        # 【Bug12 二次修复】不适用 ≠ 违规；单独成表，便于上层如实汇报
+        "not_applicable": not_applicable,
         "score": round(score, 3),
         "summary": {
-            "total_rules": total,
+            "total_rules": total + len(not_applicable),
             "passed": len(passed),
             "warnings": len(warnings),
             "violations": len(violations),
+            "not_applicable": len(not_applicable),
         },
     }
 

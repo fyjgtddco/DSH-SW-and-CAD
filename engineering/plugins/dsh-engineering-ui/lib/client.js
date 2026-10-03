@@ -82,9 +82,9 @@ window.__ModuleLoader__.load({
     //   与面板开合解耦，保证主对话样式始终生效；
     //   同时它天然具备【作用域隔离】——非工程模式绝不挂，样式不会外溢。
     var ENG_MODE_CLASS = 'dsh-eng-mode';
-    var PRESET_LABEL = 'SW单行模式';
-    var PRESET_KEY = 'sw-single-line';
-    var PRESET_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAACXBIWXMAAAsTAAALEwEAmpwYAAAFnUlEQVRIx41WW1MaSRT2N+5f2H+wT/uWrd3a1ObBoBijBsEb8ZpEDTdRUFRESYxG0QgIogIzA3NngIEZpPf0DOAwEE3Vmaqe7tP9nfOdS/cAQqiuPvCSyooKCNcW1iCdmSeWTMJJSk1pwuEDdeWBZGoEjSVPtwakJsaxUfJtzY6+aW/rl63B4QOCpMJ/galRmpCaUN2/ZPeSSceoZpyHY7mSOgAfjKif7OzMmwa9vyYAPKZrjKi0AMifnNXrEMH0VyZ6zIJjWSOArpEvVkGIYpWkZfMRtAxLOSwy0QOsb8xrG/WjSAygUYQDogOwtZKMxAqSZMSVGoQBA7YxggrzYhWkSXZ7WWDrpWprIyMoJN0BUAb4kkrS+un1LFWenA+MzfotNtfOYZyTmvmijK2jZVZsfI3djzg8b6a8zk9hUO44XeCUTF6EXW9n/KAQS5A0r1K0TJoogtnkLfvX4OLxRTEUvX01ugoekKzuvsyXmyMOryv44ypT/m90/fD0his1MRvFqlRFy65Dx9J+Kiu/HFnbiyZ4CS91AFoegSpfQWOzG8eXhYqKrHbft4ssW3oAGFpQExlm2O6lOMRKKHCYcixul2soX6jCKic9WB2e8yRfENDb2a1MTixyyiNFOoBuZqmCPm+ezK9FpRr64Pu+4j4CZnOFilhGW+HL2Y+RooDuKPVHWrS8c+lZwPBqHLAnvRSPIie5iblNiASE2gjwWAeM0LhIUhabhy6h6Dk1bHdz5WaWqgDMuHMz/C2bKz5cpHhaRMN233HsHvSBjZ1I3LG0B0471478uzGhjFrZAYVmpKiTKsOTnu9xhmDR6wk3MMOID7dEyWJzw8yS6+ufL51SHa36zxbWw3CWUEH2he1QNMOUMGo8TQMqaaqDDgCOmIwW1g/WNs/LCppcCG1HrioK+H4zNhcs19GbKf8fL2ypbPX8WrBMuhmxAWUx4vAl7yrnSW50agOSTTf/kSK2XQd6KUFUIR2tjg1RRsFICjiFjji1FAoepq+zFfvizsJa+HMgBukwiP1jf6Roq8MPyutbsQ/eKJCJa83oAdvdiyDBQeP1O3fyrpy4Kw/ZPDCJbbyv7H65fb96EL+hLTYveONcPdrav9yOxBddx6UaejO9eXKZY0WcdaTRA1Ozg9OhmB2LO5vhpFCFrA3492LjcwHg/d38Tvg4RYuNwQkXpPyXGGVfDM582IuekfALRkAeQkk/9o92kB8B9DhDAYe/psad22CXN3QFpG/sJUgWDU16oBKrODZBYA+i+s/Qyt+WFUjQ3WhmejkElhEaP4TJg1braHfKolb6kKy3JE75337/9/q+AuU9NuOHeoYw7n25Hp/briM0ZPe9tK7CwDa/CzZBynb46eNBp6Hnteofn/VHTnPZYsMXuoIEXfGeuAKnkJRAQiYnaPDKZVo4vijcFRrWqY10li/yirHJtwDYkmKkiNBaG5Suf/di7hMu3QxRIzmcoLEkhfOyUIVUAW8OTnLAG8k2o2fUhHMLsHNtfsi+FHUASFzSavyGGbJ77wuNDFHHOT7tB+rw/qIMzcAXOoe6Bc9y9AM45w6eAQAsdd13Jg+Mdx5un1LTavd8TzByAwUiqbmP+5IWQ7AAet9VGicrdBSuojtXAOeMhnbFgKTN9yqEAcx0B09fja5DVb8YXD7FOd7QG1xeq8fR6Y2J9yHH8j4kKN1m/5cAHgds7eBbOnBwCX2N1vjplChcMjc5MXSUgHvp+o7HALRsfgD0jYFJ4FYBrsDe3gsdQgJLILj7d1/g1BNB7nFTxtcW/ZNHirba+2p6BqDvK4p67u3VR/NpD54FoJ7DaHVT/en4xGuO+oWzeqWgeQBv6gFFbZJsnTA8Y8meQd8nsEl61QAGP37...';
+    // 【问题2 修复】SW单行模式权限预设及其配套横幅/图标已整体移除 ——
+    //   权限只保留 DSH 标准三档（read-only / workspace-write / danger-full-access）。
+    //   原先的 PRESET_LABEL / PRESET_KEY / PRESET_ICON 常量随之删除。
     var STYLE = [
       // ── 【布局重构】弹性尺寸变量 ──────────────────────────────────────
       // 原实现的两个致命问题：
@@ -141,6 +141,24 @@ window.__ModuleLoader__.load({
       // 收起态：面板随第三列一起归零（列宽 0 + 自身透明）
       '.eng-console.collapsed{' +
         'opacity:0;pointer-events:none;' +
+      '}' +
+      // ── 【让位时隐藏面板本体】─────────────────────────────────────────
+      // 用【元素自身的类】而不是 body 上的类来表达"让位"。
+      //   原因：让位时我们已把 DOCK_CLASS 整个摘掉（避免污染宿主层叠），
+      //   若这条规则仍写成 `body.dsh-eng-dock:not(.eng-pane-open) …`，
+      //   摘掉类之后它就【不再匹配】→ 面板反而暴露出来覆盖主区域。
+      //   用 .yielded（由 React 直接按 yieldToHost 打上）最可靠：
+      //   状态与渲染同源，不依赖任何 body 类。
+      '.eng-console.yielded{' +
+        'display:none !important;' +
+      '}' +
+      // ── 【问题4·开启侧】嵌入模式（渲染在官方右列 tab 内）───────────────
+      // 此时容器由官方提供，因此【取消 grid 定位】改为填满父容器，
+      //   否则 grid-column:3 / grid-row:1 会把面板摆到宿主 grid 的错误位置。
+      '.eng-console.embedded{' +
+        'grid-column:auto;grid-row:auto;' +
+        'height:100%;width:100%;' +
+        'border-left:none;' +
       '}' +
       // （收起态样式见上方 .eng-console.collapsed：transform 位移出场）
       // 【布局 v3】不再需要 padding 让位 —— 面板已是流内子项，
@@ -351,13 +369,44 @@ window.__ModuleLoader__.load({
       'body.' + ENG_MODE_CLASS + ' [class*="_progress"]{font-variant-numeric:tabular-nums!important;font-weight:600!important}',
       // ── 折叠开关（未闭合的工具结果等）────────────────────────
       '.eng-fold{color:#94a3b8;cursor:pointer;font-size:11px;margin:0 0 8px;padding:3px 0}',
-      '.eng-preset-icon{background-image:url(' + PRESET_ICON + ');background-position:center;background-repeat:no-repeat;background-size:contain;border-radius:3px;display:inline-block;flex:none;height:15px;width:15px}',
-      '[aria-label*="' + PRESET_LABEL + '"]::before{background-image:url(' + PRESET_ICON + ');background-position:center;background-repeat:no-repeat;background-size:contain;border-radius:3px;content:"";flex:none;height:15px;margin-right:5px;width:15px}',
-      '.eng-warn{align-items:center;background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,.10);color:#78350f;display:flex;font-size:12.5px;gap:10px;line-height:1.45;margin:6px 0;padding:8px 11px}',
-      '.eng-warn-txt{flex:1;min-width:0}',
-      '.eng-btn{background:#fff;border:1px solid #d97706;border-radius:6px;color:#92400e;cursor:pointer;font-size:12px;font-weight:600;padding:4px 12px;white-space:nowrap}',
-      '.eng-btn:hover{background:#fef3c7}',
-      '.eng-btn.p{background:#d97706;border-color:#d97706;color:#fff}',
+      // ── 【问题4】设置页「工程模式」分区样式（浅色）──────────────
+      '.eng-settings{padding:4px 2px;color:var(--dsw-alias-label-primary,#1f2328)}',
+      '.eng-settings-hd{align-items:center;display:flex;gap:10px;margin-bottom:14px}',
+      '.eng-settings-ico{font-size:20px;line-height:1}',
+      '.eng-settings-title{font-size:15px;font-weight:600}',
+      '.eng-settings-sub{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:12px;margin-top:2px}',
+      '.eng-settings-body{background:var(--dsw-alias-bg-layer-2,#f6f7f9);border:1px solid var(--dsw-alias-border-l1,#e5e7eb);border-radius:10px;padding:12px;text-align:left}',
+      // ── 【问题4】三层设置结构 ──────────────────────────────────────
+      '.eng-set-layer{border:1px solid var(--dsw-alias-border-l1,#e5e7eb);border-radius:9px;margin:0 0 10px;overflow:hidden;background:var(--dsw-alias-bg-layer-1,#fff)}',
+      '.eng-set-layer:last-child{margin-bottom:0}',
+      '.eng-set-layer-hd{align-items:center;background:transparent;border:0;color:inherit;cursor:pointer;display:flex;font:inherit;gap:9px;padding:11px 12px;text-align:left;width:100%}',
+      '.eng-set-layer-hd:hover{background:var(--dsw-alias-bg-layer-3,#eef1f5)}',
+      '.eng-set-layer-no{align-items:center;background:var(--dsw-alias-button-primary-fill,#2563eb);border-radius:50%;color:#fff;display:inline-flex;flex:none;font-size:11px;font-weight:700;height:19px;justify-content:center;width:19px}',
+      '.eng-set-layer-t{font-size:13px;font-weight:600;flex:none}',
+      '.eng-set-layer-d{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.eng-set-layer-caret{color:var(--dsw-alias-label-tertiary,#8b95a3);flex:none;font-size:11px}',
+      '.eng-set-layer-bd{border-top:1px solid var(--dsw-alias-border-l1,#e5e7eb);padding:12px}',
+      '.eng-set-note{font-size:12px;line-height:1.75;margin:0 0 10px}',
+      '.eng-set-note.dim{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;margin:10px 0 0}',
+      '.eng-set-kv{align-items:center;display:flex;gap:8px;margin:0 0 4px}',
+      '.eng-set-k{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:12px}',
+      '.eng-set-v{background:var(--dsw-alias-bg-layer-3,#eef1f5);border-radius:5px;font-size:12px;font-weight:600;padding:2px 8px}',
+      '.eng-set-v.on{background:rgba(37,99,235,.12);color:var(--dsw-alias-button-primary-fill,#2563eb)}',
+      '.eng-set-list{font-size:12px;line-height:1.9;margin:0;padding-left:18px}',
+      // 开关行
+      '.eng-sw-row{align-items:center;display:flex;gap:12px;justify-content:space-between}',
+      '.eng-sw-txt{flex:1;min-width:0}',
+      '.eng-sw-label{font-size:13px;font-weight:600}',
+      '.eng-sw-hint{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;line-height:1.65;margin-top:3px}',
+      '.eng-sw{background:var(--dsw-alias-bg-layer-3,#cbd5e1);border:0;border-radius:999px;cursor:pointer;flex:none;height:22px;padding:0;position:relative;transition:background .18s ease;width:40px}',
+      '.eng-sw.on{background:var(--dsw-alias-button-primary-fill,#2563eb)}',
+      '.eng-sw-knob{background:#fff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.25);height:18px;left:2px;position:absolute;top:2px;transition:transform .18s ease;width:18px}',
+      '.eng-sw.on .eng-sw-knob{transform:translateX(18px)}',
+      '.eng-settings-empty-t{font-size:13px;font-weight:600;margin-bottom:6px}',
+      '.eng-settings-empty-d{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:12px;line-height:1.7}',
+      '.eng-settings-ft{display:flex;justify-content:flex-end;margin-top:14px}',
+      '.eng-settings-close{background:var(--dsw-alias-button-primary-fill,#2563eb);border:0;border-radius:6px;color:#fff;cursor:pointer;font-size:12px;padding:6px 16px}',
+      '.eng-settings-close:hover{opacity:.88}',
       // ══ 【布局 v3】响应式断点 ════════════════════════════════════════
       // 设计原则（按用户要求）：
       //   · 面板永远是【流内并排】的侧边栏，绝不覆盖/悬浮在内容上；
@@ -369,8 +418,20 @@ window.__ModuleLoader__.load({
       // 【3:1 比例】不再需要断点缩水 —— 面板宽度由 JS 按 25% 精确计算；
       // 空间不足时由 _calcPaneWidth 返回 0（自动折叠），主区永远 ≥600px。
 
-      // ── 主区域：始终占满剩余空间 + 最低阅读宽度 ──────────────────
-      'body.' + DOCK_CLASS + ' div[style*="grid-template-columns"]>*{' +
+      // ── 主区域（第 2 列）：最低阅读宽度 ──────────────────────────────
+      // ── 【问题"左侧项目栏边框跳出来"根因修复·关键】────────────────────
+      // 原选择器是 `div[style*="grid-template-columns"]>*` —— `>*` 命中
+      //   【全部三个 grid 子项】，包括：
+      //     · 第 1 列 = 左侧项目/导航栏（宿主固定 280px）
+      //     · 第 2 列 = 主对话列（本规则真正想保的那一列）
+      //     · 第 3 列 = 右列（官方预览，已被上一次修复限定）
+      //   于是 `min-width:520px` 把【左侧项目栏从 280px 强行撑到 520px】，
+      //   它的右边框就"跳"到了屏幕中间 —— 这正是用户说的
+      //   「一点击子代理，旁边的项目的边框就又跳出来了」。
+      // 正确做法：只给【第 2 列】设最低宽度，用 :nth-child(2) 精确定位。
+      //   第 1 列保持宿主自己的 280px（由 --eng-sb 反映），第 3 列由
+      //   我方的列宽变量控制，两者都不该被这条规则触碰。
+      'body.' + DOCK_CLASS + '.eng-pane-open div[style*="grid-template-columns"]>:nth-child(2){' +
         'min-width:var(--eng-main-min)}' +
 
       // ══ 【布局 v11 · 真三列（文档流）】═══════════════════════════════
@@ -389,20 +450,44 @@ window.__ModuleLoader__.load({
       // 面板本体：改为渲染进第 3 列（见 SubagentConsole 的挂载点调整），
       //   但保守起见同时保留 overlay 渲染路径 + 将面板自身改为
       //   position:relative 并用 grid-column 定位到第 3 列。
-      'body.' + DOCK_CLASS + ' div[style*="grid-template-columns"]{' +
+      // ── 【问题3 修复·关键】两个条件缺一不可 ────────────────────────────
+      // ① body.dsh-eng-dock      —— 本插件接管右列的会话
+      // ② body.eng-pane-open     —— 且【当前确实由我方占列】（未给官方让位）
+      // 只写 ① 会在"让位"期间仍然覆盖宿主的 grid，把官方右列（文件预览）
+      //   的宽度写死成 var(--eng-pane) → 官方预览布局错乱、关闭按钮点不到。
+      //   用户反馈的"代码展示页关也关不了"根因即此。
+      // 让位时我方不输出任何 grid 规则 → 宿主的【内联】grid-template-columns
+      //   自然生效，官方右列按自己的 openRightbar 逻辑拿到正确宽度。
+      'body.' + DOCK_CLASS + '.eng-pane-open div[style*="grid-template-columns"]{' +
         'grid-template-columns:var(--eng-sb) minmax(0px,1fr) var(--eng-pane) !important;' +
         'transition:grid-template-columns .26s cubic-bezier(.4,0,.2,1) !important;' +
       '}' +
-      // 收起态：第三列归 0，主区铺满（与宿主默认一致）
-      'body.' + DOCK_CLASS + ':not(.eng-pane-open) div[style*="grid-template-columns"]{' +
-        'grid-template-columns:var(--eng-sb) minmax(0px,1fr) 0px !important;' +
-      '}' +
+      // 让位期间：绝不能再写 0px 版本（那会把官方右列压扁）。
+      //   这里刻意【没有】:not(.eng-pane-open) 的规则 —— 撤掉覆盖即可。
       // 【关键】overlayLayer 默认铺满整帧（绝对定位的覆盖层）。
       // 用 display:contents 把它"透明化"：其子元素（面板）直接提升为
       // frame 的 grid item，从而可以 grid-column:3 落进第三列 ——
       // 这就是面板从"覆盖层"进入"文档流三列"的通道。
-      'body.' + DOCK_CLASS + ' div[class*="overlayLayer"]{' +
+      // 【问题3 修复】同样只在 eng-pane-open 时生效：
+      //   让位期间若仍把 overlayLayer 改成 display:contents，
+      //   官方右列里的覆盖层布局会被打乱（预览/弹层定位错乱）。
+      //   撤掉覆盖 = 官方自己那套绝对定位语义完整恢复。
+      'body.' + DOCK_CLASS + '.eng-pane-open div[class*="overlayLayer"]{' +
         'display:contents !important;' +
+      '}' +
+      // ── 【P0-4 修复·保护其他 overlay 住户】────────────────────────────
+      // overlayLayer 是【共享】的列表槽：0.2.0 里除本插件外还有配额提示、
+      //   插件刷新 toast、日程删除 toast 等住户（见官方 slot 目录的
+      //   `shell.overlay` occupants）。display:contents 会让它们也变成
+      //   frame 的 grid item，被自动排进三列 → toast 位置错乱。
+      // 因此把【非本插件】的子项显式钉回"覆盖整帧"的语义。
+      //   注意必须同时排除 .eng-fab（收起态小标签，也是本插件的子项，
+      //   它自带 position:fixed 且靠右贴边，不能被拉伸成整帧）。
+      // 原 `.overlayLayer > *{pointer-events:auto}` 仍匹配（display:contents
+      //   只影响父盒子，不影响后代选择器），点击语义不变。
+      'body.' + DOCK_CLASS + '.eng-pane-open div[class*="overlayLayer"] > *:not(.eng-console):not(.eng-fab){' +
+        'grid-area:1 / 1 / -1 / -1 !important;' +
+        'z-index:20;' +
       '}' +
 
       // ══ 【布局 v10 · 内容铺满主区】══════════════════════════════════
@@ -411,29 +496,34 @@ window.__ModuleLoader__.load({
       // 看起来"气泡缩在左边、像被挤压"。
       // 修复：让位态（body.dsh-eng-dock）下解除限宽并改为铺满，
       //       卡片自身有内边距，铺满后仍保持可读行宽。
-      'body.' + DOCK_CLASS + ' [class*="wSkVaW_root"] > *,' +
-      'body.' + DOCK_CLASS + ' [class*="wSkVaW_scrollBody"] > *{' +
+      // ── 【问题3 修复】必须同时要求 eng-pane-open ──────────────────────
+      // 这些"解除限宽、铺满"的规则是为【我方占列、主区被压窄】而设的。
+      //   若在"给官方让位"期间仍然生效，会把主区内容按错误宽度铺满
+      //   （官方右列同时占位时，行宽与留白都会错乱）。
+      //   → 统一加 .eng-pane-open，让位时这些规则整体不生效。
+      'body.' + DOCK_CLASS + '.eng-pane-open [class*="wSkVaW_root"] > *,' +
+      'body.' + DOCK_CLASS + '.eng-pane-open [class*="wSkVaW_scrollBody"] > *{' +
         'max-width:100% !important;' +
         'width:100% !important;' +
       '}' +
       // 居中层（composerStack/composerHero）：取消水平居中的 margin/auto，
       // 改为撑满 + 保持内边距，让输入卡与气泡同宽对齐
-      'body.' + DOCK_CLASS + ' [class*="composerStack"],' +
-      'body.' + DOCK_CLASS + ' [class*="composerHero"],' +
-      'body.' + DOCK_CLASS + ' [class*="composerSeat"],' +
-      'body.' + DOCK_CLASS + ' [class*="uV2eYG_root"]{' +
+      'body.' + DOCK_CLASS + '.eng-pane-open [class*="composerStack"],' +
+      'body.' + DOCK_CLASS + '.eng-pane-open [class*="composerHero"],' +
+      'body.' + DOCK_CLASS + '.eng-pane-open [class*="composerSeat"],' +
+      'body.' + DOCK_CLASS + '.eng-pane-open [class*="uV2eYG_root"]{' +
         'max-width:100% !important;width:100% !important;' +
         'margin-left:0 !important;margin-right:0 !important;' +
         'padding-left:18px !important;padding-right:18px !important;' +
         'box-sizing:border-box !important;' +
       '}' +
       // hero 大标题区（首页）：同样铺满，避免缩在左边
-      'body.' + DOCK_CLASS + ' [class*="uV2eYG_hero"]{' +
+      'body.' + DOCK_CLASS + '.eng-pane-open [class*="uV2eYG_hero"]{' +
         'max-width:100% !important;width:100% !important;' +
       '}' +
       // 输入卡（白底圆角）：撑满除 padding 外的全部宽度，与气泡对齐
-      'body.' + DOCK_CLASS + ' [class*="uV2eYG_card"],' +
-      'body.' + DOCK_CLASS + ' [class*="uV2eYG_grow"]{' +
+      'body.' + DOCK_CLASS + '.eng-pane-open [class*="uV2eYG_card"],' +
+      'body.' + DOCK_CLASS + '.eng-pane-open [class*="uV2eYG_grow"]{' +
         'max-width:100% !important;width:100% !important;' +
       '}' +
 
@@ -541,9 +631,16 @@ window.__ModuleLoader__.load({
         '.eng-ask-ft{border-top-color:#33383f}' +
         '.eng-note{color:#94a3b8}' +
         '.eng-fold{color:#64748b}' +
-        '.eng-warn{background:#3a2f10;border-color:#a16207;color:#fde68a}' +
-        '.eng-btn{background:#22262e;border-color:#a16207;color:#fde68a}' +
-        '.eng-btn.p{background:#a16207;color:#fff}}',
+        '.eng-settings{color:#e5e7eb}' +
+        '.eng-settings-body{background:#1c1f26;border-color:#33383f}' +
+        '.eng-set-layer{background:#22252c;border-color:#33383f}' +
+        '.eng-set-layer-hd:hover{background:#2a2e37}' +
+        '.eng-set-layer-bd{border-top-color:#33383f}' +
+        '.eng-set-v{background:#2a2e37}' +
+        '.eng-set-v.on{background:rgba(37,99,235,.22)}' +
+        '.eng-sw{background:#3a3f4a}' +
+        '.eng-settings-empty-d,.eng-settings-sub{color:#8b95a3}' +
+      '}',
     ].join('');
     function installStyle() {
       if (typeof document === 'undefined') return;
@@ -614,7 +711,7 @@ window.__ModuleLoader__.load({
         var frame = document.querySelector('div[style*="grid-template-columns"]');
         if (!frame) return;
         var raw = (frame.style.gridTemplateColumns || "").trim();
-        var first = raw.split(/\\s+/)[0] || "";
+        var first = raw.split(/\s+/)[0] || "";
         if (/^[0-9.]+px$/.test(first)) {
           document.documentElement.style.setProperty("--eng-sb", first);
         }
@@ -790,27 +887,6 @@ window.__ModuleLoader__.load({
       };
     }
 
-    function installPresetIcon() {
-      if (typeof document === 'undefined' || typeof MutationObserver !== 'function') return;
-      var CLS = 'eng-preset-icon';
-      var mark = function () {
-        var nodes = document.querySelectorAll('button[role="menuitem"]');
-        for (var i = 0; i < nodes.length; i++) {
-          var btn = nodes[i];
-          if (btn.getElementsByClassName(CLS).length > 0) continue;
-          var label = btn.querySelector('[class*="itemLabel"]');
-          if (!label || String(label.textContent || '').indexOf(PRESET_LABEL) < 0) continue;
-          var icon = document.createElement('span');
-          icon.className = CLS;
-          icon.setAttribute('aria-hidden', 'true');
-          btn.insertBefore(icon, btn.firstChild);
-        }
-      };
-      mark();
-      var obs = new MutationObserver(mark);
-      obs.observe(document.body, { childList: true, subtree: true });
-      return function () { obs.disconnect(); };
-    }
     // ══ 文本清洗与分类 ═══════════════════════════════════════════
     function isNoise(s) {
       return /^(null|undefined|\[\]|\{\}|""|'')$/.test(String(s).trim());
@@ -1337,44 +1413,130 @@ window.__ModuleLoader__.load({
       });
       return null;
     }
-    function EngineeringBanner(props) {
-      var sessionId = props.sessionId;
-      var useSessions = props.useSessions;
-      var useProjection = props.useProjection;
-      var top = useState(false);
-      var modePreset;
-      if (typeof useSessions === 'function' && sessionId) {
-        modePreset = useSessions(function (s) { var row = s.byId ? s.byId[sessionId] : null; return row ? row.agentPreset : undefined; });
-      }
-      var perms = typeof useProjection === 'function' ? useProjection('permissions') : undefined;
-      if (top[0]) return null;
-      if (modePreset === undefined || modePreset === 'engineering') return null;
-      var current = perms && perms.currentValue !== undefined ? perms.currentValue : undefined;
-      if (current !== PRESET_KEY) return null;
-      return h('div', { className: 'eng-warn', role: 'alert' },
-        h('span', null, '⚠️'),
-        h('div', { className: 'eng-warn-txt' }, '识别到您开启的不是工程模式，您的权限可能会回退成默认的智能选择，是否继续？'),
-        h('button', { className: 'eng-btn', onClick: function () { top[1](true); } }, '取消'),
-        h('button', { className: 'eng-btn p', onClick: function () { top[1](true); } }, '继续'));
-    }
     function SubagentConsole(props) {
       var useSessions = props.useSessions;
-      // 【布局 v3】默认收起：不需要看子代理日志时不占用任何宽度，
-      // 中间对话区独占全宽；需要时点右下角按钮展开。
-      var closedSt = useState(true);
-      var currentId = typeof useSessions === 'function' ? useSessions(function (s) { return s.current; }) : undefined;
+      // 【布局 v3 → P0-4 修复】默认【展开】，让三栏布局一进工程模式就出现。
+      //   原实现是 useState(true)（默认收起）—— 即使面板成功挂载，用户看到的
+      //   也只是右边缘一个小标签，主观感受仍是"三栏布局没有出现"。
+      //   用户明确要求的是"三栏布局"，因此默认展开；仍可手动折叠。
+      var closedSt = useState(false);
+      // 【问题4】读取工程模式设置（含"是否使用自带子代理显示页"）。
+      //   必须在这里（hooks 区）调用，且在任何 return 之前。
+      var engSettings = useEngSettings();
+      // ══ 【问题1/2 根因修复·当前会话 id】════════════════════════════════
+      // 症状：
+      //   ① 非工程模式的对话右侧出现"蓝边"（实为收起态蓝色小标签 .eng-fab）；
+      //   ② 从 A 对话切到 B 对话，右侧面板仍显示 A 的子代理，不跟随。
+      // 共同根因：**当前会话的解析方式是错的**。
+      //
+      // 原实现（两种都不可靠）：
+      //   · `useSessions(s => s.current)` —— 0.2.0 的 SessionListState 没有该字段；
+      //   · `uiSession.adapter.current` —— 该 adapter 是给【session 作用域】用的
+      //     （见 ui-session/src/client/index.ts:681 `installScope('session', ...)`），
+      //     root 作用域的 shell.overlay 组件并不是它的消费方；
+      //   · 兜底"任一 preset==='engineering' 的会话" —— 这是最糟的一条：
+      //     它【忽略用户当前在看哪个对话】，永远命中第一个工程会话，
+      //     于是切到 B 对话时仍解析出 A → 问题②；而且只要列表里存在
+      //     任何工程会话，非工程对话也会被判为"有会话"→ 问题①。
+      //
+      // 正确做法（0.2.0 官方一致用法）：当前显示在主对话区的会话，
+      //   由 `byId[*].retainedBy.mainView > 0` 标记。官方多处这样取当前会话：
+      //     · ui-layout/src/client/DocumentTitle.tsx:19-23
+      //     · ui-agent-preset/src/client/index.ts:86,116,201
+      //     · ui-open-in-app/src/client/index.ts:59
+      //   在 `useSessions` 选择器里计算 → 天然随会话切换而重渲染（响应式）。
+      // 同时仍优先采用宿主注入的 hook（若有），再回落 mainView。
+      var currentId = undefined;
+      try {
+        if (typeof props.useEngCurrentSessionId === 'function') {
+          currentId = props.useEngCurrentSessionId(function (v) { return v; });
+        }
+      } catch (e) { currentId = undefined; }
+      if ((currentId === undefined || currentId === null) && props.sessionId) {
+        currentId = props.sessionId;
+      }
+      // ══ 【P0-4 修复】DSH 0.2.0 子代理目录读法 ═══════════════════════════
+      // 0.1.x：SessionListState 直接暴露 subagentsByParent[parentId].entries，
+      //   条目形如 { id, kind:'child', label, activity }。
+      // 0.2.0：【删除了 subagentsByParent】，改为按会话的投影表
+      //     state.projectionsBySession[parentId].values.subagentCatalog
+      //   条目形如 { id, createdAt, mode:'one-shot'|'continuable', label? }
+      //   —— 没有 kind 字段，activity 也不再随条目下发。
+      // 原实现只认旧形态 → 目录恒空 → 整个面板 return null（实测面板永不出现）。
+      // 现在两种形态都读：优先新投影，缺失时回落旧字段。
+      var projections = typeof useSessions === 'function'
+        ? useSessions(function (s) { return s.projectionsBySession; }) : undefined;
       var catalogs = typeof useSessions === 'function' ? useSessions(function (s) { return s.subagentsByParent; }) : undefined;
       var summaries = typeof useSessions === 'function' ? useSessions(function (s) { return s.byId; }) : undefined;
+      // ── 当前会话解析（唯一权威：mainView 保留者）──────────────────────
+      var _presetOfRow = function (row) {
+        if (!row) return undefined;
+        // 0.2.0：预设名在 projectionValues 下；0.1.x：直接挂在 row 上
+        var pv = row.projectionValues;
+        if (pv && typeof pv.agentPreset === 'string') return pv.agentPreset;
+        return row.agentPreset;
+      };
+      var mainViewId = typeof useSessions === 'function' ? useSessions(function (s) {
+        var byId = (s && s.byId) || {};
+        var ids = Object.keys(byId);
+        for (var i = 0; i < ids.length; i++) {
+          var r = byId[ids[i]];
+          if (r && r.retainedBy && (r.retainedBy.mainView || 0) > 0) return ids[i];
+        }
+        return null;
+      }) : null;
+      // mainView 是最权威的"用户正在看的对话"，优先于 hook/兜底
+      if (mainViewId) {
+        currentId = mainViewId;
+      } else if (currentId === undefined || currentId === null) {
+        // 仅当 mainView 也不可用时，才退到"唯一会话"（**不再**退到"任一工程会话"：
+        //   那正是问题①/②的根因 —— 它会让非工程对话也判定成功，且切对话不跟随）
+        var _idsOnly = summaries ? Object.keys(summaries) : [];
+        if (_idsOnly.length === 1) currentId = _idsOnly[0];
+      }
+      // 【React hooks 顺序铁律】这里【不能】提前 return：
+      //   下面还有 useState/useRef/useEffect 等 hooks，提前返回会让 hooks 数量
+      //   随渲染变化 → "Rendered fewer hooks than expected" 崩溃。
+      //   currentId 取不到时，preset 自然为 undefined，由【所有 hooks 之后】的
+      //   `if (preset !== 'engineering') return null` 统一兜住。
       var preset = typeof useSessions === 'function' ? useSessions(function (s) {
-        var row = s && s.current !== undefined && s.byId ? s.byId[s.current] : null;
-        return row ? row.agentPreset : undefined;
+        return _presetOfRow(currentId !== undefined && currentId !== null && s.byId
+          ? s.byId[currentId] : null);
       }) : undefined;
-      var catalog = catalogs && currentId ? catalogs[currentId] : undefined;
+      // 子代理的 running 状态：0.2.0 由 byId 行的 running 字段推导
+      // （旧版条目自带 activity，这里统一成同一个判据函数）
+      var isRunning = function (id) {
+        var row = summaries ? summaries[id] : null;
+        if (row && row.running === true) return true;
+        return false;
+      };
       var entries = [];
-      if (catalog && catalog.entries) {
-        for (var i = 0; i < catalog.entries.length; i++) {
-          var en = catalog.entries[i];
-          if (en && en.kind === 'child') entries.push(en);
+      // ① 新形态（DSH 0.2.0）：projectionsBySession[parent].values.subagentCatalog
+      var _proj = projections && currentId ? projections[currentId] : undefined;
+      var _cat = _proj && _proj.values ? _proj.values.subagentCatalog : undefined;
+      if (Array.isArray(_cat)) {
+        for (var pi = 0; pi < _cat.length; pi++) {
+          var pe = _cat[pi];
+          if (!pe || pe.id === undefined || pe.id === null) continue;
+          entries.push({
+            id: String(pe.id),
+            label: pe.label,
+            mode: pe.mode,
+            createdAt: pe.createdAt,
+            activity: isRunning(String(pe.id)) ? 'running' : 'inactive'
+          });
+        }
+      }
+      // ② 旧形态（DSH 0.1.x）：subagentsByParent[parent].entries，按 kind 过滤
+      if (entries.length === 0) {
+        var catalog = catalogs && currentId ? catalogs[currentId] : undefined;
+        if (catalog && catalog.entries) {
+          for (var i = 0; i < catalog.entries.length; i++) {
+            var en = catalog.entries[i];
+            // 旧条目用 kind==='child' 标注；新条目没有 kind，故此处仅在旧形态下过滤
+            if (!en || (en.kind !== undefined && en.kind !== 'child')) continue;
+            entries.push(en);
+          }
         }
       }
       var ids = entries.map(function (e) { return e.id; }).join(',');
@@ -1575,7 +1737,13 @@ window.__ModuleLoader__.load({
       //   而其他模式绝不挂 → 样式零外溢（满足"只在工程模式搞"的要求）。
       useEffect(function () {
         if (typeof document === 'undefined') return;
-        if (preset === 'engineering') {
+        // 【问题4】必须同时受【设置开关】约束：
+        //   ENG_MODE_CLASS 会改主对话的问答卡片样式，属"工程模式视觉接管"。
+        //   用户关掉「使用工程模式自带的子代理显示页」后，若它仍挂着，
+        //   还会残留一套我方样式 —— 与"关闭即交回官方"的语义不符。
+        //   注意 preset 仍是 engineering（会话身份没变），所以这里用
+        //   engAllowed（= preset 且设置开）而不是只判 preset。
+        if (preset === 'engineering' && engSettings.useOwnSubagentPane) {
           document.body.classList.add(ENG_MODE_CLASS);
         } else {
           document.body.classList.remove(ENG_MODE_CLASS);
@@ -1583,17 +1751,107 @@ window.__ModuleLoader__.load({
         return function () {
           try { document.body.classList.remove(ENG_MODE_CLASS); } catch (e) {}
         };
-      }, [preset]);
+      }, [preset, engSettings.useOwnSubagentPane]);
+
+      // ══ 【问题4·开启侧】嵌入模式（渲染在官方右列 tab 内）═════════════════
+      // 当本组件作为"官方 subagentchat tab 的正文"渲染时（engEmbedded=true），
+      //   官方右列已经提供了容器与宽度，因此【绝不能】再去抢占第三列、
+      //   也不能去改 grid-template-columns —— 否则会和官方右列打架。
+      // 嵌入模式下：只渲染面板本体（.eng-console 用流内相对定位），
+      //   并跳过所有"抢列"的副作用。
+      var embedded = !!(props && props.engEmbedded);
 
       var active = entries.length > 0 && !closedSt[0];
+      // ══ 【问题3 修复】官方右列（文件预览等）打开时，本面板必须让位 ══════
+      // 症状：点击 AI 生成的文件后，官方文档预览要在右列显示，
+      //   但本插件的面板强占了第三列（用 !important 覆盖 grid-template-columns），
+      //   导致预览被挤掉 / 无法在右侧正常查看。
+      //
+      // 机制（已核对 0.2.0 源码）：
+      //   · 右列是 ui-layout 的 `rightbar` track，官方住户是 ui-sidebar-right
+      //     的 tab 系统（文件/文档预览注册进 `sidebar.right.tab.document`）。
+      //   · 该 track 的开合由 layout store 的 `rightbarTrack` 决定，
+      //     AppFrame 把它反映为 frame 元素上的属性：
+      //       data-rightbar-collapsed  (track 关闭时存在)
+      //       data-rightbar-fullscreen (全屏覆盖时存在)
+      //     （ui-layout/src/client/AppFrame.tsx:268-271）
+      //   · 本插件是 shell.overlay 的住户，官方并不知道我们占了第三列，
+      //     所以必须【自己检测】官方右列是否已打开，并主动让位。
+      //
+      // 判据（任一成立即让位）：
+      //   ① frame 上没有 data-rightbar-collapsed → 官方 track 已打开；
+      //   ② frame 上有 data-rightbar-fullscreen → 官方全屏覆盖。
+      // 让位动作：摘掉 eng-pane-open（列宽归 0、面板透明），
+      //   但保留 DOCK_CLASS 与面板挂载，官方关闭后自动恢复。
+      var yieldSt = useState(false);
+      var yieldToHost = yieldSt[0];
       useEffect(function () {
         if (typeof document === 'undefined') return;
-        if (active) {
+        var tick = function () {
+          try {
+            var shouldYield = hostRightbarBusy();
+            yieldSt[1](function (prev) { return prev === shouldYield ? prev : shouldYield; });
+          } catch (e) { /* 保持上一次判定 */ }
+        };
+        tick();
+        var mo = null;
+        try {
+          if (typeof MutationObserver === 'function') {
+            mo = new MutationObserver(tick);
+            mo.observe(document.body, { childList: true, subtree: true,
+                                        attributes: true,
+                                        attributeFilter: ['data-rightbar-collapsed',
+                                                          'data-rightbar-fullscreen',
+                                                          'style'] });
+          }
+        } catch (e) { mo = null; }
+        window.addEventListener('resize', tick);
+        var iv = setInterval(tick, 700);
+        return function () {
+          try { if (mo) mo.disconnect(); } catch (e) {}
+          window.removeEventListener('resize', tick);
+          clearInterval(iv);
+        };
+      }, []);
+      // 实际生效的"打开"状态：官方没占右列时才展开本面板。
+      // 嵌入模式（在官方右列 tab 内）【永不】抢列 → paneOpen 恒 false。
+      var paneOpen = active && !yieldToHost && !embedded;
+      // ── 【问题1/4 根因修复·关键】把影响"是否该占列"的每个输入都放进依赖 ──
+      // React 语义：effect 只在【依赖变化】时重跑/清理。
+      //   原依赖是 [active, paneOpen, embedded]，而 active 定义在 preset/setting
+      //   门禁【之前】，所以：
+      //     · 关掉设置开关后本组件 `return null`（不再渲染），
+      //       effect 依赖若未变化 → 【清理函数不执行】→
+      //       body 上的 dsh-eng-dock / eng-pane-open【永久残留】→
+      //       CSS 继续把第三列强行撑开 = 右侧那条空白蓝带，
+      //       而且它连【左侧项目栏的边界】一起改（grid 三列比例被覆盖）。
+      //   这就是"设置没有用""蓝边又来了"的真正原因：不是渲染没生效，
+      //   而是【卸载时没把 body 类摘掉】。
+      //   另外 engAllowed 显式表达"本会话是否允许我占列"，
+      //   让「预设切换」和「设置开关」都能触发一次清理。
+      var engAllowed = (preset === 'engineering') && !!engSettings.useOwnSubagentPane;
+      // ── 【根因修复·让位时必须整体摘掉 DOCK_CLASS】──────────────────────
+      // 之前"让位"只摘 eng-pane-open，却【故意保留】DOCK_CLASS 想"平滑恢复"。
+      //   后果：body 上始终留着我方类名，而样式表里凡是 `body.dsh-eng-dock …`
+      //   的规则仍在参与层叠 —— 用户点开子代理时列宽突变，看起来就是
+      //   "旁边项目的边框又跳出来了"。
+      // 正确语义：要么【完整占列】（两个类都在），要么【完全不介入】（两个类都无）。
+      //   中间态（只有 DOCK_CLASS）没有任何规则依赖，纯粹是污染源。
+      useEffect(function () {
+        if (typeof document === 'undefined') return;
+        if (engAllowed && active && !embedded) {
           document.body.classList.add(DOCK_CLASS);
-          document.body.classList.add("eng-pane-open");
-          var px = _calcPaneWidth();
-          if (px > 0) {
-            document.documentElement.style.setProperty("--eng-pane", px + "px");
+          if (paneOpen) {
+            document.body.classList.add("eng-pane-open");
+            var px = _calcPaneWidth();
+            if (px > 0) {
+              document.documentElement.style.setProperty("--eng-pane", px + "px");
+            }
+          } else {
+            // 让位给官方右列：两个类都摘掉 → 我方 grid 覆盖整条失效，
+            //   宿主的【内联】grid-template-columns 自然生效。
+            document.body.classList.remove("eng-pane-open");
+            document.body.classList.remove(DOCK_CLASS);
           }
         } else {
           document.body.classList.remove(DOCK_CLASS);
@@ -1603,7 +1861,7 @@ window.__ModuleLoader__.load({
           document.body.classList.remove(DOCK_CLASS);
           document.body.classList.remove("eng-pane-open");
         };
-      }, [active]);
+      }, [active, paneOpen, embedded, engAllowed]);
       // ══ 【布局 v11 · 自适应】════════════════════════════════════════
       // 三列布局由样式表规则驱动，无需再清理让位残留（旧 margin 机制已废弃）。
       // 这里只做一件事：视口/宿主结构变化时，重算 --eng-pane（3:1 比例），
@@ -1637,7 +1895,6 @@ window.__ModuleLoader__.load({
         };
       }, []);
 
-      if (entries.length === 0) return null;
       // ── 【问题4 修复】非工程模式严禁渲染本面板 ──────────────────────────
       // 原条件: if (preset !== undefined && preset !== 'engineering') return null;
       //   漏洞：preset 为 undefined（会话数据尚未加载/字段缺失）时，
@@ -1646,19 +1903,50 @@ window.__ModuleLoader__.load({
       //   还会因为拿不到 catalog 而报错。
       // 修复：改为【白名单】——只有明确等于 'engineering' 才渲染，
       //   其余一律（含 undefined/null/其他预设）不渲染。
-      if (preset !== 'engineering') return null;
+      //
+      // 【P0-4 修复·判定顺序】预设门禁必须放在【最前面】。
+      //   原顺序是先 `entries.length === 0` 再查 preset：虽然结果一样，
+      //   但一旦将来 entries 的判定放宽，非工程模式就可能先走到后面的
+      //   副作用（加 body class），造成样式外溢到其他模式。
+      //   先判预设 = 从结构上保证"只在工程模式生效"。
+      if (preset !== 'engineering') {
+        // 复位：切到非工程模式后，官方 tab 接管必须立刻让位（见 canOpen）
+        try { _engContextActive = false; } catch (e) {}
+        return null;
+      }
+      // ── 【问题4】设置开关：关闭则隐藏本插件面板，右侧交回官方 ──────────
+      //   注意：此判断必须在【所有 hooks 之后】，否则 hooks 数量会随设置变化，
+      //   触发 "Rendered fewer hooks than expected"。useEngSettings 本身是 hook，
+      //   已在 hooks 区调用，这里只读它的值。
+      if (!engSettings.useOwnSubagentPane) {
+        try { _engContextActive = false; } catch (e) {}
+        return null;
+      }
+      if (entries.length === 0) {
+        try { _engContextActive = false; } catch (e) {}
+        return null;
+      }
+      // 【问题4】标记"当前上下文确为工程模式"，供官方 tab 接管的 canOpen 读取。
+      //   canOpen 在 React 之外【同步】执行，读不到 hook，因此用一个模块级布尔；
+      //   这里在两道门禁都通过之后置位，语义最准确。
+      // 注意：必须在"非工程模式"时【复位】，否则一旦某次渲染置为 true，
+      //   后续切到普通对话时 canOpen 仍返回 true 会误接管官方 tab。
+      try { _engContextActive = true; } catch (e) {}
 
       // ── 【布局 v4】折叠态 = 边缘小标签；展开态 = Flex 侧边栏 ─────────
       // 关键：面板【始终挂载】，只用 .collapsed 类切换宽度，
       //       这样 width 过渡动画才能生效（条件 return 会直接闪现、无动画）。
-      var isCollapsed = closedSt[0];
+      // 嵌入模式（官方右列 tab 内）：容器由官方提供，恒为展开、不渲染小标签。
+      var isCollapsed = embedded ? false : closedSt[0];
       var anyRunning = entries.some(function (e3) {
         var s3 = summaries ? summaries[e3.id] : null;
         return e3.activity === 'running' || !!(s3 && s3.running);
       });
 
       // 收起时：仅渲染右边缘的竖向小标签（fixed 定位，不占布局宽度）
-      var fab = isCollapsed ? h('button', {
+      // 【让位时也不渲染】官方占着右列时，我方小标签同样不该出现
+      //   （否则又变成用户看到的"多出来的蓝色小边"）。
+      var fab = (isCollapsed && !yieldToHost) ? h('button', {
         className: 'eng-fab' + (anyRunning ? ' run' : ''),
         title: '展开子代理面板（' + entries.length + ' 个子代理' +
                (anyRunning ? '，有运行中' : '') + '）',
@@ -1708,13 +1996,18 @@ window.__ModuleLoader__.load({
       var stackTree = veryNarrow;
       var consoleEl = h('div', {
         className: 'eng-console' + (stackTree ? ' stacked' : '') +
-                   (isCollapsed ? ' collapsed' : '')
+                   (isCollapsed ? ' collapsed' : '') +
+                   (embedded ? ' embedded' : '') +
+                   // 【让位】由 React 直接表达（不依赖 body 类），
+                   //   配合 .eng-console.yielded{display:none} 生效。
+                   (!embedded && yieldToHost ? ' yielded' : '')
       },
         h('div', { className: 'eng-tree' },
           h('div', { className: 'eng-tree-cap' },
             h('span', null, '子代理目录'),
             // 顶部折叠按钮：放在目录标题栏右侧，显眼易点
-            h('button', {
+            // 嵌入模式不给折叠按钮（官方 tab 自带关闭/切换，避免语义重复）
+            embedded ? null : h('button', {
               className: 'eng-collapse',
               title: '折叠子代理面板，让对话区占满全宽',
               onClick: function () { closedSt[1](true); }
@@ -1725,14 +2018,15 @@ window.__ModuleLoader__.load({
             h('span', { className: 'eng-name' }, title),
             h('span', { className: 'eng-tag' + (running ? ' run' : '') }, running ? '运行中' : (done ? '已完成' : '未运行')),
             h('span', { className: 'eng-tag' }, current && current.mode === 'one-shot' ? '一次性' : '可持续'),
-            h('button', {
+            embedded ? null : h('button', {
               className: 'eng-collapse',
               title: '折叠子代理面板',
               onClick: function () { closedSt[1](true); }
             }, '折叠 ›')),
           h('div', { className: 'eng-log', ref: boxRef }, body)));
       // 用 Fragment 同时输出：收起态的小标签 + 面板本体
-      return h(React.Fragment, null, consoleEl, fab);
+      // 嵌入模式不输出小标签（官方右列自己管开合）
+      return embedded ? consoleEl : h(React.Fragment, null, consoleEl, fab);
     }
     // ══ 【Bug1】主对话内的交互提问节点 ═══════════════════════════════════════
     // 旧版 AskCard 只挂在 SubagentConsole（右侧子代理面板）里 —— 用户必须跑到
@@ -1777,26 +2071,320 @@ window.__ModuleLoader__.load({
       });
     }
 
+    // ══ 【问题4·开启侧】官方右列子代理 tab 的正文（本插件自有实现）═════════
+    // 用户要求："所有官方的子代理在右侧显示的都指向我们现在搞的"。
+    // 本组件就是"指向的去处"：当工程模式 + 开关开启时，官方右列的
+    //   subagentchat tab 由本组件渲染（接管见 apply()）。
+    //
+    // 【不使用官方组件】这里完全自绘：直接复用本插件自己的
+    //   SubagentConsole（三栏工作区本体），因此观感与插件面板一致，
+    //   官方只是提供了"容器/入口"。
+    //
+    // 为什么直接渲染 SubagentConsole 而不写一套新 UI：
+    //   · 用户的诉求就是"官方入口 → 指向我们的界面"，用同一个组件最忠实；
+    //   · SubagentConsole 自己会算当前会话（mainView）、读子代理目录、
+    //     拉日志、按 preset 门禁自渲染，语义完全适用。
+    // 传给它的 props：useSessions 由渲染器按 session 作用域注入（该 seat 是
+    //   scope:'session'，所以这里能拿到 useSessions 标准 prop）。
+    function EngSubagentTabBody(props) {
+      // 开关关闭 / 非工程模式 → 不接管，交回官方（配合 canOpen 双保险）
+      if (!_engSettings.useOwnSubagentPane || !_isEngineeringContext()) return null;
+      return h(SubagentConsole, Object.assign({}, props, { engEmbedded: true }));
+    }
+
+    // ══ 【问题4】设置页「工程模式」分区：三层结构 ═════════════════════════
+    //
+    // 契约来源：@deepseek-ai/dsh-client-ui-settings 的 slots 声明
+    //   'settings.section': { kind: 'list', scope: 'root',
+    //                          owner: SettingsSectionOwnerProps }
+    //   SettingsSectionOwnerProps = { close: () => void }
+    //
+    // 用户要求把设置分为【三层】，并把"是否使用工程模式自带的子代理显示页"
+    //   放在【第三层】。这里按信息层级组织：
+    //     第一层 · 概览        —— 这个分区是干什么的、当前生效状态
+    //     第二层 · 工作流与门禁 —— 门禁/防线相关（只读展示，指向命令行）
+    //     第三层 · 界面与显示   —— 界面行为开关（本开关在此）
+    //   每层是一个可折叠小节，层级清晰且不喧宾夺主。
+    function EngSettingsLayer(props) {
+      var openSt = useState(props.defaultOpen !== false);
+      var open = openSt[0];
+      return h('div', { className: 'eng-set-layer' + (open ? ' open' : '') },
+        h('button', {
+          className: 'eng-set-layer-hd',
+          type: 'button',
+          'aria-expanded': open ? 'true' : 'false',
+          onClick: function () { openSt[1](!open); }
+        },
+          h('span', { className: 'eng-set-layer-no' }, props.no),
+          h('span', { className: 'eng-set-layer-t' }, props.title),
+          h('span', { className: 'eng-set-layer-d' }, props.desc || ''),
+          h('span', { className: 'eng-set-layer-caret' }, open ? '▾' : '▸')),
+        open ? h('div', { className: 'eng-set-layer-bd' }, props.children) : null
+      );
+    }
+
+    /** 单个开关行（自绘，不依赖官方组件库）。 */
+    function EngSwitch(props) {
+      var on = !!props.checked;
+      return h('div', { className: 'eng-sw-row' },
+        h('div', { className: 'eng-sw-txt' },
+          h('div', { className: 'eng-sw-label' }, props.label),
+          props.hint ? h('div', { className: 'eng-sw-hint' }, props.hint) : null),
+        h('button', {
+          className: 'eng-sw' + (on ? ' on' : ''),
+          type: 'button',
+          role: 'switch',
+          'aria-checked': on ? 'true' : 'false',
+          title: props.label,
+          onClick: function () { props.onChange(!on); }
+        },
+          h('span', { className: 'eng-sw-knob' }))
+      );
+    }
+
+    function EngineeringSettingsSection(props) {
+      var close = props && props.close;
+      var settings = useEngSettings();
+      var useOwn = settings.useOwnSubagentPane;
+      return h('div', { className: 'eng-settings', 'data-eng-section': 'engineering' },
+        h('div', { className: 'eng-settings-hd' },
+          h('span', { className: 'eng-settings-ico' }, '🛠️'),
+          h('div', null,
+            h('div', { className: 'eng-settings-title' }, '工程模式'),
+            h('div', { className: 'eng-settings-sub' },
+              'SolidWorks / CAD 机械设计工作流的专用设置'))),
+
+        h('div', { className: 'eng-settings-body' },
+
+          // ── 第一层：概览 ──────────────────────────────────────────────
+          h(EngSettingsLayer, {
+            no: '1', title: '概览', desc: '工程模式做什么、当前生效状态'
+          },
+            h('div', { className: 'eng-set-note' },
+              '工程模式以「完成工图」为核心目标，执行 分析 → 设计 → 验证 的闭环流程，' +
+              '并用三大防线（材料 / 物理 / 领域）对结果做代码级校验。'),
+            h('div', { className: 'eng-set-kv' },
+              h('span', { className: 'eng-set-k' }, '子代理显示页'),
+              h('span', { className: 'eng-set-v' + (useOwn ? ' on' : '') },
+                useOwn ? '使用工程模式自带' : '使用 DSH 官方')),
+            h('div', { className: 'eng-set-note dim' },
+              '说明：三大防线的阈值与门禁策略由命令行工具管理，' +
+              '可通过 `python tools/defense_gate.py status` 查看当前状态。')),
+
+          // ── 第二层：工作流与门禁 ──────────────────────────────────────
+          h(EngSettingsLayer, {
+            no: '2', title: '工作流与门禁', desc: '设计流程、房间调度与防线', defaultOpen: false
+          },
+            h('div', { className: 'eng-set-note' },
+              '本分区用于说明工程模式的流程约束；具体参数由 tools/ 下的命令行工具' +
+              '（workflow_gate.py / mode_gate.py / defense_gate.py）管理，' +
+              '以免界面与门禁状态不一致。'),
+            h('ul', { className: 'eng-set-list' },
+              h('li', null, '零件设计三部曲：分析 → 设计 → 验证'),
+              h('li', null, '多零件任务按「房间」并行/串行调度'),
+              h('li', null, '每个房间下线前必须通过三大防线校验'),
+              h('li', null, '所有防线凭据必须由 DSH 宿主签名'))),
+
+          // ── 第三层：界面与显示（本开关在此）───────────────────────────
+          h(EngSettingsLayer, {
+            no: '3', title: '界面与显示', desc: '子代理面板等界面行为'
+          },
+            h(EngSwitch, {
+              checked: useOwn,
+              label: '使用工程模式自带的子代理显示页',
+              hint: useOwn
+                ? '已开启：右侧子代理面板由工程模式接管（三栏布局）。' +
+                  '官方子代理入口在工程模式下也指向本面板。'
+                : '已关闭：隐藏工程模式自带的子代理面板，右侧交回 DSH 官方显示。',
+              onChange: function (next) {
+                setEngSetting('useOwnSubagentPane', next);
+              }
+            }),
+            h('div', { className: 'eng-set-note dim' },
+              '关闭后本插件不再占用右侧第三列，官方子代理/文件预览按原生方式显示；' +
+              '重新开启即可恢复三栏布局。此设置会保存在本机，重启后仍然生效。'))),
+
+        close ? h('div', { className: 'eng-settings-ft' },
+          h('button', { className: 'eng-settings-close', onClick: close }, '关闭')) : null
+      );
+    }
+    // ══ 【问题4】工程模式设置：持久化开关 + 三层结构 ═════════════════════
+    // 用户需求：
+    //   · 在设置页「工程模式」里加一个选项：**是否使用工程模式自带的子代理显示页**。
+    //     开 → 右侧子代理显示由本插件接管（官方子代理入口也指向这里）；
+    //     关 → 隐藏本插件面板。
+    //   · 设置分【三层】，该开关放在【第三层】。
+    //
+    // 持久化：用 localStorage（官方 packages/client/store 与 shortcuts 都这么做）。
+    //   键名带插件前缀，避免与其他插件冲突。读取失败一律回落默认值 true
+    //   （默认"使用自带显示页"= 保持用户此前看到的行为，不静默改变现状）。
+    var ENG_SETTINGS_KEY = 'dsh-engineering-ui/settings/v1';
+    var _engSettings = { useOwnSubagentPane: true };
+    var _engSettingsSubs = [];
+    // ══ 【问题3】官方右列占用探针（可选服务，缺失时回落 DOM）══════════════
+    // 研究结论（已核对 0.2.0 源码）：
+    //   · 官方读面是 `ctx.sidebarRight`：isExpanded() / active() / openTabs
+    //     （ui-sidebar-right/src/client/service.ts:231 / :226 / :264）
+    //   · DOM 属性 `data-rightbar-collapsed` 【只反映 track】，且窄屏
+    //     （<768px）autoFullscreen 为真时 track=false → 属性仍在，会误判
+    //     （SidebarRight.tsx:362,369 + AppFrame.tsx:174,269）
+    //     所以 DOM 只能当兜底。
+    // 这里把官方服务存成模块级引用，供组件内的探测器使用。
+    var _hostRightbar = null;
+    // ── 【问题4】"当前上下文是否工程模式"（供官方 tab 接管的 canOpen 用）────
+    // canOpen 是同步谓词、且在 React 之外执行，所以不能读 hook。
+    // 这里用一个模块级布尔：由 SubagentConsole 每次渲染时更新
+    //   （它已经可靠地算出了 preset === 'engineering'）。
+    // 初始 false = 不接管，宁可不接管也不要污染非工程模式。
+    var _engContextActive = false;
+    function _isEngineeringContext() { return _engContextActive === true; }
+    /** 探测官方右列是否正在占用（true = 本面板应让位）。
+     *
+     * ── 【根因修复·只认 isExpanded】────────────────────────────────────────
+     * 之前同时用了三个判据（isExpanded / active / openTabs），其中两个有害：
+     *
+     * ① `openTabs` —— 官方该快照是【跨全部会话 + localStorage 持久化】的
+     *    （ui-sidebar-right/src/client/tab-inventory.ts:22-47 启动即扫 localStorage）。
+     *    于是"历史上开过任何一个 tab"就让它永远非空 →
+     *    hostRightbarBusy() 恒为 true → 本插件【永远让位】→
+     *    用户看到"该出没出"（面板该显示时却不显示）。已删除该判据。
+     *
+     * ② `active()` —— 只表示"当前 pane 的活动 tab 是谁"，即使右列【没有展开】
+     *    也可能有活动记录。把它当"占用"会误判。已删除。
+     *
+     * 唯一可靠的语义 = 【官方右列是否展开】（isExpanded）。
+     *    展开 = 官方正在用第三列 → 我让位；
+     *    未展开 = 第三列空闲 → 我方占列（三栏布局）。
+     *    这正是官方 service 的公开读面（service.ts:472-474）。
+     */
+    function hostRightbarBusy() {
+      try {
+        var sr = _hostRightbar;
+        if (sr && typeof sr.isExpanded === 'function') {
+          return !!sr.isExpanded();
+        }
+      } catch (e) { /* 服务异常 → 走 DOM 兜底 */ }
+      // ── DOM 兜底（仅在拿不到官方服务时）────────────────────────────
+      // 注意：data-rightbar-collapsed 只反映 track，窄屏全屏时仍存在，
+      //   故这里只在"未 collapsed"或"全屏"时判占用（保守，宁可让位）。
+      try {
+        if (typeof document === 'undefined') return false;
+        var frame = document.querySelector('div[style*="grid-template-columns"]');
+        if (!frame) return false;
+        var collapsed = frame.hasAttribute('data-rightbar-collapsed');
+        var fullscreen = frame.hasAttribute('data-rightbar-fullscreen');
+        return !collapsed || fullscreen;
+      } catch (e2) { return false; }
+    }
+    function loadEngSettings() {
+      try {
+        if (typeof localStorage === 'undefined') return;
+        var raw = localStorage.getItem(ENG_SETTINGS_KEY);
+        if (!raw) return;
+        var j = JSON.parse(raw);
+        if (j && typeof j === 'object') {
+          if (typeof j.useOwnSubagentPane === 'boolean') {
+            _engSettings.useOwnSubagentPane = j.useOwnSubagentPane;
+          }
+        }
+      } catch (e) { /* 读取失败 → 保持默认 */ }
+    }
+    function saveEngSettings() {
+      try {
+        if (typeof localStorage === 'undefined') return;
+        localStorage.setItem(ENG_SETTINGS_KEY, JSON.stringify(_engSettings));
+      } catch (e) { /* 写入失败不影响本次会话 */ }
+    }
+    function setEngSetting(key, value) {
+      _engSettings[key] = value;
+      saveEngSettings();
+      for (var i = 0; i < _engSettingsSubs.length; i++) {
+        try { _engSettingsSubs[i](); } catch (e) {}
+      }
+    }
+    // 跨标签页/跨窗口同步（官方 shortcuts/storage.ts 同思路）
+    try {
+      if (typeof window !== 'undefined' && window.addEventListener) {
+        window.addEventListener('storage', function (ev) {
+          if (ev && ev.key === ENG_SETTINGS_KEY) {
+            loadEngSettings();
+            for (var i = 0; i < _engSettingsSubs.length; i++) {
+              try { _engSettingsSubs[i](); } catch (e) {}
+            }
+          }
+        });
+      }
+    } catch (e) {}
+    loadEngSettings();
+    /** 供组件订阅设置变化（返回取消订阅函数）。 */
+    function subscribeEngSettings(fn) {
+      _engSettingsSubs.push(fn);
+      return function () {
+        var i = _engSettingsSubs.indexOf(fn);
+        if (i >= 0) _engSettingsSubs.splice(i, 1);
+      };
+    }
+    /** 在组件里以 state 形式读取设置（随变化重渲染）。 */
+    function useEngSettings() {
+      var st = useState(function () {
+        return {
+          useOwnSubagentPane: _engSettings.useOwnSubagentPane,
+        };
+      });
+      useEffect(function () {
+        return subscribeEngSettings(function () {
+          st[1]({
+            useOwnSubagentPane: _engSettings.useOwnSubagentPane,
+          });
+        });
+      }, []);
+      return st[0];
+    }
+
     function apply(ctx) {
       installStyle();
+      // ── 【问题3】抓取官方右列服务（可选，缺失不影响加载）────────────────
+      // ctx.get 是可选服务读取法：服务不在时返回 undefined，不会让插件失败。
+      try {
+        if (ctx && typeof ctx.get === 'function') {
+          _hostRightbar = ctx.get('sidebarRight') || null;
+        }
+      } catch (e) { _hostRightbar = null; }
       try { ctx.effect(function () { installStyle(); }, 'dsh-engineering-ui: styles'); } catch (e) { installStyle(); }
       try { ctx.effect(function () { return installFrameWidthSync(); }, 'dsh-engineering-ui: frame sync'); } catch (e) { installFrameWidthSync(); }
-      try { ctx.effect(function () { return installPresetIcon(); }, 'dsh-engineering-ui: preset icon'); } catch (e) { installPresetIcon(); }
       // 【问题1 修复】主对话原生问答卡片的倒计时（仅工程模式生效）
       try {
         ctx.effect(function () { return installQuestionCountdown(10); },
                    'dsh-engineering-ui: question countdown');
       } catch (e) { try { installQuestionCountdown(10); } catch (e2) {} }
-      try {
-        ctx.slots.inject('conversation.input.dock', function () {
-          return ctx.slots.register({ name: 'conversation.input.dock', id: 'eng-banner', order: -20 }, EngineeringBanner);
-        });
-      } catch (e) { console.error('[dsh-engineering-ui] banner slot', e); }
+      // ══ 【问题1/2】当前会话解析：以 mainView 为唯一权威 ═════════════════
+      // 结论（已核对 0.2.0 源码 + 官方多处用法）：
+      //   本面板挂在 root 作用域的 shell.overlay 上，而 root 作用域的 slot
+      //   【不会】收到 `sessionId` 标准 prop（那是 session 作用域才有）；
+      //   SessionListState 也【没有】`current` 字段。
+      //   官方 root 侧取"当前会话"的标准做法是
+      //     useSessions(s => Object.values(s.byId).find(x => x.retainedBy.mainView > 0))
+      //   —— 见 ui-layout/DocumentTitle.tsx:19-23、ui-settings-general/
+      //   SettingsRoot.tsx:134-138、ui-workspace/tree.ts:40。
+      //   本插件即在 SubagentConsole 内用这一条（响应式，切换会话自动跟随），
+      //   因此这里【不再需要】自己注入当前会话 hook。
+      //
+      // 历史说明：曾尝试用 `uiSession.adapter.current` 注入 hook。该 adapter 是
+      //   ui-session 为【session 作用域】安装的默认绑定，并非第三方稳定契约
+      //   （README 未承诺），且实测在本组合下未生效。已移除，改用 mainView。
       try {
         ctx.slots.inject('shell.overlay', function () {
           return ctx.slots.register({ name: 'shell.overlay', id: 'eng-subagent-console', order: 31, label: '子代理控制台' }, SubagentConsole);
         });
       } catch (e) { console.error('[dsh-engineering-ui] console slot', e); }
+      // ── 【问题4】设置页「工程模式」分区 ──────────────────────────────
+      // order=25：紧跟「Agent 预设」(order=20) 之后。
+      // label 用中文字面量（注册方自带文案，shell 不订阅 locale）。
+      try {
+        ctx.slots.inject('settings.section', function () {
+          return ctx.slots.register({ name: 'settings.section', id: 'engineering', order: 25, label: '工程模式' }, EngineeringSettingsSection);
+        });
+      } catch (e) { console.error('[dsh-engineering-ui] settings.section slot', e); }
       // 【重要】主对话的提问选项卡【不由本插件渲染】。
       // DSH 原生包 @deepseek-ai/dsh-client-ui-user-questions 已注册
       // （dsh-web-app/cordis.patch.yml 的 ui-user-questions 行），它：
@@ -1807,12 +2395,88 @@ window.__ModuleLoader__.load({
       // 因此这里**不再注册** conversation.chat.node，避免同一个提问出现两个选项卡。
       // 本插件只负责子代理侧的三栏工作区展示（原生不覆盖那里）。
       void MainAskNode;
+
+      // ══ 【问题4·开启侧】"官方右侧子代理显示指向本插件" ═══════════════════
+      // 用户需求原话：
+      //   「如果选择是的话，那么所有官方的子代理在右侧显示的都指向我们现在搞的。」
+      //
+      // 官方机制（已核对 0.2.0 源码，ui-subagent/src/client/sidebar-chat/index.tsx）：
+      //   官方右侧显示子代理的【唯一】通道是一个 tab 类型：
+      //     id       = '@deepseek-ai/dsh-client-ui-subagent'
+      //     kind     = 'subagentchat'
+      //     priority = 'builtin'          ← 关键：可被 'extension' 档合法接管
+      //   它的正文注册在 `sidebar.right.pane.tab`，key = 该 id。
+      //   官方 tab-registry 的 band 规则：
+      //     extension(3) > builtin(2) > fallback(1)；
+      //     同 kind 下更高档位接管；接管者注销后 builtin 自动恢复
+      //     （tab-registry.ts:36-59, 253-281, 291-310）。
+      //
+      // 因此"让官方指向我们"= 用【同一个 kind】+【priority:'extension'】+
+      // 【我们自己的新 id】注册一个类型，再用该 id 注册我们的正文。
+      //   · 这不是 hack，是官方的一等机制（官方测试 tab-registry.client.spec.ts
+      //     就用 extension 接管 builtin 来验证）；
+      //   · 用新 id 而非复用官方 id：官方禁止同 id 二次注册（:258），
+      //     且新 id 让"关闭开关"时能干净注销、官方自动恢复。
+      //   · 我们【不使用】任何官方组件：正文渲染的是本插件自有的 SubagentConsole
+      //     同款信息（三栏工作区），只是被挂进了官方的右列 tab。
+      var ENG_SUBAGENT_TAB_ID = 'dsh-engineering-ui/subagentchat';
+      var disposers = [];
+      function installOfficialTabTakeover() {
+        // 关闭开关时：不注册 → 官方 builtin 生效
+        if (!_engSettings.useOwnSubagentPane) return;
+        var tabs = null;
+        try { tabs = ctx.get ? ctx.get('sidebarRightTabs') : null; } catch (e) { tabs = null; }
+        if (!tabs || typeof tabs.register !== 'function') {
+          // 服务不在（旧版 DSH / 非 web）→ 静默跳过，不影响其他功能
+          return;
+        }
+        try {
+          // ① 注册 tab 类型：接管 'subagentchat' kind（extension 档 > builtin）
+          var disposeType = tabs.register({
+            id: ENG_SUBAGENT_TAB_ID,
+            kind: 'subagentchat',           // ← 同 kind 才能接管官方子代理会话
+            patterns: ['dsh-resource://subagentchat/session/**'],
+            priority: 'extension',          // ← 高于 builtin，构成接管
+            // ── 只在工程模式接管 ────────────────────────────────────────
+            // tab-registry 的路由：globs 先筛候选，canOpen 是否决票，
+            //   幸存者按 priority band 排序（tab-registry.ts:11 注释）。
+            //   因此 canOpen 返回 false 时本类型【退出竞争】，
+            //   官方 builtin 自动生效 —— 这正是"限定工程模式"的正确落点：
+            //   普通对话点开子代理，看到的仍是官方原生界面。
+            canOpen: function () { return _isEngineeringContext(); },
+            title: function () { return '子代理工作区'; },
+          });
+          disposers.push(disposeType);
+          // ② 注册正文：key 必须是上面那个 id（tab-registry 用 definition.id 派发）
+          ctx.slots.inject('sidebar.right.pane.tab', function () {
+            return ctx.slots.register({
+              name: 'sidebar.right.pane.tab',
+              key: ENG_SUBAGENT_TAB_ID,
+            }, EngSubagentTabBody);
+          });
+        } catch (e) {
+          console.error('[dsh-engineering-ui] official subagent tab takeover', e);
+        }
+      }
+      try {
+        installOfficialTabTakeover();
+        // 设置变化时重装（开关切换即时生效，无需刷新）
+        subscribeEngSettings(function () {
+          for (var i = disposers.length - 1; i >= 0; i--) {
+            try { disposers[i](); } catch (e) {}
+          }
+          disposers.length = 0;
+          installOfficialTabTakeover();
+        });
+      } catch (e) { console.error('[dsh-engineering-ui] tab takeover setup', e); }
     }
     exports.apply = apply;
     exports.inject = ['sessions', 'slots'];
     exports.SubagentConsole = SubagentConsole;
+    exports.EngineeringSettingsSection = EngineeringSettingsSection;
+    exports.EngSettingsLayer = EngSettingsLayer;
+    exports.EngSwitch = EngSwitch;
     exports.SubagentDock = SubagentConsole;
-    exports.EngineeringBanner = EngineeringBanner;
     exports.formatMessage = formatMessage;
     exports.renderEvent = renderEvent;
     exports.AskCard = AskCard;

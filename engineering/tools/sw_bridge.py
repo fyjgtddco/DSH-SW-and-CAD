@@ -897,6 +897,59 @@ def cmd_run(sw, script_path, extra_args, room=None):
             result["error"] = ("脚本执行完毕但预期产物未生成: %s。"
                                "（原实现此处会误报成功，请检查脚本的保存逻辑）"
                                % ", ".join(_art["missing"]))
+    # ══ 【三大防线 · 防线①材料】建模出口强制校验 ═══════════════════════
+    # "AI 到了这一步就必须过"：脚本落盘 .sldprt 的那一刻，材料事实即被
+    #   swapi.save() 固化；此处【当场】读取凭据并校验，不合格直接判本次
+    #   run 失败（ok=False）—— 不让"密度=1000(水)/跨族换材"的零件
+    #   继续流向下游房间，从源头掐断而非等到交付才发现。
+    try:
+        import defense_gate as _dg
+        _parts = []
+        for _cand in (list(_art.get("present") or []) +
+                      list(result.get("artifacts_present") or [])):
+            if str(_cand).lower().endswith(".sldprt") and os.path.exists(_cand):
+                if _cand not in _parts:
+                    _parts.append(_cand)
+        # 脚本可显式用 __RESULT__ 里的 artifacts 声明产物
+        _biz2 = result.get("script_result")
+        if isinstance(_biz2, dict):
+            for _cand in (_biz2.get("artifacts") or _biz2.get("files") or []):
+                _s = str(_cand)
+                if _s.lower().endswith(".sldprt") and os.path.exists(_s) and _s not in _parts:
+                    _parts.append(_s)
+        if _parts:
+            _mat_reports = []
+            _mat_block = []
+            for _p in _parts:
+                _mr = _dg.check_material_attestation(_p)
+                _mat_reports.append({
+                    "part": os.path.basename(_p), "ok": _mr["ok"],
+                    "level": _mr["level"], "reasons": _mr["reasons"],
+                    "attestation": _mr.get("attestation"),
+                })
+                if not _mr["ok"]:
+                    _mat_block.append("%s: %s" % (os.path.basename(_p),
+                                                  "；".join(_mr["reasons"])))
+            result["material_defense"] = _mat_reports
+            if _mat_block and not _dg.bypass_requested():
+                result["ok"] = False
+                result["defense_blocked"] = "MATERIAL"
+                result["error"] = (
+                    "【防线①材料】建模产物未通过材料校验，已阻断本次 run：\n  - "
+                    + "\n  - ".join(_mat_block)
+                    + "\n请按提示用 swapi.new_part(material=...) 显式赋材后重新保存。"
+                    + "（确需放行：设 DSH_DEFENSE_BYPASS=1，会留痕到 "
+                      "reports/defense_bypass.json）")
+            elif _mat_block:
+                _dg.log_bypass("sw_bridge.run.material",
+                               "; ".join(_mat_block), by="DSH_DEFENSE_BYPASS")
+                result["defense_bypassed"] = "MATERIAL"
+    except ImportError:
+        result.setdefault("warnings_list", []).append(
+            "defense_gate.py 不可用，本次未执行材料防线校验")
+    except Exception as _e_def:
+        result.setdefault("warnings_list", []).append(
+            "材料防线校验异常（不阻断）: %r" % (_e_def,))
 
     # 建模完成后自动展示：固定等轴测视角 + 中等缩放 + 截图（用户约定）
     try:
@@ -3478,7 +3531,32 @@ def main():
                 if not case_path or not os.path.exists(case_path):
                     result = {"ok": False, "error": f"载荷工况文件不存在: {case_path}"}
                 else:
-                    result = _pb.cmd_optimize(case_path, max_iter=max_iter)
+                    # ── 【Bug7】解析 --part <零件>：物理校核必须针对真实零件 ──
+                    _part_path = ""
+                    for _j in range(2, len(_args)):
+                        if _args[_j] in ("--part", "--part-path") and _j + 1 < len(_args):
+                            _part_path = _args[_j + 1]
+                    if not _part_path:
+                        _part_path = (os.environ.get("DSH_PART_PATH")
+                                      or os.environ.get("DSH_PART") or "")
+                    if not _part_path or not os.path.exists(_part_path):
+                        result = {
+                            "ok": False,
+                            "error": "物理校核必须针对真实零件：缺少 --part <零件.SLDPRT>。",
+                            "hint": ("原实现用硬编码几何（thickness=5/volume=100000）"
+                                     "校验虚构零件，任何不合格设计都能通过（Bug7）。"
+                                     "请指定真实零件："
+                                     "python sw_bridge.py physics-optimize "
+                                     "<case.json> --part <零件.SLDPRT> --room <房间>"),
+                            "given_part": _part_path or None,
+                        }
+                    else:
+                        result = _pb.cmd_optimize(
+                            case_path, max_iter=max_iter,
+                            room=(_room_from_strip or _detect_gate_room(args)
+                                  or os.environ.get("DSH_ROOM") or ""),
+                            part_path=_part_path,
+                        )
         elif cmd == "physics-report":
             if not _HAS_PHYSICS:
                 result = {"ok": False, "error": "physics_bridge.py 未找到"}
@@ -3519,7 +3597,7 @@ def main():
                 result = {"ok": False, "error": "physics_bridge.py 未找到"}
             else:
                 _dom = _args[1] if len(_args) > 1 else "structural"
-                result = _pb.cmd_validate_domain(_dom)
+                result = _pb.cmd_validate_domain(_dom, room=(_room_from_strip or _detect_gate_room(args) or os.environ.get("DSH_ROOM") or ""))
         elif cmd == "physics-list-domains":
             if not _HAS_PHYSICS:
                 result = {"ok": False, "error": "physics_bridge.py 未找到"}

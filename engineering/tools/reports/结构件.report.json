@@ -3,24 +3,150 @@
   "latest": {
     "room": "结构件",
     "stage": "done",
-    "detail": "7件结构件全部完成：车架底板/前横梁/后横梁/前悬架臂/后悬架臂/舵机连杆/电池仓/加强筋（PETG），归属校验全部allowed=true，SW已close-all",
-    "ts": 1790820266.181908,
-    "time": "2026-10-01 10:04:26"
+    "detail": "三防线深度极限测试完成: 材料①真验签(多材料sig=True);物理②多工况+疲劳正常但SF载荷不敏感(Bug17);领域③四规则均报未识别验证目标(Bug12未全修)+Bug15/16 共4新bug",
+    "ts": 1790947530.734189,
+    "time": "2026-10-02 21:25:30"
   },
   "history": [
     {
       "room": "结构件",
       "stage": "part_done",
-      "detail": "已建模6件：车架底板/前横梁/后横梁/前悬架臂/后悬架臂/舵机连杆/电池仓，归属校验全通过",
-      "ts": 1790820184.111117,
-      "time": "2026-10-01 10:03:04"
+      "detail": "验证1 Bug5未修复: 类型库缓存生成成功但IMathUtility包装后CreateTransform/CreatePoint/CreateVector仍报InvokeTypes错误; 维修部假设CreateArray不存在",
+      "ts": 1790938836.1018775,
+      "time": "2026-10-02 19:00:36"
     },
     {
       "room": "结构件",
       "stage": "done",
-      "detail": "7件结构件全部完成：车架底板/前横梁/后横梁/前悬架臂/后悬架臂/舵机连杆/电池仓/加强筋（PETG），归属校验全部allowed=true，SW已close-all",
-      "ts": 1790820266.181908,
-      "time": "2026-10-01 10:04:26"
+      "detail": "Bug5/2复测完成: Bug2已修复; Bug5未修复(类型库缓存生成但IMathUtility调用仍失败); Bug11未回归(0.5mm板FAIL)",
+      "ts": 1790938872.9636219,
+      "time": "2026-10-02 19:01:12"
+    },
+    {
+      "room": "结构件",
+      "stage": "registered",
+      "detail": "Bug5二次复测开始",
+      "ts": 1790943111.5697834,
+      "time": "2026-10-02 20:11:51"
+    },
+    {
+      "room": "结构件",
+      "stage": "part_done",
+      "detail": "Bug5核心已修复: CreateTransform返回CDispatch(不再InvokeTypes错误); CreateArray/SetData16确认不存在但单参路径可用",
+      "ts": 1790943241.598613,
+      "time": "2026-10-02 20:14:01"
+    },
+    {
+      "room": "结构件",
+      "stage": "done",
+      "detail": "Bug5二次复测完成: Bug5已真正修复(CreateTransform返回有效MathTransform带Inverse/Multiply); Bug11/7/9未回归(0.5mm板FAIL); Bug2未回归",
+      "ts": 1790943458.2675574,
+      "time": "2026-10-02 20:17:38"
+    },
+    {
+      "room": "结构件",
+      "stage": "registered",
+      "detail": "极端环境测试开始",
+      "ts": 1790943792.6271398,
+      "time": "2026-10-02 20:23:12"
+    },
+    {
+      "room": "结构件",
+      "stage": "part_done",
+      "detail": "用例1超薄0.2mm板FAIL(0.199<2.0)✓; 批量跑用例2-8中",
+      "ts": 1790944118.0203955,
+      "time": "2026-10-02 20:28:38"
+    },
+    {
+      "room": "结构件",
+      "stage": "done",
+      "detail": "极端测试完成: 三防线①②真发挥; 领域③value全0空数据误报; 发现Bug12/13/14",
+      "ts": 1790944916.234557,
+      "time": "2026-10-02 20:41:56"
+    },
+    {
+      "room": "结构件",
+      "stage": "registered",
+      "detail": "极限复测开始",
+      "ts": 1790946529.220876,
+      "time": "2026-10-02 21:08:49"
+    },
+    {
+      "room": "结构件",
+      "stage": "part_done",
+      "detail": "验证1Bug12已修: 领域接入真实数据von_mises361/SF0.11/mass0.9144非0",
+      "ts": 1790946556.3276947,
+      "time": "2026-10-02 21:09:16"
+    },
+    {
+      "room": "结构件",
+      "stage": "part_done",
+      "detail": "验证2Bug13已修: 临界2mm板REVIEW不误FAIL, 加±15%误差带",
+      "ts": 1790946607.864934,
+      "time": "2026-10-02 21:10:07"
+    },
+    {
+      "room": "结构件",
+      "stage": "part_done",
+      "detail": "验证3Bug14已修: 1N载荷OVER_DESIGN,overall REVIEW",
+      "ts": 1790946631.3600948,
+      "time": "2026-10-02 21:10:31"
+    },
+    {
+      "room": "结构件",
+      "stage": "part_done",
+      "detail": "验证4回归全通过: 5000N FAIL/超薄FAIL/实心REVIEW",
+      "ts": 1790946661.5642943,
+      "time": "2026-10-02 21:11:01"
+    },
+    {
+      "room": "结构件",
+      "stage": "done",
+      "detail": "极限复测完成: Bug12/13/14全修, 三防线都真发挥作用",
+      "ts": 1790946675.128395,
+      "time": "2026-10-02 21:11:15"
+    },
+    {
+      "room": "结构件",
+      "stage": "registered",
+      "detail": "三防线深度极限测试开始",
+      "ts": 1790946812.9174101,
+      "time": "2026-10-02 21:13:32"
+    },
+    {
+      "room": "结构件",
+      "stage": "part_done",
+      "detail": "测试A: 领域4规则均报未识别验证目标违规(Bug12未全修): structural fillet_mm/transmission shaft_diameter_mm+gear_module/housing wall_thickness_mm+rib_height_mm/mold cavity_depth_mm+draft_angle_deg+surface_roughness_um",
+      "ts": 1790946829.6624079,
+      "time": "2026-10-02 21:13:49"
+    },
+    {
+      "room": "结构件",
+      "stage": "part_done",
+      "detail": "测试B: 多材料验签-所有sig=True真验签;但Bug15 PLA赋材失败density=None;Bug16 非法材料INVALID_MAT未被拒绝仍sig=True保存;Q235/6061/ABS/PETG/钛合金/不锈钢正常",
+      "ts": 1790947099.0072718,
+      "time": "2026-10-02 21:18:19"
+    },
+    {
+      "room": "结构件",
+      "stage": "part_done",
+      "detail": "测试C: 物理多方向载荷-三工况rated/lateral/longitudinal全ok;overall=REVIEW(SF=2.5临界);physics.json已签名_kid=8c5e493d946f98d5;无failed_gates",
+      "ts": 1790947270.1387355,
+      "time": "2026-10-02 21:21:10"
+    },
+    {
+      "room": "结构件",
+      "stage": "part_done",
+      "detail": "测试E: SF临界-Bug17!三载荷(39.5/27.4/12.2N)全部min_sf=2.5/REVIEW,SF未随载荷变;根因analytical_beam_cantilever用design_domain尺寸(200x60x60)解析解,未接入真实零件几何(Bug7残留)",
+      "ts": 1790947530.628735,
+      "time": "2026-10-02 21:25:30"
+    },
+    {
+      "room": "结构件",
+      "stage": "done",
+      "detail": "三防线深度极限测试完成: 材料①真验签(多材料sig=True);物理②多工况+疲劳正常但SF载荷不敏感(Bug17);领域③四规则均报未识别验证目标(Bug12未全修)+Bug15/16 共4新bug",
+      "ts": 1790947530.734189,
+      "time": "2026-10-02 21:25:30"
     }
   ]
 }

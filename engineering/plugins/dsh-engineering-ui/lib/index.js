@@ -28,6 +28,9 @@ import * as agentPresets from '@deepseek-ai/dsh-agent-preset-registry';
 // 用静态 import 最可靠（apply 是同步函数，不能用 await import）。
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
+// 【三大防线 · 签名式信任根】仅工程模式装配；密钥只存宿主内存。
+import { DefenseSigner } from './defense-sign.js';
 
 // 纯本地兜底：最后一次 agent-preset/selected，否则 header.agentPreset。
 function resolvePresetFallback(header, events) {
@@ -70,6 +73,13 @@ export const name = 'dsh-engineering-ui';
 export const inject = ['webServer', 'subagents', 'sessionPersistence', 'sessions', 'agents', 'userQuestions'];
 const PREFIX = '/dsh-engineering-ui';
 const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+// ── 【Bug3 修复】房间名必须接受【中文】─────────────────────────────────
+// 工程模式的房间名天然是中文（结构件 / 传动机构 / 壳体机架 / 总装与验证 …），
+//   而 /defense/sign、/defense/judge 之前用只允许 ASCII 的 ID_RE 校验 room，
+//   于是中文房间一律被判 "bad room" → 凭据签不出来、宿主判定也不可用，
+//   表现为三道防线全部 fail-closed（看起来像"签名服务未装配"）。
+// 该正则仅用于房间名，允许中英文字母、数字、下划线与常见连接符。
+const ROOM_RE = /^[\u4e00-\u9fa5A-Za-z0-9_.: -]{1,64}$/;
 // 【Bug2】守卫只对这一个预设的会话生效。原先无差别 steer 所有对话 → 到处都不给结束。
 const GUARD_PRESET = 'engineering';
 // 高频低值事件：不入前端流（流式 chunk 每token一条，会挤满窗口）
@@ -241,8 +251,11 @@ export function apply(ctx) {
   // 非空的 preset 类字段直接当成预设 ID —— 一旦该字段承载的是别的东西
   // （如 "default"、权限名、undefined 转换来的字符串），就会误判成
   // 非 engineering 而放行，或反过来。白名单从根上消除这类误判。
+  // ── 【问题2 修复】移除 'sw-single-line' ──────────────────────────────
+  //   该权限预设及其配套插件/横幅已整体删除，白名单同步收敛，
+  //   避免把已不存在的预设当成合法证据。
   const KNOWN_PRESETS = new Set([
-    'engineering', 'sw-single-line', 'default', 'default-preset',
+    'engineering', 'default', 'default-preset',
   ]);
   function isKnownPreset(v) {
     return typeof v === 'string' && KNOWN_PRESETS.has(v);
@@ -373,27 +386,122 @@ export function apply(ctx) {
    * 【PhaseA 修复】新增 DSH_HOME 支持与候选目录扩充，并缓存结果。
    *  原实现只认 USERPROFILE/.dsh/...，当用户自定义了 DSH_HOME 时定位失败，
    *  detectTaskFinished 会误以为"没有门禁终态"从而一直拦住任务（或反之）。
+   *
+   * ── 【P0-3 状态双副本分裂修复】────────────────────────────────────────
+   * 原实现【只】搜 DSH_HOME 下的安装副本，完全不含工作区。而工程模式的
+   *  Python 工具在【工作区】里跑，于是：
+   *   · Python 写工作区的 workflow_state.json / mode_state.json / reports/
+   *   · 宿主守卫却读安装副本 → step、房间数、凭据全部对不上
+   *   · 守卫把"已完成"判成"未完成"，反复 steer 拦住对话结束
+   *
+   * 【最终裁决】宿主与 Python 两侧必须认【同一个目录】。现约定：
+   *   DSH_STATE_DIR（显式）> 安装副本（宿主/守卫/签名信任根所在）
+   *   > DSH_ENGINEERING_ROOT > 进程 cwd 下的工作区
+   * 与 Python 的 tools/_store.py:state_dir() 保持完全一致的优先级。
+   * 安装副本优先是有意的：宿主进程本身就是信任根与守卫所在处，
+   *   凭据写在那里才有意义；工作区副本按代码注释"仅作分发"。
+   * 同时保留 mtime 兜底：安装副本没有任何状态文件时，才采用工作区。
    */
   let toolsDirCache = null;
+  let toolsDirCacheAt = 0;
+  let toolsDirCacheKey = '';
+  function toolsDirCandidates() {
+    const home = process.env.USERPROFILE || process.env.HOME || '';
+    const dshHome = process.env.DSH_HOME || (home ? path.join(home, '.dsh') : '');
+    const out = [];
+    const push = (p) => { try { if (p && fs.existsSync(p) && out.indexOf(p) < 0) out.push(p); } catch (e) {} };
+    // ① 安装副本（与 Python _store.py 的第一优先一致）
+    push(dshHome && path.join(dshHome, '.agent-presets', 'engineering', 'tools'));
+    push(dshHome && path.join(dshHome, 'engineering', 'tools'));
+    push(home && path.join(home, '.dsh', '.agent-presets', 'engineering', 'tools'));
+    push(home && path.join(home, '.dsh', 'engineering', 'tools'));
+    // ② 工作区副本（未安装时的回退）
+    try {
+      const eng = process.env.DSH_ENGINEERING_ROOT;
+      if (eng) push(path.join(eng, 'tools'));
+    } catch (e) {}
+    try {
+      const cwd = process.cwd();
+      if (cwd) {
+        push(path.join(cwd, 'engineering', 'tools'));
+        push(path.join(cwd, 'tools'));
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  /** 目录的"新鲜度"= 状态文件里最新的 mtime（越大越可能是当前真相）。 */
+  function toolsDirFreshness(dir) {
+    let newest = 0;
+    for (const f of ['workflow_state.json', 'mode_state.json', 'TASK_FINISHED.json']) {
+      try {
+        const st = fs.statSync(path.join(dir, f));
+        if (st.mtimeMs > newest) newest = st.mtimeMs;
+      } catch (e) {}
+    }
+    return newest;
+  }
+
+  /**
+   * 缓存键：把这几个环境变量的当前取值拼起来。
+   *
+   * ── 【P0-3 修复·缓存失效】──────────────────────────────────────────────
+   * 原实现只做 10 秒超时，不看环境。后果：进程内若 DSH_HOME 变化
+   *   （测试逐个用例切换临时 DSH_HOME；真实场景里也可能被重设为别的部署），
+   *   缓存仍指向旧目录，守卫会读【上一个环境】的状态 → 判定完全错乱。
+   *   实测：升级后的回归测试第 1 个用例被误判为"已完成"而不 steer。
+   * 现在把环境纳入键：键变化即强制重新解析，10 秒超时保留作为兜底。
+   */
+  function toolsDirEnvKey() {
+    try {
+      return [
+        process.env.DSH_STATE_DIR || '',
+        process.env.DSH_HOME || '',
+        process.env.DSH_ENGINEERING_ROOT || '',
+        process.env.USERPROFILE || process.env.HOME || '',
+        process.cwd() || '',
+      ].join('\u0000');
+    } catch (e) {
+      return '';
+    }
+  }
+
   function findToolsDir() {
-    if (toolsDirCache) {
+    const _key = toolsDirEnvKey();
+    // 缓存有效条件：环境未变 且 未超时 且 目录仍存在
+    if (toolsDirCache && _key === toolsDirCacheKey &&
+        (Date.now() - toolsDirCacheAt) < 10000) {
       try { if (fs && fs.existsSync(toolsDirCache)) return toolsDirCache; } catch (e) {}
       toolsDirCache = null;
     }
-    const home = process.env.USERPROFILE || process.env.HOME || '';
-    const dshHome = process.env.DSH_HOME || (home ? path.join(home, '.dsh') : '');
-    const cands = [
-      dshHome && path.join(dshHome, '.agent-presets', 'engineering', 'tools'),
-      dshHome && path.join(dshHome, 'engineering', 'tools'),
-      home && path.join(home, '.dsh', '.agent-presets', 'engineering', 'tools'),
-      home && path.join(home, '.dsh', 'engineering', 'tools'),
-    ].filter(Boolean);
-    for (const c of cands) {
-      try {
-        if (fs && fs.existsSync(c)) { toolsDirCache = c; return c; }
-      } catch (e) {}
-    }
-    return null;
+    // 显式指定优先
+    try {
+      const explicit = (process.env.DSH_STATE_DIR || '').trim();
+      if (explicit) {
+        try {
+          if (fs.existsSync(explicit)) {
+            toolsDirCache = explicit; toolsDirCacheAt = Date.now(); toolsDirCacheKey = _key;
+            return explicit;
+          }
+        } catch (e) {}
+      }
+    } catch (e) {}
+    const cands = toolsDirCandidates();
+    if (!cands.length) return null;
+    // ── 【P0-3 修复·必须严格按优先级，禁止跨目录回退】────────────────────
+    // 取【第一个存在的候选】即最高优先级目录（安装副本优先），
+    //   与 Python 侧 tools/_store.py:state_dir() 完全一致。
+    //
+    // 为什么不能"按 mtime 挑最新"或"空目录就跳到下一个"：
+    //   那样守卫会因为当前目录【暂时没有状态文件】而去读另一个部署的
+    //   状态 —— 正是"状态跨目录污染"本身。实测：临时 DSH_HOME 下没有
+    //   状态文件时，守卫回退到真实安装目录，读到"任务已完成"→ 该拦不拦。
+    //   契约必须是：认哪个目录就只认那个目录；目录里没有状态文件，
+    //   就按"无门禁终态"处理（宁可不放行），而不是去别处找证据。
+    toolsDirCache = cands[0];
+    toolsDirCacheAt = Date.now();
+    toolsDirCacheKey = _key;
+    return toolsDirCache;
   }
 
   /**
@@ -606,15 +714,48 @@ export function apply(ctx) {
       // （dsh-agent-loop/isOwned、dsh-goal-round-driver/restoreOtherClaimed 等），
       // 缺 source 的 user 消息会让宿主抛 "Cannot read properties of undefined (reading 'kind')"，
       // 该错误经 promptError 冒到输入框下方的 Toast。见 2026-09-12 排查记录。
+      //
+      // ══ 【V4 适配修复】source.kind 必须"生产者自有" ══════════════════════
+      // 报错：format v4 message requires a producer-owned source kind
+      // 根因：Session V4 已【取消通用 'plugin' kind】。校验见
+      //   session-format-v3-to-v4/src/message-sources.ts：
+      //     value.kind 为空串或恰为 'plugin' → 直接抛该错。
+      //   类型契约见 llm/src/message.ts：MessageSourceMap 只声明各生产者
+      //   自己的 kind（user / model / tool / system-prompt / runtime-context …），
+      //   "there is no shared catch-all plugin kind"。
+      // 正确写法（V3→V4 迁移规则 sources.ts:producerKind 对外部插件的规定）：
+      //     { kind: 'plugin:<插件名>' }        ← 必须去掉 plugin 字段
+      // 旧的 { kind: 'plugin', plugin: 'X' } 属于【已退休写法】，
+      //   既会被 V4 拒绝，也会让该消息无法持久化。
+      // 已核对：宿主 isOwned() 只比对 'runtime-context'，改 ours 无冲突。
       const msg = createUserMessage({
         content: [{ type: 'text', text: GUARD_TEXT }],
-        source: { kind: 'plugin', plugin: 'dsh-engineering-ui' }
+        source: { kind: 'plugin:dsh-engineering-ui' }
       });
       agent.steer(msg);
     } catch (e) {
       // 守卫失败不能影响主流程
     }
   }));
+
+
+  // ── 【已移除】Bug-47 重复输出自动阻断 ──────────────────────────────
+  // 原实现挂在 agent/assistant-stream 上，统计同一段文字在窗口内的出现次数，
+  //   达阈值即 agent.cancel() 打断本轮。实测该判定误伤正常作业：进度播报、
+  //   状态复述、工具重试提示都属于正常工作节奏下的重复，却被当作病态循环
+  //   直接终止对话，表现为模型自己就断了。用户决定移除。
+  // 若将来需要防死循环，应基于【回合数 / 无进展】而非文本重复度。
+
+
+  // ── 【已移除】系统提问账本（question_log.json）──────────────────────
+  // 原实现监听 tools/post-execute，把每次真实 ask_user_question 的题面/选项
+  //   写进 question_log.json，供门禁校验"题目是否问全"。
+  // 用户反馈该机制实用价值低、且反复造成流程卡顿（记录不全就被判定"没问"），
+  //   已连同消费方 choice_contract 的核对逻辑一并移除。
+  // 现在两个固定问题（搭建方式 A/B/C、并行策略 D/E）依然是代码固定题面，
+  //   但不再依赖任何账本文件 —— 门禁只检查 select 是否给出了合法选择。
+
+
 
   // ── 子代理树 ──────────────────────────────────────────────────────────────
   disposers.push(ctx.webServer.register({
@@ -1488,6 +1629,242 @@ export function apply(ctx) {
       });
     }
   }));
+
+  // ══ 【三大防线 · 签名式信任根】══════════════════════════════════════════
+  // 定位：签名是主防线，守卫是围绕签名服务的补丁。
+  //   · 签名：HMAC + 密钥隔离（只存宿主内存）+ 时间窗 + nonce。
+  //     防的是 AI 直接 write 一份格式完美的伪造凭据。
+  //   · 守卫：文件监控 + 台账比对 + 无效凭据记异常。
+  //     它不产生信任，只保证校验读到的是签名认可的版本；
+  //     读不到合法文件时，defense_gate 会因验签失败而阻断（fail-closed）。
+  // 范围：仅工程模式 —— tools 目录不存在时不构造、不注册、不写文件。
+  let defenseSigner = null;
+  try {
+    const _toolsDir = findToolsDir();
+    if (_toolsDir) {
+      defenseSigner = new DefenseSigner(_toolsDir, (m) => {
+        try { console.log("[defense] " + m); } catch (e) {}
+      });
+      const _port = (ctx.webServer && ctx.webServer.port) || null;
+      defenseSigner.writeRuntime(_port);
+      defenseSigner.startGuard(5000);
+      disposers.push(() => { try { defenseSigner.stopGuard(); } catch (e) {} });
+    }
+  } catch (e) {
+    console.error("[dsh-engineering-ui] defense signer init", e);
+  }
+
+  const readJsonBody = async (req) => {
+    try { return JSON.parse(await readBody(req)); } catch (e) { return null; }
+  };
+
+  disposers.push(ctx.webServer.register({
+    kind: "exact",
+    path: PREFIX + "/defense/sign",
+    handler: async (req, res) => {
+      if (req.method !== "POST") return send(res, 405, { ok: false, error: "POST only" });
+      if (!defenseSigner) return send(res, 200, { ok: false, error: "防线签名服务未装配（仅工程模式）" });
+      const body = await readJsonBody(req);
+      if (!body || typeof body !== "object") return send(res, 400, { ok: false, error: "bad json" });
+      const kind = String(body.kind || "");
+      const room = String(body.room || "").trim();
+      // ── 【Bug8 修复】room 校验按凭据类型区分 ────────────────────────
+      // 物理/领域凭据【必须】绑定房间（房间是判定的作用域）；
+      // 而材料凭据是【按零件】的事实（零件可能尚未归属任何房间，
+      //   例如单独建模/批量生成），因此允许 room 为空 ——
+      //   否则 DSH_ROOM 未设时材料凭据永远签不出来。
+      const _needRoom = (kind === "physics" || kind === "domain");
+      if (_needRoom && !ROOM_RE.test(room)) {
+        return send(res, 400, { ok: false, error: "bad room" });
+      }
+      if (room && !ROOM_RE.test(room)) {
+        return send(res, 400, { ok: false, error: "bad room" });
+      }
+      let payload = null;
+      if (kind === "physics") {
+        const built = defenseSigner.buildPhysicsPayload(room, body.report_path);
+        if (!built.ok) return send(res, 200, { ok: false, error: "物理凭据拒绝签发: " + built.reason });
+        payload = built.payload;
+      } else if (kind === "domain") {
+        const dom = String(body.domain || "").trim();
+        if (!/^[A-Za-z0-9_-]{1,32}$/.test(dom)) return send(res, 400, { ok: false, error: "bad domain" });
+        const _td = findToolsDir() || "";
+        // ── 【Bug8 修复】规则文件必须能在【多个部署位置】找到 ──────────────
+        // 宿主按自己的 toolsDir 拼路径，而工程模式存在工作区/安装目录两份
+        //   副本；若宿主那份缺 physics/rules，就会误报
+        //   "规则文件无法解析 <domain>"，导致领域凭据永远签不出来。
+        const _ruleCands = [];
+        try {
+          _ruleCands.push(path.join(_td, "physics", "rules", dom + "_rules.json"));
+          const _home = process.env.USERPROFILE || process.env.HOME || "";
+          const _dshHome = process.env.DSH_HOME
+            || (_home ? path.join(_home, ".dsh") : "");
+          if (_dshHome) {
+            _ruleCands.push(path.join(_dshHome, ".agent-presets", "engineering",
+                                      "tools", "physics", "rules", dom + "_rules.json"));
+            _ruleCands.push(path.join(_dshHome, "engineering", "tools",
+                                      "physics", "rules", dom + "_rules.json"));
+          }
+        } catch (e) {
+          // 环境变量缺失不影响主候选
+        }
+        let rulesPath = null;
+        for (const _rc of _ruleCands) {
+          try {
+            if (fs.existsSync(_rc)) { rulesPath = _rc; break; }
+          } catch (e) {
+            continue;
+          }
+        }
+        if (!rulesPath) {
+          return send(res, 200, { ok: false,
+            error: "领域凭据拒绝签发: 规则文件不存在 " + dom,
+            tried: _ruleCands });
+        }
+        if (!Array.isArray(body.violations)) {
+          return send(res, 200, { ok: false, error: "领域凭据拒绝签发: violations 必须是数组" });
+        }
+        // 【缺口5 修复】不再原样签调用方给的 violations —— 宿主自己加载规则文件，
+        //   复核其结构并把"宿主确认过的事实"（规则哈希 + 规则条数 + 违规条目）
+        //   纳入待签体。调用方仍可声称 violations=[]，但待签体由宿主构造，
+        //   且 rules_sha256 会被校验端比对，使"换一套规则"也会被发现。
+        let ruleCount = -1;
+        try {
+          const rj = JSON.parse(fs.readFileSync(rulesPath, "utf8"));
+          ruleCount = Array.isArray(rj.rules) ? rj.rules.length : -1;
+        } catch (e) {
+          ruleCount = -1;
+        }
+        if (ruleCount < 0) {
+          return send(res, 200, { ok: false, error: "领域凭据拒绝签发: 规则文件无法解析 " + dom });
+        }
+        payload = {
+          kind: "domain",
+          // schema / at / ts 由宿主在签名时写定（Python 侧不得再补，否则验签失配）
+          schema: "dsh-domain-attestation/1",
+          at: new Date().toISOString(),
+          ts: Date.now(),
+          room, domain: dom,
+          rules_sha256: fileSha256(rulesPath),
+          rule_count: ruleCount,
+          violations: body.violations,
+          score: typeof body.score === "number" ? body.score : null,
+          checked_items: Array.isArray(body.checked_items) ? body.checked_items : [],
+          // 校验端 check_domain_attestation() 会读这两项作为"真的跑过校验"的凭据
+          warnings: Array.isArray(body.warnings) ? body.warnings : [],
+          passed: Array.isArray(body.passed) ? body.passed : [],
+          source: body.source === undefined ? "physics_bridge" : String(body.source),
+        };
+      } else if (kind === "material") {
+        const partPath = String(body.part_path || "").trim();
+        if (!partPath || !fs.existsSync(partPath)) {
+          return send(res, 200, { ok: false, error: "材料凭据拒绝签发: 零件文件不存在" });
+        }
+        const st = fs.statSync(partPath);
+        if (st.size < 4096) {
+          return send(res, 200, { ok: false, error: "材料凭据拒绝签发: 零件文件过小（疑似伪造）" });
+        }
+        // ── 【签后补字段 BUG 修复】材料凭据同样必须一次签全 ──────────────
+        // 校验端 check_material_attestation() 读的是 part / part_name /
+        //   part_md5 / schema / attested_* / ok / approximate_match /
+        //   material_mismatch_rejected 等字段，而原先宿主只签
+        //   part_path / part_sha256 / applied_name / density_kg_m3 / source。
+        //   Python 侧只好在签名后补十几个字段 → HMAC 必然失配 → 防线①也失效。
+        //   现在把这些字段全部纳入待签体：
+        //     · part_sha256 / part_size_bytes / part_md5 由宿主【自己读盘】算出，
+        //       调用方无法伪造（这正是信任根的职责）；
+        //     · 其余材料事实（材料名/密度/家族/是否近似匹配）由调用方声明，
+        //       宿主原样纳入签名 —— 它们随后不可再被静默篡改。
+        const _md5 = (() => {
+          try {
+            return crypto.createHash("md5").update(fs.readFileSync(partPath)).digest("hex");
+          } catch (e) { return null; }
+        })();
+        const _apName = body.applied_name === undefined ? null : String(body.applied_name);
+        const _dens = typeof body.density_kg_m3 === "number" ? body.density_kg_m3 : null;
+        payload = {
+          kind: "material",
+          // schema/room/at/ts 一并签名：校验端会读它们，事后不得再补
+          schema: "dsh-material-attestation/1",
+          room,
+          at: new Date().toISOString(),
+          ts: Date.now(),
+          part: path.resolve(partPath),
+          part_name: path.basename(partPath).replace(/\.[^.]+$/, ""),
+          part_path: path.resolve(partPath),
+          part_sha256: fileSha256(partPath),
+          part_size_bytes: st.size,
+          part_md5: _md5,
+          applied_name: _apName,
+          density_kg_m3: _dens,
+          source: body.source === undefined ? null : String(body.source),
+          // 校验端归一化字段
+          attested_material: _apName,
+          attested_density_kg_m3: _dens,
+          attested_family: body.attested_family === undefined ? null : String(body.attested_family),
+          ok: body.ok === undefined ? null : !!body.ok,
+          approximate_match: !!body.approximate_match,
+          material_mismatch_rejected: !!body.material_mismatch_rejected,
+        };
+      } else {
+        return send(res, 400, { ok: false, error: "unknown kind: " + kind });
+      }
+      const signed = defenseSigner.sign(payload);
+      if (!signed) return send(res, 200, { ok: false, error: "签名失败（密钥未就绪）" });
+      return send(res, 200, { ok: true, credential: { ...payload, ...signed } });
+    }
+  }));
+
+  disposers.push(ctx.webServer.register({
+    kind: "exact",
+    path: PREFIX + "/defense/verify",
+    handler: async (req, res) => {
+      if (req.method !== "POST") return send(res, 405, { ok: false, error: "POST only" });
+      if (!defenseSigner) return send(res, 200, { ok: false, error: "防线签名服务未装配" });
+      const cred = await readJsonBody(req);
+      if (!cred || typeof cred !== "object") return send(res, 400, { ok: false, error: "bad json" });
+      const v = defenseSigner.verify(cred);
+      return send(res, 200, { ok: !!v.ok, verified: !!v.ok, reason: v.reason || null, kid: defenseSigner.kid });
+    }
+  }));
+
+  disposers.push(ctx.webServer.register({
+    kind: "exact",
+    path: PREFIX + "/defense/info",
+    handler: async (req, res) => {
+      if (!defenseSigner) return send(res, 200, { ok: false, error: "防线签名服务未装配（仅工程模式）" });
+      return send(res, 200, defenseSigner.status());
+    }
+  }));
+
+  // ── /defense/judge：宿主侧执行完整防线判定（C 方案核心） ────────────
+  // 判定权收回宿主：Python 侧不再自行组合"验签 + 规则"，而是把房间上报，
+  //   由宿主读凭据、验签、判定并返回结论。这样 AI 在 Python 侧没有可冒充
+  //   的判定点（它若伪造判定结果，等于篡改 defense_gate 本身，属另一类攻击，
+  //   且守约会记录凭据异常）。
+  disposers.push(ctx.webServer.register({
+    kind: "exact",
+    path: PREFIX + "/defense/judge",
+    handler: async (req, res) => {
+      if (req.method !== "POST") return send(res, 405, { ok: false, error: "POST only" });
+      if (!defenseSigner) return send(res, 200, { ok: false, error: "防线签名服务未装配（仅工程模式）" });
+      const body = await readJsonBody(req);
+      if (!body || typeof body !== "object") return send(res, 400, { ok: false, error: "bad json" });
+      const room = String(body.room || "").trim();
+      if (!ROOM_RE.test(room)) return send(res, 400, { ok: false, error: "bad room" });
+      const result = defenseSigner.judgeDefense(room, String(body.kind || "room"), {
+        requirePhysics: body.require_physics !== false,
+      });
+      return send(res, 200, result);
+    }
+  }));
+
+  /** 计算文件 sha256（读失败返回 null）。 */
+  function fileSha256(p2) {
+    try {
+      return crypto.createHash("sha256").update(fs.readFileSync(p2)).digest("hex");
+    } catch (e) { return null; }
+  }
 
   return () => {
     for (const dispose of disposers.reverse()) {

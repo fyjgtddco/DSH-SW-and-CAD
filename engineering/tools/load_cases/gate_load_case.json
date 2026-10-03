@@ -1,19 +1,19 @@
 {
   "schema_version": "1.0",
   "meta": {
-    "problem_id": "GATE_8B5D4906D3A5",
-    "title": "设计一台校内竞速小车，要求高速直线行驶并快速转弯，赛道：外形4500x4500mm方框赛道，含R600圆弧、R688.57圆弧、2100mm直线、1000mm窄段、1600mm入口；小车需3D打印制造",
+    "problem_id": "GATE_01CC675F19C4",
+    "title": "测试：简单轴承支架设计，3D打印",
     "revision": "A",
     "generated_by": "workflow_gate.estimate_mechanics",
-    "generated_at": "2026-10-01 09:56:38",
-    "task_type": "vehicle",
-    "task_type_label": "轮式车辆 / 小车",
+    "generated_at": "2026-10-02 10:11:45",
+    "task_type": "generic",
+    "task_type_label": "通用机械结构",
     "design_domain_mm": [
-      300.0,
       200.0,
-      180.0
+      60.0,
+      60.0
     ],
-    "design_domain_note": "零件包络取自任务/回答中的零件语境尺寸 [300.0, 200.0, 180.0]",
+    "design_domain_note": "未从任务/回答中提取到【零件】包络尺寸（赛道/整机尺寸不计入），已按任务类型取典型零件包络 (200, 60, 60) mm；请在小屋 prompt 中明确零件长宽高。",
     "design_domain_basis": "零件包络（Bug-12：不再沿用赛道/整机尺寸）"
   },
   "units": {
@@ -25,11 +25,11 @@
   "design_domain": {
     "bounds": {
       "x_min": 0.0,
-      "x_max": 300.0,
+      "x_max": 200.0,
       "y_min": 0.0,
-      "y_max": 200.0,
+      "y_max": 60.0,
       "z_min": 0.0,
-      "z_max": 180.0
+      "z_max": 60.0
     },
     "keep_in_regions": [],
     "keep_out_regions": []
@@ -42,7 +42,7 @@
     "yield_strength_mpa": 40.0,
     "uts_mpa": 50.0,
     "density_kg_m3": 1270.0,
-    "source": "workflow_gate.infer_material"
+    "source": "workflow_gate.infer_material.default_print"
   },
   "spatial_selectors": [
     {
@@ -50,11 +50,11 @@
       "type": "box",
       "bounds": {
         "x_min": 0.0,
-        "x_max": 15.0,
+        "x_max": 10.0,
         "y_min": -10.0,
-        "y_max": 210.0,
+        "y_max": 70.0,
         "z_min": -10.0,
-        "z_max": 190.0
+        "z_max": 70.0
       },
       "selection_rule": "faces_intersecting_region"
     },
@@ -62,12 +62,12 @@
       "id": "load_face",
       "type": "box",
       "bounds": {
-        "x_min": 290.0,
-        "x_max": 300.0,
+        "x_min": 190.0,
+        "x_max": 200.0,
         "y_min": -10.0,
-        "y_max": 210.0,
+        "y_max": 70.0,
         "z_min": -10.0,
-        "z_max": 190.0
+        "z_max": 70.0
       },
       "selection_rule": "faces_intersecting_region"
     }
@@ -92,7 +92,7 @@
       "id": "load_rated",
       "spatial_selector_id": "load_face",
       "type": "distributed_force",
-      "magnitude_n": 14.71,
+      "magnitude_n": 30.401,
       "direction": [
         0.0,
         0.0,
@@ -105,20 +105,20 @@
       "id": "load_lateral",
       "spatial_selector_id": "load_face",
       "type": "distributed_force",
-      "magnitude_n": 29.42,
+      "magnitude_n": 30.401,
       "direction": [
         1.0,
         0.0,
         0.0
       ],
       "case_name": "侧向工况（过弯侧倾/转向拉杆受拉）",
-      "note": "侧向力 = 额定载荷 × 动载系数 2.00"
+      "note": "侧向力 = 额定载荷 × 动载系数 1.00"
     },
     {
       "id": "load_longitudinal",
       "spatial_selector_id": "load_face",
       "type": "distributed_force",
-      "magnitude_n": 14.71,
+      "magnitude_n": 30.401,
       "direction": [
         0.0,
         1.0,
@@ -162,18 +162,18 @@
   ],
   "acceptance": {
     "analysis_type": "linear_static",
-    "min_safety_factor": 3.0,
+    "min_safety_factor": 2.5,
     "target_safety_factor_max": 5.0,
     "max_displacement_mm": null,
     "min_wall_thickness_mm": null,
     "max_mass_kg": null,
     "must_remain_in_design_domain": true,
     "mesh_quality_min": 0.1,
-    "design_life_years": 1.0,
-    "operating_cycles_per_year": 200000.0,
-    "load_type": "impact",
-    "impact_factor": 2.0,
-    "fatigue_check_required": true,
+    "design_life_years": 30.0,
+    "operating_cycles_per_year": 1000.0,
+    "load_type": "static",
+    "impact_factor": 1.0,
+    "fatigue_check_required": false,
     "required_load_cases": [
       "rated",
       "lateral",

@@ -21,11 +21,11 @@
 #     discovers user skills at <DSH_HOME>/skills, same as before)
 #   Those two are shared by every profile and are installed once.
 #
-# SAFETY: the profile's cordis.patch.yml is NEVER overwritten. An existing
-#   `permission` row is edited IN PLACE - only `sw-single-line` is inserted
-#   into its `presets:` map, so `defaultPreset` and every other key the user
-#   already set survive. With no `permission` row at all, a full 4-preset row
-#   is appended.
+# SAFETY: the profile's cordis.patch.yml is NEVER overwritten.
+#   [problem-2 fix] The custom `sw-single-line` permission preset and its
+#   plugin (dsH-engineering-sw-single-line) were removed. This installer now
+#   only CLEANS any residual `sw-single-line` block from an existing profile
+#   and leaves the standard three permission tiers intact.
 #
 # NOTE: keep this file ASCII-only. PowerShell 5.1 reads .ps1 as ANSI unless a
 # UTF-8 BOM is present; Chinese literals here would be corrupted. All Chinese
@@ -45,13 +45,10 @@ $ProfilesDir = Join-Path $DshHome 'profiles'
 $DataDir     = Join-Path $DshHome '.agent-presets\engineering'
 $UserSkills  = Join-Path $DshHome 'skills'
 $PatchSrc    = Join-Path $Root 'profiles\web-0.2.0\cordis.patch.yml'
-$SwLineSrc   = Join-Path $Root 'profiles\web-0.2.0\sw-single-line.presets.yml'
 $LogPath     = Join-Path $Root 'install-0.2.0.log'
 
 $UI_NAME   = 'dsh-engineering-ui'
-$SWSL_NAME = 'dsH-engineering-sw-single-line'
 $UI_SRC    = Join-Path $Root "engineering\plugins\$UI_NAME"
-$SWSL_SRC  = Join-Path $Root "engineering\plugins\$SWSL_NAME"
 
 $script:Log = New-Object System.Text.StringBuilder
 $script:Bad = 0
@@ -91,8 +88,8 @@ if ($targets.Count -eq 0) { Say "[X] nothing to install into"; WriteNoBom $LogPa
 Say ("targets   = " + ($targets -join ', '))
 
 if (-not (Test-Path $UI_SRC))    { Say ("[X] missing plugin source " + $UI_SRC); WriteNoBom $LogPath $script:Log.ToString(); exit 1 }
-if (-not (Test-Path $SWSL_SRC))  { Say ("[X] missing plugin source " + $SWSL_SRC); WriteNoBom $LogPath $script:Log.ToString(); exit 1 }
-if (-not (Test-Path $SwLineSrc)) { Say ("[X] missing " + $SwLineSrc); WriteNoBom $LogPath $script:Log.ToString(); exit 1 }
+# [problem-2 fix] the sw-single-line plugin + its preset file were removed.
+if (-not (Test-Path $UI_SRC))    { Say ("[X] missing plugin source " + $UI_SRC); WriteNoBom $LogPath $script:Log.ToString(); exit 1 }
 if (-not (Test-Path $PatchSrc))  { Say ("[X] missing " + $PatchSrc); WriteNoBom $LogPath $script:Log.ToString(); exit 1 }
 Say "[OK] preflight"
 
@@ -118,92 +115,6 @@ if (Test-Path $SkillsSrc) {
     Say ("[OK] skills ->  " + $UserSkills)
 } else { Say "[WARN] engineering\skills not found" }
 
-# ----------------------------------------------------- helper: patch permission
-function Merge-PermissionPreset {
-    param([string]$PatchPath, [string]$SwLinePath)
-
-    $nl = "`n"
-    $raw = ''
-    if (Test-Path $PatchPath) { $raw = [System.IO.File]::ReadAllText($PatchPath) }
-    $raw = $raw.TrimStart([char]0xFEFF)
-    if ($raw -match "`r`n") { $nl = "`r`n" }
-
-    if ($raw -match 'sw-single-line') { return 'ALREADY' }
-
-    $lines = @()
-    if ($raw.Trim().Length -gt 0) { $lines = $raw -split "`r?`n" }
-
-    # locate the `- id: permission` entry
-    $permIdx = -1
-    $permIndent = 0
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^(\s*)-\s*id:\s*permission\s*$') {
-            $permIdx = $i
-            $permIndent = $Matches[1].Length
-            break
-        }
-    }
-
-    $swLines = ([System.IO.File]::ReadAllText($SwLinePath).TrimStart([char]0xFEFF)) -split "`r?`n"
-
-    if ($permIdx -lt 0) {
-        # No permission row anywhere -> append the full canonical block.
-        $block = [System.IO.File]::ReadAllText($PatchSrc).TrimStart([char]0xFEFF)
-        if ($lines.Count -eq 0) {
-            WriteNoBom $PatchPath $block
-        } else {
-            WriteNoBom $PatchPath (($lines -join $nl) + $nl + $nl + $block)
-        }
-        return 'APPENDED'
-    }
-
-    # bound this entry: next `- id:` at indent <= permIndent
-    $endIdx = $lines.Count
-    for ($i = $permIdx + 1; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^(\s*)-\s*id:') {
-            if ($Matches[1].Length -le $permIndent) { $endIdx = $i; break }
-        }
-    }
-
-    # find `presets:` inside the entry
-    $presetsIdx = -1
-    $presetsIndent = 0
-    for ($i = $permIdx + 1; $i -lt $endIdx; $i++) {
-        if ($lines[$i] -match '^(\s*)presets:\s*$') {
-            $presetsIdx = $i
-            $presetsIndent = $Matches[1].Length
-            break
-        }
-    }
-    if ($presetsIdx -lt 0) { return 'NO_PRESETS_KEY' }
-
-    # Append at the END of the presets map: walk forward while lines are part of it
-    # (blank, or indented deeper than `presets:`); stop at a sibling key such as
-    # `defaultPreset`, at the entry boundary, or at EOF.
-    $insertAt = $presetsIdx + 1
-    for ($i = $presetsIdx + 1; $i -lt $endIdx; $i++) {
-        if ($lines[$i].Trim().Length -eq 0) { continue }
-        if ($lines[$i] -match '^(\s*)\S') {
-            if ($Matches[1].Length -gt $presetsIndent) { $insertAt = $i + 1; continue }
-        }
-        break
-    }
-    # drop a single trailing blank line at the insertion point so we do not double it up
-    if ($insertAt -gt $presetsIdx + 1 -and $lines[$insertAt - 1].Trim().Length -eq 0) { $insertAt = $insertAt - 1 }
-
-    $childIndent = ' ' * ($presetsIndent + 2)
-    $insert = @()
-    foreach ($l in $swLines) {
-        if ($l.Trim().Length -eq 0) { $insert += '' } else { $insert += ($childIndent + $l) }
-    }
-
-    $out = @()
-    if ($insertAt -gt 0) { $out += $lines[0..($insertAt - 1)] }
-    $out += $insert
-    if ($insertAt -le $lines.Count - 1) { $out += $lines[$insertAt..($lines.Count - 1)] }
-    WriteNoBom $PatchPath (($out -join $nl))
-    return 'MERGED'
-}
 
 # ============================= per-profile install ===========================
 foreach ($prof in $targets) {
@@ -217,7 +128,8 @@ foreach ($prof in $targets) {
     if (-not (Test-Path $NodeModules)) { New-Item -ItemType Directory -Path $NodeModules -Force | Out-Null }
 
     # --- copy plugin packages (copy-overwrite only; never delete) ---
-    foreach ($pair in @(@{ n = $UI_NAME; s = $UI_SRC }, @{ n = $SWSL_NAME; s = $SWSL_SRC })) {
+    # [problem-2 fix] only the UI plugin is installed now
+    foreach ($pair in @(@{ n = $UI_NAME; s = $UI_SRC })) {
         $dst = Join-Path $NodeModules $pair.n
         if (-not (Test-Path $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }
         Copy-Item -Path (Join-Path $pair.s '*') -Destination $dst -Recurse -Force
@@ -228,12 +140,19 @@ foreach ($prof in $targets) {
     # --- host-layer permission presets: merge in place, never overwrite ---
     $bak = $ProfilePatch + '.bak-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
     if (Test-Path $ProfilePatch) { Copy-Item $ProfilePatch $bak -Force; Say ("  [bak] " + (Split-Path $bak -Leaf)) }
-    $r = Merge-PermissionPreset -PatchPath $ProfilePatch -SwLinePath $SwLineSrc
-    switch ($r) {
-        'ALREADY'        { Say "  [SKIP] sw-single-line already present" }
-        'MERGED'         { Say "  [OK] inserted sw-single-line into existing permission row (defaultPreset & other keys preserved)" }
-        'APPENDED'       { Say "  [OK] appended full permission row (4 presets incl. sw-single-line)" }
-        'NO_PRESETS_KEY' { Say "  [WARN] permission row has no 'presets:' key - left untouched; add sw-single-line by hand"; $script:Bad++ }
+    # [problem-2 fix] do NOT insert a custom preset; strip any residual block instead.
+    if (Test-Path $ProfilePatch) {
+        $ptxt = [System.IO.File]::ReadAllText($ProfilePatch).TrimStart([char]0xFEFF)
+        if ($ptxt -match 'sw-single-line') {
+            $nlch = if ($ptxt -match "`r`n") { "`r`n" } else { "`n" }
+            $clean = [regex]::Replace($ptxt, '(?m)^[ 	]*sw-single-line:[ 	]*?
+(?:[ 	]{6,}.*?
+)*', '')
+            if ($clean -ne $ptxt) {
+                WriteNoBom $ProfilePatch $clean
+                Say "  [OK] removed residual sw-single-line preset (standard three tiers kept)"
+            } else { Say "  [WARN] sw-single-line found but not auto-removable; edit manually" }
+        } else { Say "  [OK] no custom permission preset (standard three tiers only)" }
     }
 
     # --- register bundles in the profile manifest ---
@@ -241,11 +160,10 @@ foreach ($prof in $targets) {
     $deps = [ordered]@{}
     foreach ($p in $pkg.dependencies.PSObject.Properties) { $deps[$p.Name] = $p.Value }
     $deps[$UI_NAME]   = ('file:./node_modules/' + $UI_NAME)
-    $deps[$SWSL_NAME] = ('file:./node_modules/' + $SWSL_NAME)
 
     $bundles = @()
     foreach ($b in $pkg.dsh.profile.bundles) { $bundles += $b }
-    $ordered = @($SWSL_NAME, $UI_NAME)   # sw-single-line host service first, then the UI plugin
+    $ordered = @($UI_NAME)   # [problem-2 fix] only the UI plugin bundle
     foreach ($name in $ordered) {
         if ($bundles -notcontains $name) {
             $idx = [array]::IndexOf($bundles, '@deepseek-ai/dsh-web-app')
@@ -272,8 +190,7 @@ foreach ($prof in $targets) {
         @{ n = 'package.json'; p = $ProfilePkg },
         @{ n = 'cordis.patch.yml'; p = $ProfilePatch },
         @{ n = ('node_modules\' + $UI_NAME + '\package.json'); p = (Join-Path $NodeModules ($UI_NAME + '\package.json')) },
-        @{ n = ('node_modules\' + $UI_NAME + '\preset-engineering.patch.yml'); p = (Join-Path $NodeModules ($UI_NAME + '\preset-engineering.patch.yml')) },
-        @{ n = ('node_modules\' + $SWSL_NAME + '\package.json'); p = (Join-Path $NodeModules ($SWSL_NAME + '\package.json')) }
+        @{ n = ('node_modules\' + $UI_NAME + '\preset-engineering.patch.yml'); p = (Join-Path $NodeModules ($UI_NAME + '\preset-engineering.patch.yml')) }
     )
     foreach ($c in $checks) {
         if (Test-Path $c.p) { Say ("  [OK] " + $c.n) } else { Say ("  [MISSING] " + $c.n + " -> " + $c.p); $script:Bad++ }
@@ -283,7 +200,7 @@ foreach ($prof in $targets) {
         Say ("  [BOM!] " + $ProfilePkg + " has a UTF-8 BOM - boot will fail"); $script:Bad++
     } else { Say "  [OK] package.json is BOM-less" }
     $pt = [System.IO.File]::ReadAllText($ProfilePatch)
-    if ($pt -match 'sw-single-line') { Say "  [OK] cordis.patch.yml contains sw-single-line" } else { Say "  [MISSING] sw-single-line not in cordis.patch.yml"; $script:Bad++ }
+    if ($pt -match 'sw-single-line') { Say "  [WARN] cordis.patch.yml still contains sw-single-line"; $script:Bad++ } else { Say "  [OK] no custom permission preset remains" }
     if ($pt -match 'defaultPreset')  { Say "  [OK] existing defaultPreset preserved" }
 }
 

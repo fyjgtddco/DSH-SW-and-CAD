@@ -38,7 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FILES = [
     "sw_bridge.py", "swapi.py", "ask_user.py", "mode_gate.py",
     "workflow_gate.py", "physics_bridge.py", "ac_validate.py",
-    "ac_bridge.py", "_root.py",
+    "ac_bridge.py", "_root.py", "defense_gate.py",
 ]
 
 

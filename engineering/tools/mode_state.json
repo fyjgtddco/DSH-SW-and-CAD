@@ -2,47 +2,45 @@
   "rooms": {
     "结构件": {
       "active": false,
-      "started_at": 1790819830.8472886,
-      "ended_at": 1790820427.0033886
-    },
-    "传动机构": {
-      "active": false,
-      "started_at": 1790819830.9412475,
-      "ended_at": 1790821420.58031
-    },
-    "壳体机架": {
-      "active": true,
-      "started_at": 1790822726.8270717
-    },
-    "支撑结构": {
-      "active": false,
-      "started_at": 1790819831.1296148,
-      "ended_at": 1790820691.9710457
+      "started_at": 1790910071.8440664,
+      "ended_at": 1790912659.6242025
     }
   },
-  "subagents": {},
+  "subagents": {
+    "结构件": {
+      "id": "14d6cecf-4426-4dfc-bb67-8a945ccee8a6",
+      "assigned_at": 1790953217.7649565
+    }
+  },
   "sw_lock": {
     "owner": null,
     "queue": [],
     "acquired_at": null,
-    "prev_owner": "壳体机架",
-    "sw_by_room": false,
-    "cmd_seq": 50,
-    "fair_start": 1790819923.7530415,
+    "prev_owner": "结构件",
+    "sw_by_room": true,
+    "cmd_seq": 27,
+    "fair_start": 1790907195.4968727,
     "hold_mode": "command",
-    "purged_at": 1790823294.6183848,
-    "purged_by": "壳体机架",
+    "purged_at": 1790952217.7358148,
+    "purged_by": "结构件",
     "purged_actions": [
-      "owner 为空→prev_owner 标志清除(防幽灵占用)"
+      "SW 进程未运行(prev_owner='结构件')→清"
     ]
   },
   "mode": "2",
   "mode_name": "大型复杂器械装配",
-  "declared_at": 1790819813.8427541,
+  "declared_at": 1790907112.9218345,
   "task_epoch_started_at": 1789737163.1795745,
   "task_epoch_at": "2026-09-18 21:12:43",
-  "subagent_history": [],
-  "parallel_mode_updated_at": 1790504901.177457,
+  "subagent_history": [
+    {
+      "room": "结构件",
+      "freed_id": "27198a3f-89a1-451c-b9f1-0ada1145a083",
+      "at": 1790910071.844065,
+      "reason": "room-start 重开房间，清除上一波残留"
+    }
+  ],
+  "parallel_mode_updated_at": 1790858271.7732038,
   "parallel_mode": "parallel",
   "parallel_mode_repaired_by": "get_parallel_mode(wf)",
   "parallel_mode_synced_at": 1789875200.3143635

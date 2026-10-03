@@ -36,7 +36,7 @@ cd <preset目录>
 ```
 
 脚本会自动：
-1. 把 **SW单行模式** 权限预设 patch 进宿主层 `profiles/web/cordis.patch.yml`（幂等，已存在则跳过，自动备份）
+1. 【问题2 修复】权限预设只保留 DSH 标准三档，**不再注入 SW单行模式**
 2. 把 `plugins/dsh-engineering-ui` 复制进 profile 的 `node_modules`
 3. 把插件登记进 profile 的 `package.json`（`dependencies` + `dsh.profile.bundles`）
 
@@ -62,7 +62,6 @@ cd <preset目录>
       read-only:          { sandbox: read-only,          approval: ask   }
       workspace-write:    { sandbox: workspace-write,    approval: ask   }
       danger-full-access: { sandbox: danger-full-access, approval: never, name: Full access }
-      sw-single-line:     { sandbox: danger-full-access, approval: never, name: SW单行模式 }
 ```
 
 **为什么必须写 `defaultPreset`**：权限服务的行为是
@@ -74,21 +73,19 @@ const defaultPreset = config.defaultPreset ?? inferredDefault;
 
 patch 是**整体替换该行 config**，一旦覆盖了 `presets` 表又没给 `defaultPreset`，
 服务只能靠推导——推不出来时 UI 默认值会落到表内任意项，
-表现为"设置了 Full access，新会话却仍被 SW单行模式 锁住"。
+表现为"设置了 Full access，新会话却被锁在某个非预期权限档"。
 
-### 两档工作模式（手动切换）
+### 标准三档权限（问题2 修复后）
 
 | 预设 | sandbox | approval | 什么时候用 |
 |------|---------|----------|-----------|
 | **Full access** | `danger-full-access` | `never` | 默认；完全访问，不弹审批 |
-| **SW单行模式** | `danger-full-access` | `never` | 工程模式专用（SW 活） |
-| `workspace-write` | `workspace-write` | `ask` | 与 SW 无关的本地杂活 |
+| `workspace-write` | `workspace-write` | `ask` | 只在工作区内写，越界要审批 |
+| `read-only` | `read-only` | `ask` | 只读 |
 
-| 字段 | 值 |
-|------|-----|
-| 预设 id | `sw-single-line` |
-| 显示名 | SW单行模式 |
-| 图标 | 随插件内联分发（`assets/sw-single-line-*.png`） |
+> 【问题2 修复】原「SW单行模式」权限档、配套插件
+> `dsH-engineering-sw-single-line` 及非工程模式警告横幅已**整体移除**。
+> 工程模式现在直接使用 DSH 标准权限档，不再自动切换自定义预设。
 
 **修改 preset 表必须重启 DSH**（进程级配置，不热生效）。
 
@@ -294,8 +291,7 @@ engineering/
 │   ├── physics/               # 物理仿真（GB/T 规则库）
 │   └── examples/              # 建模样例
 └── plugins/
-    ├── dsh-engineering-ui/            # 三栏 UI + 提问卡片 + 守卫
-    └── dsH-engineering-sw-single-line/# SW单行模式权限预设
+    └── dsh-engineering-ui/            # 三栏 UI + 提问卡片 + 守卫 + 提问记账
 ```
 
 ---
@@ -326,7 +322,7 @@ engineering/
 | 10 | **SW 锁饥饿**（单房间独占致队列饿死） | 公平轮转（命令数 + 独占时长双判据） |
 | 11 | **C+D 被强制降级为 E** | 移除 `conflict_warning` 自动改写逻辑 |
 | 12 | **`entry.resolve is not a function`** | `entry` 持有真正的 resolve + 桥接 `ask()` |
-| 13 | **权限默认被 SW单行模式锁死** | 显式声明 `defaultPreset: danger-full-access` |
+| 13 | **权限默认被自定义预设锁死** | 【问题2】移除自定义档，只留标准三档 + 显式 `defaultPreset` |
 | 14 | **问题集不一致**（有时5问有时10问） | `QUESTION_SPEC` 单一事实来源，统一 17 题 |
 | 15 | **子代理不知自己 sessionId 而卡死** | 新增 `whoami` 身份自查命令 |
 | 16 | **report 始终为 null** | `registered` 改为开工必做第一件事 |

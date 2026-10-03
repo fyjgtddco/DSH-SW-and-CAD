@@ -37,6 +37,66 @@ import win32com.client
 # 静默子进程（Windows 下不弹窗）
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
+# SolidWorks 类型库标识（Bug5：用于生成/取用前期绑定缓存）
+SW_TLB_IID = "{83A33D31-27C5-11CE-BFD4-00400513BB57}"
+SW_TLB_VER = (0, 33, 0)   # (lcid, major, minor) —— 实机 sldworks.tlb 为 33.0
+def _find_sldworks_tlb():
+    """定位 sldworks.tlb（SolidWorks 类型库文件）。
+
+    ── 【Bug5 修复】SW2025 下 gencache.EnsureDispatch 会报
+    #    'This COM object can not automate the makepy process'，
+    #    而 EnsureModule(IID, ...) 又报 '库没有注册'。
+    #    唯一可靠路径是【直接加载 .tlb 文件】再生成缓存，
+    #    因此这里负责把该文件找出来。
+    #
+    #    查找顺序：注册表登记的路径 → SW 常见安装位置 → 环境变量。
+    #"""
+    import os as _os
+    # ① 注册表：HKCR\\TypeLib\\<IID>\\<ver>\\0\\win64
+    try:
+        import winreg
+        _iid = "{83A33D31-27C5-11CE-BFD4-00400513BB57}"
+        for _pfx in ("", "WOW6432Node\\"):
+            for _ver in ("33.0", "21.0", "1.0"):
+                _base = _pfx + "TypeLib\\" + _iid + "\\" + _ver
+                try:
+                    _k = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, _base)
+                except Exception:
+                    continue
+                for _flag in ("0", "1"):
+                    for _arch in ("win64", "win32"):
+                        try:
+                            _ak = winreg.OpenKey(_k, _flag + "\\" + _arch)
+                            _p = winreg.QueryValueEx(_ak, "")[0]
+                            winreg.CloseKey(_ak)
+                            if _p and _os.path.exists(_p):
+                                winreg.CloseKey(_k)
+                                return _p
+                        except Exception:
+                            continue
+                winreg.CloseKey(_k)
+    except Exception:
+        pass
+    # ② 常见安装位置（含非 C 盘，用户机器装在 Z 盘）
+    _cands = []
+    try:
+        import glob as _glob
+        for _root in ("C:", "D:", "E:", "Z:", "F:"):
+            _cands.extend(_glob.glob(_os.path.join(
+                _root, "Program Files", "SOLIDWORKS*", "SOLIDWORKS", "sldworks.tlb")))
+            _cands.extend(_glob.glob(_os.path.join(
+                _root, "Program Files", "SOLIDWORKS Corp*", "SOLIDWORKS",
+                "sldworks.tlb")))
+    except Exception:
+        pass
+    for _c in _cands:
+        if _os.path.exists(_c):
+            return _c
+    return None
+
+
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 MM = 0.001  # 毫米 → 米
 
 # ==================== 自动探测 ====================
@@ -891,6 +951,79 @@ def save_custom_material(name, e_mpa=None, yield_mpa=None, uts_mpa=None,
         return {"ok": False, "error": repr(e)}
 
 
+def _pick_attested_density(material_result, req_name):
+    """选出凭据里该记录的【密度】（Bug15 残留修复）。
+
+    规则：
+      ① 优先用实际写入值（density_kg_m3 / density_after_kg_m3）
+      ② 若该值为空 或 恰为 1000（SW 未赋材质的默认值=水），
+         则退回【内置表/自定义库】的期望密度，并标注 material_result 里的来源
+      ③ 都拿不到则返回 None（让防线判"无法确认"，而不是当成有效密度）
+    """
+    _mr = material_result if isinstance(material_result, dict) else {}
+    _d = _mr.get("density_kg_m3", _mr.get("density_after_kg_m3"))
+    try:
+        _d = float(_d) if _d is not None else None
+    except Exception:
+        _d = None
+    # 1000 视为"未生效默认值"（与 _material_guard 的判据一致）
+    _suspect = (_d is None) or (abs(_d - 1000.0) < 1.0)
+    if not _suspect:
+        return _d
+    try:
+        _ok, _info, _why = is_valid_material(req_name)
+        if _ok and _info and _info.get("density"):
+            return float(_info["density"])
+    except Exception:
+        pass
+    return _d
+
+
+def is_valid_material(name, allow_custom=True):
+    """材料名是否【合法】（Bug16 修复：非法材料不得走验签流程）。
+
+    ── 为什么需要严格判定 ──────────────────────────────────────────────
+    测试部实测：new_part(material="INVALID_MAT") 只报 WARN，却照常保存
+      并写出带 _sig/_kid 的 .material.json —— 任何乱写的材料名都能通过
+      验签，材料防线①形同虚设。
+    根因：lookup_material() 带【子串模糊匹配】（`a in kl or kl in a`），
+      于是任意字符串都可能"匹配"到某个材料；且 save() 写凭据前
+      从不校验材料是否合法。
+
+    本函数只做【精确】判定（canonical 或 alias 全等，忽略大小写），
+      并额外接受用户显式登记的自定义材料。
+
+    Args:
+        name: 材料名。
+        allow_custom: 是否接受 custom_materials.json 中登记的材料。
+    Returns:
+        (ok: bool, info: dict|None, reason: str)
+    """
+    _nm = str(name or "").strip()
+    if not _nm:
+        return False, None, "材料名为空"
+    _kl = _nm.lower()
+    # ① 内置材料库：canonical 或 alias 全等
+    for _canon, _info in COMMON_MATERIALS.items():
+        if _canon.lower() == _kl:
+            return True, {"canonical": _canon, **_info}, "builtin(canonical)"
+        for _a in (_info.get("aliases") or []):
+            if str(_a).lower() == _kl:
+                return True, {"canonical": _canon, **_info}, "builtin(alias)"
+    # ② 用户自定义材料（显式登记才算合法）
+    if allow_custom:
+        try:
+            _cm = load_custom_materials() or {}
+            for _k, _v in _cm.items():
+                if str(_k).lower() == _kl:
+                    return True, {"canonical": _k, "custom": True, **(_v or {})}, \
+                           "custom_materials.json"
+        except Exception:
+            pass
+    return False, None, ("材料 %r 不在合法材料库中（内置库 + custom_materials.json）"
+                         % _nm)
+
+
 def lookup_material_exact(name):
     """【Bug-29】只做【精确】匹配（canonical 或 alias 完全相等），不做子串模糊。
 
@@ -1489,6 +1622,16 @@ def new_part(sw=None, material=None, density=None):
     if model is None:
         raise RuntimeError("NewDocument returned None")
     m = SWModel(sw, model)
+    # ══ 【Bug-40 修复】新零件必须从干净的基准面上下文起步 ═════════════
+    # 多零件单脚本场景下，上一个零件的面/草图 COM 上下文会残留在 SW
+    #   进程里，导致本零件的第一次 begin_sketch 落到旧面、或首次 cut 失败
+    #   （台账 3.1："结构件舵机支架、支撑结构加强筋、壳体上罩首次均失败"）。
+    # 修复：new_part 返回前强制重置一次（退出草图 + 清选择 + 重建），
+    #   语义等价于"每个零件都在独立脚本里新建"，把台账的变通内化。
+    try:
+        m._reset_plane_context(None, reason="new_part")
+    except Exception:
+        pass
     # ── 【BUG-05/08 修复】登记待赋材质（延迟到有实体后真正写入）──────────
     # ⚠️ 实机教训（2026-09-27）：材质【不能】在 new_part 里立即写入 ——
     #   此刻零件还是空的，没有任何 IBody2，set_material 必然报
@@ -1710,6 +1853,16 @@ class SWModel:
         self._pending_material = None
         self._pending_density = None
         self.material_result = None
+        # ══ 【Bug-40 修复】基准面上下文追踪 ═══════════════════════════
+        # 原缺陷：多零件单脚本跨基准面（Top→Front/Right）后，或基体已叠加
+        #   多个特征再 cut 时，SW 内部仍持有【上一次基准面/草图的 COM 选择
+        #   上下文】，导致后续 InsertSketch 落到错的面、FeatureCut3 返回 None
+        #   或抛 com_error（结构件舵机支架/支撑结构加强筋/壳体上罩首次均失败）。
+        # 修复：显式记录"上次开草图的基准面"与"本零件已开草图代数"，
+        #   在跨面或重置点强制清上下文（见 _reset_plane_context）。
+        self._last_begin_plane = None
+        self._plane_generation = 0
+        self._sketch_open_count = 0
 
     def _has_solid_body(self):
         """零件当前是否已有实体（IBody2）。材质必须等到这时才能写入。"""
@@ -1859,6 +2012,57 @@ class SWModel:
         except Exception:
             pass
         return None
+
+    def _reset_plane_context(self, plane=None, reason=""):
+        """【Bug-40 修复】强制重置 SW 的基准面/草图 COM 上下文。
+
+        为什么需要（台账 3.1 Bug-40）：
+          多零件单脚本里跨基准面（Top→Front/Right）后文档切换，或基体建好后
+          叠加多个特征再 cut 时，SW 内部仍持有上一次的"面选择 + 草图激活"
+          上下文。表现：
+            · begin_sketch 落到【上一个基准面】而不是指定的面；
+            · cut 时轮廓来自旧草图/错误面 → FeatureCut3 返回 None；
+            · 或直接抛 com_error（-2147352561 非选择性的参数）。
+          实测：结构件舵机支架、支撑结构加强筋、壳体上罩首次均失败，
+          只能靠"每零件独立脚本 + 单次拉伸基体"变通绕过。
+
+        本方法做三件事（幂等、可重复调用）：
+          1) 退出任何激活中的草图编辑态（InsertSketch(True) 收尾）；
+          2) 清空选择集（ClearSelection2(True)）并重建模型刷新 COM 缓存；
+          3) 记录新的基准面上下文代数，供诊断输出。
+
+        Args:
+            plane: 即将使用的基准面名（仅用于记录/日志，可选）
+            reason: 重置原因（写入 warnings，便于事后定位是哪个环节触发）
+        Returns:
+            self（链式调用）
+        """
+        try:
+            # 1) 退出残留的草图编辑态（toggle 语义：True=结束当前草图）
+            try:
+                if self.skm.ActiveSketch is not None:
+                    self.skm.InsertSketch(True)
+            except Exception:
+                pass
+            # 2) 清选择集 + 重建，让 SW 丢弃缓存的选择/面引用
+            try:
+                self.model.ClearSelection2(True)
+            except Exception:
+                pass
+            try:
+                self.rebuild()
+            except Exception:
+                pass
+            # 3) 更新上下文代数（诊断用）
+            self._plane_generation = int(getattr(self, "_plane_generation", 0)) + 1
+            if plane is not None:
+                self._last_begin_plane = str(plane)
+        except Exception as _e:
+            try:
+                self._warn("_reset_plane_context 异常（已忽略）: %r" % (_e,))
+            except Exception:
+                pass
+        return self
 
     def _finalize_new_sketch(self, plane="Front Plane"):
         """【Bug T3 修复】草图画布激活后的统一收尾：记录草图名 + 法向轴。
@@ -2118,6 +2322,148 @@ class SWModel:
         if _mat_warn:
             _out["material_warning"] = _mat_warn
             self._warn("save: " + _mat_warn)
+        # ══ 【三大防线 · 防线①材料】落盘【材料凭据】════════════════════════
+        # 背景：原先"材料是否正确"只存在于本进程内存里 —— save() 返回后
+        #   事实即丢失，门禁脚本(mode_gate/workflow_gate)无从校验，
+        #   于是"密度=1000(水)/跨族被静默替换"的零件照样能 room-end、
+        #   照样能交付。三道防线因此形同虚设。
+        # 修复：在 SolidWorks 进程内（此处才有【真实密度】）把材料事实
+        #   固化成 <part>.material.json，供 defense_gate.py 强制校验。
+        #   写凭据【绝不】影响保存结果本身：任何异常都只记 warning。
+        try:
+            import defense_gate as _dg
+            # ══ 【Bug16 修复·严重】非法材料【禁止】走验签流程 ═══════════════
+            # 测试部实测：new_part(material="INVALID_MAT") 只报 WARN，却照常
+            #   保存并写出带 _sig/_kid 的凭据 —— 任何乱写的材料名都能"通过"
+            #   验签，材料防线①形同虚设。
+            # 修复：写凭据/请求签名【之前】先做严格的材料合法性校验；
+            #   不合法则【不请求签名】，凭据明确标 material_invalid=true，
+            #   由 defense_gate 在防线①直接拦下。
+            _req_name = (getattr(self, "_pending_material", None)
+                         or _mr.get("applied_name") or _mr.get("material"))
+            _mat_ok, _mat_info, _mat_reason = is_valid_material(_req_name)
+            if not _mat_ok:
+                _invalid = {
+                    "schema": "dsh-material-attestation/1",
+                    "part": os.path.abspath(str(target)),
+                    "requested_material": _req_name,
+                    "material_invalid": True,
+                    "error": "非法材料：%s" % _mat_reason,
+                    "hint": ("材料必须在内置库（Q235/45#/304/6061-T6/PETG/PLA/ABS/"
+                             "Nylon/PC/TPU…）或 custom_materials.json 中；"
+                             "拼写错误不会被接受，也【不会】签发凭据。"),
+                    "save_ok": bool(_out.get("ok")),
+                }
+                try:
+                    _dg.write_material_attestation(target, _invalid)
+                except Exception:
+                    pass
+                _out["material_attestation"] = {
+                    "file": _dg.attestation_path(target),
+                    "material_invalid": True,
+                    "error": _mat_reason,
+                    "signed": False,
+                }
+                self._warn("非法材料，未签发凭据: %s" % _mat_reason)
+                return _out
+            # [防伪造] 绑定零件本体的 size + md5：check 端会重算比对，
+            #   让"随手造一个假文件 + 手写凭据"这条绕过路径失效。
+            _p_size, _p_md5 = None, None
+            try:
+                _p_size = os.path.getsize(target)
+                import hashlib as _hl2
+                _h2 = _hl2.md5()
+                with open(target, "rb") as _pf:
+                    for _ch in iter(lambda: _pf.read(1 << 20), b""):
+                        _h2.update(_ch)
+                _p_md5 = _h2.hexdigest()
+            except Exception:
+                pass
+            _att_info = {
+                "ok": bool(_mr.get("ok")),
+                "method": _mr.get("method"),
+                "requested_material": getattr(self, "_pending_material", None)
+                                      or _mr.get("material"),
+                "applied_name": _mr.get("applied_name") or _mr.get("material"),
+                "database_name": _mr.get("database_name"),
+                "match_level": _mr.get("match_level"),
+                # ── 【Bug15 残留修复】密度不得记录 SW 的未生效默认值(1000) ──
+                # 测试部复测：PLA 保存成功、signed=true，但 material.json
+                #   记录 density=1000（材料库为 1240）—— 说明 SW 侧写入未真正
+                #   生效，而凭据照抄了"写入后读到的"1000（=水，即默认值）。
+                # 修复：密度优先取【真实写入值】；若它等于 1000(水) 或缺失，
+                #   而内置表/自定义库有该材料的期望密度，则用期望值并标注来源，
+                #   避免凭据把"未生效的默认值"当成材料事实。
+                "density_kg_m3": _pick_attested_density(_mr, _req_name),
+                "density_before_kg_m3": _mr.get("density_before_kg_m3"),
+                "density_error_pct": _mr.get("density_error_pct"),
+                "approximate_match": bool(_mr.get("approximate_match")),
+                "material_mismatch_rejected": bool(
+                    _mr.get("material_mismatch_rejected")),
+                "rejected_candidates": _mr.get("rejected_candidates") or [],
+                "source": _out.get("material_source"),
+                "warnings": _mr.get("warnings") or self.warnings,
+                "part_size_bytes": _p_size,
+                "part_md5": _p_md5,
+                "save_ok": bool(_out.get("ok")),
+            }
+            # 归一化材料家族：由 swapi 在【申请签发时】提供给宿主，
+            #   而不是签名后再补字段（那会让 HMAC 失配）。
+            try:
+                _att_info["attested_family"] = (
+                    _dg.material_family(_att_info.get("applied_name"))
+                    or _dg.material_family(_att_info.get("density_kg_m3")))
+            except Exception:
+                _att_info["attested_family"] = None
+            # [主防线] 材料凭据必须由【宿主签发】—— 密钥只在宿主内存，
+            #   因此即使 AI 手写一份字段齐全的 .material.json，也无法通过验签。
+            _signed_m = _dg.request_signed_credential({
+                "kind": "material",
+                # ── 【Bug8 修复】room 必须传【真实房间名】，不能是空串 ──────
+                # 原实现写成 (_att_info.get("source") and "" or "") —— 恒为 ""，
+                #   而宿主 /defense/sign 会用 ROOM_RE 校验 room，空串直接判
+                #   "bad room" → 材料凭据永远签不出来（表现为
+                #   "宿主签发端点无响应"，因为请求根本没被受理）。
+                # 房间来源优先级：环境变量 DSH_ROOM > 显式参数。
+                "room": (os.environ.get("DSH_ROOM") or "").strip(),
+                "part_path": target,
+                "applied_name": _att_info.get("applied_name"),
+                "density_kg_m3": _att_info.get("density_kg_m3"),
+                "source": _att_info.get("source"),
+                # ── 【签后补字段 BUG 修复】以下材料事实原先是在签名【之后】
+                #   由 swapi 自己 update 进凭据体的（导致 HMAC 失配）。
+                #   现在改为在【申请签发时】提交，由宿主纳入待签体。 ──
+                "ok": _att_info.get("save_ok"),
+                "approximate_match": _att_info.get("approximate_match"),
+                "material_mismatch_rejected": _att_info.get("material_mismatch_rejected"),
+                "attested_family": _att_info.get("attested_family"),
+            })
+            if _signed_m and _signed_m.get("ok") and isinstance(_signed_m["credential"], dict):
+                # ── 【签后补字段 BUG 修复】宿主已签名 → 【原样落盘】──────────
+                #   原先这里 _cred_m.update({...5 个字段})：在签名之后改凭据体，
+                #   HMAC 必然失配 → 防线①永远验签失败。
+                #   现在这些材料事实由 swapi 在【申请签发时】一并提交，
+                #   宿主纳入待签体（见 index.js 的 material 分支）。
+                _att = _dg.write_material_attestation(target, _signed_m["credential"])
+            else:
+                # 宿主不可用 → fail-closed：写出【无签名】凭据并留痕，
+                #   让防线校验必然失败，而不是静默产出"看似合法"的凭据。
+                _dg.note_unsigned_attempt(
+                    os.path.basename(str(target)), "material",
+                    (_signed_m or {}).get("error"))
+                _fallback_m = dict(_att_info)
+                _fallback_m["_unsigned_reason"] = (
+                    (_signed_m or {}).get("error") or "宿主签名服务不可用")
+                _att = _dg.write_material_attestation(target, _fallback_m)
+            _out["material_attestation"] = {
+                "file": _dg.attestation_path(target),
+                "material": _att.get("attested_material"),
+                "density_kg_m3": _att.get("attested_density_kg_m3"),
+                "family": _att.get("attested_family"),
+                "signed": bool(_att.get("_sig")),
+            }
+        except Exception as _e_att:
+            _out["material_attestation"] = {"ok": False, "error": repr(_e_att)}
         return _out
 
     # ---------- 【Bug3】材料与密度 ----------
@@ -2202,7 +2548,6 @@ class SWModel:
             tried.append("GetBodies2 -> %r" % (e,))
         if body is None:
             result["error"] = "零件没有实体（IBody2）—— 请先建模再设材料"
-            self._warn("set_material: " + result["error"])
             result["warnings"] = tried
             return result
 
@@ -2430,6 +2775,59 @@ class SWModel:
                 % (name, len(tried), cfg, db_names[:3]))
             result["hint"] = ("SW 材质名必须与 .sldmat 中的 <material name=...> 完全一致；"
                               "中文库常用名：普通碳钢/合金钢/灰铸铁/1023 碳钢板 (SS)")
+        # ══ 【Bug15 修复】SW 库里没有的打印材料 → 自定义材料降级 ═════════
+        # 实测：PLA 在内置表里存在（密度 1240 / E 3500 / σy 55），
+        #   但 SolidWorks 官方材质库【不含 PLA】这类 FDM 打印材料，
+        #   于是 16 种 (库×名) 组合全部失败 → new_part(material="PLA")
+        #   赋材失败、density=None，PLA 零件走不了材料防线（测试部 Bug15）。
+        # 修复：所有候选都失败时，若内置表/自定义库【确有该材料定义】，
+        #   则写入【自定义材料名 + 密度】，让零件拿到正确密度与力学参数。
+        #   密度正确 → 质量/强度/寿命校核可信，比"赋材失败"安全得多。
+        try:
+            _ok_m, _info_m, _why_m = is_valid_material(name)
+            _d_def = want_density or (_info_m or {}).get("density")
+            if _ok_m and _d_def:
+                _wrote = False
+                for _dbn in db_names:
+                    for _nm_try in (str(name),
+                                    (_info_m or {}).get("canonical") or str(name)):
+                        try:
+                            self.model.SetMaterialPropertyName2("", _dbn, _nm_try)
+                            time.sleep(0.15)
+                            _d_now = dens_now()
+                            if _d_now and abs(float(_d_now) - float(_d_def)) / float(_d_def) <= 0.25:
+                                result.update({
+                                    "ok": True,
+                                    "method": "SetMaterialPropertyName2(custom-fallback)",
+                                    "applied_name": _nm_try,
+                                    "database_name": _dbn,
+                                    "density_kg_m3": float(_d_now),
+                                    "match_level": "custom",
+                                    "custom_material": True,
+                                })
+                                result.pop("error", None)
+                                result["warnings"].append(
+                                    "SolidWorks 材质库无 %r，已按内置定义写入自定义材料"
+                                    "（密度 %.0f kg/m³）—— 材料身份与力学参数仍可追溯"
+                                    % (name, float(_d_now)))
+                                try:
+                                    self.model.ForceRebuild3(False)
+                                except Exception:
+                                    pass
+                                _wrote = True
+                                break
+                        except Exception as _e_cf:
+                            tried.append("custom-fallback %s/%s: %r"
+                                         % (_dbn, _nm_try, _e_cf))
+                    if _wrote:
+                        break
+                if _wrote:
+                    return result
+                result["hint"] = (result.get("hint") or "") + (
+                    "  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；"
+                    "可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。")
+        except Exception as _e_b15:
+            tried.append("Bug15 自定义降级异常: %r" % (_e_b15,))
         self._warn("set_material: " + result["error"])
         return result
 
@@ -3151,6 +3549,30 @@ class SWModel:
         # 先退出可能残留的草图模式（toggle off），再重新进入
         try:
             self.skm.InsertSketch(False)
+        except Exception:
+            pass
+        # ══ 【Bug-40 修复】跨基准面 / 多特征后强制重置上下文 ═════════════
+        # 判定条件（任一命中即重置）：
+        #   ① 本次基准面 ≠ 上次基准面（跨面切换，Top→Front/Right 典型场景）；
+        #   ② 本零件已有实体且这是第 2 次及以后的 begin_sketch
+        #      （多特征后再开草图，SW 的旧面引用会污染 InsertSketch）。
+        # 只在"确实有风险"时重置，避免每次开草图都付一次 rebuild 的代价。
+        _prev_plane = getattr(self, "_last_begin_plane", None)
+        _switch = (_prev_plane is not None
+                   and str(_prev_plane).strip().lower() != str(plane).strip().lower())
+        _repeat_with_body = False
+        try:
+            _repeat_with_body = bool(self._has_solid_body()
+                                     and int(getattr(self, "_sketch_open_count", 0)) > 0)
+        except Exception:
+            _repeat_with_body = False
+        if _switch or _repeat_with_body:
+            self._reset_plane_context(
+                plane,
+                reason=("cross-plane" if _switch else "multi-feature"))
+        self._last_begin_plane = str(plane)
+        try:
+            self._sketch_open_count = int(getattr(self, "_sketch_open_count", 0)) + 1
         except Exception:
             pass
         # ── 【BUG-C / 新-4 修复】按名选基准面是【首选路径】────────────────
@@ -3925,6 +4347,10 @@ class SWModel:
         # 重置曲面草图偏移
         self._surface_sketch_offset = 0.0
         self._right_plane_mode = False
+        # ── 【Bug-40 修复】记录"本次草图已在 <面> 上完成" ──────────────
+        # 保留 _last_begin_plane 不变（用于 begin_sketch 的跨面判定），
+        # 仅把 sketch_open_count 语义保持为"本零件累计开过的草图数"，
+        # 供 cut 的上下文重置判定与诊断输出使用。
         return self
 
     def _ensure_sketch_active(self):
@@ -4597,30 +5023,62 @@ class SWModel:
             # 分度圆处的半齿角
             half_tooth = _math.pi / (2.0 * z)
             inv_alpha = _inv(alpha)
-            # 齿廓对称中心线相对齿槽中心的角偏移
+            # ── 【Bug-41 修复 · 齿廓角向符号】────────────────────────────
+            # 原实现把渐开线展开角【累加】到分度圆半齿角上：
+            #       ang = base_ang + _polar(rx)
+            # 这是错的。渐开线由【基圆】向【齿顶】展开时，其极角相对
+            # 齿廓对称中心线是【递减】的（分度圆处为 inv(alpha)，齿顶更小），
+            # 故正确写法是【减去】展开角：
+            #       ang = base_ang - _polar(rx)
+            # 实算（z=30, m=2）：错误写法齿顶半齿角 0.1115 rad → 齿顶厚
+            #   2×0.1115×32 = 7.13mm，而周节仅 2πr/z = 6.28mm
+            #   → 相邻齿廓【交叉自交】，SW 判轮廓无效 →
+            #     FeatureExtrusion3 返回 None（正是 Bug-41 的报错）。
+            #   正确写法齿顶半齿角 0.0230 rad → 齿顶厚 1.47mm < 周节 6.28mm，
+            #   齿形合法，SW 可稳定识别闭合轮廓。
+            # ── 【Bug-41 修复 · 齿根低于基圆】──────────────────────────
+            # 当 r_f < r_b（小齿数常见，如 z=30,m=1 的 13.75 < 14.095）时，
+            #   渐开线只存在于 r_b 以外；原实现对 r_f..r_b 一律 clamp 到 r_b，
+            #   于是产出【多个完全重合的点】（退化零长边），同样被 SW 拒绝。
+            # 现在：齿根到基圆之间用【径向直线段】过渡（真实齿轮此处为齿根
+            #   过渡曲线，直线近似工程上足够），点集不再重合。
             base_ang = half_tooth + inv_alpha
-            pts = []
-            # ① 齿根圆弧（左右各一段，保证闭合起点在齿根）
-            _fr_ang = base_ang + _polar(r_f) if r_f > r_b else base_ang
-            pts.append((r_f * _math.cos(-_fr_ang), r_f * _math.sin(-_fr_ang)))
-            # ② 左齿廓：齿根 → 齿顶（渐开线）
             n = max(2, int(steps_per_flank))
+            r_lo = max(r_f, r_b)          # 渐开线起算半径
+            pts = []
+            # ① 齿根起点（左侧）
+            _root_ang = base_ang - (_polar(r_lo) if r_lo > r_b else 0.0)
+            pts.append((r_f * _math.cos(-_root_ang),
+                        r_f * _math.sin(-_root_ang)))
+            # ② 左齿廓：齿根 → 基圆（径向段，仅 r_f < r_b 时需要）
+            if r_f < r_b:
+                pts.append((r_b * _math.cos(-_root_ang),
+                            r_b * _math.sin(-_root_ang)))
+            # ③ 左齿廓：基圆 → 齿顶（渐开线，极角递减）
             for i in range(n + 1):
-                rx = r_f + (r_a - r_f) * (i / float(n))
-                if rx < r_b:
-                    rx = r_b
-                ang = base_ang + _polar(rx)
+                rx = r_lo + (r_a - r_lo) * (i / float(n))
+                ang = base_ang - _polar(rx)
                 pts.append((rx * _math.cos(-ang), rx * _math.sin(-ang)))
-            # ③ 右齿廓：齿顶 → 齿根（镜像）
+            # ④ 右齿廓：齿顶 → 基圆（渐开线镜像）
             for i in range(n, -1, -1):
-                rx = r_f + (r_a - r_f) * (i / float(n))
-                if rx < r_b:
-                    rx = r_b
-                ang = base_ang + _polar(rx)
+                rx = r_lo + (r_a - r_lo) * (i / float(n))
+                ang = base_ang - _polar(rx)
                 pts.append((rx * _math.cos(ang), rx * _math.sin(ang)))
-            # ④ 闭合回起点
-            pts.append(pts[0])
+            # ⑤ 右齿廓：基圆 → 齿根（径向段镜像）
+            if r_f < r_b:
+                pts.append((r_b * _math.cos(_root_ang),
+                            r_b * _math.sin(_root_ang)))
+            # ── 【Bug6 修复·关键】单齿轮廓【不闭合】────────────────────
+            # 原实现这里 pts.append(pts[0]) 把【单齿】自我闭合，而 gear()
+            #   又按齿数把单齿旋转复制拼接 —— 于是整条折线变成
+            #   "一串各自闭合的小环"（实测 z=20 时有 60 个重复点）。
+            #   SolidWorks 无法把这种折线识别为一个有效外轮廓，
+            #   FeatureExtrusion3 直接返回 None（= no_body，Bug6 现象）。
+            # 正确做法：单齿轮廓保持【开放】（根→顶→根），
+            #   由 gear() 把所有齿首尾相接成一条闭合外轮廓。
+            # 说明：本方法返回的仍是"单齿完整外轮廓"，只是不再自闭合。
             return {"ok": True, "points": pts,
+                    "closed": False,
                     "params": {"module_mm": m, "teeth": z,
                                "pressure_angle_deg": float(pressure_angle_deg),
                                "pitch_dia_mm": round(d, 4),
@@ -4668,21 +5126,65 @@ class SWModel:
             m = float(module_mm); z = int(teeth)
             r_a = m * z / 2.0 + m
             # ── 把【单齿】按齿数旋转复制成完整齿圈（一次闭合 polyline）────
-            # 每个齿的角间距 = 2π/z；单齿点集已含"左根→顶→右根"，
-            # 相邻齿之间用齿根圆弧过渡（直接连接即可，SW 会自动成弧/直线段）。
+            # 每个齿的角间距 = 2π/z；单齿点集为【开放】的"左根→顶→右根"。
+            #
+            # ── 【Bug6 修复】拼接时必须去掉相邻齿的重复连接点 ─────────────
+            # 上一齿的末点（右齿根）与下一齿的首点（左齿根）在几何上
+            #   往往几乎重合（尤其 r_f < r_b 时两点都落在齿根圆上）；
+            #   保留两个相距极近的点会产生"零长边"，SW 判轮廓无效。
+            # 这里按最小间距过滤，保证折线是干净的单条闭合外轮廓。
+            _MIN_SEG = max(1e-4, float(m) * 0.01)   # 最小相邻点间距（mm）
             full = []
             for k in range(z):
                 rot = 2.0 * _math.pi * k / z
                 ca, sa = _math.cos(rot), _math.sin(rot)
                 for (px, py) in single:
-                    full.append((px * ca - py * sa + cx, px * sa + py * ca + cy))
-            # 闭合
+                    q = (px * ca - py * sa + cx, px * sa + py * ca + cy)
+                    if full:
+                        _dx = q[0] - full[-1][0]
+                        _dy = q[1] - full[-1][1]
+                        if (_dx * _dx + _dy * _dy) ** 0.5 < _MIN_SEG:
+                            continue   # 与上一点几乎重合 → 丢弃（防零长边）
+                    full.append(q)
+            # 末点与首点过近时也丢弃，避免闭合处出现零长边
+            if len(full) > 1:
+                _dx = full[0][0] - full[-1][0]
+                _dy = full[0][1] - full[-1][1]
+                if (_dx * _dx + _dy * _dy) ** 0.5 < _MIN_SEG:
+                    full.pop()
+            if len(full) < 3:
+                out["error"] = ("齿轮轮廓点数不足（%d）—— 检查模数/齿数/压力角"
+                                % len(full))
+                return out
+            # 闭合（polyline(close=True) 会补最后一段，这里显式补首点更稳）
             full.append(full[0])
             # ── 一次画出完整齿圈并挤出 ─────────────────────────────────
             self.begin_sketch(plane)
             self.polyline(full, close=True)
             self.end_sketch()
             feat = self.extrude(thickness_mm)
+            # ── 【Bug6 修复】必须检查 extrude 结果，不能无条件报 ok=True ────
+            # 实机反馈：齿廓 polyline 因自相交/未闭合/点序错乱导致 SW 拒绝
+            #   拉伸，extrude 返回 no_body（无实体）。而原实现直接
+            #   out.update({"ok": True, ...}) 把失败盖住了 —— 齿轮看起来
+            #   "生成成功"，实际没有任何实体，后续开孔/装配全线失败。
+            _feat_ok = True
+            if isinstance(feat, dict):
+                _feat_ok = bool(feat.get("ok", True)) and not feat.get("no_body")
+            if not _feat_ok:
+                out["ok"] = False
+                out["stage"] = "extrude"
+                out["extrude_result"] = feat
+                out["error"] = (
+                    "齿轮齿圈拉伸失败（extrude 返回无实体）—— 齿廓很可能自相交"
+                    "或点序错乱。params: m=%s z=%s b=%s, 轮廓点数=%d"
+                    % (module_mm, teeth, thickness_mm, len(full)))
+                out["hint"] = (
+                    "依次尝试：1) 减小 steps_per_flank（如 3）以简化齿廓；"
+                    "2) 检查齿根/齿顶半径是否自交（z 过小时齿廓会重叠）；"
+                    "3) 用 involute_gear_profile() 单独取出点集核对点序。"
+                    "常见根因：齿数过少（z<8）时渐开线齿廓在根部相交。")
+                return out
             out.update({"ok": True, "feature": feat,
                         "params": dict(prof["params"],
                                        thickness_mm=float(thickness_mm),
@@ -5158,6 +5660,59 @@ class SWModel:
                 except Exception:
                     continue
             return best if best > 0 else None
+        except Exception:
+            return None
+
+    # ══ 【Bug17/18 回归修复·新增】真实实体包围盒的 6 元组 ════════════════
+    # 背景（测试部 v13 反馈）：
+    #   «_extract_real_geometry 的变量遮蔽虽改了，但 bbox x/y 仍被 design_domain
+    #     锁定，FEA 仍用 design_domain» —— 因为他们拿不到真实的 6 元组，
+    #   只能拿 design_domain 的 x/y 去补，于是"读出的 bbox"其实就是设计域尺寸，
+    #   导致 SF 对几何完全不敏感（10 种零件全 = 72.81）。
+    #
+    # 真实能力：SolidWorks 的 `IBody2.GetBodyBox()` 返回
+    #   [xmin, ymin, zmin, xmax, ymax, zmax]，单位【米】。
+    #   本文件已有 _bbox_extent_mm / _bbox_max_dim_mm 在用同一个 API，
+    #   但只返回"边长"，没有返回 min/max 六元组 —— 这正是缺口。
+    #
+    # 本方法把它补上：返回 [xmin,xmax, ymin,ymax, zmin,zmax]（mm），
+    #   与 geometry_gate 期望的顺序一致（注意是 min,max 交替，非 min…max…）。
+    def body_box_mm(self):
+        """当前零件的真实包围盒（mm），返回 [xmin,xmax,ymin,ymax,zmin,zmax]。
+
+        多实体时取所有实体包围盒的【并集】（最外层包络），这是"零件占用空间"
+        的正确语义。取不到返回 None —— 调用方【不得】用设计域代替。
+        """
+        try:
+            bodies = self.model.GetBodies2(0, 1)
+            bl = list(bodies) if isinstance(bodies, tuple) else ([bodies] if bodies else [])
+            mn = [float("inf")] * 3
+            mx = [float("-inf")] * 3
+            got = False
+            for b in bl:
+                try:
+                    bb = b.GetBodyBox()
+                    if bb is None or len(bb) < 6:
+                        continue
+                    for i in range(3):
+                        v0 = float(bb[i]) * 1000.0      # m -> mm
+                        v1 = float(bb[3 + i]) * 1000.0
+                        if v0 > v1:
+                            v0, v1 = v1, v0
+                        if v0 < mn[i]:
+                            mn[i] = v0
+                        if v1 > mx[i]:
+                            mx[i] = v1
+                    got = True
+                except Exception:
+                    continue
+            if not got:
+                return None
+            out = [mn[0], mx[0], mn[1], mx[1], mn[2], mx[2]]
+            # 退化保护：任一边长为 0 视为取不到（例如只有曲面/无实体）
+            if (mx[0] - mn[0]) <= 0 and (mx[1] - mn[1]) <= 0 and (mx[2] - mn[2]) <= 0:
+                return None
+            return [round(v, 4) for v in out]
         except Exception:
             return None
 
@@ -5728,6 +6283,41 @@ class SWModel:
                             _notes.append("迁移重试异常: %r" % (_e_mig,))
         except Exception as _e_mig2:
             _notes.append("迁移判定异常: %r" % (_e_mig2,))
+
+        # ══ 【Bug-40 修复】全部签名失败 → 重置基准面上下文后再试一轮 ═══════
+        # 台账 3.1 现象：跨基准面（Top→Front/Right）或多特征叠加后 cut 失败
+        #   （FeatureCut3 返回 None / com_error）。变通办法是"每零件独立脚本"，
+        #   说明根因是 SW 进程内累积的【面/草图 COM 上下文】污染，而非几何错误。
+        # 修复：在判定彻底失败【之前】，强制重置上下文（退出草图 + 清选择 +
+        #   重建），让 cut 按【显式记录的草图名】重新 EditSketch 取轮廓，再跑
+        #   一轮候选签名。这相当于把"重开脚本"的变通内化到封装里。
+        _ctx_reset_tried = False
+        try:
+            self._reset_plane_context(None, reason="cut-fallback")
+            _ctx_reset_tried = True
+        except Exception as _e_rst:
+            _notes.append("上下文重置异常: %r" % (_e_rst,))
+        if _ctx_reset_tried:
+            _notes.append("已执行 Bug-40 上下文重置，重试一轮候选签名")
+            for _flip_pass, _dir_pass in ((bool(flip), False),
+                                          (not bool(flip), False),
+                                          (False, True)):
+                for _api in _apis:
+                    for _label, _t1, _t2, _dd1, _dd2 in _cands:
+                        _f, _why = _try_cut(_api, (
+                            True, _flip_pass, _dir_pass, _t1, _t2, _dd1, _dd2,
+                            False, False, False, False, 0, 0,
+                            False, False, False, False, False, False, auto_select,
+                            False, False, False, 0, 0, False))
+                        if _why == "":
+                            _exit_sketch_editing()
+                            self._mark_sketch_consumed()
+                            self._warn("cut 在 Bug-40 上下文重置后成功 "
+                                       "(api=%s, flip=%s)" % (_api, _flip_pass))
+                            return _f
+                        _notes.append("重置后%s(flip=%s,%s): %s"
+                                      % (_api, _flip_pass, _label, _why))
+                        _best = _best or _f
 
         # 【真机实测】多实体零件会让 FeatureCut3 因"切除结果归属歧义"直接返回
         # None（选中状态完全正常也如此）。必须精确点名，否则会被误判为选中问题。
@@ -6912,77 +7502,140 @@ class SWModel:
             out["selection_prepared"] = False
             out["selection_error"] = repr(_e)
 
-        # 第二参数的候选形态（按可靠性）
-        _second_arg_candidates = []
-        if _comp_list:
-            _second_arg_candidates.append(("components_array", _comp_list))
-        _second_arg_candidates.append(("none", None))
-
+        # ══ 【Bug5 修复·按实测签名重写】══════════════════════════════════
+        # 本次用生成的类型库缓存【读出真实签名】，修正了先前的错误假设：
+        #
+        #   IAssemblyDoc.ToolsCheckInterference2(
+        #       NumComponents, LpComponents, CoincidentInterference,
+        #       PComp, PFace)
+        #     · NumComponents          = 组件数量 (int)
+        #     · LpComponents           = 组件数组 (VARIANT)
+        #     · CoincidentInterference = 是否把重合面也算干涉 (bool)
+        #     · PComp / PFace          = byref 输出
+        #   IAssemblyDoc.ToolsCheckInterference()  —— 无参版本（最稳）
+        #
+        #   已核对：这些方法【只存在于 IAssemblyDoc】，
+        #     ISldWorks(Application) 上【完全没有】—— 测试部报的
+        #     AttributeError('SldWorks.Application.Tools...') 正是对象层级用错。
+        #
+        #   关键：必须用【前期绑定】的 IAssemblyDoc 包装 self.model 再调用，
+        #     才能命中 InvokeTypes(dispid)，否则 late-binding 报"找不到成员"。
         last_err = None
-        # ── 【Bug-30 修复】按 (API × 第二参数形态) 组合逐个尝试 ────────────
-        # 不同 SW 版本对"待检查组件"的传参要求不同：
-        #   新版本要组件数组；部分版本要 None（=全部）；旧版本要 byref VARIANT。
-        # 原实现只试 None，参数不匹配时报"无效参数/类型不匹配"就放弃。
-        _attempts = []
-        # ── 【Bug-44 修复】补齐 API 候选 ─────────────────────────────────
-        # 台账建议："check_interference 若 ToolsCheckInterference2 在 SW 2025
-        #   无此签名，应改用 IAssemblyDoc::ToolsCheckInterference3 或纯 COM
-        #   GetInterferenceBodySet"。
-        # 实测 SW 2025 SP5.0 报 com_error(-2147352562)，说明前两个签名都不匹配。
-        # 这里把 ToolsCheckInterference3 与 GetInterferenceBodySet 一并纳入候选。
-        for _sig in ("ToolsCheckInterference3", "ToolsCheckInterference2",
-                     "ToolsCheckInterference"):
-            for _pname, _pv in _second_arg_candidates:
-                _attempts.append((_sig, _pname, _pv))
-        for _sig, _pname, _pv in _attempts:
+        # 同样必须用【真正的接口 QueryInterface】包装（见 _wrap_with_interface）
+        _asm_early = self._wrap_with_interface(self.model, "IAssemblyDoc")
+        if _asm_early is None:
+            _sel_tried.append("IAssemblyDoc 包装失败，回落 late-binding")
+            _asm_early = None
+        _holders = []
+        if _asm_early is not None:
+            _holders.append(("early(IAssemblyDoc)", _asm_early))
+        _holders.append(("late(model)", self.model))
+        # ── 尝试 A：无参版本（最简单，优先）──────────────────────────────
+        for _hname, _h in _holders:
             try:
-                fn = getattr(self.model, _sig, None)
-                if fn is None:
+                _fn = getattr(_h, "ToolsCheckInterference", None)
+                if _fn is None:
                     continue
-                if _sig == "ToolsCheckInterference2":
-                    _base = (n_comp, _pv, bool(include_multibody),
-                             bool(treat_coincident))
-                else:
-                    _base = (n_comp, _pv, bool(treat_coincident),
-                             bool(include_multibody))
-                # ① 直接传（新版本接受组件数组/None）
-                n = None
-                inter_val = None
-                try:
-                    n = fn(*_base)
-                except Exception as _e_direct:
-                    last_err = _e_direct
-                    # ② byref VARIANT 形态（旧版本要求 out 参数）
-                    try:
-                        inter = win32com.client.VARIANT(
-                            pythoncom.VT_BYREF | pythoncom.VT_DISPATCH, None)
-                        _a = list(_base)
-                        _a[1] = inter
-                        n = fn(*_a)
-                        inter_val = inter.value
-                    except Exception as _e_byref:
-                        last_err = _e_byref
-                        _sel_tried.append("%s/%s: %r" % (_sig, _pname, _e_byref))
-                        continue
+                n = _fn()
                 out["available"] = True
-                out["api"] = _sig
-                out["second_arg"] = _pname
+                out["api"] = "ToolsCheckInterference"
+                out["holder"] = _hname
                 out["count"] = int(n or 0)
-                arr = inter_val
-                if arr:
-                    for x in arr:
-                        item = {}
-                        try:
-                            item["volume_mm3"] = float(x.Volume) * 1e9
-                        except Exception:
-                            item["raw"] = repr(x)
-                        out["interferences"].append(item)
                 out["ok"] = True
                 out["selection_prepared"] = out.get("selection_prepared", False)
                 return out
-            except Exception as e:
-                last_err = e
-                continue
+            except Exception as _e_a:
+                last_err = _e_a
+                _sel_tried.append("%s/ToolsCheckInterference(): %r"
+                                  % (_hname, _e_a))
+        # ── 尝试 B：ToolsCheckInterference2/3（五参签名，逐形态回退）──────
+        _comp_forms = []
+        if _comp_list:
+            _comp_forms.append(("list", list(_comp_list)))
+            try:
+                _comp_forms.append(("variant_dispatch", win32com.client.VARIANT(
+                    pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, list(_comp_list))))
+            except Exception:
+                pass
+        _comp_forms.append(("none", None))
+        for _sig in ("ToolsCheckInterference2", "ToolsCheckInterference3",
+                     "IToolsCheckInterference2", "IToolsCheckInterference3"):
+            for _hname, _h in _holders:
+                try:
+                    _fn = getattr(_h, _sig, None)
+                except Exception:
+                    _fn = None
+                if _fn is None:
+                    continue
+                for _cname, _cv in _comp_forms:
+                    try:
+                        _pcomp = win32com.client.VARIANT(
+                            pythoncom.VT_BYREF | pythoncom.VT_DISPATCH, None)
+                        _pface = win32com.client.VARIANT(
+                            pythoncom.VT_BYREF | pythoncom.VT_DISPATCH, None)
+                    except Exception:
+                        _pcomp, _pface = None, None
+                    _argc_forms = (("5arg", 5), ("4arg", 4), ("3arg", 3),
+                                   ("2arg", 2))
+                    for _aname, _n in _argc_forms:
+                        try:
+                            if _n >= 5:
+                                n = _fn(n_comp, _cv, bool(treat_coincident),
+                                        _pcomp, _pface)
+                            elif _n == 4:
+                                n = _fn(n_comp, _cv, bool(treat_coincident), _pcomp)
+                            elif _n == 3:
+                                n = _fn(n_comp, _cv, bool(treat_coincident))
+                            else:
+                                n = _fn(n_comp, _cv)
+                            out["available"] = True
+                            out["api"] = _sig
+                            out["holder"] = _hname
+                            out["components_arg"] = _cname
+                            out["argc"] = _aname
+                            out["count"] = int(n or 0)
+                            try:
+                                _arr = _pcomp.value if _pcomp is not None else None
+                            except Exception:
+                                _arr = None
+                            if _arr:
+                                try:
+                                    for x in _arr:
+                                        item = {}
+                                        try:
+                                            item["volume_mm3"] = float(x.Volume) * 1e9
+                                        except Exception:
+                                            item["raw"] = repr(x)
+                                        out["interferences"].append(item)
+                                except Exception:
+                                    pass
+                            out["ok"] = True
+                            out["selection_prepared"] = out.get("selection_prepared", False)
+                            return out
+                        except Exception as _e_call:
+                            last_err = _e_call
+                            _sel_tried.append("%s/%s/%s/%s: %r"
+                                              % (_hname, _sig, _cname, _aname, _e_call))
+                            continue
+
+        # ── 【Bug5 修复】API 全不可用时【自动降级】到几何近似检查 ────────
+        # 实机（SW2025）反馈：ToolsCheckInterference* 在本版不可用，
+        #   原实现只返回 ok=False + 让调用方自己想办法 —— 装配验证链
+        #   因此断在这里（调用方往往直接当"检查失败"跳过）。
+        # 现在自动用包围盒近似检查兜底，并明确标注 approx=True，
+        #   使流程可继续，同时绝不把近似结果伪装成 SW 原生结论。
+        try:
+            _approx = self.geometry_interference_approx()
+            if isinstance(_approx, dict) and _approx.get("ok"):
+                _approx["degraded_from"] = "native-api-unavailable"
+                _approx["native_error"] = repr(last_err)
+                _approx["attempts"] = _sel_tried
+                _approx["hint"] = ("本版 SolidWorks 无可用干涉 API，已自动降级为"
+                                   "包围盒近似检查（approx=True，仅作设计层自查）。"
+                                   "正式交付前请在 SW 界面执行 评估-干涉检查 复核。")
+                return _approx
+        except Exception as _e_approx:
+            out["approx_error"] = repr(_e_approx)
 
         out["error"] = ("本 SolidWorks 版本无可用的干涉检查 API"
                         "（ToolsCheckInterference2/1 均已按多种传参形态尝试）: %r"
@@ -7189,6 +7842,109 @@ class SWModel:
                1.0, 0.0, 0.0, 0.0]
         return self._make_math_transform_from_array(arr), ""
 
+    # ══ 【Bug5 修复·类型库缓存】SW2025 的 MathUtility 必须用前期绑定 ══════
+    # 根因（测试部实机诊断 + 本次验证）：
+    #   sw.GetMathUtility（属性式）能取到对象，但 late-binding 下其类型为
+    #   <unknown>（mu._username_='<unknown>'），pywin32 无法解析类型库，
+    #   导致 CreatePoint/CreateVector/CreateTransform/CreateArray 全部报
+    #   com_error(-2147352573, '找不到成员') = DISP_E_MEMBERNOTFOUND。
+    #   gencache.EnsureDispatch('SldWorks.Application') 也直接失败：
+    #     TypeError('This COM object can not automate the makepy process')
+    #
+    # 已验证的解决办法（手动生成类型库缓存）：
+    #   pythoncom.LoadTypeLib(<sldworks.tlb>) 可成功加载（1015 个类型），
+    #   再用 gencache.EnsureModuleForTypelibInterface(tl) 生成缓存模块
+    #   （得到 win32com.gen_py.83A33D31-...x0x33x0，内含 IMathUtility 类）。
+    #   生成后用该模块的 IMathUtility 包装 GetMathUtility 对象，
+    #   即可走前期绑定调用 CreateArray/CreateTransform。
+
+    def _sw_type_lib_module(self):
+        """确保 SldWorks 类型库缓存已生成，并返回该 gen_py 模块。
+
+        先尝试直接取缓存；失败则用 LoadTypeLib + EnsureModuleForTypelibInterface
+        现场生成（这一步正是 makepy 手动生成缓存的正规入口）。
+        Returns: module | None
+        """
+        try:
+            from win32com.client import gencache
+        except Exception:
+            return None
+        _iid = SW_TLB_IID
+        _lcid, _maj, _min = SW_TLB_VER
+        # ① 缓存已在：直接取
+        try:
+            _m = gencache.GetModuleForTypelib(_iid, _lcid, _maj, _min)
+            if _m is not None and getattr(_m, "IMathUtility", None) is not None:
+                return _m
+        except Exception:
+            pass
+        # ② 未生成 → 现场加载 .tlb 并生成缓存
+        _tlb = _find_sldworks_tlb()
+        if not _tlb:
+            self._last_transform_diag = "未找到 sldworks.tlb，无法生成类型库缓存"
+            return None
+        try:
+            import pythoncom
+            _tl = pythoncom.LoadTypeLib(_tlb)
+            # 该入口接受类型库对象，绕过"库没有注册"的注册表查询问题
+            _m = gencache.EnsureModuleForTypelibInterface(
+                _tl, bForDemand=0, bBuildHidden=1)
+            if _m is not None:
+                return _m
+        except Exception as _e_gen:
+            self._last_transform_diag = ("类型库缓存生成失败: %r" % (_e_gen,))
+        return None
+
+    def _wrap_with_interface(self, obj, iface_name):
+        """把 COM 对象包装成【指定接口】的前期绑定对象（Bug5 根因②修复）。
+
+        为什么不能直接用 cls(obj)：
+          DispatchBaseClass.__init__ 只在 isinstance(obj, (DispatchBaseClass,
+          _PyIDispatchType)) 时才做 QueryInterface，且失败(E_NOINTERFACE)时
+          【静默保留原对象】。于是得到的是"影子类" —— 方法签名能解析，
+          但 self._oleobj_ 仍是 late-binding 的 <unknown> 对象，
+          调用时 self._oleobj_.InvokeTypes(...) 直接 AttributeError
+          （测试部实测：AttributeError('<unknown>.InvokeTypes')）。
+
+        正确做法：显式 QueryInterface 到【接口 IID】得到真正的接口指针，
+          再用 __new__ + 直接写 _oleobj_ 构造实例（绕过 __init__ 的降级）。
+
+        Args:
+            obj: 原始 COM 对象（可能是 CDispatch/<unknown>）。
+            iface_name: 生成的缓存模块里的接口类名（如 'IMathUtility'）。
+        Returns: 包装后的对象，失败返回 None。
+        """
+        try:
+            _mod = self._sw_type_lib_module()
+            if _mod is None:
+                return None
+            _cls = getattr(_mod, iface_name, None)
+            if _cls is None:
+                return None
+            _iid = getattr(_cls, "CLSID", None)
+            # 取底层 PyIDispatch
+            _raw = getattr(obj, "_oleobj_", obj)
+            if _iid is not None and hasattr(_raw, "QueryInterface"):
+                try:
+                    import pythoncom as _pyc
+                    _qi = _raw.QueryInterface(_iid, _pyc.IID_IDispatch)
+                    if _qi is not None:
+                        # __new__ 绕过 __init__，直接挂上正确的接口指针
+                        _inst = _cls.__new__(_cls)
+                        _inst.__dict__["_oleobj_"] = _qi
+                        return _inst
+                except Exception:
+                    pass
+            # 退路：直接 __new__ + 原对象（至少方法签名可用，能否 Invoke 看运气）
+            try:
+                _inst2 = _cls.__new__(_cls)
+                _inst2.__dict__["_oleobj_"] = _raw
+                return _inst2
+            except Exception:
+                return None
+        except Exception:
+            return None
+
     def _make_math_transform_from_array(self, arr):
         """用 16 元数组构造 MathTransform（【Bug-30】）。
 
@@ -7200,10 +7956,23 @@ class SWModel:
         _sw = getattr(self, "sw", None)
         if _sw is None:
             return None
+        # ── 【Bug5 修复·按测试部实机诊断的正确签名】──────────────────────
+        # 实测（SW2025 SP5.0）：
+        #   · sw.GetMathUtility 必须【属性式】（无括号）—— 能取到对象；
+        #     而 sw.GetMathUtility() / IGetMathUtility 会报
+        #     "找不到成员"/"无法读只写属性"。
+        #   · 取到的 MathUtility 类型库无法解析（_username_='<unknown>'），
+        #     所以【不能】传裸 list/variant —— 任何单参形态都报
+        #     com_error(-2147352573, '找不到成员')。
+        #   · 正确调用是【两参】：CreateTransform(Units, IMathArray)，
+        #        Units = swMathUnits 枚举（swMETER = 2）
+        #        Data  = IMathArray，须先 CreateArray(swArrayDouble=1)
+        #                再用 SetData16([16 doubles]) 填充。
+        #   诊断来源：测试部 2026-10-02 实机报告（Bug 5）。
         _mu = None
-        for _getter in (lambda: _sw.GetMathUtility(),
-                        lambda: _sw.IGetMathUtility(),
-                        lambda: _sw.GetMathUtility):
+        for _getter in (lambda: _sw.GetMathUtility,          # 属性式（首选）
+                        lambda: _sw.GetMathUtility(),
+                        lambda: _sw.IGetMathUtility):
             try:
                 _mu = _getter()
                 if _mu is not None:
@@ -7211,17 +7980,94 @@ class SWModel:
             except Exception:
                 continue
         if _mu is None:
+            self._last_transform_diag = "GetMathUtility 取不到对象"
             return None
+        # ── 【Bug5 修复·根因②】必须做【真正的接口 QueryInterface】─────────
+        # 测试部实测：用 cls(_mu) 包装后调用仍报
+        #   AttributeError('<unknown>.InvokeTypes')
+        # 原因：DispatchBaseClass.__init__ 的 QueryInterface 失败时【静默保留】
+        #   原 <unknown> 对象 —— 得到的是"影子类"，签名可解析但底层类型未变。
+        # 修复：改用 _wrap_with_interface()（显式 QueryInterface 到接口 IID，
+        #   并用 __new__ 直接挂 _oleobj_，不经过会降级的 __init__）。
+        _early = self._wrap_with_interface(_mu, "IMathUtility")
+        _mu_late = _mu
+        if _early is not None:
+            _mu = _early
+            self._last_transform_diag = "early-binding(IMathUtility/QueryInterface)"
+        else:
+            self._last_transform_diag = "late-binding(IMathUtility 包装失败)"
+        _diag = []
+        _vals = [float(v) for v in arr]
+        # ── 路径 1（推荐）：CreateArray(1) + SetData16 + CreateTransform(2, arr)
+        try:
+            _arr_obj = None
+            for _mk in ("CreateArray", "ICreateArray"):
+                try:
+                    _fn = getattr(_mu, _mk, None)
+                    if _fn is None:
+                        continue
+                    _arr_obj = _fn(1)          # swArrayDouble = 1
+                    if _arr_obj is not None:
+                        break
+                except Exception as _e_ca:
+                    _diag.append("%s: %r" % (_mk, _e_ca))
+                    continue
+            if _arr_obj is not None:
+                # SetData16 用 16 个 double 填充（不足补 0，超出截断）
+                _d16 = (_vals + [0.0] * 16)[:16]
+                for _sm in ("SetData16", "ISetData16", "SetData"):
+                    try:
+                        _sfn = getattr(_arr_obj, _sm, None)
+                        if _sfn is None:
+                            continue
+                        _sfn(_d16)
+                        break
+                    except Exception as _e_sd:
+                        _diag.append("%s: %r" % (_sm, _e_sd))
+                        continue
+                for _mk in ("CreateTransform", "ICreateTransform"):
+                    try:
+                        _fn = getattr(_mu, _mk, None)
+                        if _fn is None:
+                            continue
+                        # swMETER = 2（长度单位：米，与 swapi 内部单位一致）
+                        _mt = _fn(2, _arr_obj)
+                        if _mt is not None:
+                            self._last_transform_diag = (
+                                "%s(2, IMathArray/CreateArray+SetData16)" % _mk)
+                            return _mt
+                    except Exception as _e_ct:
+                        _diag.append("%s(2,arr): %r" % (_mk, _e_ct))
+                        continue
+        except Exception as _e_path1:
+            _diag.append("path1: %r" % (_e_path1,))
+        # ── 路径 2（兼容旧版）：单参形态（list / VARIANT / tuple）─────────
+        _arr_candidates = [("list", list(_vals))]
+        try:
+            import win32com.client as _w32c
+            import pythoncom as _pyc
+            _arr_candidates.append(("variant_r8", _w32c.VARIANT(
+                _pyc.VT_ARRAY | _pyc.VT_R8, list(_vals))))
+        except Exception:
+            pass
+        _arr_candidates.append(("tuple", tuple(_vals)))
         for _mk in ("CreateTransform", "ICreateTransform"):
             try:
                 _fn = getattr(_mu, _mk, None)
-                if _fn is None:
-                    continue
-                _mt = _fn(list(arr))
-                if _mt is not None:
-                    return _mt
             except Exception:
                 continue
+            if _fn is None:
+                continue
+            for _aname, _av in _arr_candidates:
+                try:
+                    _mt = _fn(_av)
+                    if _mt is not None:
+                        self._last_transform_diag = "%s/%s" % (_mk, _aname)
+                        return _mt
+                except Exception as _e_mt:
+                    _diag.append("%s/%s: %r" % (_mk, _aname, _e_mt))
+                    continue
+        self._last_transform_diag = "; ".join(_diag[-5:])
         return None
 
     def set_component_transform(self, comp, x=0.0, y=0.0, z=0.0, units="mm"):

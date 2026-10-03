@@ -1,6 +1,0 @@
-# 工程模式专用档：SW 活直接执行，不弹审批（由工程模式自动切换使用）
-sw-single-line:
-  sandbox: danger-full-access
-  approval: never
-  name: SW单行模式
-  description: 工程模式专用（SW活）：关闭沙盒，SolidWorks 与 DSH 相关文件直接执行不再询问

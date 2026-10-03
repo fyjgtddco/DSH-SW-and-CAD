@@ -9,7 +9,35 @@ if sys.stderr.encoding != 'utf-8':
 
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflow_state.json")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ── 【P0-3 写侧修复】状态目录必须来自【单一事实源】────────────────────────
+# 原实现把 workflow_state.json 写到本脚本所在目录。但工程模式有两份副本
+#   （工作区 + ~/.dsh 安装目录），从哪份调用就写哪份 —— 于是
+#   mode_gate 写安装副本、workflow_gate 写工作区，状态被劈成两半：
+#     workflow_state.json：工作区 step=user_selected vs 安装 step=depth_asked
+#   宿主守卫读安装副本 → 把"已完成"判成"未完成"，反复 steer 拦住对话结束。
+# 现在所有状态/凭据统一由 _store.state_dir() 决定落点。
+# STATE_DIR 用于【读写状态】；BASE_DIR 仍表示【脚本所在目录】
+#   （用于定位 mode_gate.py / choice_contract.py 等同目录模块）。
+try:
+    import _store as _store_mod
+    STATE_DIR = _store_mod.state_dir()
+except Exception:
+    STATE_DIR = BASE_DIR
+STATE_PATH = os.path.join(STATE_DIR, "workflow_state.json")
+if STATE_DIR and os.path.isdir(STATE_DIR) and STATE_DIR not in sys.path:
+    sys.path.insert(0, STATE_DIR)
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 MODE_GATE_PATH = os.path.join(BASE_DIR, "mode_gate.py")
+# ── 【固定两问】搭建方式(A/B/C) 与 并行策略(D/E) 的代码级强制 ──────────
+# 这两问是【两个独立问题】：本模块只核对"各自是否被系统问题问过"，
+#   不再使用旧的"分批/单次题数"规则 —— 那种规则把
+#   "连着问两次"或"一次问两题"误判成违规，已按用户要求移除。
+try:
+    import choice_contract as _cc
+except Exception:  # 模块缺失时降级为"不强制"，绝不锁死流程
+    _cc = None
 
 CHOICES = {
     "A": {"label": "完全自主搭建", "strategy": "parallel", "detail": "full", "desc": "AI自主决策"},
@@ -388,7 +416,7 @@ TASK_TYPE_TEMPLATES = {
         "lite_ids": ("mech_type", "arm_lengths", "load_magnitude",
                      "load_type", "open_extra"),
         "room_scope": {
-            "structural": "车架底板、横梁、悬架臂、舵机连杆、电池仓、加强筋等结构件",
+            "structural": "车架底板、横梁、悬架臂、舵机连杆、电池仓等结构件",
             "transmission": "车轮、车轴、电机座、减速齿轮、小齿轮、转向节、轴承座等传动件",
             "housing": "底壳、上罩、摄像头座、电池托架、横梁护罩等壳体/外观件",
             "support": "转向支撑座、舵机支架、加强筋等辅助支撑件",
@@ -1191,7 +1219,7 @@ def cmd_work_dir(new_dir=None):
 
 
 def _get_done_rooms():
-    ms_path = os.path.join(BASE_DIR, "mode_state.json")
+    ms_path = os.path.join(STATE_DIR, "mode_state.json")
     done = set()
     if os.path.exists(ms_path):
         try:
@@ -1207,7 +1235,7 @@ def _get_done_rooms():
 
 def _rooms_detail():
     """读取 mode_state.json 的 rooms 原始记录（含 ended_at/failed_at/active）。"""
-    ms_path = os.path.join(BASE_DIR, "mode_state.json")
+    ms_path = os.path.join(STATE_DIR, "mode_state.json")
     detail = {}
     if os.path.exists(ms_path):
         try:
@@ -1240,7 +1268,86 @@ def _check_wave1_done():
     return {"all_done": not (not_ended or active or failed),
             "not_ended": not_ended, "active": active, "failed": failed}
 
+def bypass_requested():
+    """是否显式要求绕开三大防线（唯一合法绕行，必定留痕）。"""
+    import os as _os
+    return str(_os.environ.get("DSH_DEFENSE_BYPASS") or "").strip() in ("1", "true", "yes")
+
+
+def _wave1_room_names():
+    """第一波【建模类】房间名列表（用于开总装前的三防线强制校验）。"""
+    state = load_state()
+    cfg = state.get("subagent_config") or {}
+    out = []
+    for row in (cfg.get("rooms") or []):
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            if str(row[1]) in WAVE1_TYPES:
+                out.append(str(row[0]))
+        elif isinstance(row, dict):
+            if str(row.get("type") or "") in WAVE1_TYPES:
+                out.append(str(row.get("name") or row.get("room")))
+    # 兜底：退化为 mode_state 里已登记的房间（排除总装/出图）
+    if not out:
+        try:
+            import json as _json
+            _mp = os.path.join(STATE_DIR, "mode_state.json")
+            if os.path.exists(_mp):
+                with open(_mp, "r", encoding="utf-8") as _f:
+                    _ms = _json.load(_f)
+                out = [str(n) for n in (_ms.get("rooms") or {})]
+        except Exception:
+            out = []
+    return out
+
+
 def cmd_confirm_assembly(parts_payload):
+    """【三大防线】开总装前强制：第一波各房间必须已通过三防线。
+
+    为什么挂在这里：总装会把所有零件固化成一个装配体，一旦开总装，
+      再回头改单个零件就要重做总装 —— 所以这是"最后一个能便宜地拦下
+      材料/强度/领域问题"的时刻，必须在这里把三道防线全部卡住。
+    """
+    if not bypass_requested():
+        try:
+            import defense_gate as _dg
+            _bad = []
+            _rooms = _wave1_room_names()
+            for _r in _rooms:
+                _d = _dg.check_room_defense(_r)
+                if not _d["ok"]:
+                    _bad.append((_r, _d["blockers"]))
+            if _bad:
+                _nl = chr(10)
+                _lines = ["=== 【三大防线】拦截：第一波房间未通过校验，禁止开启总装 ===", ""]
+                for _r, _bs in _bad:
+                    _lines.append("房间 [%s]:" % _r)
+                    for _b in _bs:
+                        _lines.append("   ✗ " + _b)
+                _lines += [
+                    "",
+                    "处理：让对应小屋补齐材料凭据 / 跑 physics-optimize / 跑",
+                    "physics-validate-domain 后，重新 room-end 该房间，再调 confirm-assembly。",
+                    "（确需放行：设 DSH_DEFENSE_BYPASS=1，会留痕。）",
+                ]
+                return {
+                    "ok": False,
+                    "gate": "DEFENSE_REQUIRED",
+                    "phase": "confirm-assembly",
+                    "blocked_rooms": [x[0] for x in _bad],
+                    "error": "【三大防线】第一波房间未通过强制校验，禁止开启总装。",
+                    "message": _nl.join(_lines),
+                }
+        except ImportError:
+            pass
+        except Exception:
+            pass
+    elif bypass_requested():
+        try:
+            import defense_gate as _dg
+            _dg.log_bypass("workflow_gate.confirm-assembly",
+                           reason="DSH_DEFENSE_BYPASS=1", by="env")
+        except Exception:
+            pass
     """【总装确认门禁】主对话开『总装与验证』房间前必须调用，代码级强制。
 
     parts_payload: 主对话汇总的第一波产出零件清单（文件路径+零件名）。
@@ -1815,7 +1922,7 @@ def cmd_init(task_desc):
     # 读取 mode_state 的真实房间情况（这才是权威来源）
     _ms_rooms = {}
     try:
-        _ms_path = os.path.join(BASE_DIR, "mode_state.json")
+        _ms_path = os.path.join(STATE_DIR, "mode_state.json")
         if os.path.exists(_ms_path):
             with open(_ms_path, "r", encoding="utf-8") as _mf:
                 _ms_rooms = (json.load(_mf) or {}).get("rooms") or {}
@@ -1823,7 +1930,7 @@ def cmd_init(task_desc):
         _ms_rooms = {}
     _ms_subs = {}
     try:
-        _ms_path2 = os.path.join(BASE_DIR, "mode_state.json")
+        _ms_path2 = os.path.join(STATE_DIR, "mode_state.json")
         if os.path.exists(_ms_path2):
             with open(_ms_path2, "r", encoding="utf-8") as _mf2:
                 _ms_subs = (json.load(_mf2) or {}).get("subagents") or {}
@@ -1934,7 +2041,7 @@ def cmd_init(task_desc):
         except Exception:
             pass
         try:
-            _mk = os.path.join(BASE_DIR, "TASK_FINISHED.json")
+            _mk = os.path.join(STATE_DIR, "TASK_FINISHED.json")
             if os.path.exists(_mk):
                 os.remove(_mk)
         except Exception:
@@ -2025,7 +2132,7 @@ def cmd_init(task_desc):
     _need_reset = False
     try:
         _ms_now = {}
-        _msp = os.path.join(BASE_DIR, "mode_state.json")
+        _msp = os.path.join(STATE_DIR, "mode_state.json")
         if os.path.exists(_msp):
             with open(_msp, "r", encoding="utf-8") as _mrf:
                 _ms_now = json.load(_mrf) or {}
@@ -2070,12 +2177,14 @@ def cmd_init(task_desc):
     # 【Bug3】新任务开始 → 清除"任务已完成"标记，
     # 否则上一任务的完成标记会让守卫在本任务中错误放行。
     try:
-        _mk = os.path.join(BASE_DIR, "TASK_FINISHED.json")
+        _mk = os.path.join(STATE_DIR, "TASK_FINISHED.json")
         if os.path.exists(_mk):
             os.remove(_mk)
     except Exception:
         pass
     return {"ok": True, "step": "depth_asked", "task": task_desc,
+            # ── 【固定两问】此处只登记参数深度题；A/B/C 与 D/E 在
+            #   provide_context 末段以固定两问给出（见 choice_contract）。
             "message": _ask_questions(task_desc, depth="ask",
                                       context=(state.get("context") or "")),
             # ── 【残留检测】把"开始前清掉了什么"透明地报给用户 ──────────
@@ -2126,6 +2235,16 @@ def cmd_init(task_desc):
                              "⚠️ 本环境没有 workflow-gate-* 这类 DSH 工具，"
                              "真实入口就是上面这条命令行（BUG-03）。")}
 
+def _choice_qs_fallback():
+    """choice_contract 不可用时的兜底题面（与固定两问保持一致）。"""
+    return [
+        {"id": "build_mode", "question": "请选择搭建方式（A/B/C）",
+         "options": [{"label": "A"}, {"label": "B"}, {"label": "C"}]},
+        {"id": "parallel_mode", "question": "请选择并行策略（D/E）",
+         "options": [{"label": "D"}, {"label": "E"}]},
+    ]
+
+
 def cmd_provide_context(context_text):
     """【问题2 修复】两段式状态机。
 
@@ -2140,6 +2259,7 @@ def cmd_provide_context(context_text):
 
     # ── 第一段：判定参数需求深度，返回第二段问题 ──────────────────────
     if step == "depth_asked":
+        # ── 【问题1 修复】第0题由模型用系统问题问；此处据其回答定深度 ──
         depth = resolve_depth(context_text)
         state["param_depth"] = depth
         state["depth_answer"] = context_text
@@ -2150,13 +2270,27 @@ def cmd_provide_context(context_text):
         total = (len(question_spec_for(state.get("task"), state.get("context")))
                  if depth == "full"
                  else len(question_spec_lite(state.get("task"), state.get("context"))))
+        # ── 【问题1 修复】登记"第二段问题必须用系统问题提问" ────────────
+        _spec2 = (question_spec_for(state.get("task"), state.get("context"))
+                  if depth == "full"
+                  else question_spec_lite(state.get("task"), state.get("context")))
+        # ── 【固定两问】末段一并给出 A/B/C 与 D/E 的固定问题 ────────────
+        _fixed_qs = _cc.questions_payload() if _cc is not None else _choice_qs_fallback()
         return {
             "ok": True,
             "step": "context_asked",
-            "task": state["task"],
             "param_depth": depth,
             "param_depth_label": "强需求(全量)" if depth == "full" else "不强(精简)",
             "question_count": total,
+            # ── 【固定两问】参数题由门禁给出；A/B/C 与 D/E 在末段固定问 ──
+            "mandatory_contract": {
+                "enforced": bool(_cc is not None),
+                "stage": "context",
+                "required_questions": total,
+                "must_use": "ask_user_question",
+                "rule": ("把下面 %d 题用系统问题问给用户；"
+                         "禁止用正文文字代替提问。" % total),
+            },
             "message": nl.join([
                 "已识别参数需求强度: 【%s】→ 接下来问 %d 题。"
                 % ("强需求" if depth == "full" else "不强", total),
@@ -2232,8 +2366,30 @@ def cmd_provide_context(context_text):
             "      并会在每个零件的参数表中标注。若后续发现参数不够，可随时补充，",
             "      C 模式（步步确认）下每个零件的参数表都会重新展示供你复核。",
         ])
+    # ── 【固定两问】A/B/C 与 D/E 由代码固定，模型必须原样询问 ────────────
+    # 这两问是【两个独立问题】：分两次问、或一次问两题都合法。
+    # 旧规则用 max_per_call=1 强制"每次只问一题"，把正常的
+    #   "连着问两次"也纳入题数校验，经常误判违规 —— 已按用户要求移除。
+    _fixed_qs = _cc.questions_payload() if _cc is not None else [
+        {"id": "build_mode", "question": "请选择搭建方式（A/B/C）",
+         "options": [{"label": "A"}, {"label": "B"}, {"label": "C"}]},
+        {"id": "parallel_mode", "question": "请选择并行策略（D/E）",
+         "options": [{"label": "D"}, {"label": "E"}]},
+    ]
     return {"ok": True, "step": "mechanics_done", "task": state["task"],
             "param_depth": depth, "mechanics": m,
+            # ── 【固定两问】机器契约：问题与选项由代码固定 ──────────────
+            "mandatory_questions": _fixed_qs,
+            "mandatory_contract": {
+                "enforced": bool(_cc is not None),
+                "stage": "choice",
+                "mode": "by-question-id",
+                "required_questions": 2,
+                "must_use": "ask_user_question",
+                "rule": ("必须用系统问题询问【搭建方式 A/B/C】与【并行策略 D/E】；"
+                         "这两问是两个独立问题 —— 分两次问或一次问两题都可以，",
+                         "不存在\"合并即违规\"的判定。"),
+            },
             # 【BUG-07】把落盘路径与数值契约显式回传，便于自动化校验一致性
             "load_case_file": state.get("load_case_file"),
             "load_case_written": bool(_lc.get("ok")),
@@ -2279,6 +2435,54 @@ def _pre_finish_residue_guard():
 
 
 def _archive_finished(state, done_count, total, message):
+    # ══ 【三大防线 · 交付前总闸】══════════════════════════════════════
+    # 用户要求：三道防线必须在"合适的时刻强制发挥作用"。而【宣告任务完成】
+    #   是不可逆的终态 —— 一旦写 TASK_FINISHED.json，守卫就放行、对话就结束。
+    #   因此这是最后、也是最重要的一道强制点：任何房间三防线未通过，
+    #   一律拒绝归档，退回"继续干活"。
+    if not bypass_requested():
+        try:
+            import defense_gate as _dg
+            _dt = _dg.check_task_defense()
+            if not _dt["ok"]:
+                _nl2 = chr(10)
+                _ls = ["=== 【三大防线】交付前总闸拦截：任务未通过强制校验 ===", ""]
+                for _b in _dt["blockers"][:24]:
+                    _ls.append("  ✗ " + _b)
+                if len(_dt["blockers"]) > 24:
+                    _ls.append("  …（其余 %d 项见 defense_gate.py check-task）"
+                               % (len(_dt["blockers"]) - 24))
+                _ls += [
+                    "",
+                    "任务【不得】宣告完成。请先补齐：",
+                    "  ① 材料：零件重新赋材并 save()（生成 .material.json 凭据）；",
+                    "  ② 物理：对每个建模房间跑 physics-optimize --room <房间>；",
+                    "  ③ 领域：对每个建模房间跑 physics-validate-domain --room <房间>；",
+                    "然后用 mode_gate.py room-end 重新收尾各房间，再调 select。",
+                    "",
+                    "（确需放行：设 DSH_DEFENSE_BYPASS=1，会留痕到 reports/defense_bypass.json）",
+                ]
+                return {
+                    "ok": False,
+                    "gate": "DEFENSE_REQUIRED",
+                    "phase": "finish",
+                    "defense": {"blockers": _dt["blockers"][:24],
+                                "warnings": _dt["warnings"][:12],
+                                "room_count": _dt["room_count"]},
+                    "error": "【三大防线】交付前总闸未通过，拒绝宣告完成。",
+                    "message": _nl2.join(_ls),
+                }
+        except ImportError:
+            pass
+        except Exception:
+            pass
+    else:
+        try:
+            import defense_gate as _dg
+            _dg.log_bypass("workflow_gate.finish",
+                           reason="DSH_DEFENSE_BYPASS=1", by="env")
+        except Exception:
+            pass
     """【bug4修复】任务全部完成：状态机收敛到 finished，一次性给出收尾协议。
 
     归档后 select 不再返回任何可执行内容——这是防止'循环交代结果'的代码级闸门。
@@ -2318,7 +2522,7 @@ def _archive_finished(state, done_count, total, message):
     #   工件、走完收尾，仍被反复 steer 拉回来继续干，用户看到"活干完了还自说自话"。
     # 现在守卫一旦看到这个标记就立即放行，彻底解决"该结束却结束不了"。
     try:
-        marker = os.path.join(BASE_DIR, "TASK_FINISHED.json")
+        marker = os.path.join(STATE_DIR, "TASK_FINISHED.json")
         with open(marker, "w", encoding="utf-8") as f:
             json.dump({
                 "finished": True,
@@ -2425,6 +2629,11 @@ def cmd_select(choice, parallel=None):
         pass
     elif state.get("step") != "mechanics_done":
         return {"ok": False, "error": "请先完成力学估算！"}
+    # ── 【固定两问】不再校验"系统提问账本" ──────────────────────────────
+    # 用户反馈：账本机制实用价值低且反复造成流程卡顿（记录不全就被判定"没问"），
+    #   已整体移除 —— 包括宿主侧的写入（tools/post-execute）与这里的核对。
+    # 现在两个固定问题（搭建方式 A/B/C、并行策略 D/E）仍是代码固定题面，
+    #   但强制点落在【select 参数必须合法】：A/B/C 与 D/E 由下方校验把关。
     # 【bug5修复】仅本次是该任务的第一条 select（mechanics_done → user_selected）时
     # 兜底清房间残留；后续波次推进的 select 绝不能再清，否则 room-end 记录被抹掉、
     # 波次永远卡在第1波
@@ -2837,10 +3046,77 @@ def write_part_ownership(state=None, work_dir=None):
         return {"ok": False, "error": "写入零件归属清单失败: %r" % (e,)}
 
 
+def _norm_part_probe(part_name):
+    """把零件文件名规范成用于关键词比对的"裸名"（去目录、去扩展名、去 DSH_ 前缀）。"""
+    _stem = os.path.splitext(os.path.basename(str(part_name or "")))[0]
+    _probe = _stem
+    for _pfx in ("DSH_", "dsh_"):
+        if _probe.startswith(_pfx):
+            _probe = _probe[len(_pfx):]
+    return _stem, _probe
+
+
+def _match_rooms_for(probe, manifest):
+    """【Bug-38 修复·歧义检测】返回该零件命中的【所有】房间（而非"第一个"）。
+
+    ── 为什么必须返回全部命中 ────────────────────────────────────────────
+    台账现象：结构件房间越界建了"加强筋"（本属支撑结构），check-part 未拦截，
+      文件已保存，只能靠支撑房间事后重建覆盖。
+    根因：关键词唯一性没有被保证 —— 车辆模板里 "加强筋" 同时出现在
+      structural 与 support 两个房间的 scope 文本中，于是 part_to_room 的
+      `setdefault` 只留下第一个，而 check_part_ownership 又是
+      "本房间命中即放行"，两个房间就都顺利通过了。
+    修复：显式收集【所有】命中房间；命中数 > 1 即判歧义，必须显式报错，
+      而不是静默选边站。
+
+    Returns: [(room, keyword), ...]
+    """
+    _rooms = manifest.get("rooms") or {}
+    _hits = []
+    for _rn, _info in _rooms.items():
+        for _k in ((_info or {}).get("keywords") or []):
+            if _k and (_k in probe or probe in _k):
+                _hits.append((_rn, _k))
+                break
+    return _hits
+
+
+def _existing_owner_of(part_name):
+    """【Bug-38 修复】查"该零件文件当前是否已由某房间登记产出"。
+
+    数据源：mode_gate 的 artifacts_registry.json（room-artifact 显式登记，最权威）。
+    Returns: 房间名 或 None
+    """
+    try:
+        _stem, _probe = _norm_part_probe(part_name)
+        _reg_path = os.path.join(STATE_DIR, "artifacts_registry.json")
+        if os.path.exists(_reg_path):
+            with open(_reg_path, "r", encoding="utf-8") as f:
+                _reg = json.load(f) or {}
+            if isinstance(_reg, dict):
+                for _rn, _items in _reg.items():
+                    for _it in (_items or []):
+                        if not isinstance(_it, dict):
+                            continue
+                        _nm = str(_it.get("name") or "")
+                        _p = str(_it.get("path") or "")
+                        if (_norm_part_probe(_nm)[1] == _probe
+                                or _norm_part_probe(_p)[1] == _probe):
+                            return _rn
+    except Exception:
+        pass
+    return None
+
+
 def check_part_ownership(part_name, room, work_dir=None):
     """【Bug-38 建议②】校验某零件是否属于该房间。
 
     Returns: {ok, allowed, room, part, matched_keyword, owner_room?, hint?}
+
+    ── 【Bug-38 修复】三条新判据 ───────────────────────────────────────
+    1) 歧义关键词（同一零件命中 ≥2 个房间）→ 直接拒绝，要求补齐归属定义；
+    2) 文件【已存在】且已由其它房间登记 → 直接拒绝（原实现静默允许覆盖）；
+    3) 未命中任何关键词 → 仍允许，但附明确提示（避免误拦新零件）。
     """
     try:
         st = load_state()
@@ -2853,38 +3129,69 @@ def check_part_ownership(part_name, room, work_dir=None):
     _room_info = rooms.get(room) or {}
     _kws = _room_info.get("keywords") or []
     _part = str(part_name or "")
-    _stem = os.path.splitext(os.path.basename(_part))[0]
-    # 去掉 DSH_ 前缀后比对
-    _probe = _stem
-    for _pfx in ("DSH_", "dsh_"):
-        if _probe.startswith(_pfx):
-            _probe = _probe[len(_pfx):]
-    _matched = None
+    _stem, _probe = _norm_part_probe(_part)
+    _local_matched = None
     for k in _kws:
         if k and (k in _probe or _probe in k):
-            _matched = k
+            _local_matched = k
             break
-    if _matched:
+    # ── 判据 1：歧义检测（必须先于"本房间命中即放行"）────────────────
+    _hits = _match_rooms_for(_probe, manifest)
+    if len(_hits) > 1:
+        _names = [h[0] for h in _hits]
+        return {"ok": True, "allowed": False, "room": room, "part": _stem,
+                "ambiguous_rooms": _names,
+                "matched_keyword": _local_matched,
+                "gate": "PART_OWNERSHIP_AMBIGUOUS",
+                "error": ("【Bug-38】零件 '%s' 的归属【有歧义】：同时命中房间 %s。"
+                          "歧义归属会让越界产出被静默放行"
+                          "（台账：结构件越界建加强筋未被拦截）。"
+                          % (_stem, _names)),
+                "hint": ("· 由大屋在 workflow_gate 的房间零件范围里【去重关键词】，"
+                         "让该零件只归属唯一房间；"
+                         "· 或在本房间确实需要该零件时，显式补充更具体的关键词"
+                         "（如 '舵机加强筋'）避免与其它房间重叠。")}
+    if _local_matched:
+        # ── 判据 2：文件已存在且已有"他房间"的登记产物 ──────────────
+        _conflict = _existing_owner_of(_part)
+        if _conflict and _conflict != room:
+            return {"ok": True, "allowed": False, "room": room, "part": _stem,
+                    "matched_keyword": _local_matched,
+                    "owner_room": _conflict,
+                    "gate": "PART_OWNERSHIP_CONFLICT",
+                    "error": ("【Bug-38】文件 '%s' 已存在，且已由房间 [%s] 登记产出。"
+                              "本房间 [%s] 不得静默覆盖他房间的成果。"
+                              % (_stem, _conflict, room)),
+                    "hint": ("· 由归属房间 [%s] 重新产出/修正该零件；"
+                             "· 若确需本房间接管，请先由大屋确认并清理旧登记。"
+                             % _conflict)}
         return {"ok": True, "allowed": True, "room": room, "part": _stem,
-                "matched_keyword": _matched}
-    # 找它实际属于哪个房间
+                "matched_keyword": _local_matched}
+    # 找它实际属于哪个房间（单命中场景）
     _owner = None
     _owner_kw = None
-    for k, rn in p2r.items():
-        if k and (k in _probe or _probe in k):
-            _owner, _owner_kw = rn, k
-            break
+    if _hits:
+        _owner, _owner_kw = _hits[0][0], _hits[0][1]
     if _owner and _owner != room:
         return {"ok": True, "allowed": False, "room": room, "part": _stem,
                 "owner_room": _owner, "matched_keyword": _owner_kw,
                 "hint": ("零件 '%s' 属于房间 [%s]（关键词 '%s'），不属于 [%s]。"
                          "越界产出会导致总装重复/缺失（Bug-38）。"
                          % (_stem, _owner, _owner_kw, room))}
+    # ── 判据 3：未命中任何关键词 → 允许；但已存在于他房间时仍拦截 ────
+    _conflict3 = _existing_owner_of(_part)
+    if _conflict3 and _conflict3 != room:
+        return {"ok": True, "allowed": False, "room": room, "part": _stem,
+                "owner_room": _conflict3, "matched_keyword": None,
+                "gate": "PART_OWNERSHIP_CONFLICT",
+                "error": ("【Bug-38】文件 '%s' 已存在且由房间 [%s] 登记产出，"
+                          "本房间 [%s] 不得覆盖（即便零件名未命中本房间关键词）。"
+                          % (_stem, _conflict3, room)),
+                "hint": "若确属本房间新零件，请换一个不冲突的零件名。"}
     return {"ok": True, "allowed": True, "room": room, "part": _stem,
             "matched_keyword": None,
             "note": ("未匹配到任何房间关键词，按【允许】处理（避免误拦新零件）；"
                      "若确认越界，请 room-report 警告。")}
-
 
 def verify_ownership(work_dir=None):
     """【Bug-38 建议③】总装前核对交付目录里的零件归属与去重。
@@ -3002,8 +3309,8 @@ def cmd_recover():
     no_heartbeat       : 登记超宽限期仍无心跳 —— 可疑，先 list_agents 核对再决定；
     completed / failed : 非活动状态，不在重启范围。
     """
-    hb_dir = os.path.join(BASE_DIR, "heartbeats")
-    ms_path = os.path.join(BASE_DIR, "mode_state.json")
+    hb_dir = os.path.join(STATE_DIR, "heartbeats")
+    ms_path = os.path.join(STATE_DIR, "mode_state.json")
     empty = {"ok": True, "running": [], "starting": [], "stale": [], "no_heartbeat": [],
              "completed": [], "failed": [], "rooms_to_restart": [], "message": ""}
     if not os.path.exists(ms_path):
@@ -3157,7 +3464,7 @@ def cmd_gate_summary():
     """
     state = load_state()
     step = str(state.get("step") or "idle")
-    ms_path = os.path.join(BASE_DIR, "mode_state.json")
+    ms_path = os.path.join(STATE_DIR, "mode_state.json")
     ms = {}
     try:
         if os.path.exists(ms_path):
@@ -3224,7 +3531,88 @@ def cmd_gate_summary():
                  "三者口径不一致时以本命令的 phase/can_start_new_task 为准。"),
     }
 
-if __name__ == "__main__":
+def _run_main_with_defense_exit():
+    """[门禁] 包装 __main__：三大防线拦截时以非零码退出。
+
+    为什么不改每个分支：workflow_gate 的每个子命令各自 print 结果，逐个
+      改动易漏且易破坏既有输出格式。这里统一把 stdout 捕获、解析出 JSON，
+      只在 gate 属于防线拦截时设置退出码，输出内容与顺序保持不变。
+
+    ── 【P1-5 修复 · 所有 sys.exit 路径静默丢失输出】──────────────────────
+    原实现把 stdout 换成 StringIO，在 finally 里恢复，【之后】才把缓冲写回
+    （第 3529-3531 行）。但 _main_body() 内部有三处 sys.exit()：
+        · 无参数/--help（用法提示）
+        · select 缺参数（用法提示）
+        · 未知命令（错误提示）
+    SystemExit 会【穿透】finally 直接终止进程，那三行写回代码永远不会执行 →
+    实测这些路径 stdout 恒为 0 字节。调用方（主对话/小屋）看不到任何提示，
+    只拿到退出码，于是被逼去手改 workflow_state.json 绕过流程。
+
+    修复：把 SystemExit 在包装层【捕获】，先无条件写回捕获的输出，
+    再用原始退出码退出。help / 用法 / 未知命令 / 缺参数四类提示全部恢复。
+    """
+    import io as _io
+    _buf = _io.StringIO()
+    _old = sys.stdout
+    _exit_code = 0
+    _pending_exc = None
+    sys.stdout = _buf
+    try:
+        _main_body()
+    except SystemExit as _e:
+        # 记录退出码，稍后写回输出再退出（不能让它跳过下面的写回）
+        _code = getattr(_e, "code", 0)
+        if _code is None:
+            _exit_code = 0
+        elif isinstance(_code, int):
+            _exit_code = _code
+        else:
+            # sys.exit("字符串") 语义：打印该串到 stderr 并以 1 退出
+            try:
+                sys.stderr.write(str(_code) + "\n")
+            except Exception:
+                pass
+            _exit_code = 1
+    except BaseException as _e2:
+        # 其它异常同样不能吞掉输出：先写回，再原样抛出
+        _pending_exc = _e2
+    finally:
+        sys.stdout = _old
+    # ── 无条件写回捕获的输出（这正是原实现漏掉的步骤）──
+    _text = _buf.getvalue()
+    if _text:
+        try:
+            _old.write(_text)
+            _old.flush()
+        except Exception:
+            pass
+    if _pending_exc is not None:
+        raise _pending_exc
+    if _exit_code:
+        sys.exit(_exit_code)
+    # 输出是【多行 pretty JSON】，必须整体解析（不是取最后一行）。
+    _j = {}
+    _t = _text.strip()
+    if _t:
+        try:
+            _j = json.loads(_t)
+        except Exception:
+            try:
+                _j = json.loads(_t.splitlines()[-1])
+            except Exception:
+                _j = {}
+    try:
+        if isinstance(_j, dict) and _j.get("ok") is False:
+            _g = str(_j.get("gate") or "")
+            if _g in ("DEFENSE_REQUIRED", "DEFENSE_ERROR"):
+                sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+
+
+def _main_body():
     if len(sys.argv) < 2 or sys.argv[1].lower() in ("-h", "--help", "help"):
         # ── 【C2 修复】用法提示必须列全命令 ─────────────────────────────
         # 原提示漏了 confirm-assembly（以及 recover/restart），
@@ -3323,3 +3711,7 @@ if __name__ == "__main__":
                           "hint": "运行 `python workflow_gate.py --help` 查看全部命令"},
                          ensure_ascii=False))
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    _run_main_with_defense_exit()

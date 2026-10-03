@@ -1,0 +1,226 @@
+{
+  "items": [
+    {
+      "at": "2026-10-02 10:14:46",
+      "where": "defense_gate.unsigned:DSH_测试_轴承支架.sldprt",
+      "kind": "material",
+      "reason": "宿主签发端点无响应",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 10:16:06",
+      "where": "defense_gate.unsigned:DSH_测试_gear.sldprt",
+      "kind": "material",
+      "reason": "宿主签发端点无响应",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 10:17:35",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "physics",
+      "reason": "物理凭据拒绝签发: report path outside managed physics_runs root",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 10:17:48",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "physics",
+      "reason": "物理凭据拒绝签发: report path outside managed physics_runs root",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 10:18:14",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 structural",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 10:19:26",
+      "where": "defense_gate.unsigned:DSH_测试_极薄壁.sldprt",
+      "kind": "material",
+      "reason": "宿主签发端点无响应",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 10:19:41",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "physics",
+      "reason": "物理凭据拒绝签发: report path outside managed physics_runs root",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 10:21:03",
+      "where": "mode_gate.room-end:结构件",
+      "reason": "--force 显式强制放行（跳过三大防线）",
+      "by": "cli-force"
+    },
+    {
+      "at": "2026-10-02 11:07:11",
+      "where": "defense_gate.unsigned:DSH_测试_gear2.sldprt",
+      "kind": "material",
+      "reason": "宿主签发端点无响应",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 11:13:37",
+      "where": "defense_gate.unsigned:DSH_测试_诊断装配.sldasm",
+      "kind": "material",
+      "reason": "宿主签发端点无响应",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 11:13:38",
+      "where": "defense_gate.unsigned:DSH_测试_诊断装配.sldasm",
+      "kind": "material",
+      "reason": "宿主签发端点无响应",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 11:44:19",
+      "where": "mode_gate.room-end:结构件",
+      "reason": "--force 显式强制放行（跳过三大防线）",
+      "by": "cli-force"
+    },
+    {
+      "at": "2026-10-02 17:39:31",
+      "where": "defense_gate.unsigned:DSH_实战_极薄壁.sldprt",
+      "kind": "material",
+      "reason": "宿主签发端点无响应",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 17:40:50",
+      "where": "defense_gate.unsigned:DSH_实战_极薄板.sldprt",
+      "kind": "material",
+      "reason": "宿主签发端点无响应",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 17:41:00",
+      "where": "defense_gate.unsigned:DSH_实战_3mm板.sldprt",
+      "kind": "material",
+      "reason": "宿主签发端点无响应",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 17:43:39",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 structural",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 20:34:15",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 structural",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 21:08:59",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 structural",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 21:13:33",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 structural",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 21:13:33",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 transmission",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 21:13:34",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 housing",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 21:13:34",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 mold",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 22:42:01",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 structural",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 22:42:13",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 transmission",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 22:42:13",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 housing",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 22:42:13",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 mold",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 23:01:03",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 structural",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 23:01:03",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 transmission",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 23:01:04",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 housing",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 23:01:04",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 mold",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 23:01:19",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 structural",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-02 23:01:20",
+      "where": "defense_gate.unsigned:结构件",
+      "kind": "domain",
+      "reason": "领域凭据拒绝签发: 规则文件无法解析 transmission",
+      "by": "fail-closed"
+    }
+  ]
+}

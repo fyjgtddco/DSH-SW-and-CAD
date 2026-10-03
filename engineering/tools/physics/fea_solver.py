@@ -34,6 +34,35 @@ except ImportError:          # 允许在 sys.path 未注入时降级运行
         _fatigue = None
 
 
+def aggregate_overall(gates):
+    """按统一三档口径聚合 overall（Bug14 修复）。
+
+    ── 为什么需要统一函数 ──────────────────────────────────────────────
+    测试部实测：1N 超小载荷 → SF=2213 远超 target_max=5，
+      SAFETY_FACTOR gate 确实标了 OVER_DESIGN / over_design=true，
+      但最终 overall 却是 PASS，与"过度设计应提示 WARNING"的预期不符；
+      而同样超标的实心块用例又报了 OVER_DESIGN —— 行为不一致。
+    根因：各求解路径各自用 `passed = all(status == "PASS")` 算 overall，
+      把 OVER_DESIGN 当"非 PASS"→ 有的路径算成 FAIL，随后又被
+      _attach_fatigue 用另一套口径重算成 PASS，前后矛盾。
+
+    统一口径（与 _attach_fatigue 保持一致）：
+      · 任一 FAIL          → FAIL
+      · 有 WARNING / N/A   → REVIEW
+      · 有 OVER_DESIGN     → REVIEW（过度设计需提示，但不阻断交付）
+      · 否则               → PASS
+    说明：OVER_DESIGN 归 REVIEW 而非 PASS —— 用户要的是"可优化/减重"
+      提示能被看见；它仍不是 FAIL，不影响交付。
+    """
+    statuses = [g.get("status") for g in (gates or {}).values()
+                if isinstance(g, dict)]
+    if "FAIL" in statuses:
+        return "FAIL"
+    if "WARNING" in statuses or "N/A" in statuses or "OVER_DESIGN" in statuses:
+        return "REVIEW"
+    return "PASS"
+
+
 def _material_guard(load_case: dict) -> Optional[dict]:
     """【BUG-05/08 修复】材料健全性前置检查。
 
@@ -152,7 +181,8 @@ def _attach_fatigue(load_case: dict, result: dict) -> dict:
                 if isinstance(g, dict)]
     if "FAIL" in statuses:
         result["overall"] = "FAIL"
-    elif "WARNING" in statuses or "N/A" in statuses:
+    elif ("WARNING" in statuses or "N/A" in statuses
+          or "OVER_DESIGN" in statuses):
         result["overall"] = "REVIEW"
     else:
         result["overall"] = "PASS"
@@ -244,9 +274,33 @@ def solve_analytical(load_case: dict, mesh_stats: dict) -> dict[str, Any]:
     total_force = sum(_load_force(l) for l in loads)
     force_dir = loads[0].get("direction", [0, 0, -1]) if loads else [0, 0, -1]
 
-    L = domain.get("x_max", 200)
-    W = domain.get("y_max", 60)
-    H = domain.get("z_max", 60)
+    # ══ 【Bug17 修复】几何必须优先取【真实零件】，而非 design_domain ═════
+    # 测试部实测：三个不同载荷（39.5N/27.4N/12.2N，差 3 倍）返回的
+    #   SF 完全相同 —— 因为解析解一直用 design_domain 的固定尺寸
+    #   (200×60×60) 当梁长/宽/高，与真实零件无关，载荷变化被几何口径
+    #   掩盖，强度判定因此不可信（Bug7 的残留）。
+    # 修复：若 load_case 携带 real_geometry（由 physics_bridge 从
+    #   swapi.massprops / 包围盒提取），则用它推导等效梁尺寸。
+    _rg = load_case.get("real_geometry") or {}
+    _bbox = _rg.get("bbox_mm") or None
+    _vol_real = _rg.get("volume_mm3")
+    _used_real = False
+    if _bbox and len(_bbox) >= 6:
+        try:
+            _lx = abs(float(_bbox[1]) - float(_bbox[0]))
+            _ly = abs(float(_bbox[3]) - float(_bbox[2]))
+            _lz = abs(float(_bbox[5]) - float(_bbox[4]))
+            _dims = sorted([_lx, _ly, _lz], reverse=True)
+            if _dims[0] > 0 and _dims[1] > 0 and _dims[2] > 0:
+                # 最长边=梁长；次长边=宽；最短边=高（悬臂梁等效）
+                L, W, H = _dims[0], _dims[1], _dims[2]
+                _used_real = True
+        except Exception:
+            _used_real = False
+    if not _used_real:
+        L = domain.get("x_max", 200)
+        W = domain.get("y_max", 60)
+        H = domain.get("z_max", 60)
 
     # 假设悬臂梁边界条件（固定端在 x=0）
     result = analytical_beam_cantilever(L, W, H, total_force, E)
@@ -254,6 +308,24 @@ def solve_analytical(load_case: dict, mesh_stats: dict) -> dict[str, Any]:
     sigma_max = result.get("max_stress_mpa", 0)
     delta_max = result.get("max_deflection_mm", 0)
     volume_mm3 = result.get("volume_mm3", 0)
+
+    # ── 【Bug17/18 回归修复】体积必须报【真实测量值】，不得用 bbox 乘积 ────
+    # 测试部 v13 反馈：fea_result.volume 恒 = 720000（= design_domain
+    #   200×60×60 的乘积），10 种零件完全一样 → 报告里的体积是"设计域体积"
+    #   而不是"零件体积"，下游据此判断材料用量/质量必然失真。
+    # 修复：优先采用 real_geometry.volume_mm3（swapi.massprops 的真实实体体积），
+    #   bbox 只用于梁模型的等效尺寸，不再充当体积。
+    _vol_reported = volume_mm3
+    _vol_source = "bbox_product(等效梁)"
+    if _vol_real:
+        try:
+            _vr = float(_vol_real)
+            if _vr > 0:
+                _vol_reported = _vr
+                _vol_source = "swapi.massprops(真实实体体积)"
+        except Exception:
+            pass
+    volume_mm3 = _vol_reported
 
     # 计算安全系数
     safety_factor = sigma_y / sigma_max if sigma_max > 0 else float("inf")
@@ -298,11 +370,18 @@ def solve_analytical(load_case: dict, mesh_stats: dict) -> dict[str, Any]:
             "actual_mm": round(delta_max, 4),
             "required_max_mm": acceptance.get("max_displacement_mm"),
         },
-        "DESIGN_SPACE": {"status": "PASS"},
+        # ── 【Bug18 修复】FEA 层【不输出】DESIGN_SPACE ────────────────────
+        # 空间是否越界是【几何】问题，归属 geometry_gate（见
+        #   simulation_report.GATE_OWNER）。原实现在这里写死 "PASS"，
+        #   与 geometry_gate 的 FAIL 形成"两层相反结论"，用户无从判断。
+        # 注意：这里【整条不输出】，而不是标成 N/A —— 因为 aggregate_overall()
+        #   把 N/A 视为"未评估"从而把整体判为 REVIEW，会让本来 PASS 的
+        #   校核被无谓降级（实测 feapy 路径回归）。
+        #   一个闸口只由一个层负责，不属于本层的就不要出现在本层结果里。
         "MESH_QUALITY": {"status": "N/A", "note": "analytical method, no mesh"},
     }
 
-    passed = all(g["status"] == "PASS" for g in gates.values())
+    passed = (aggregate_overall(gates) == "PASS")
 
     return {
         "ok": True,
@@ -314,7 +393,7 @@ def solve_analytical(load_case: dict, mesh_stats: dict) -> dict[str, Any]:
         "volume_mm3": round(volume_mm3, 2),
         "mass_kg": round(volume_mm3 * mat.get("density_kg_m3", 7850) / 1e9, 4),
         "gates": gates,
-        "overall": "PASS" if passed else "FAIL",
+        "overall": aggregate_overall(gates),
         "limitations": [
             "Euler-Bernoulli beam assumptions",
             "ignores stress concentrations",
@@ -405,14 +484,16 @@ def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, 
                 "actual_mm": round(max_disp_val, 4),
                 "required_max_mm": max_disp,
             },
-            "DESIGN_SPACE": {"status": "PASS"},
+            # ── 【Bug18 修复】FEA 层【不输出】DESIGN_SPACE（归属 geometry_gate）
+            #   理由见 solve_analytical 内同处注释：一个闸口只由一个层负责，
+            #   且不得用 N/A 占位（aggregate_overall 会把 N/A 降级为 REVIEW）。
             "MESH_QUALITY": {
                 "status": "PASS",
                 "note": f"CST triangle mesh: ~{nx*ny*2} elements",
             },
         }
 
-        passed = all(g["status"] == "PASS" for g in gates.values())
+        passed = (aggregate_overall(gates) == "PASS")
 
         return {
             "ok": True,
@@ -424,7 +505,7 @@ def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, 
             "volume_mm3": round(volume_mm3, 2),
             "mass_kg": round(volume_mm3 * mat.get("density_kg_m3", 7850) / 1e9, 4),
             "gates": gates,
-            "overall": "PASS" if passed else "FAIL",
+            "overall": aggregate_overall(gates),
             "limitations": [
                 "2D plane stress assumption only",
                 "CST linear elements (6-8%% error vs analytical)",

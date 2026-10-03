@@ -157,18 +157,37 @@ def _find_tools_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+# ── 【P0-3 写侧修复】状态目录必须来自【单一事实源】────────────────────────
+# 原实现把状态写到本脚本所在目录 —— 而工程模式在磁盘上有【两份副本】
+#   （工作区 + ~/.dsh 安装目录），从哪份调用就写哪份，于是状态被劈成两半：
+#     workflow_state.json：工作区 step=user_selected vs 安装 step=depth_asked
+#     mode_state.json    ：工作区 1 个房间 vs 安装 0 个房间
+#     reports/           ：工作区有防线凭据，安装副本没有
+#   宿主守卫读安装副本 → 把"已完成"判成"未完成"，反复 steer 拦住对话结束。
+# 现在统一由 _store.state_dir() 决定落点（优先 DSH_STATE_DIR > 工程根 > 探测）。
+# _find_tools_dir() 保留为"脚本所在目录"的探测（用于定位同目录的 .py 模块）。
 _BASE_DIR = _find_tools_dir()
+try:
+    import _store as _store_mod
+    STATE_DIR = _store_mod.state_dir()
+    # 状态目录可能不等于脚本目录：把两者都加进 sys.path，
+    #   保证 import mode_gate / defense_gate / choice_contract 都能找到。
+    for _d in (STATE_DIR, _BASE_DIR):
+        if _d and os.path.isdir(_d) and _d not in sys.path:
+            sys.path.insert(0, _d)
+except Exception:
+    STATE_DIR = _BASE_DIR
 
-_SW_STATE_FILE = os.path.join(_BASE_DIR, "sw_state.json")
-_SW_MONITOR_PID_FILE = os.path.join(_BASE_DIR, "sw_monitor.pid")
+_SW_STATE_FILE = os.path.join(STATE_DIR, "sw_state.json")
+_SW_MONITOR_PID_FILE = os.path.join(STATE_DIR, "sw_monitor.pid")
 _SW_MONITOR_INTERVAL = 3   # 监控刷新间隔（秒）
 
-STATE_PATH = os.path.join(_BASE_DIR, "mode_state.json")
-WORKFLOW_STATE_PATH = os.path.join(_BASE_DIR, "workflow_state.json")
+STATE_PATH = os.path.join(STATE_DIR, "mode_state.json")
+WORKFLOW_STATE_PATH = os.path.join(STATE_DIR, "workflow_state.json")
 MODE_NAMES = {"1": "基础零件搭建", "2": "大型复杂器械装配", "3": "原图解分析"}
 NL = chr(10)
-HEARTBEAT_DIR = os.path.join(_BASE_DIR, "heartbeats")
-REPORTS_DIR = os.path.join(_BASE_DIR, "reports")
+HEARTBEAT_DIR = os.path.join(STATE_DIR, "heartbeats")
+REPORTS_DIR = os.path.join(STATE_DIR, "reports")
 
 
 def _sw_running():
@@ -207,7 +226,7 @@ def _sw_force_close():
 #     python mode_gate.py platform-sync <房间名> running|inactive|missing
 #   mode_gate 的存活判定【优先读它】，心跳降级为辅助证据。
 #   platform-sync 写入的 ts 若仍在 PLATFORM_FRESH_SEC 内，即为权威结论。
-PLATFORM_STATUS_FILE = os.path.join(_BASE_DIR, "platform_status.json")
+PLATFORM_STATUS_FILE = os.path.join(STATE_DIR, "platform_status.json")
 # 平台状态有效期：超过则视为"未知"（不是"死亡"），退回证据链判断
 PLATFORM_FRESH_SEC = 600
 
@@ -523,7 +542,7 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
                 actions.append("清门禁残留失败: %r" % (e,))
             # 顺带清掉完成标记，避免上一轮的 finished 让守卫误放行
             try:
-                _mk = os.path.join(_BASE_DIR, "TASK_FINISHED.json")
+                _mk = os.path.join(STATE_DIR, "TASK_FINISHED.json")
                 if os.path.exists(_mk):
                     os.remove(_mk)
                     actions.append("清除 TASK_FINISHED.json 标记")
@@ -596,17 +615,54 @@ _STATE_FILES = ("workflow_state.json", "mode_state.json", "sw_state.json",
 
 
 def _alt_tools_dirs():
-    """探测除本目录外的其他"工程模式 tools 目录"（分发副本）。"""
+    """探测除【权威状态目录】外的其他"工程模式 tools 目录"（分发副本）。
+
+    ── 【P0-3 修复】候选必须覆盖全部已知落点，且不再硬编码个人路径 ─────────
+    原实现只认 ~/Desktop/DSH-SW-and-CAD-main（写死了用户名与布局），
+    且比较基准是 _BASE_DIR（脚本所在目录）而非【权威状态目录】——
+    当脚本从安装副本运行、状态目录却指向工作区时，体检会把权威目录本身
+    误报成"副本"，结论完全反过来。
+    """
     out = []
+    seen = set()
+
+    def _add(p):
+        try:
+            ap = os.path.abspath(p)
+        except Exception:
+            return
+        key = os.path.normcase(ap)
+        if key in seen:
+            return
+        seen.add(key)
+        if os.path.isdir(ap) and key != os.path.normcase(os.path.abspath(STATE_DIR)):
+            out.append(ap)
+
     try:
         home = os.path.expanduser("~")
-        # 常见副本位置：桌面工程仓库
-        for base in (os.path.join(home, "Desktop", "DSH-SW-and-CAD-main",
-                                  "engineering", "tools"),
-                     os.path.join(home, "Desktop", "DSH-SW-and-CAD-main",
-                                  "tools")):
-            if os.path.isdir(base) and os.path.normcase(base) != os.path.normcase(_BASE_DIR):
-                out.append(base)
+        _add(os.path.join(home, ".dsh", ".agent-presets", "engineering", "tools"))
+        _add(os.path.join(home, ".dsh", "engineering", "tools"))
+        # 工作区副本：以 __file__ 向上回溯找 engineering/tools（不写死用户名）
+        try:
+            _cur = os.path.dirname(os.path.abspath(__file__))
+            for _ in range(6):
+                if os.path.basename(_cur) == "engineering":
+                    _add(os.path.join(_cur, "tools"))
+                    break
+                _nxt = os.path.dirname(_cur)
+                if _nxt == _cur:
+                    break
+                _cur = _nxt
+        except Exception:
+            pass
+        # 环境变量显式声明的工程根
+        try:
+            _eng = (os.environ.get("DSH_ENGINEERING_ROOT") or "").strip()
+            if _eng:
+                _add(_eng if os.path.basename(_eng).lower() == "tools"
+                     else os.path.join(_eng, "tools"))
+        except Exception:
+            pass
     except Exception:
         pass
     return out
@@ -616,13 +672,13 @@ def cmd_doctor(sync=False, clean=False):
     """体检并（可选）修复状态文件多副本不一致问题。
 
     Args:
-        sync:  把权威（本目录）状态覆盖到各副本
+        sync:  把权威（STATE_DIR）状态覆盖到各副本
         clean: 清空副本里的运行时状态（只留空壳，避免误读）
     """
-    report = {"ok": True, "authoritative_dir": _BASE_DIR, "copies": [], "issues": []}
+    report = {"ok": True, "authoritative_dir": STATE_DIR, "copies": [], "issues": []}
     _auth = {}
     for fn in ("workflow_state.json", "mode_state.json"):
-        p = os.path.join(_BASE_DIR, fn)
+        p = os.path.join(STATE_DIR, fn)
         try:
             with open(p, "r", encoding="utf-8") as f:
                 _auth[fn] = json.load(f)
@@ -689,14 +745,45 @@ def cmd_doctor(sync=False, clean=False):
         report["hint"] = ("发现多副本不一致。工具【只读】权威目录(%s)；"
                           "副本仅作分发，不应承载运行时状态。"
                           "可用 --sync 对齐、或 --clean 清空副本运行时状态。"
-                          % _BASE_DIR)
+                          % STATE_DIR)
     else:
         report["note"] = "各副本与权威状态一致。"
     report["ok"] = True
+    # ── 【P0-3 修复】提示可用 _store.py 做权威目录迁移 ────────────────────
+    # doctor 只做"体检/对齐/清空"；若发现副本里有【比权威更新】的状态
+    #   （收敛写入点之前的遗留），应提示用 _store.py --migrate 搬过来，
+    #   而不是简单清空 —— 那会让用户的任务进度凭空回退。
+    try:
+        _newer_found = []
+        for _d in _alt_tools_dirs():
+            for _fn in ("workflow_state.json", "mode_state.json"):
+                _sp = os.path.join(_d, _fn)
+                _dp = os.path.join(STATE_DIR, _fn)
+                if os.path.isfile(_sp):
+                    if not os.path.exists(_dp) or \
+                       os.path.getmtime(_sp) > os.path.getmtime(_dp) + 1.0:
+                        _newer_found.append("%s/%s" % (_d, _fn))
+        if _newer_found:
+            report["newer_in_copies"] = _newer_found
+            report["migrate_hint"] = (
+                "检测到副本中存在【比权威目录更新】的状态。"
+                "请用 `python tools/_store.py --dry-run` 预览、"
+                "`python tools/_store.py --migrate` 搬到权威目录（会自动备份）。"
+                "【不要】直接用 --clean 清空，否则任务进度会回退。")
+    except Exception:
+        pass
     return report
 
 
 def cmd_rooms_reset(keep_pmode=True):
+    # [审计] rooms-reset 会清空房间与报告（含三大防线凭据），必须留痕。
+    try:
+        import defense_gate as _dg_r
+        _dg_r.log_bypass("mode_gate.rooms-reset",
+                         reason="清空房间/报告（会抹除防线凭据），已留痕",
+                         by="rooms-reset")
+    except Exception:
+        pass
     """【bug5修复】清空房间记录/子代理对账/SW锁/心跳/进度报告。
 
     新任务开始时必须调用：否则上一任务的 ended_at 残留会让 select 把旧房间
@@ -950,7 +1037,7 @@ def scan_legacy_artifacts(work_dir, epoch=None):
 #     python mode_gate.py room-artifact <房间名> <文件路径> [零件名]
 #   登记表写入 artifacts_registry.json，按【房间名】隔离；
 #   _recent_artifact_evidence 优先用登记表判定归属，扫描 mtime 降级为兜底。
-ARTIFACT_REGISTRY_FILE = os.path.join(_BASE_DIR, "artifacts_registry.json")
+ARTIFACT_REGISTRY_FILE = os.path.join(STATE_DIR, "artifacts_registry.json")
 
 
 def _load_artifact_registry():
@@ -1065,7 +1152,42 @@ def _recent_artifact_evidence(room, window=None, since=None):
     #   同时归到多个房间名下（实测 4 个房间共用同一份 DSH_车架底板.SLDPRT）。
     # 修复：若本房间有登记产物，直接以登记表为准 —— 这是【确定性归属】，
     #   不再让别的房间"蹭"到别人的产物；无登记时才退回 mtime 扫描（兼容旧流程）。
-    _registered = _registered_artifacts(room)
+    # ── 【Bug2 修复·真正的根因】登记表也必须按【当前任务】过滤 ──────────
+    # 测试部复测：disk_artifact 仍指向 20261001_203321_77D09BD3\DSH_电池仓.sldprt。
+    # 根因不在目录扫描（那部分已修），而在【登记表优先】这条路径：
+    #   artifacts_registry.json 里保留了【上一个任务】的登记记录，
+    #   而本函数一旦发现本房间有登记就直接返回 —— 旧任务产物因此
+    #   永久优先于当前任务的真实产物，看起来"一直指向历史目录"。
+    # 修复：登记项必须位于【当前任务交付目录】之下才被采纳；
+    #   不在当前任务目录下的登记项视为历史残留（不参与判定）。
+    _cur_task_dir = None
+    try:
+        _wf_st = _read_json_file(WORKFLOW_STATE_PATH) or {}
+        _wd = _wf_st.get("work_dir")
+        if _wd:
+            _cur_task_dir = os.path.abspath(_wd)
+    except Exception:
+        _cur_task_dir = None
+    _registered_all = _registered_artifacts(room)
+    _registered = []
+    _stale_registered = []
+    for _it in _registered_all:
+        _p = str(_it.get("path") or "")
+        if not _p:
+            continue
+        if _cur_task_dir:
+            try:
+                _ap = os.path.abspath(_p)
+                # 只接受当前任务目录下的产物（含子目录）
+                if _ap == _cur_task_dir or _ap.startswith(_cur_task_dir + os.sep):
+                    _registered.append(_it)
+                else:
+                    _stale_registered.append(_it)
+            except Exception:
+                _registered.append(_it)
+        else:
+            # 拿不到当前任务目录时保持旧行为（避免误伤单任务场景）
+            _registered.append(_it)
     if _registered:
         _exist = [x for x in _registered if x.get("exists")]
         _newest = None
@@ -1078,10 +1200,13 @@ def _recent_artifact_evidence(room, window=None, since=None):
             "newest": _newest,
             "count": len(_exist),
             "registered": _registered,
-            "source": "artifacts_registry.json（显式登记，Bug-16/17）",
+            "stale_registered_count": len(_stale_registered),
+            "task_dir": _cur_task_dir,
+            "source": "artifacts_registry.json（显式登记·已按当前任务过滤）",
             "scanned_dirs": [],
             "window_sec": None,
         }
+    # 登记项全为历史残留 → 继续走下面的目录扫描（当前任务真实产物）
 
     # 有效判定窗口 = max(绝对窗口, 自房间启动以来的时长 + 裕量)
     #   · 绝对窗口：保证"最近动过" 
@@ -1093,22 +1218,36 @@ def _recent_artifact_evidence(room, window=None, since=None):
         except Exception:
             pass
     dirs = []
-    # 1) state 里显式记录的目录
-    try:
-        st = load_state()
-        wd = st.get("work_dir")
-        if wd:
-            dirs.append(wd)
-    except Exception:
-        pass
-    # 2) 工程模式自带输出目录
+    # ── 【Bug2 修复·彻底版】本任务交付目录必须来自【当前任务】─────────
+    # 测试部复测：disk_artifact 仍指向历史任务目录
+    #   （...\test\20261001_203321_77D09BD3\DSH_电池仓.sldprt），
+    #   而当前任务目录是 20261001_230715_AD844F4D。
+    # 根因：原实现从 load_state()（= mode_state.json）取 work_dir，
+    #   但 mode_state.json 【根本没有 work_dir 键】—— 该字段由
+    #   workflow_gate 写在 workflow_state.json 里。于是这里取不到，
+    #   退化成"只扫 output/"，而历史残留目录又被别的路径带进来。
+    # 修复：按优先级取【当前任务】交付目录：
+    #   ① workflow_state.json 的 work_dir（init 时为每个任务创建）
+    #   ② mode_state.json 的 work_dir（若某些部署写在这里）
+    _task_work_dir = None
+    for _st_getter, _st_name in (
+            (lambda: _read_json_file(WORKFLOW_STATE_PATH), "workflow_state"),
+            (lambda: load_state(), "mode_state")):
+        try:
+            _stv = _st_getter() or {}
+            _wd = _stv.get("work_dir")
+            if _wd and os.path.isdir(_wd):
+                _task_work_dir = os.path.abspath(_wd)
+                break
+        except Exception:
+            continue
+    if _task_work_dir:
+        dirs.append(_task_work_dir)
+    # 工程模式自身 output/（当前任务产物也可能落这里）
     base = os.path.dirname(os.path.abspath(__file__))
-    dirs.append(os.path.join(os.path.dirname(base), "output"))
-    dirs.append(os.path.join(base, "..", "output"))
-    # 3) 桌面常见测试目录
-    home = os.path.expanduser("~")
-    dirs.append(os.path.join(home, "Desktop", "test"))
-    dirs.append(os.path.join(home, "Desktop"))
+    dirs.append(os.path.abspath(os.path.join(base, "..", "output")))
+    # 【已移除】桌面/历史目录扫描：宁可少认产物，也绝不把历史任务的
+    #   产物算作本房间产出（Bug2）。
 
     exts = tuple(e.lower() for e in SW_ARTIFACT_GLOB_EXT)
     newest, hits, seen = None, 0, set()
@@ -1719,7 +1858,7 @@ def cmd_room_status():
         out.append(rec)
 
     # ── ① 来源可审计 ──────────────────────────────────────────────
-    _src = {"state_file": STATE_PATH, "base_dir": _BASE_DIR,
+    _src = {"state_file": STATE_PATH, "base_dir": STATE_DIR,
             "heartbeats_dir": HEARTBEAT_DIR, "reports_dir": REPORTS_DIR}
     try:
         if os.path.exists(STATE_PATH):
@@ -2961,6 +3100,11 @@ def _room_completion_evidence(room):
     return {"completed": completed, "reasons": reasons, "evidence": ev}
 
 
+def bypass_requested_defense():
+    """是否显式绕行三大防线（唯一合法绕行，必定留痕）。"""
+    return str(os.environ.get("DSH_DEFENSE_BYPASS") or "").strip() in ("1", "true", "yes")
+
+
 def _maybe_advance_workflow_finished(reason="room-end"):
     """【Bug#6 修复】全部房间收尾后，自动把 workflow_state.step 推进到 finished。
 
@@ -3057,6 +3201,48 @@ def _maybe_advance_workflow_finished(reason="room-end"):
                          "若确为启动失败，重新 subagent_fork 并让房间真正产出后再 room-end。"
                          "本函数不会把这种状态推进为 finished（Bug-33）。"),
             }
+        # ══ 【三大防线 · 自动收尾前强制】══════════════════════════════════
+        # 漏点修复：本函数会在【最后一个房间 room-end 时自动】把 step 写成
+        #   finished 并落 TASK_FINISHED.json —— 而 workflow_gate._archive_finished
+        #   的那道防线总闸【根本不会被执行到】。实测这意味着：只要各房间有
+        #   "完成证据"（哪怕只是产出文件），三大防线可以被整体绕过（手写
+        #   reports/<room>.physics.json 即可，甚至完全不跑 FEA）。
+        # 修复：自动收尾【之前】同样强制三防线；不通过就不写 finished，
+        #   让任务停在"房间已结束但未交付"的可修复状态。
+        if not bypass_requested_defense():
+            try:
+                import defense_gate as _dg2
+                try:
+                    _dt2 = _dg2.check_task_defense()
+                except Exception as _e_auto:
+                    return {
+                        "advanced": False,
+                        "reason": "三大防线校验异常，按[失效关闭]拒绝自动收尾",
+                        "defense_required": True,
+                        "blockers": ["防线校验抛异常: %r" % (_e_auto,)],
+                        "hint": "修复 reports/ 下的凭据结构，或用 DSH_DEFENSE_BYPASS=1 显式绕行（会留痕）。",
+                    }
+                if not _dt2["ok"]:
+                    return {
+                        "advanced": False,
+                        "reason": "三大防线未通过，拒绝自动收尾为 finished",
+                        "defense_required": True,
+                        "blockers": _dt2["blockers"][:24],
+                        "hint": ("先补齐三道防线（材料凭据 / physics-optimize / "
+                                 "physics-validate-domain），再用 room-end 收尾；"
+                                 "或设 DSH_DEFENSE_BYPASS=1 显式绕行（会留痕）。"),
+                    }
+            except ImportError:
+                pass
+            except Exception:
+                pass
+        else:
+            try:
+                import defense_gate as _dg3
+                _dg3.log_bypass("mode_gate.auto-finish",
+                                reason="DSH_DEFENSE_BYPASS=1", by="env")
+            except Exception:
+                pass
         wf["step"] = "finished"
         wf["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         wf["finished_by"] = "auto(%s)" % reason
@@ -3066,7 +3252,7 @@ def _maybe_advance_workflow_finished(reason="room-end"):
             json.dump(wf, f, ensure_ascii=False, indent=2)
         # 写完成标记（守卫据此放行）
         try:
-            with open(os.path.join(_BASE_DIR, "TASK_FINISHED.json"), "w",
+            with open(os.path.join(STATE_DIR, "TASK_FINISHED.json"), "w",
                       encoding="utf-8") as f:
                 json.dump({"finished": True, "finished_at": wf["finished_at"],
                            "completed_count": len(_expect),
@@ -3182,6 +3368,81 @@ def _finalize_room(name, failed=False, force=False):
 
 
 def cmd_room_end(name, force=False):
+    """【三大防线】room-end 是"房间下线"这个不可逆动作 —— 就在这里强制执行三道防线。
+
+    设计意图（用户要求）：不是让 AI 自己选择要不要校核，而是 AI 一旦走到
+      "结束房间"这一步，系统就【必须】先拿到三份凭据，否则拒绝下线。
+        · 防线①材料：本房间每个 .sldprt 都有材料凭据且密度/家族可信；
+        · 防线②物理：本房间有物理校核凭据且 overall != FAIL；
+        · 防线③领域：本房间有 DSVA 校验凭据且无 CRITICAL 违规。
+    放行：--force 或环境变量 DSH_DEFENSE_BYPASS=1（都会留痕，绝不静默）。
+    """
+    if force:
+        # [审计] --force 也是绕行，必须留痕（原实现直接跳过、零审计）。
+        try:
+            import defense_gate as _dg0
+            _dg0.log_bypass("mode_gate.room-end:" + str(name),
+                            reason="--force 显式强制放行（跳过三大防线）",
+                            by="cli-force")
+        except Exception:
+            pass
+    if not force:
+        try:
+            import defense_gate as _dg
+            if _dg.bypass_requested():
+                _dg.log_bypass("mode_gate.room-end:" + str(name),
+                               reason="DSH_DEFENSE_BYPASS=1", by="env")
+            else:
+                try:
+                    _def = _dg.check_room_defense(name)
+                except Exception as _e_def:
+                    # [FAIL-CLOSED] 凭据异常绝不当"通过"：畸形/恶意 JSON 若能抛异常
+                    #   让门禁静默放行，防线就等于不存在（对抗测试 C6 实测过）。
+                    #   这里把异常本身当成一次拦截，并要求人工/修数据后重试。
+                    return {
+                        "ok": False,
+                        "room": name,
+                        "gate": "DEFENSE_ERROR",
+                        "error": "【三大防线】校验过程异常，按[失效关闭]拒绝 room-end。",
+                        "detail": repr(_e_def),
+                        "message": ("=== 三大防线校验异常（拒绝下线）===\n"
+                                    "房间: %s\n异常: %r\n\n"
+                                    "这通常意味着 reports/<房间>.physics.json 或 "
+                                    ".domain.json 结构被改坏（例如 violations 不是数组）。\n"
+                                    "请用 defense_gate.py check-room \"%s\" 定位并修复；\n"
+                                    "确需放行：--force 或 DSH_DEFENSE_BYPASS=1（会留痕）。"
+                                    % (name, _e_def, name)),
+                    }
+                if not _def["ok"]:
+                    _nl = chr(10)
+                    _lines = ["=== 三大防线拦截：房间 [" + str(name) + "] 不得下线 ===", ""]
+                    for _b in _def["blockers"]:
+                        _lines.append("  ✗ " + _b)
+                    _lines += [
+                        "",
+                        "补齐方式：",
+                        "  ① 材料：每个零件用 swapi.new_part(material='Q235') 显式赋材后重新 save()；",
+                        "  ② 物理：在房间内跑 python sw_bridge.py physics-optimize <load_case.json> --room " + str(name),
+                        "  ③ 领域：在房间内跑 python sw_bridge.py physics-validate-domain <domain> --room " + str(name),
+                        "",
+                        "确需放行（会留痕到 reports/defense_bypass.json）：",
+                        "  · python mode_gate.py room-end \"" + str(name) + "\" --force",
+                        "  · 或设环境变量 DSH_DEFENSE_BYPASS=1",
+                    ]
+                    return {
+                        "ok": False,
+                        "room": name,
+                        "gate": "DEFENSE_REQUIRED",
+                        "room_type": _def.get("room_type"),
+                        "blockers": _def["blockers"],
+                        "defense": _def["details"],
+                        "error": "【三大防线】房间 [" + str(name) + "] 未通过强制校验，拒绝 room-end。",
+                        "message": _nl.join(_lines),
+                    }
+        except ImportError:
+            pass   # defense_gate.py 缺失时降级，绝不因门禁自身故障卡死流程
+        except Exception:
+            pass
     was_owner, killed, waited, _reason = _finalize_room(name, failed=False,
                                                         force=force)
     # ── 【Bug#6 修复】房间收尾后自动推进门禁到 finished（若无活动房间）──
@@ -3226,6 +3487,20 @@ def cmd_room_end(name, force=False):
 
 
 def cmd_room_fail(name):
+    # ══ 【三大防线 · 留痕体检】══════════════════════════════════════
+    # room-fail 是唯一能"清掉 active 房间"却原本完全不经防线的官方命令，
+    #   而它正是自动 finished 路径的必要前置。这里不阻断（回退本就是
+    #   "承认失败、准备重做"），但必须把该房间当前缺哪道防线【记下来】，
+    #   让"先 room-fail 清场、再伪造完成证据"这种绕过可被事后审计。
+    try:
+        import defense_gate as _dg_f
+        _df = _dg_f.check_room_defense(name)
+        _dg_f.log_bypass("mode_gate.room-fail:" + str(name),
+                         reason=("房间回退留痕；当前防线缺口: " +
+                                 ("; ".join(_df.get("blockers") or []) or "无")),
+                         by="room-fail")
+    except Exception:
+        pass
     state = load_state()
     rooms = state.setdefault("rooms", {})
     if name not in rooms:
@@ -3842,6 +4117,17 @@ def main():
     else:
         result = {"ok": False, "error": "未知命令: " + cmd}
     emit(result)
+    # [门禁] 防线拦截/校验异常必须以非零退出码结束：否则自动化脚本
+    #   （pwsh $? / 子代理判定）会把"被拦"误读成"成功"，继续往下走。
+    try:
+        if isinstance(result, dict) and result.get("ok") is False:
+            _g = str(result.get("gate") or "")
+            if _g in ("DEFENSE_REQUIRED", "DEFENSE_ERROR"):
+                sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

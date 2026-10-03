@@ -1,0 +1,475 @@
+{
+  "schema_version": "1.1",
+  "run_id": "opt_iter_1",
+  "iteration": 1,
+  "timestamp": "2026-10-02 20:28:39",
+  "parent_run_id": null,
+  "load_case_summary": {
+    "problem_id": "GATE_01CC675F19C4",
+    "title": "测试：简单轴承支架设计，3D打印",
+    "material": "PETG",
+    "yield_strength_mpa": 40.0,
+    "E_mpa": 2000.0,
+    "material_resolved": true,
+    "density_kg_m3": 1270.0
+  },
+  "design_params": {
+    "thickness_mm": {
+      "id": "thickness_mm",
+      "value": 0.465,
+      "source": "real-geometry(V/A)"
+    },
+    "min_wall_thickness": {
+      "id": "min_wall_thickness",
+      "value": 2.0,
+      "source": "acceptance.min_wall_thickness_mm(默认 FDM 2.0mm)"
+    }
+  },
+  "geometry_gate": {
+    "status": "FAIL",
+    "design_space": {
+      "ok": true,
+      "body_bbox_mm": [
+        0.0,
+        200.0,
+        0.0,
+        60.0,
+        0.0,
+        60.0
+      ],
+      "design_bounds": {
+        "x_min": 0.0,
+        "x_max": 200.0,
+        "y_min": 0.0,
+        "y_max": 60.0,
+        "z_min": 0.0,
+        "z_max": 60.0
+      },
+      "per_axis": {
+        "x": {
+          "violated": false
+        },
+        "y": {
+          "violated": false
+        },
+        "z": {
+          "violated": false
+        }
+      },
+      "violation_vol_mm3": 0.0,
+      "violation_pct": 0.0
+    },
+    "connectivity": {
+      "ok": true,
+      "num_bodies": 1,
+      "num_volumes": 1,
+      "single_body": true,
+      "status": "PASS",
+      "note": ""
+    },
+    "wall_thickness_estimate": {
+      "ok": true,
+      "estimated_min_thickness_mm": 0.4648,
+      "volume_mm3": 97.5,
+      "total_area_mm2": 419.5,
+      "method": "2V/A_ratio_approximation",
+      "note": "近似估计（2V/A）；精确壁厚需 STEP 网格分析。用于识别明显过薄件。"
+    },
+    "interface_compliance": {
+      "ok": true,
+      "violations": [],
+      "locked_param_changes": []
+    },
+    "gates": [
+      {
+        "id": "DESIGN_SPACE",
+        "status": "PASS"
+      },
+      {
+        "id": "CONNECTIVITY",
+        "status": "PASS"
+      },
+      {
+        "id": "WALL_THICKNESS",
+        "status": "FAIL",
+        "estimated_mm": 0.4648,
+        "required_mm": 2.0,
+        "reason": "估计壁厚 0.465mm 低于要求 2.000mm"
+      }
+    ],
+    "geometry_source": "swapi.massprops(真实实体体积)"
+  },
+  "fea_result": {
+    "ok": true,
+    "method": "feapy_numpy",
+    "backend": "pure_python_cst_triangle",
+    "safety_factor": 72.81,
+    "max_von_mises_mpa": 0.55,
+    "max_displacement_mm": 0.1197,
+    "volume_mm3": 720000.0,
+    "mass_kg": 0.9144,
+    "gates": {
+      "SAFETY_FACTOR": {
+        "status": "OVER_DESIGN",
+        "actual": 72.81,
+        "required_min": 2.5,
+        "required_max": 5.0,
+        "over_design": true,
+        "note": "结构安全，安全系数高于目标上限 —— 属【过度设计/材料利用率低】，不是缺陷"
+      },
+      "MAX_DISPLACEMENT": {
+        "status": "PASS",
+        "actual_mm": 0.1197,
+        "required_max_mm": null
+      },
+      "DESIGN_SPACE": {
+        "status": "PASS"
+      },
+      "MESH_QUALITY": {
+        "status": "PASS",
+        "note": "CST triangle mesh: ~960 elements"
+      },
+      "FATIGUE_STRENGTH": {
+        "status": "PASS",
+        "actual_sf": 46.738,
+        "required_min": 1.5,
+        "endurance_limit_mpa": 17.3
+      },
+      "FATIGUE_LIFE": {
+        "status": "PASS",
+        "required_years": 30.0,
+        "allowable_life_years": null,
+        "damage_at_required_life": 0.0
+      }
+    },
+    "overall": "PASS",
+    "limitations": [
+      "2D plane stress assumption only",
+      "CST linear elements (6-8%% error vs analytical)",
+      "no stress concentrations captured",
+      "no 3D effects",
+      "结构安全但安全系数高于目标上限（过度设计）：材料利用率偏低，如需轻量化可减小截面尺寸或换薄壁结构。这不影响交付，仅作优化提示。"
+    ],
+    "analytical_comparison": {
+      "delta_mm": 0.11259629629629629,
+      "sigma_mpa": 0.5066833333333334,
+      "disp_error_pct": 6.315435554205395,
+      "stress_error_pct": 8.427326980422855
+    },
+    "fatigue": {
+      "ok": true,
+      "method": "fatigue_sn_miner",
+      "backend": "basquin_sn_marin_miner",
+      "verdict": "PASS",
+      "reason": "疲劳安全系数 46.74 ≥ 1.5 且 30 年累积损伤 D=0 < 1",
+      "design_life_years": 30.0,
+      "cycles_per_year": 1000.0,
+      "total_cycles_design_life": 30000.0,
+      "endurance_limit_mpa": 17.3,
+      "fatigue_sf": 46.738,
+      "min_required_fatigue_sf": 1.5,
+      "damage_design_life": 0.0,
+      "life_years_allowable": null,
+      "stress_amplitude_mpa": 0.275,
+      "mean_stress_mpa": 0.275,
+      "peak_stress_mpa": 0.55,
+      "criterion": "goodman",
+      "endurance_detail": {
+        "Se_prime_mpa": 25.0,
+        "Se_mpa": 17.3,
+        "uts_mpa": 50.0,
+        "yield_mpa": 40.0,
+        "is_aluminum": false,
+        "factors": {
+          "ka": 1.0,
+          "kb": 0.85,
+          "kc": 1.0,
+          "kd": 1.0,
+          "ke": 0.814
+        },
+        "notes": {
+          "basis": "钢材：Se'=0.5·Su（Su<=1400MPa）",
+          "ka": "machined",
+          "kb": "default(未给特征尺寸，取 0.85)",
+          "kc": "弯曲 → 1.0",
+          "kd": "常温 → kd=1.0",
+          "ke": "可靠度 0.99 → ke=0.814"
+        },
+        "capped_by_yield": false,
+        "default_used": []
+      },
+      "load_spectrum": [
+        {
+          "amplitude_mpa": 0.275,
+          "mean_mpa": 0.275,
+          "equivalent_amplitude_mpa": 0.277,
+          "cycles_per_year": 50.0,
+          "allowable_cycles": null,
+          "infinite_life": true,
+          "damage_per_year": 0.0
+        },
+        {
+          "amplitude_mpa": 0.22,
+          "mean_mpa": 0.22,
+          "equivalent_amplitude_mpa": 0.221,
+          "cycles_per_year": 150.0,
+          "allowable_cycles": null,
+          "infinite_life": true,
+          "damage_per_year": 0.0
+        },
+        {
+          "amplitude_mpa": 0.165,
+          "mean_mpa": 0.165,
+          "equivalent_amplitude_mpa": 0.166,
+          "cycles_per_year": 300.0,
+          "allowable_cycles": null,
+          "infinite_life": true,
+          "damage_per_year": 0.0
+        },
+        {
+          "amplitude_mpa": 0.11,
+          "mean_mpa": 0.11,
+          "equivalent_amplitude_mpa": 0.11,
+          "cycles_per_year": 300.0,
+          "allowable_cycles": null,
+          "infinite_life": true,
+          "damage_per_year": 0.0
+        },
+        {
+          "amplitude_mpa": 0.055,
+          "mean_mpa": 0.055,
+          "equivalent_amplitude_mpa": 0.055,
+          "cycles_per_year": 200.0,
+          "allowable_cycles": null,
+          "infinite_life": true,
+          "damage_per_year": 0.0
+        }
+      ],
+      "assumption": "静态工况: 以 σ_peak/2 作等效交变幅做保守疲劳评估",
+      "gates": {
+        "FATIGUE_STRENGTH": {
+          "status": "PASS",
+          "actual_sf": 46.738,
+          "required_min": 1.5,
+          "endurance_limit_mpa": 17.3,
+          "criterion": "Goodman",
+          "below_unity": false
+        },
+        "FATIGUE_LIFE": {
+          "status": "PASS",
+          "required_years": 30.0,
+          "damage_at_required_life": 0.0,
+          "damage_limit": 1.0,
+          "allowable_life_years": null
+        },
+        "STATIC_STRENGTH": {
+          "status": "PASS",
+          "peak_stress_mpa": 0.55,
+          "yield_mpa": 40.0
+        }
+      },
+      "limitations": [
+        "S-N 曲线由 UTS 经验估算（非实测材料数据）",
+        "Miner 线性累积损伤忽略载荷顺序与过载迟滞效应",
+        "未计入焊接接头/缺口应力集中系数 Kt（保守起见请另乘 Kt）",
+        "脉动循环假设（σa=σm=σpeak/2）；对称循环工况偏保守",
+        "尺寸/表面/可靠度系数取自 Shigley 经验表"
+      ]
+    },
+    "acceptance": {
+      "analysis_type": "linear_static",
+      "min_safety_factor": 2.5,
+      "target_safety_factor_max": 5.0,
+      "max_displacement_mm": null,
+      "min_wall_thickness_mm": null,
+      "max_mass_kg": null,
+      "must_remain_in_design_domain": true,
+      "mesh_quality_min": 0.1,
+      "design_life_years": 30.0,
+      "operating_cycles_per_year": 1000.0,
+      "load_type": "static",
+      "impact_factor": 1.0,
+      "fatigue_check_required": false,
+      "required_load_cases": [
+        "rated",
+        "lateral",
+        "longitudinal"
+      ]
+    },
+    "over_design": true
+  },
+  "fatigue": {
+    "ok": true,
+    "method": "fatigue_sn_miner",
+    "backend": "basquin_sn_marin_miner",
+    "verdict": "PASS",
+    "reason": "疲劳安全系数 46.74 ≥ 1.5 且 30 年累积损伤 D=0 < 1",
+    "design_life_years": 30.0,
+    "cycles_per_year": 1000.0,
+    "total_cycles_design_life": 30000.0,
+    "endurance_limit_mpa": 17.3,
+    "fatigue_sf": 46.738,
+    "min_required_fatigue_sf": 1.5,
+    "damage_design_life": 0.0,
+    "life_years_allowable": null,
+    "stress_amplitude_mpa": 0.275,
+    "mean_stress_mpa": 0.275,
+    "peak_stress_mpa": 0.55,
+    "criterion": "goodman",
+    "endurance_detail": {
+      "Se_prime_mpa": 25.0,
+      "Se_mpa": 17.3,
+      "uts_mpa": 50.0,
+      "yield_mpa": 40.0,
+      "is_aluminum": false,
+      "factors": {
+        "ka": 1.0,
+        "kb": 0.85,
+        "kc": 1.0,
+        "kd": 1.0,
+        "ke": 0.814
+      },
+      "notes": {
+        "basis": "钢材：Se'=0.5·Su（Su<=1400MPa）",
+        "ka": "machined",
+        "kb": "default(未给特征尺寸，取 0.85)",
+        "kc": "弯曲 → 1.0",
+        "kd": "常温 → kd=1.0",
+        "ke": "可靠度 0.99 → ke=0.814"
+      },
+      "capped_by_yield": false,
+      "default_used": []
+    },
+    "load_spectrum": [
+      {
+        "amplitude_mpa": 0.275,
+        "mean_mpa": 0.275,
+        "equivalent_amplitude_mpa": 0.277,
+        "cycles_per_year": 50.0,
+        "allowable_cycles": null,
+        "infinite_life": true,
+        "damage_per_year": 0.0
+      },
+      {
+        "amplitude_mpa": 0.22,
+        "mean_mpa": 0.22,
+        "equivalent_amplitude_mpa": 0.221,
+        "cycles_per_year": 150.0,
+        "allowable_cycles": null,
+        "infinite_life": true,
+        "damage_per_year": 0.0
+      },
+      {
+        "amplitude_mpa": 0.165,
+        "mean_mpa": 0.165,
+        "equivalent_amplitude_mpa": 0.166,
+        "cycles_per_year": 300.0,
+        "allowable_cycles": null,
+        "infinite_life": true,
+        "damage_per_year": 0.0
+      },
+      {
+        "amplitude_mpa": 0.11,
+        "mean_mpa": 0.11,
+        "equivalent_amplitude_mpa": 0.11,
+        "cycles_per_year": 300.0,
+        "allowable_cycles": null,
+        "infinite_life": true,
+        "damage_per_year": 0.0
+      },
+      {
+        "amplitude_mpa": 0.055,
+        "mean_mpa": 0.055,
+        "equivalent_amplitude_mpa": 0.055,
+        "cycles_per_year": 200.0,
+        "allowable_cycles": null,
+        "infinite_life": true,
+        "damage_per_year": 0.0
+      }
+    ],
+    "assumption": "静态工况: 以 σ_peak/2 作等效交变幅做保守疲劳评估",
+    "gates": {
+      "FATIGUE_STRENGTH": {
+        "status": "PASS",
+        "actual_sf": 46.738,
+        "required_min": 1.5,
+        "endurance_limit_mpa": 17.3,
+        "criterion": "Goodman",
+        "below_unity": false
+      },
+      "FATIGUE_LIFE": {
+        "status": "PASS",
+        "required_years": 30.0,
+        "damage_at_required_life": 0.0,
+        "damage_limit": 1.0,
+        "allowable_life_years": null
+      },
+      "STATIC_STRENGTH": {
+        "status": "PASS",
+        "peak_stress_mpa": 0.55,
+        "yield_mpa": 40.0
+      }
+    },
+    "limitations": [
+      "S-N 曲线由 UTS 经验估算（非实测材料数据）",
+      "Miner 线性累积损伤忽略载荷顺序与过载迟滞效应",
+      "未计入焊接接头/缺口应力集中系数 Kt（保守起见请另乘 Kt）",
+      "脉动循环假设（σa=σm=σpeak/2）；对称循环工况偏保守",
+      "尺寸/表面/可靠度系数取自 Shigley 经验表"
+    ]
+  },
+  "acceptance_criteria": {
+    "analysis_type": "linear_static",
+    "min_safety_factor": 2.5,
+    "target_safety_factor_max": 5.0,
+    "max_displacement_mm": null,
+    "min_wall_thickness_mm": null,
+    "max_mass_kg": null,
+    "must_remain_in_design_domain": true,
+    "mesh_quality_min": 0.1,
+    "design_life_years": 30.0,
+    "operating_cycles_per_year": 1000.0,
+    "load_type": "static",
+    "impact_factor": 1.0,
+    "fatigue_check_required": false,
+    "required_load_cases": [
+      "rated",
+      "lateral",
+      "longitudinal"
+    ],
+    "max_safety_factor": 5.0
+  },
+  "overall_status": "FAIL",
+  "passed_gates": [
+    "DESIGN_SPACE",
+    "CONNECTIVITY",
+    "MAX_DISPLACEMENT",
+    "MESH_QUALITY",
+    "FATIGUE_STRENGTH",
+    "FATIGUE_LIFE"
+  ],
+  "failed_gates": [
+    {
+      "id": "WALL_THICKNESS",
+      "status": "FAIL",
+      "estimated_mm": 0.4648,
+      "required_mm": 2.0,
+      "reason": "估计壁厚 0.465mm 低于要求 2.000mm"
+    }
+  ],
+  "not_evaluated": [],
+  "release_readiness": {
+    "status": "NEEDS_REVISION",
+    "human_review_required": true,
+    "limitations": [
+      "2D plane stress assumption only",
+      "CST linear elements (6-8%% error vs analytical)",
+      "no stress concentrations captured",
+      "no 3D effects",
+      "结构安全但安全系数高于目标上限（过度设计）：材料利用率偏低，如需轻量化可减小截面尺寸或换薄壁结构。这不影响交付，仅作优化提示。"
+    ],
+    "fatigue_verified": true,
+    "fatigue_verdict": "PASS"
+  },
+  "room": "结构件"
+}

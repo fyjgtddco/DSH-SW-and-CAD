@@ -2,8 +2,9 @@
 # DSH 0.2.0 - Engineering Mode UNINSTALLER
 # =============================================================================
 # Reverses install-0.2.0.ps1 for the given profile(s):
-#   1. removes node_modules/dsh-engineering-ui and node_modules/dsH-engineering-sw-single-line
-#   2. removes those two entries from package.json (dependencies + dsh.profile.bundles)
+#   1. removes node_modules/dsh-engineering-ui (and any legacy
+#      dsH-engineering-sw-single-line dir, if one survives from an older install)
+#   2. removes those entries from package.json (dependencies + dsh.profile.bundles)
 #   3. restores cordis.patch.yml from the OLDEST cordis.patch.yml.bak-* the installer
 #      created (= the pre-install state). Without a backup, it removes only the
 #      `sw-single-line:` map block and leaves everything else intact.

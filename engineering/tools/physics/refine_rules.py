@@ -89,19 +89,33 @@ def generate_recommendations(
     if sf is not None and sf > max_sf:
         thickness_param = design_params.get("thickness_mm")
         if thickness_param and thickness_param.get("id") not in locked_params:
-            current = thickness_param.get("value", 5)
-            # 安全系数与厚度的平方近似成反比（梁弯曲）
-            scale = math.sqrt(max_sf / sf)
-            new_thickness = max(current * scale, thickness_param.get("min", 2))
-            new_thickness = min(new_thickness, current - 0.5)
-            actions.append({
-                "action": ACTION_REDUCE_VOLUME,
-                "param_id": thickness_param["id"],
-                "from": current,
-                "to": round(new_thickness, 1),
-                "reason": f"safety factor {sf:.2f} > {max_sf}, reduce material",
-                "priority": 1,
-            })
+            # [Bug7 连带修复] value 可能为 None（真实几何未取得壁厚时）。
+            # 上游改为从真实零件取几何后，拿不到壁厚则 value=None；
+            # 原实现直接 current * scale 会 TypeError 打崩整个 optimize。
+            _cur = thickness_param.get("value")
+            try:
+                _cur = float(_cur) if _cur is not None else None
+            except Exception:
+                _cur = None
+            _min_t = thickness_param.get("min")
+            try:
+                _min_t = float(_min_t) if _min_t is not None else 2.0
+            except Exception:
+                _min_t = 2.0
+            if _cur is not None and _cur > 0:
+                # 安全系数与厚度的平方近似成反比（梁弯曲）
+                scale = math.sqrt(max_sf / sf)
+                new_thickness = max(_cur * scale, _min_t)
+                new_thickness = min(new_thickness, _cur - 0.5)
+                if new_thickness > 0:
+                    actions.append({
+                        "action": ACTION_REDUCE_VOLUME,
+                        "param_id": thickness_param["id"],
+                        "from": _cur,
+                        "to": round(new_thickness, 1),
+                        "reason": f"safety factor {sf:.2f} > {max_sf}, reduce material",
+                        "priority": 1,
+                    })
 
     # ── 位移超限 → 增大截面惯性矩 ──
     max_disp = fea.get("max_displacement_mm")

@@ -1,0 +1,20 @@
+{
+  "PETG": {
+    "e_mpa": 2000.0,
+    "yield_mpa": 40.0,
+    "uts_mpa": 50.0,
+    "density_kg_m3": 1270.0,
+    "poissons_ratio": 0.37,
+    "note": "由 set_custom_material 写入",
+    "updated_at": "2026-10-02 10:14:44"
+  },
+  "PLA": {
+    "e_mpa": 3500.0,
+    "yield_mpa": 55.0,
+    "uts_mpa": 60.0,
+    "density_kg_m3": 1240.0,
+    "poissons_ratio": 0.36,
+    "note": "由 set_custom_material 写入",
+    "updated_at": "2026-10-02 00:55:00"
+  }
+}

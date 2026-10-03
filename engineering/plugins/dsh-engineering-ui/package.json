@@ -1,7 +1,7 @@
 {
   "name": "dsh-engineering-ui",
   "version": "1.1.0",
-  "description": "DSH 工程模式 UI：子代理三栏工作区（主对话 + 频道列表 + 实时工作区）与非工程模式警告横幅。",
+  "description": "DSH 工程模式 UI：子代理三栏工作区（主对话 + 频道列表 + 实时工作区），仅在 engineering 预设下生效，可在设置中关闭。",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

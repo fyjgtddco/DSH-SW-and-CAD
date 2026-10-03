@@ -1,0 +1,32 @@
+{
+  "schema": "dsh-physics-attestation/1",
+  "room": "结构件",
+  "at": "2026-10-02 23:02:09",
+  "ts": 1790953329.044598,
+  "kind": "physics",
+  "run_id": "opt_iter_4",
+  "report_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\output\\physics_runs\\opt_GATE_01CC675F19C4_1790953325\\iteration_4\\opt_iter_4_report.json",
+  "report_sha256": "b2721c942ad8236c69724a340eb07e0219edde49fccd4fc9d9023772d00c8098",
+  "overall_status": "FAIL",
+  "passed_gates": [
+    "CONNECTIVITY",
+    "WALL_THICKNESS",
+    "MAX_DISPLACEMENT",
+    "DESIGN_SPACE",
+    "MESH_QUALITY",
+    "FATIGUE_STRENGTH",
+    "FATIGUE_LIFE"
+  ],
+  "failed_gates": [
+    {
+      "id": "DESIGN_SPACE",
+      "status": "FAIL"
+    }
+  ],
+  "fatigue_verdict": "PASS",
+  "_sig": "qWGxEKzG5u+Npo7L+EZSu0h8YlxLyR+DfK6lNoufCzA=",
+  "_kid": "6c3acd0ae1c198f1",
+  "_ts": 1790953329042,
+  "_nonce": "af817b5453e048565e6295ae1f693b46",
+  "run_dir": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\..\\..\\output\\physics_runs\\opt_GATE_01CC675F19C4_1790953325"
+}

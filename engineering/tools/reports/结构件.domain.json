@@ -1,0 +1,42 @@
+{
+  "schema": "dsh-domain-attestation/1",
+  "room": "结构件",
+  "at": "2026-10-02 23:01:20",
+  "ts": 1790953280.4923005,
+  "domain": "transmission",
+  "score": 0.6,
+  "violations": [
+    {
+      "rule_id": "TR-001",
+      "target": "shaft_diameter_mm",
+      "severity": "CRITICAL",
+      "message": "验证目标 shaft_diameter_mm 无数据 —— 该规则未被验证，不得判为合规。【需人工提供】轴径（由扭矩/弯矩设计决定）"
+    },
+    {
+      "rule_id": "TR-002",
+      "target": "gear_module",
+      "severity": "CRITICAL",
+      "message": "验证目标 gear_module 无数据 —— 该规则未被验证，不得判为合规。【需人工提供】齿轮模数（GB/T 1357，由传动比/强度设计决定）"
+    }
+  ],
+  "warnings": [],
+  "passed": [
+    {
+      "rule_id": "TR-003",
+      "target": "max_von_mises_mpa",
+      "value": 0.55
+    },
+    {
+      "rule_id": "TR-004",
+      "target": "safety_factor",
+      "value": 72.81
+    },
+    {
+      "rule_id": "TR-005",
+      "target": "max_displacement_mm",
+      "value": 0.1197
+    }
+  ],
+  "source": "physics_bridge",
+  "_unsigned_reason": "领域凭据拒绝签发: 规则文件无法解析 transmission"
+}
