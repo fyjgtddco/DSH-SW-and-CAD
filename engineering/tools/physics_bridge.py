@@ -325,6 +325,74 @@ def cmd_recommend(run_id: str, max_iter: int = 3) -> dict:
     return result
 
 
+def _normalize_param_aliases(design_params):
+    """把设计参数的【同义键名】归一化（观察点 20 修复）。
+
+    ── 为什么需要 ──────────────────────────────────────────────────────
+    同一个物理量在仿真报告与领域规则里用了不同键名，规则按自己的名字取不到值，
+    于是把"有数据"误判成"无数据（CRITICAL）"，room-end 被无谓拦下。实测：
+      · 上罩 report.design_params 里是 `thickness_mm = 2.0`；
+      · `housing_rules.json` 的 HS-001 却要求 `wall_thickness_mm`；
+      · 结果报 "HS-001 wall_thickness_mm 无数据（CRITICAL）"。
+
+    本函数只做**键名归一**：同义组内只要任一键有有效值，就补齐其余键。
+    它【不创造】任何数值 —— 没数据的参数依旧没数据，规则照旧如实报缺，
+    因此不会把"不合格"洗成"合规"。
+
+    Args:
+        design_params: 待归一化的设计参数字典。
+    Returns:
+        归一化后的新字典（原字典不被修改）。
+    """
+    if not isinstance(design_params, dict):
+        return design_params
+    out = dict(design_params)
+
+    def _valid(v):
+        """有效值判据：非 None、非空串；0 视为"未测量"（与调用方口径一致）。"""
+        if v is None:
+            return False
+        if isinstance(v, str):
+            return v.strip() != ""
+        if isinstance(v, (int, float)):
+            return v != 0
+        return True
+
+    # 同义组：组内任一键有值 → 补齐其余键
+    _ALIAS_GROUPS = [
+        # 壁厚 / 特征厚度
+        ("thickness_mm", "wall_thickness_mm", "min_wall_thickness_mm",
+         "wall_thickness", "feature_thickness_mm"),
+        # 圆角
+        ("fillet_mm", "fillet_radius_mm", "min_fillet_mm"),
+        # 轴径
+        ("shaft_diameter_mm", "shaft_dia_mm", "axle_diameter_mm"),
+        # 齿轮模数
+        ("gear_module", "module_mm", "gear_module_mm"),
+        # 加强筋
+        ("rib_height_mm", "rib_mm", "rib_height"),
+        # 型腔深度
+        ("cavity_depth_mm", "cavity_mm", "cavity_depth"),
+        # 拔模角
+        ("draft_angle_deg", "draft_angle", "draft_deg"),
+        # 表面粗糙度
+        ("surface_roughness_um", "roughness_um", "ra_um"),
+    ]
+    for _grp in _ALIAS_GROUPS:
+        _hit = None
+        for _k in _grp:
+            if _k in out and _valid(out.get(_k)):
+                _hit = out.get(_k)
+                break
+        if _hit is None:
+            continue
+        for _k in _grp:
+            # 只补空缺，绝不覆盖调用方已显式给出的值
+            if _k not in out or not _valid(out.get(_k)):
+                out[_k] = _hit
+    return out
+
+
 def _derive_design_params(part_path="", volume_mm3=None, surface_area_mm2=None,
                           bbox_mm=None):
     """从真实零件几何推导【领域规则所需的设计参数】（Bug12 复发修复）。
@@ -556,6 +624,16 @@ def cmd_validate_domain(domain_id: str = "structural",
         design_params, fea_result = _dp, _fr
         _data_meta = dict(_meta or {})
         _data_meta["source"] = "physics_runs(最近一次真实仿真)"
+    # ── 【观察点 20 修复】字段别名归一化 ──────────────────────────────────
+    # 同一物理量在【仿真报告】与【领域规则】里叫法不同，导致规则"读不到数据"
+    # 而误报 CRITICAL：
+    #   report.design_params.thickness_mm  ↔  housing_rules HS-001 要 wall_thickness_mm
+    # 实测：上罩 report 里是 thickness_mm=2.0，HS-001 却读 wall_thickness_mm →
+    #   "HS-001 wall_thickness_mm 无数据（CRITICAL）" → room-end 被拦。
+    # 这里在把设计参数交给规则【之前】做一次别名归一：任一同义键有值，
+    #   就补齐其余同义键（不覆盖已有值）。这是"读取时归一化"，不改变任何
+    #   真实测量结果，只让规则能按自己的键名取到同一个物理量。
+    design_params = _normalize_param_aliases(design_params)
     # ── 【Bug12 复发修复】补上【设计参数】（领域规则真正需要的东西）──────
     # 上轮只接了物理结果，design_params 仍空 → 四个领域规则全部报
     #   "未识别的验证目标"（thickness_mm/shaft_diameter_mm/wall_thickness_mm…）。
@@ -574,6 +652,8 @@ def cmd_validate_domain(domain_id: str = "structural",
         for _k, _v in (_derived or {}).items():
             if _k not in design_params or design_params.get(_k) in (None, 0):
                 design_params[_k] = _v
+        # 几何推导出的键也要归一化（例如推导出 thickness_mm 后补齐 wall_thickness_mm）
+        design_params = _normalize_param_aliases(design_params)
         if isinstance(_data_meta, dict):
             _data_meta["derived_params"] = _dsrc
     except Exception as _e_dp:

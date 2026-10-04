@@ -29,6 +29,10 @@ import * as agentPresets from '@deepseek-ai/dsh-agent-preset-registry';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+// 【连接区】需要同步调用 Python 探测器（sw_bridge.py conn-probe）——
+//   用 spawnSync 而非 spawn：探测最长 120s，同步等待语义更简单，
+//   且设置页是低频人工操作，不占用事件循环热点。
+import { spawnSync } from 'node:child_process';
 // 【三大防线 · 签名式信任根】仅工程模式装配；密钥只存宿主内存。
 import { DefenseSigner } from './defense-sign.js';
 
@@ -70,6 +74,12 @@ export const name = 'dsh-engineering-ui';
 // 【必须声明 userQuestions】阻塞式代问依赖 ctx.userQuestions.ask()；
 // cordis 的依赖注入要求服务名必须列在 inject 里，否则 ctx.userQuestions 为
 // undefined，/ask 会直接失败（"userQuestions 服务不可用"）。
+//
+// 【独立聊天页 · 刻意不 inject llm】推荐追问只影响聊天页的"锦上添花"，
+// 而 inject 是【硬依赖】：服务缺失会让本插件整体 PENDING、永不 apply，
+// 连带收尾守卫与三大防线一起失效 —— 代价远大于收益。
+// 因此 llm 走 ctx.get('llm') 惰性读取（与 client 半读 sidebarRight 同一做法），
+// 缺失时 /suggest 返回 ok:false，聊天主体功能不受影响。
 export const inject = ['webServer', 'subagents', 'sessionPersistence', 'sessions', 'agents', 'userQuestions'];
 const PREFIX = '/dsh-engineering-ui';
 const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -939,8 +949,48 @@ export function apply(ctx) {
         const log = await readSessionLog(ctx, sessionId);
         if (!log) return send(res, 404, { ok: false, error: 'no session log' });
         const header = log.header || {};
+        // ── 【路由修复 v2】多种来源依次尝试 ────────────────────────────────
+        // 教训：v1 只在持久化日志里找 request/header，实测取不到（会话日志
+        //   里该事件的形状/位置与本机版本不完全一致）。
+        // 现在按【可靠性从高到低】依次尝试三个来源：
+        //   ① 正在运行的 agent 的 session.requestHeader()  ← 最权威
+        //      （官方 API：dsh-session/src/index.ts:788，返回当前生效的
+        //        EpochHeader，其 .config 即 provider/model）
+        //   ② 持久化日志里的最后一条 request/header（agent 已释放时唯一来源）
+        //   ③ 请求参数显式传入（前端已拿到时直接用作兜底）
+        // 任一命中即用，全部落空才报"无法确定路由"。
         const seedLength = log.inheritedEventCount || 0;
-        const all = (log.events || []).filter((e) => e.seq >= seedLength && !RAW_DROP.has(e.type));
+        const raw = (log.events || []).filter((e) => e.seq >= seedLength);
+        let route = null;
+
+        // ① 运行中的 agent（最可靠）
+        try {
+          const agentsSvc = ctx.agents;
+          if (agentsSvc && typeof agentsSvc.get === 'function') {
+            const live = agentsSvc.get(sessionId);
+            const hdr = live && live.session && typeof live.session.requestHeader === 'function'
+              ? live.session.requestHeader() : null;
+            const cfg = hdr && hdr.config;
+            if (cfg && cfg.provider && cfg.model) {
+              route = { provider: String(cfg.provider), model: String(cfg.model) };
+            }
+          }
+        } catch (e) { /* 继续尝试下一来源 */ }
+
+        // ② 持久化日志（agent 不在时）
+        if (!route) {
+          for (let i = raw.length - 1; i >= 0; i--) {
+            const ev = raw[i];
+            if (!ev || ev.type !== 'request/header') continue;
+            const cfg = ev.data && ev.data.header && ev.data.header.config;
+            if (cfg && cfg.provider && cfg.model) {
+              route = { provider: String(cfg.provider), model: String(cfg.model) };
+            }
+            break;
+          }
+        }
+        // 下发用的事件流：仍按 RAW_DROP 过滤（高频低值事件不入前端）
+        const all = raw.filter((e) => !RAW_DROP.has(e.type));
         const out = [];
         for (const event of all) {
           if (since && event.seq <= since) continue;
@@ -963,6 +1013,7 @@ export function apply(ctx) {
           title: title || null,
           createdAt: header.createdAt,
           latestSeq: tail.length ? tail[tail.length - 1].seq : since,
+          route,
           events: tail
         });
       } catch (error) {
@@ -1865,6 +1916,866 @@ export function apply(ctx) {
       return crypto.createHash("sha256").update(fs.readFileSync(p2)).digest("hex");
     } catch (e) { return null; }
   }
+
+  // ══ 【连接区】SW / CAD 连接状态：读状态 + 触发探测 ═══════════════════════
+  // 设计要点（与 conn_state.py 同一份契约）：
+  //   · 状态落成【JSON 文件】(connection_state.json)，与 mode_state.json 同目录，
+  //     这样【设置页 UI】与【AI 流程】读的是同一份真相 ——
+  //     只放 localStorage 的话 AI 侧读不到，"流程中做代码判断"无从实现。
+  //   · 探测动作【委托给 Python】(sw_bridge.py conn-probe)，宿主不自己写
+  //     COM/进程逻辑 —— 避免 Node 与 Python 两套探测结论互相打架。
+  //   · 探测有副作用风险（COM Dispatch 可能把 SW 拉起来），
+  //     因此【只在用户点「连接」时】触发；GET 只读文件，绝无副作用。
+
+  /** 解析 connection_state.json 路径（与 Python _store.state_dir() 同优先级）。 */
+  function connStatePath() {
+    const dir = findToolsDir();
+    if (!dir) return null;
+    return path.join(dir, 'connection_state.json');
+  }
+
+  /** 读取连接状态（纯文件读，零副作用）。 */
+  function readConnState() {
+    const p2 = connStatePath();
+    if (!p2) return { ok: false, error: '未定位到 tools 目录' };
+    const j = readJsonSafe(p2);
+    if (!j) {
+      return {
+        ok: true, state_file: p2, updated_at: null, age_sec: null,
+        stale: true,
+        sw: { connected: false, running: null, checked_at: null },
+        cad: { connected: false, running: null, checked_at: null },
+        paths: {},
+      };
+    }
+    const age = j.updated_at ? Math.max(0, Date.now() / 1000 - Number(j.updated_at)) : null;
+    return {
+      ok: true,
+      state_file: p2,
+      updated_at: j.updated_at_str || null,
+      age_sec: age,
+      // 与 Python 侧 STALE_AFTER_SEC 保持一致（900s）
+      stale: age == null || age > 900,
+      sw: j.sw || { connected: false, running: null, checked_at: null },
+      cad: j.cad || { connected: false, running: null, checked_at: null },
+      paths: j.paths || {},
+    };
+  }
+
+  /** 找到 Python 解释器（优先 python，回退 py -3 / python3）。 */
+  function resolvePython() {
+    const cands = [];
+    if (process.env.DSH_PYTHON) cands.push(process.env.DSH_PYTHON);
+    cands.push('python', 'python3', 'py');
+    for (const c of cands) {
+      try {
+        const r = spawnSync(c, ['--version'], { encoding: 'utf8', timeout: 15000 });
+        if (r && r.status === 0) return c;
+      } catch (e) { /* 试下一个 */ }
+    }
+    return null;
+  }
+
+  /** 触发一次真实探测（会调 Python，可能连接 SW/CAD）。 */
+  function runConnProbe(target) {
+    const dir = findToolsDir();
+    if (!dir) return { ok: false, error: '未定位到 tools 目录' };
+    const bridge = path.join(dir, 'sw_bridge.py');
+    if (!fs.existsSync(bridge)) {
+      return { ok: false, error: '未找到 sw_bridge.py: ' + bridge };
+    }
+    const py = resolvePython();
+    if (!py) return { ok: false, error: '未找到可用的 Python 解释器' };
+    const args = [bridge, 'conn-probe'];
+    if (target === 'sw' || target === 'cad') args.push('--target', target);
+    try {
+      const r = spawnSync(py, args, {
+        encoding: 'utf8', timeout: 120000, cwd: dir,
+        windowsHide: true,
+      });
+      const out = String((r && r.stdout) || '');
+      const errOut = String((r && r.stderr) || '');
+      let parsed = null;
+      // sw_bridge 输出 JSON；取最后一段完整 JSON
+      const start = out.indexOf('{');
+      if (start >= 0) {
+        try { parsed = JSON.parse(out.slice(start)); } catch (e) { parsed = null; }
+      }
+      if (!parsed) {
+        return {
+          ok: false,
+          error: '探测未返回可解析 JSON',
+          stdout_tail: out.slice(-800),
+          stderr_tail: errOut.slice(-800),
+        };
+      }
+      // 探测完成后回读文件，保证 UI 拿到的是落盘后的真相
+      const fresh = readConnState();
+      return { ok: true, probe: parsed, state: fresh };
+    } catch (e) {
+      return { ok: false, error: '探测执行异常: ' + String((e && e.message) || e) };
+    }
+  }
+
+  // GET：只读状态（零副作用）—— 设置页打开时轮询用
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/conn-state',
+    handler: async (req, res) => {
+      try {
+        return send(res, 200, readConnState());
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  }));
+
+  // POST：触发探测（点「连接」按钮时才走这里）
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/conn-probe',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
+      const body = await readJsonBody(req);
+      const target = String((body && body.target) || '').trim().toLowerCase();
+      if (target !== 'sw' && target !== 'cad' && target !== 'all') {
+        return send(res, 400, { ok: false, error: "target 必须是 'sw' | 'cad' | 'all'" });
+      }
+      try {
+        const r = runConnProbe(target === 'all' ? null : target);
+        return send(res, 200, r);
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  }));
+
+  // ── POST /conn-launch：显式启动 SW / CAD（「启动」按钮）──────────────────
+  // 用户诉求："给俩个都搞一个按键，自动启动吧，不然一直点连接启动不了的，
+  //   就是启动成不需要 SW 自己跳出来的那种。"
+  // 与 /conn-probe 的区别：这个真的会拉起进程。因此【只由用户点击触发】，
+  //   不做任何自动调用；且耗时较长（SW 冷启动可达数十秒），
+  //   故给足超时（默认 120s + 余量）。
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/conn-launch',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
+      const body = await readJsonBody(req);
+      const target = String((body && body.target) || '').trim().toLowerCase();
+      if (target !== 'sw' && target !== 'cad') {
+        return send(res, 400, { ok: false, error: "target 必须是 'sw' | 'cad'" });
+      }
+      const dir = findToolsDir();
+      if (!dir) return send(res, 200, { ok: false, error: '未定位到 tools 目录' });
+      const bridge = path.join(dir, 'sw_bridge.py');
+      if (!fs.existsSync(bridge)) {
+        return send(res, 200, { ok: false, error: '未找到 sw_bridge.py: ' + bridge });
+      }
+      const py = resolvePython();
+      if (!py) return send(res, 200, { ok: false, error: '未找到可用的 Python 解释器' });
+      try {
+        const r = spawnSync(py, [bridge, 'conn-launch', '--target', target], {
+          encoding: 'utf8', timeout: 240000, cwd: dir, windowsHide: true,
+        });
+        const out = String((r && r.stdout) || '');
+        const errOut = String((r && r.stderr) || '');
+        let parsed = null;
+        const start = out.indexOf('{');
+        if (start >= 0) {
+          try { parsed = JSON.parse(out.slice(start)); } catch (e) { parsed = null; }
+        }
+        if (!parsed) {
+          return send(res, 200, {
+            ok: false,
+            error: '启动命令未返回可解析 JSON',
+            stdout_tail: out.slice(-1500),
+            stderr_tail: errOut.slice(-1500),
+          });
+        }
+        // 启动后回读状态，保证 UI 拿到落盘后的真相
+        return send(res, 200, { ok: !!parsed.ok, ...parsed, state: readConnState() });
+      } catch (error) {
+        return send(res, 200, { ok: false, error: '启动执行异常: ' + String((error && error.message) || error) });
+      }
+    }
+  }));
+
+  // ── POST /conn-diagnose：把启动日志【当作消息发给当前会话的模型】────────
+  // 用户诉求："加上一个按键，按了就可以将错误日志直接发给 DSH 内部模型的，
+  //   然后 DSH 就可以根据错误日志去找到底是啥情况。"
+  // 实现：包装成一条 user 消息并用 agent.steer() 投递（与收尾守卫同一机制），
+  //   模型收到后会带着日志内容与工具能力去排查根因。
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/conn-diagnose',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
+      const body = await readJsonBody(req);
+      const target = String((body && body.target) || 'sw').trim().toLowerCase();
+      const provided = String((body && body.log_text) || '');
+      const wantSid = String((body && body.sessionId) || '').trim();
+
+      // 优先用前端传来的日志；没传就现场向后端取一份（含环境事实）
+      let logText = provided;
+      if (!logText) {
+        try {
+          const dir0 = findToolsDir();
+          const py0 = resolvePython();
+          if (dir0 && py0) {
+            const rr = spawnSync(py0, [path.join(dir0, 'sw_bridge.py'),
+                                       'conn-log', '--target', target],
+                                 { encoding: 'utf8', timeout: 60000, cwd: dir0, windowsHide: true });
+            const oo = String((rr && rr.stdout) || '');
+            const st0 = oo.indexOf('{');
+            if (st0 >= 0) {
+              try { logText = (JSON.parse(oo.slice(st0)) || {}).log_text || ''; } catch (e) {}
+            }
+          }
+        } catch (e) { /* 取不到就用空，下面会兜底 */ }
+      }
+      if (!logText) {
+        return send(res, 200, { ok: false, error: '没有可发送的启动日志（请先点「启动」）' });
+      }
+
+      // 找目标 agent：显式 sessionId > roots()[0]
+      const agents = ctx.agents;
+      if (!agents || typeof agents.get !== 'function') {
+        return send(res, 200, { ok: false, error: 'agents 服务不可用' });
+      }
+      let agent = wantSid && ID_RE.test(wantSid) ? agents.get(wantSid) : undefined;
+      if (agent === undefined) {
+        try {
+          const roots = typeof agents.roots === 'function' ? agents.roots() : [];
+          agent = (roots && roots.length) ? roots[0] : undefined;
+        } catch (e) { agent = undefined; }
+      }
+      if (agent === undefined || agent === null) {
+        return send(res, 200, {
+          ok: false,
+          error: '会话不在运行中（请保持主对话开启后再点「发给模型诊断」）',
+        });
+      }
+
+      const name = target === 'cad' ? 'AutoCAD' : 'SolidWorks';
+      const text = [
+        `【连接区诊断请求】${name} 启动失败，下面是完整日志与机器环境事实。`,
+        '',
+        '请据此判断失败的**根本原因**，并给出**具体可执行的下一步**。',
+        '可用手段：阅读 常见SW启动失败问题.md、运行 sw_bridge.py doctor / sw-proc、',
+        '检查许可证(sw_d.lic)/netapi32.dll/安装盘符/沙箱限制等。',
+        '',
+        '```',
+        logText,
+        '```',
+      ].join('\n');
+
+      try {
+        const msg = createUserMessage({
+          content: [{ type: 'text', text }],
+          source: { kind: 'plugin:dsh-engineering-ui' },
+        });
+        agent.steer(msg);
+        return send(res, 200, { ok: true, target, delivered_to: String(agent.sessionId || agent.id || ''), chars: text.length });
+      } catch (error) {
+        return send(res, 200, { ok: false, error: '投递失败: ' + String((error && error.message) || error) });
+      }
+    }
+  }));
+
+  // ══ 【独立聊天页】推荐追问生成（POST /suggest）═════════════════════════
+  // 用户需求（对照 ChatGPT 的"相关追问"）：模型每次生成结果后，给出几条
+  //   顺着当前话题往下走的推荐问题。
+  //
+  // 设计（与官方 session-title-llm 的辅助调用同一套做法，见
+  //   packages/session/session-title-llm/src/index.ts）：
+  //   · 一次【一次性】辅助请求：system 给死规则，messages 只带最近若干轮文本；
+  //   · 用 BlockAssembler 把流收成文本，再解析成一问一行的数组；
+  //   · 【不落库】：这是一次纯 UI 建议生成，不写会话事件、不进模型上下文，
+  //     因此不会污染工程模式的会话日志与守卫判定。
+  //     （官方 session-title-llm 会 append 一条 log-only 请求事件；这里更保守，
+  //      连该事件也不写 —— 因为它不是会话语义的一部分。）
+  //   · 失败一律返回 ok:false，前端静默忽略 —— 推荐追问是可选增强，
+  //     绝不能因为模型/网络问题影响聊天本身。
+  //
+  // 模型路由：优先用请求里显式给的 provider/model（前端可从会话头部读），
+  //   否则回退到 process.env 配置，再否则放弃生成。
+  const SUGGEST_SYSTEM = [
+    'You generate follow-up question suggestions for a user in a chat with an engineering AI assistant.',
+    'Read the recent conversation and propose exactly 3 short follow-up questions THE USER might ask next.',
+    'Rules:',
+    '- Write in the SAME language as the conversation (Chinese conversation -> Chinese questions).',
+    '- Each suggestion must be a question or imperative the user would say, NOT the assistant.',
+    '- Keep each under 24 characters (CJK) or 12 words (English). No numbering, no quotes, no trailing punctuation.',
+    '- Base them on the actual topic just discussed; make them concrete, never generic like "tell me more".',
+    '- Output exactly 3 lines, one suggestion per line, nothing else.',
+  ].join('\n');
+
+  /**
+   * 把一次 LLM 流收成纯文本。
+   *
+   * ── 为什么不用官方的 BlockAssembler ──────────────────────────────────────
+   * 官方确实提供 BlockAssembler（dsh-llm 的 assembler.ts，且从包根导出），
+   *   用它也能work。但本插件刻意【不新增任何 import】：
+   *   · 本插件是【独立分发包】，要保证别人 clone 下来即可运行；每多一个
+   *     从官方包静态 import 的名字，就多一个"该名字在本机 DSH 构建里
+   *     是否存在/同名同形"的假设，一旦 DSH 版本变动就会让整个 Host 插件
+   *     求值失败（连带守卫与三大防线一起失效）。
+   *   · 只用手写累加，依赖面收敛到【流协议本身】（StreamChunk），这是
+   *     最稳定的一层契约：
+   *       { type:'text-delta', index, text }
+   *       { type:'finish', reason: { kind } }
+   *   · 包内测试用 data-URL 替身模拟官方模块，替身只有 createUserMessage；
+   *     不引入新导出，测试替身无需改动、回归测试保持绿色。
+   *
+   * @param llm - ctx.llm 服务。
+   * @param options - GenerateOptions。
+   * @returns 累计的纯文本（多块按换行拼接）。
+   */
+  async function collectLlmText(llm, options, timeoutMs) {
+    let text = '';
+    let finishKind = null;
+    let finishMsg = '';
+    // ── 超时保护（修「有概率超时/报错」）────────────────────────────────
+    // 曾经的问题：流一旦不结束就永远挂着，前端只能一直转圈或被更外层的
+    //   超时打断，错误信息也看不出原因。
+    // 这里主动给一个上限：到点 abort，让它变成一个【可解释】的错误。
+    // 官方适配器契约要求遵守 options.signal（llm/src/index.ts:286-290）。
+    const ms = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 90000;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, ms);
+    try {
+      for await (const chunk of llm.stream(Object.assign({}, options, { signal: ctrl.signal }))) {
+        if (!chunk || typeof chunk !== 'object') continue;
+        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+          text += chunk.text;
+        } else if (chunk.type === 'finish') {
+          const reason = chunk.reason || {};
+          finishKind = reason.kind || null;
+          finishMsg = (reason.failure && reason.failure.message) || '';
+        }
+      }
+    } catch (error) {
+      // 中断 → 给一个用户看得懂的原因，而不是底层 AbortError
+      if (ctrl.signal.aborted) {
+        throw new Error('请求超时（超过 ' + Math.round(ms / 1000) + ' 秒未完成）');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    // 只有 stop（或无 finish 帧）算正常收尾；其余都当失败。
+    // aborted 单独说明：多半就是上面的超时。
+    if (finishKind && finishKind !== 'stop') {
+      if (finishKind === 'aborted') {
+        throw new Error('请求被中断' + (ctrl.signal.aborted ? '（超时）' : '') +
+          (finishMsg ? '：' + finishMsg : ''));
+      }
+      throw new Error('模型返回异常（' + String(finishKind) + '）' + (finishMsg ? '：' + finishMsg : ''));
+    }
+    return text;
+  }
+
+  /** 解析模型输出为最多 3 条建议（容错：去序号/引号/空行）。 */
+  function parseSuggestions(text) {
+    return String(text || '')
+      .split(/\r?\n/)
+      .map((s) => s.trim()
+        .replace(/^[-*•]\s*/, '')            // 去掉项目符号
+        .replace(/^\d+[.)、]\s*/, '')        // 去掉 "1. " / "1、"
+        .replace(/^["'“”「『]+|["'“”」』]+$/g, '')  // 去掉包裹引号
+        .trim())
+      .filter((s) => s && s.length <= 120)
+      .slice(0, 3);
+  }
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/suggest',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
+      let payload;
+      try { payload = JSON.parse(await readBody(req)); } catch {
+        return send(res, 400, { ok: false, error: 'bad json' });
+      }
+      const turns = Array.isArray(payload && payload.turns) ? payload.turns : [];
+      if (!turns.length) return send(res, 200, { ok: false, error: 'no turns' });
+
+      // llm 走 ctx.get：未装配时静默降级，绝不影响其他功能（见 inject 注释）
+      let llm = null;
+      try { llm = ctx.get ? ctx.get('llm') : ctx.llm; } catch (e) { llm = null; }
+      if (!llm || typeof llm.stream !== 'function') {
+        return send(res, 200, { ok: false, error: 'llm 服务不可用（已跳过推荐追问）' });
+      }
+
+      const provider = String((payload && payload.provider) || process.env.DSH_SUGGEST_PROVIDER || '').trim();
+      const model = String((payload && payload.model) || process.env.DSH_SUGGEST_MODEL || '').trim();
+      if (!provider || !model) {
+        return send(res, 200, {
+          ok: false,
+          error: '缺少模型路由（provider/model）：请由前端传入或设置 DSH_SUGGEST_PROVIDER / DSH_SUGGEST_MODEL',
+        });
+      }
+
+      // 只取最近 6 条，压成纯文本；过长截断，避免把整段代码塞进辅助请求
+      const transcript = turns.slice(-6).map((t) => {
+        const who = String((t && t.role) || 'user') === 'assistant' ? 'Assistant' : 'User';
+        const text = String((t && t.text) || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+        return who + ': ' + text;
+      }).filter((s) => s.length > 8).join('\n');
+      if (!transcript) return send(res, 200, { ok: false, error: 'no usable transcript' });
+
+      try {
+        const text = await collectLlmText(llm, {
+          provider,
+          model,
+          system: SUGGEST_SYSTEM,
+          // ── 【必须用 RequestUserInput，不能用 durable Message】────────────
+          // 官方契约（dsh-llm/src/types.ts:486-495）：RequestUserInput 显式
+          //   禁止 id/source，语义是"仅供本次请求、不落库"。
+          // 这正是本场景 —— auto-review 的 classifyRisk 就是这么做的
+          //   （packages/experimental/auto-review/src/index.ts:617-638），
+          //   注释明写该 prompt 永不进入 Session log。
+          // 若改用 createUserMessage(source:{kind:'plugin:...'}) 反而更糟：
+          //   durable 消息要求 source.kind 已在 MessageSourceMap 里声明，
+          //   本插件没有做 declaration merge，会被判为未知来源。
+          messages: [{
+            role: 'user',
+            content: [{ type: 'text', text: 'Recent conversation:\n' + transcript }],
+          }],
+          maxTokens: 256,
+          // ⚠️ 刻意不传 purpose：它是【闭集】'compaction' | 'session-title'
+          //   （types.ts:552），不是可合并扩展的 map。传自定义值非法；
+          //   传那两个字面量则语义错误（会改变适配器行为，如关闭思考）。
+          //   一次性辅助调用正确做法就是省略它。
+        });
+        const items = parseSuggestions(text);
+        if (!items.length) return send(res, 200, { ok: false, error: 'empty suggestions' });
+        return send(res, 200, { ok: true, items, provider, model });
+      } catch (error) {
+        // 失败静默：推荐追问不是关键路径
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  }));
+
+  // ══ 【划词详情】侧边分析对话（POST /side-chat）══════════════════════════
+  // 用户需求（对照三张截图）：
+  //   · 在 Agent 回复里【划选一段文字】→ 出现「更多详情」；
+  //   · 点它 → 右下角弹出一个小聊天面板，就这段内容与你展开分析；
+  //   · 结果可以「添加到对话」回填到主对话输入框。
+  //
+  // 设计要点：
+  //   · 【无状态】：历史由前端持有并每次整包回传。宿主不写任何文件、
+  //     不落会话日志 —— 这样它既不污染工程模式的会话与守卫判定，
+  //     也让"别人 clone 下来即用"成立（无需任何持久化目录假设）。
+  //   · 【一次性辅助调用】：与 /suggest 同一套做法（不落库、不建 Agent）。
+  //     用同一个模型路由（前端把当前会话的 provider/model 传进来）。
+  //   · 失败一律 ok:false，前端显示错误 —— 这是用户主动发起的操作，
+  //     不能像 /suggest 那样静默。
+  const SIDE_CHAT_SYSTEM = [
+    'You are a focused engineering analysis assistant shown in a side panel.',
+    'The user selected a passage from an AI agent conversation and wants deeper analysis of it.',
+    '',
+    'Rules:',
+    '- Answer in the SAME language as the selected passage and the user question.',
+    '- Ground every claim in the selected passage; quote it when useful.',
+    '- Be concrete and technical. If the passage contains a plan, a result, or code,',
+    '  point out assumptions, risks, and what to verify next.',
+    '- Keep it tight: a few short paragraphs or a compact list. No filler, no restating the question.',
+    '- You have no tools; if something needs execution, say what should be run instead of pretending.',
+  ].join('\n');
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/side-chat',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
+      let payload;
+      try { payload = JSON.parse(await readBody(req)); } catch {
+        return send(res, 400, { ok: false, error: 'bad json' });
+      }
+
+      // llm 走 ctx.get：未装配时明确报错（用户主动操作，不静默）
+      let llm = null;
+      try { llm = ctx.get ? ctx.get('llm') : ctx.llm; } catch (e) { llm = null; }
+      if (!llm || typeof llm.stream !== 'function') {
+        return send(res, 200, { ok: false, error: 'llm 服务不可用（无法进行详情分析）' });
+      }
+
+      const provider = String((payload && payload.provider) || '').trim();
+      const model = String((payload && payload.model) || '').trim();
+      if (!provider || !model) {
+        return send(res, 200, {
+          ok: false,
+          error: '缺少模型路由（provider/model）：前端应从当前会话读取后传入',
+        });
+      }
+
+      // 选中文本：这是本次分析的锚点，必须有
+      const selection = String((payload && payload.selection) || '').trim().slice(0, 8000);
+      if (!selection) return send(res, 200, { ok: false, error: '没有选中内容' });
+
+      // 历史：前端整包回传，宿主只用不管生命周期。限制条数与单条长度防滥用。
+      const rawHistory = Array.isArray(payload && payload.messages) ? payload.messages : [];
+      const history = rawHistory.slice(-20).map((m) => ({
+        role: String((m && m.role) || 'user') === 'assistant' ? 'assistant' : 'user',
+        text: String((m && m.text) || '').slice(0, 4000),
+      })).filter((m) => m.text.trim());
+
+      // 拼成一次请求：
+      //   [选中内容（锚点）] + [历史...] + [本次提问]
+      // 选中内容每次都带上，保证多轮里锚点不丢（历史是整包来的，不依赖宿主记忆）。
+      const parts = [];
+      parts.push('【选中的原文】\n' + selection);
+      if (history.length) {
+        parts.push('【此前的分析对话】\n' + history.map((m) => (
+          (m.role === 'assistant' ? 'Assistant: ' : 'User: ') + m.text
+        )).join('\n'));
+      }
+      // 最后一轮如果是用户提问，它就是本次要回答的问题（历史里已含）；
+      //   否则给一个默认指令，保证模型有明确任务。
+      const last = history.length ? history[history.length - 1] : null;
+      if (!last || last.role !== 'user') {
+        parts.push('请就以上选中内容给出深入分析：关键结论、隐含假设、风险点与下一步建议。');
+      }
+
+      try {
+        const reply = await collectLlmText(llm, {
+          provider,
+          model,
+          system: SIDE_CHAT_SYSTEM,
+          // RequestUserInput：一次性、不落库（同 /suggest 的理由）
+          messages: [{
+            role: 'user',
+            content: [{ type: 'text', text: parts.join('\n\n') }],
+          }],
+          maxTokens: 1200,
+        }, 90000);
+        const text = String(reply || '').trim();
+        if (!text) return send(res, 200, { ok: false, error: '模型未返回内容（可能被安全策略拦截或输出为空）' });
+        return send(res, 200, { ok: true, reply: text, provider, model });
+      } catch (error) {
+        // 把失败原因说清楚，前端直接展示（用户要求"必须有效"，不能只转圈）
+        const msg = String((error && error.message) || error);
+        return send(res, 200, {
+          ok: false,
+          error: msg,
+          hint: /超时/.test(msg)
+            ? '模型响应超时。可稍后重试、减少选中文字量，或换一个更快的模型。'
+            : (/路由|模型/.test(msg)
+              ? '无法确定模型路由：请先在该会话里正常发送一条消息，让会话记录下所用模型。'
+              : null),
+        });
+      }
+    }
+  }));
+
+  // ══ 【纯聊天开关】同一个会话内切换「聊天 / 工作」════════════════════════
+  // 用户要求：在【工程模式里面直接选择聊天】就能纯聊天，不要另开一个预设。
+  //
+  // ── 为什么之前失败、现在为什么能成 ────────────────────────────────────
+  // 之前只想"换个显示"，模型照样挂满工具 → 照样调 skill。
+  // 要让同一个 Agent 真的没有工具，必须同时做两件事（都已核对官方契约）：
+  //
+  //   ① 摘掉工具：ctx.tools.restrict({ deny: [...] })
+  //      （dsh-tools/src/index.ts:1097-1123）
+  //      · 必须在【作用域上下文】调用（agent.ctx），全局调用会 throw；
+  //      · deny 的每个名字都必须是【已知的全局工具名】，否则 throw
+  //        —— 所以这里必须先 tools.schemas(agent) 现场取名字，
+  //        绝不硬编码（不同预设挂的工具不同，硬编码必崩）；
+  //      · 返回 disposer，注销即恢复，天然支持来回切。
+  //
+  //   ② 换掉系统提示词：systemPrompt.section({ complete: true })
+  //      （dsh-system-prompt/src/index.ts:69-75、629-632）
+  //      · complete 的 section 会把整个系统提示词替换成它自己：
+  //          sections: completeSection === undefined ? transformed.sections : [completeSection]
+  //      · 这样那套 700 行 CAD 人设（"必须先调用 mode-selection skill"）
+  //        就不再进入请求 —— 模型不会以为自己该去调工具。
+  //      · 两件事同时做才算"真正不是 Agent"。
+  //
+  // 状态：每个 agent 一份，存在内存（Map）。会话重开回到"工作"模式，
+  //   这是刻意的保守默认 —— 绝不静默改变用户原本的 Agent 行为。
+  const CHAT_MODE_SECTION = 'dsh-engineering-ui:chat-mode';
+  const chatModeAgents = new Map();   // agentId -> { restrict, section }
+  const chatModeState = new Map();    // agentId -> boolean（当前是否聊天模式）
+
+  /** 聊天模式的完整系统提示词：一段干净的对话人设，且不声称有工具。 */
+  function chatModePrompt() {
+    return [
+      '你是一个友好的对话助手。',
+      '',
+      '现在是【纯聊天】模式：你没有任何可调用的工具，只能与用户进行自然语言交流。',
+      '',
+      '规则：',
+      '1. 直接回答用户的问题，用清晰、自然的中文（或用户所用的语言）。',
+      '2. 不要声称要执行命令、读写文件或运行程序，也不要输出假装是工具调用或执行结果的文本。',
+      '3. 如果用户要求做需要工具才能完成的事（读取文件、执行命令、操作 SolidWorks 等），',
+      '   直接说明当前处于纯聊天模式、你无法执行，并建议他切回「工作」模式；',
+      '   然后仍然尽力用语言帮他分析或解答。',
+      '4. 需要用户做选择时，可以正常提问并给出选项，等用户回答。',
+    ].join('\n');
+  }
+
+  /** 进入聊天模式：摘掉该 agent 的全部工具 + 替换系统提示词。 */
+  function enterChatMode(agent) {
+    if (!agent || !agent.ctx) throw new Error('agent 不可用');
+    // 幂等：已在聊天模式就不重复挂
+    if (chatModeAgents.has(agent.id)) return;
+    const handles = {};
+
+    // ① 取当前【实际可见】的工具名，逐个 deny。
+    //    ⚠️ 必须现场取：restrict() 对未知名字会 throw（tools/src/index.ts:1114-1118），
+    //    而工具集合取决于预设，硬编码名字在别的部署上必崩。
+    let names = [];
+    try {
+      const schemas = (typeof ctx.tools.schemas === 'function')
+        ? (ctx.tools.schemas(agent) || []) : [];
+      names = schemas.map((s) => s && s.name).filter((n) => typeof n === 'string' && n);
+    } catch (e) {
+      names = [];
+    }
+
+    // 逐个尝试 restrict。官方契约（tools/tests/scoped.spec.ts:184-195）：
+    //   · 命名 scope 自己的注册会 throw unknown global tool；
+    //   · 空过滤会 throw no-op。
+    // 因此这里逐个名字单独 try：能被 restrict 的记账，不能被 restrict 的
+    //   跳过（它们由下面的 guard 兜底拦执行）。
+    // 之所以不整体传一个大数组：一个"未知"名字会让整批失败（全都不生效）。
+    const lifters = [];
+    for (const n of names) {
+      try {
+        lifters.push(agent.ctx.tools.restrict({ deny: [n] }));
+      } catch (e) {
+        // 该名字不可 restrict（scope 自身注册 / 未继承）→ 交给 guard 兜底
+      }
+    }
+    if (lifters.length) {
+      handles.restrict = () => { for (const l of lifters) { try { l(); } catch (e) {} } };
+    }
+
+    // ② 【执行兜底】guard 拒绝一切工具调用。
+    //    为什么还需要它：restrict 只影响"模型看到的工具列表"，若某个工具名
+    //    不可 restrict（见上），模型仍可能看到它并尝试调用。guard 是同步的
+    //    最终否决权（tools/src/index.ts:1126-1136），保证聊天模式下
+    //    【任何】工具都无法真正执行 —— 这是"真正不是 Agent"的硬保证。
+    try {
+      handles.guard = agent.ctx.tools.guard((exec) => {
+        // 聊天模式下拒绝一切工具执行
+        const reason = '当前处于【纯聊天】模式，没有可用的工具。'
+          + '请直接用语言回答；如需执行操作，请切回「工作」模式。';
+        return reason;
+      });
+    } catch (e) { /* guard 不可用时不阻断（restrict 已尽力） */ }
+
+    // ③ 用 complete section 独占系统提示词
+    handles.section = agent.ctx.systemPrompt.section({
+      name: CHAT_MODE_SECTION,
+      // order 任意（complete section 最终会独占），给身份说明的位置即可
+      order: agent.ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
+      text: chatModePrompt(),
+      complete: true,
+    });
+    chatModeAgents.set(agent.id, handles);
+  }
+
+  /** 退出聊天模式：恢复工具与系统提示词。 */
+  function exitChatMode(agent) {
+    const h = chatModeAgents.get(agent.id);
+    if (!h) return;
+    chatModeAgents.delete(agent.id);
+    try { if (h.guard) h.guard(); } catch (e) {}
+    try { if (h.restrict) h.restrict(); } catch (e) {}
+    try { if (h.section) h.section(); } catch (e) {}
+  }
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/chat-mode',
+    handler: async (req, res) => {
+      const q = queryOf(req);
+      // GET：查询某会话当前是否聊天模式
+      if (req.method === 'GET') {
+        const sid = (q.get('sessionId') || '').trim();
+        if (!ID_RE.test(sid)) return send(res, 400, { ok: false, error: 'bad sessionId' });
+        return send(res, 200, { ok: true, sessionId: sid, chatMode: chatModeState.get(sid) === true });
+      }
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'GET or POST only' });
+      let payload;
+      try { payload = JSON.parse(await readBody(req)); } catch {
+        return send(res, 400, { ok: false, error: 'bad json' });
+      }
+      const sid = String((payload && payload.sessionId) || '').trim();
+      const on = !!(payload && payload.on);
+      if (!ID_RE.test(sid)) return send(res, 400, { ok: false, error: 'bad sessionId' });
+
+      const agents = ctx.agents;
+      if (!agents || typeof agents.get !== 'function') {
+        return send(res, 200, { ok: false, error: 'agents 服务不可用' });
+      }
+      const agent = agents.get(sid);
+      if (agent === undefined || agent === null) {
+        return send(res, 200, {
+          ok: false,
+          error: '会话不在运行中：请保持该对话为当前对话后再切换（聊天模式是运行期状态）',
+        });
+      }
+      try {
+        if (on) enterChatMode(agent); else exitChatMode(agent);
+        chatModeState.set(sid, on);
+        // 报告切换后【实际可见】的工具数量，便于前端确认真的摘干净了
+        let left = -1;
+        try {
+          const sc = (typeof ctx.tools.schemas === 'function') ? (ctx.tools.schemas(agent) || []) : [];
+          left = sc.length;
+        } catch (e) { left = -1; }
+        return send(res, 200, { ok: true, sessionId: sid, chatMode: on, tools_left: left });
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  }));
+
+  // agent 释放时清掉聊天模式状态，避免 Map 泄漏
+  disposers.push(ctx.on('agent/disposed', (payload) => {
+    try {
+      const a = payload && payload.agent;
+      if (!a || !a.id) return;
+      chatModeAgents.delete(a.id);
+      chatModeState.delete(a.id);
+    } catch (e) {}
+  }));
+
+  // ══ 【工程人设】设置页可填写的自定义提示词（GET/POST /persona）══════════
+  // 用户需求：「当使用者使用工程模式的时候，在一开始会当作提示词发给模型」，
+  //   内容由用户在【设置 → 工程模式 → 美化工程模式】下的新主栏目里填写。
+  //
+  // ── 存哪里 ────────────────────────────────────────────────────────────
+  // 与工程模式其它状态同目录（findToolsDir() 解析出的 tools 目录）下的
+  //   persona.json：{ text: "..." }。
+  //   · 与 mode_state.json / workflow_state.json 同一处 → 用户/AI/设置页
+  //     读的是同一份真相，不需要额外的目录约定；
+  //   · 纯文本、无签名：它不是防线凭据，只是用户自己的提示词。
+  // ── 怎么进提示词 ──────────────────────────────────────────────────────
+  // 见下方 /persona 之后的 agent/created 监听：为【工程模式】的 agent 注册
+  //   一个 per-agent 的 systemPrompt.section()，text 是【函数】——每次装配
+  //   现场读取，因此用户改完设置，【下一轮】请求立即生效，无需重启或新建会话。
+  /** persona.json 路径（找不到 tools 目录时返回 null）。 */
+  function personaPath() {
+    const dir = findToolsDir();
+    if (!dir) return null;
+    return path.join(dir, 'persona.json');
+  }
+
+  /** 读自定义人设文本（读不到返回空串）。 */
+  function readPersona() {
+    const p = personaPath();
+    if (!p) return '';
+    const j = readJsonSafe(p);
+    return (j && typeof j.text === 'string') ? j.text : '';
+  }
+
+  disposers.push(ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/persona',
+    handler: async (req, res) => {
+      if (req.method === 'GET') {
+        return send(res, 200, { ok: true, text: readPersona(), file: personaPath() });
+      }
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'GET or POST only' });
+      let payload;
+      try { payload = JSON.parse(await readBody(req)); } catch {
+        return send(res, 400, { ok: false, error: 'bad json' });
+      }
+      const text = String((payload && payload.text) || '').slice(0, 20000);
+      const p = personaPath();
+      if (!p) {
+        return send(res, 200, {
+          ok: false,
+          error: '无法定位工程模式 tools 目录，人设未保存',
+        });
+      }
+      try {
+        fs.writeFileSync(p, JSON.stringify({ text, updated_at: new Date().toISOString() }, null, 2), 'utf8');
+        return send(res, 200, { ok: true, text, file: p });
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  }));
+
+  // ── 【工程人设】把自定义文本注入【工程模式会话】的系统提示词 ──────────────
+  // 官方契约（dsh-system-prompt/src/index.ts:454-463、:53-76）：
+  //   · section() 必须在【作用域上下文】里注册（这里用 agent.ctx），
+  //     全局注册会与 registry 自己的 persona 注册撞名而失败；
+  //   · text 可以是函数 → 每次装配现场求值（官方先例：
+  //     context/file-reference-local/src/index.ts:69-75 就是这么做的）；
+  //   · order 用 getSectionOrder('DEPLOYMENT_PERSONA_PREFIX')，
+  //     即与官方 persona 同段位置 —— 用户人设紧跟身份说明之后，最自然。
+  // 作用域：只有【工程模式】的会话才注入（用户明确要求）。
+  //   判据优先用会话头的 agentPreset，缺失时回落扫事件（与 client 半一致）。
+  const PERSONA_SECTION = 'dsh-engineering-ui:user-persona';
+
+  /** 该 agent 是否为工程模式会话。 */
+  function isEngineeringAgent(agent) {
+    try {
+      const header = agent && agent.session && agent.session.header;
+      const direct = header && header.agentPreset;
+      if (typeof direct === 'string') return direct === 'engineering';
+      // 回退：扫会话事件里最后一次 agent-preset/selected
+      const evs = (agent && agent.session && typeof agent.session.snapshotEvents === 'function')
+        ? agent.session.snapshotEvents() : (agent && agent.session && agent.session.events);
+      if (Array.isArray(evs)) {
+        for (let i = evs.length - 1; i >= 0; i--) {
+          const ev = evs[i];
+          if (ev && ev.type === 'agent-preset/selected' && ev.data && ev.data.agentPreset) {
+            return String(ev.data.agentPreset) === 'engineering';
+          }
+        }
+      }
+    } catch (e) { /* 判定异常 → 按非工程处理（宁可不注入） */ }
+    return false;
+  }
+
+  const personaFibers = new Map();   // agentId -> disposer
+  disposers.push(ctx.on('agent/created', (payload) => {
+    try {
+      const agent = payload && payload.agent;
+      if (!agent || !agent.ctx || !agent.id) return;
+      if (!isEngineeringAgent(agent)) return;
+      if (personaFibers.has(agent.id)) return;
+      // agent.ctx.inject 等待 systemPrompt 服务就绪；官方同一写法
+      const fiber = agent.ctx.inject(['systemPrompt'], (scope) => {
+        scope.systemPrompt.section({
+          name: PERSONA_SECTION,
+          order: scope.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
+          // 函数形式：每轮装配现场读取，改设置后下一轮即生效
+          text: () => {
+            const t = readPersona().trim();
+            if (!t) return '';                 // 没填 → 不贡献任何文本
+            return t;
+          },
+        });
+      });
+      personaFibers.set(agent.id, fiber);
+    } catch (e) {
+      // 人设注入失败不能影响会话创建
+      try { console.error('[dsh-engineering-ui] persona section', e); } catch (e2) {}
+    }
+  }));
+  // agent 释放时回收（避免 fiber 泄漏）
+  const disposePersonaFiber = (agentId) => {
+    const f = personaFibers.get(agentId);
+    if (!f) return;
+    personaFibers.delete(agentId);
+    try { const r = f.dispose && f.dispose(); if (r && r.catch) r.catch(() => {}); } catch (e) {}
+  };
+  disposers.push(ctx.on('agent/disposed', (payload) => {
+    try {
+      const agent = payload && payload.agent;
+      if (agent && agent.id) disposePersonaFiber(agent.id);
+    } catch (e) {}
+  }));
 
   return () => {
     for (const dispose of disposers.reverse()) {

@@ -222,19 +222,74 @@ console.log('\n=== "让位"必须完全退出，不留 DOCK_CLASS 中间态 ==='
 check('★ 让位分支同时摘掉 eng-pane-open 与 DOCK_CLASS',
   /remove\("eng-pane-open"\);\s*document\.body\.classList\.remove\(DOCK_CLASS\)/.test(src));
 
-// ══ 【问题4 回归】设置：三层结构 + 开关 ═══════════════════════════════
-console.log('\n=== 问题4：设置三层结构 + 自带子代理显示页开关 ===');
-check('存在三层设置组件 EngSettingsLayer', typeof client.EngSettingsLayer === 'function');
-check('存在开关组件 EngSwitch', typeof client.EngSwitch === 'function');
+// ══ 【版式 v2·用户指定】设置分区：主栏目 + 子项行 ══════════════════════
+console.log('\n=== 版式 v2：主栏目1/2 + 美化工程模式（子项行）===');
+check('存在主栏目组件 EngGroup', typeof client.EngGroup === 'function');
+check('存在子项行组件 EngRow', typeof client.EngRow === 'function');
+check('开关组件仍导出（功能不变）', typeof client.EngSwitch === 'function');
 check('设置分区组件仍导出', typeof client.EngineeringSettingsSection === 'function');
-check('★ 开关键名正确（useOwnSubagentPane）',
-  src.includes('useOwnSubagentPane'));
+check('★ 开关键名不变（useOwnSubagentPane）', src.includes('useOwnSubagentPane'));
 check('★ 关闭时隐藏面板（!engSettings.useOwnSubagentPane → return null）',
   src.includes('!engSettings.useOwnSubagentPane'));
 check('设置持久化到 localStorage', src.includes('localStorage.setItem'));
-check('第三层标题为「界面与显示」', src.includes('界面与显示'));
-check('第一层「概览」/第二层「工作流与门禁」存在',
-  src.includes("'概览'") && src.includes('工作流与门禁'));
+check('★ 第三个主栏目名为「美化工程模式」', src.includes('美化工程模式'));
+check('★ 第一个主栏目名为「连接区」', src.includes("'连接区'"));
+check('★ 第四个主栏目名为「工程人设」', src.includes('工程人设'));
+check('★ 第二个主栏目名为「设计过程优化」', src.includes('设计过程优化'));
+check('★ 其首行为「右键引用调出AI解释」', src.includes('右键引用调出AI解释'));
+check('★ 连接区前两行为「SW 连接」「CAD连接」',
+  src.includes("'SW 连接'") && src.includes("'CAD连接'"));
+// ── 【连接区·已接真实探测 + 启动 + 日志诊断】用户要求：
+//   "设置那边『连接区』里的 SW/CAD 连接要能真的连上，
+//    并且流程中要能根据连接结果做代码判断。"
+//   "给俩个都搞一个按键，自动启动吧……启动成不需要 SW 自己跳出来的那种，
+//    然后要是报错的话，就贴出错误日志，然后加上一个按键就是，
+//    按了就可以将错误日志直接发给 DSH 内部模型的。"
+//   因此界面必须：
+//     ① 状态徽标 + 「连接」按钮（只探测）；
+//     ② 「启动」按钮（真的拉起软件）；
+//     ③ 启动失败能贴出错误日志；
+//     ④ 「发给模型诊断」按钮把日志投给会话；
+//     ⑤ 状态来自【共享 JSON 文件】而非 localStorage（否则 AI 读不到）。
+check('存在连接行组件 EngConnRow', typeof client.EngConnRow === 'function');
+check('存在状态徽标组件 EngStatusChip', typeof client.EngStatusChip === 'function');
+check('★ 连接区两行用 EngConnRow 渲染（带 target）',
+  (src.match(/h\(EngConnRow,\s*\{\s*target:/g) || []).length >= 2);
+check('★ 徽标含「已连接/未连接/未检测」文案',
+  src.includes("text: '已连接'") && src.includes("text: '未连接'") && src.includes("text: '未检测'"));
+check('★ 有「连接」按钮', src.includes('eng-conn-btn') && src.includes("'连接'"));
+// 已接真实探测：必须命中连接区端点
+check('★ 已接入真实探测（读状态 + 触发探测端点）',
+  src.includes('/dsh-engineering-ui/conn-state')
+  && src.includes('/dsh-engineering-ui/conn-probe'));
+// 【启动按钮】真的拉起软件
+check('★ 有「启动」按钮且调用 conn-launch 端点',
+  src.includes("'启动'") && src.includes('/dsh-engineering-ui/conn-launch'));
+// 【错误日志 + 发给模型】
+check('★ 启动失败会展示错误日志',
+  src.includes('eng-conn-log-pre') && src.includes('log_text'));
+check('★ 有「发给模型诊断」按钮且调用 conn-diagnose 端点',
+  src.includes('发给模型诊断') && src.includes('/dsh-engineering-ui/conn-diagnose'));
+// 关键契约：状态必须落到共享 JSON 文件（AI/流程侧要能读到）
+check('★ 状态来自共享文件而非 localStorage（AI 才能读到）',
+  src.includes('connection_state.json') || src.includes('conn-state'));
+check('占位子项文案仍存在（未定的行）', src.includes('子栏目选项设置3'));
+check('★ 显示页开关改用 bare 模式（标签由行提供，不重复渲染）',
+  src.includes('bare: true'));
+check('旧的可折叠层组件已移除（不再有 EngSettingsLayer）',
+  typeof client.EngSettingsLayer === 'undefined' && !src.includes('EngSettingsLayer'));
+// ── 【滚动】纵向滑块：宿主 .options 本身会滚，但内容不足时不显示。
+//   用户要求"现在就调出来"，故本分区【自带】一个有上限的滚动区。
+//   关键约束：上限必须由【宿主面板的同一高度公式】推导，让本分区刚好装进
+//   宿主的 .options —— 否则会同时出现两条滚动条。
+check('★ 设置正文自成滚动容器（滑块可见）',
+  /\.eng-settings-body\{[^}]*overflow-y:auto/.test(src.replace(/\s+/g, ''))
+  && /\.eng-settings-body\{[^}]*max-height:max\(/.test(src.replace(/\s+/g, '')));
+check('★ 滚动上限复用宿主面板高度公式（避免双滚动条）',
+  src.includes('--eng-opts-h:min(800px')
+  && src.includes('var(--eng-opts-h, 800px) - 200px'));
+check('★ 卡片本身不设固定高度（行不被裁切）',
+  !/\.eng-grp-card\{[^}]*max-height/.test(src.replace(/\s+/g, '')));
 
 // ══ 【问题4·开启侧】官方右侧子代理入口指向本插件 ══════════════════════
 console.log('\n=== 问题4 开启侧：接管官方 subagentchat 入口 ===');
@@ -256,9 +311,9 @@ check('嵌入模式有专门 CSS（取消 grid 定位）',
 check('切换设置即时生效（订阅设置变化重装）',
   src.includes('subscribeEngSettings') && src.includes('installOfficialTabTakeover'));
 
-// 渲染设置分区，断言三层都出现。
-// 注意：EngSettingsLayer 是【函数组件】，本测试的 React shim 不会自动调用它，
-//   因此必须递归调用（模拟 React 渲染函数组件）才能取到层内文本。
+// 渲染设置分区，断言三个主栏目与子项行都出现。
+// 注意：EngGroup/EngRow/EngSwitch 是【函数组件】，本测试的 React shim 不会自动
+//   调用它们，因此必须递归调用（模拟 React 渲染函数组件）才能取到内部文本。
 function renderDeep(node, out) {
   if (node === null || node === undefined || node === false) return out;
   if (typeof node === 'string' || typeof node === 'number') { out.text += String(node) + ' '; return out; }
@@ -286,11 +341,18 @@ const settingsOut = { text: '' };
 try { renderDeep(client.EngineeringSettingsSection({ close: () => {} }), settingsOut); }
 catch (e) { settingsOut.text = 'ERR:' + e.message; }
 const settingsHtml = settingsOut.text;
-check('★ 设置分区可渲染且含三层标题',
-  settingsHtml.includes('概览') && settingsHtml.includes('工作流与门禁') &&
-  settingsHtml.includes('界面与显示'), settingsHtml.slice(0, 80));
+check('★ 设置分区可渲染且含四个主栏目标题',
+  settingsHtml.includes('连接区') && settingsHtml.includes('设计过程优化') &&
+  settingsHtml.includes('美化工程模式') && settingsHtml.includes('工程人设'),
+  settingsHtml.slice(0, 120));
+check('★ 渲染结果含「SW 连接」「CAD连接」',
+  settingsHtml.includes('SW 连接') && settingsHtml.includes('CAD连接'));
 check('★ 设置分区含开关文案',
   settingsHtml.includes('使用工程模式自带的子代理显示页'));
+check('★ 设置分区含子项行与右箭头',
+  settingsHtml.includes('eng-row') && settingsHtml.includes('eng-row-chev'));
+check('★ 「美化工程模式」下第 1 行为开关行（eng-row sw）',
+  settingsHtml.includes('eng-row sw'));
 
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);
 process.exit(fail === 0 ? 0 : 1);

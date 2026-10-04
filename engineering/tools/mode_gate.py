@@ -1833,6 +1833,96 @@ ROOM_STATUS_HINT = (
 ) % (SW_START_GRACE, SW_HEARTBEAT_TIMEOUT, SW_STALE_GRACE)
 
 
+def _detect_state_copies():
+    """检测工程模式是否存在【多份状态副本】（观察点 2/9/18 修复）。
+
+    ── 为什么要单独检测 ────────────────────────────────────────────────
+    工程模式在磁盘上有两份部署位置：
+      · 安装副本：%DSH_HOME%\\.agent-presets\\engineering\\tools
+      · 工作区副本：<repo>\\engineering\\tools
+    两份都会有 mode_state.json / workflow_state.json。若【同时存在】，
+    就会出现"谁最后写谁生效"：小屋从一份调用、主对话从另一份读，
+    房间表 / 推进态 / 凭据互相看不见（实测症状见观察点 2、9、18）。
+
+    本函数只做**只读检测与告警**，不迁移、不改写任何文件 ——
+    状态落点由 _store.state_dir() 统一决定（写入侧已收敛），
+    这里负责把"另一份也存在"这个事实显式暴露给调用方。
+
+    Returns:
+        dict: {conflict: bool, active_dir: str, candidates: [...], note: str|None}
+    """
+    _active = os.path.abspath(STATE_DIR)
+    _cands = []
+    # ① 当前权威目录
+    _cands.append(_active)
+    # ② 脚本自身目录（另一份副本的落点）
+    try:
+        _b = os.path.abspath(_BASE_DIR)
+        if _b not in _cands:
+            _cands.append(_b)
+    except Exception:
+        pass
+    # ③ 环境变量显式声明的根
+    try:
+        for _env in ("DSH_STATE_DIR", "DSH_ENGINEERING_ROOT"):
+            _v = (os.environ.get(_env) or "").strip()
+            if not _v:
+                continue
+            _a = os.path.abspath(_v)
+            if os.path.basename(_a).lower() != "tools":
+                _a = os.path.join(_a, "tools")
+            if _a not in _cands:
+                _cands.append(_a)
+    except Exception:
+        pass
+    # ④ DSH_HOME 下的标准安装位置
+    try:
+        _home = os.environ.get("USERPROFILE") or os.environ.get("HOME") or ""
+        _dsh = (os.environ.get("DSH_HOME") or "").strip() or (
+            os.path.join(_home, ".dsh") if _home else "")
+        if _dsh:
+            for _sub in (os.path.join(".agent-presets", "engineering", "tools"),
+                         os.path.join("engineering", "tools")):
+                _a = os.path.abspath(os.path.join(_dsh, _sub))
+                if _a not in _cands:
+                    _cands.append(_a)
+    except Exception:
+        pass
+
+    _detail = []
+    _with_state = []
+    for _d in _cands:
+        _entry = {"dir": _d, "exists": os.path.isdir(_d),
+                  "has_mode_state": False, "has_workflow_state": False,
+                  "mode_state_mtime": None, "is_active": (_d == _active)}
+        try:
+            _ms = os.path.join(_d, "mode_state.json")
+            if os.path.isfile(_ms):
+                _entry["has_mode_state"] = True
+                _entry["mode_state_mtime"] = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(_ms)))
+                _with_state.append(_d)
+            _entry["has_workflow_state"] = os.path.isfile(
+                os.path.join(_d, "workflow_state.json"))
+        except Exception:
+            pass
+        _detail.append(_entry)
+
+    # 冲突 = 除当前权威目录外，还有【另一份确实带 state 文件】的目录
+    _others = [d for d in _with_state if d != _active]
+    _conflict = bool(_others)
+    _note = None
+    if _conflict:
+        _note = ("⚠️ 检测到【多份工程模式状态副本】：本命令读取 %s，"
+                 "但另有 %d 处也存在状态文件（%s）。"
+                 "两份状态互不可见，谁最后写谁生效 —— 若发现房间/凭据"
+                 "与预期不符，请统一用一个路径调用工具，"
+                 "或设置 DSH_STATE_DIR 显式指定唯一状态目录。"
+                 % (_active, len(_others), "、".join(_others)))
+    return {"conflict": _conflict, "active_dir": _active,
+            "candidates": _detail, "note": _note}
+
+
 def cmd_room_status():
     """输出每个房间的精确状态（主对话判断小屋死活必须用本命令，禁止凭感觉猜）。
 
@@ -1867,6 +1957,21 @@ def cmd_room_status():
             _src["state_size"] = os.path.getsize(STATE_PATH)
     except Exception:
         pass
+    # ── 【观察点 2/9/18 修复】多副本检测：显式列出"另一份"状态文件 ────────
+    # 工程模式在磁盘上有两份副本（工作区 + ~/.dsh 安装目录）。若两份都存在
+    #   mode_state.json / workflow_state.json，就会出现"谁最后写谁生效"：
+    #   不同小屋/不同终端看到的房间、凭据、推进态可能完全不一致。
+    # 实测症状：room-status 指向 .dsh 内置路径，而主对话按技能文档从桌面仓库
+    #   调用，状态被写进另一份 → "明明凭据存在却报缺少"。
+    # 这里把全部候选并列出来并给出冲突告警，让调用方一眼看出该以哪份为准。
+    _multi = _detect_state_copies()
+    if _multi.get("conflict"):
+        _src["state_dir_candidates"] = _multi["candidates"]
+        _src["state_dir_note"] = _multi["note"]
+    if _multi.get("conflict"):
+        _consistency_pre = _multi["note"]
+    else:
+        _consistency_pre = None
 
     # ── ③ mode 字段溯源（与 workflow 推进态交叉印证）──────────────
     _mode_internal = state.get("mode")
@@ -1900,6 +2005,10 @@ def cmd_room_status():
                 "rooms 为空，但检测到 %d 个子代理登记 / %d 个心跳文件 —— "
                 "可能存在多副本 mode_state（本命令读到的是 %s）。"
                 "请用 mode_gate.py doctor 对账。" % (_subs_n, len(_hb), STATE_PATH))
+    # ── 【观察点 2/9/18 修复】多副本冲突告警（合并进 consistency）────────
+    if _consistency_pre:
+        _consistency["consistent"] = False
+        _consistency["warnings"].append(_consistency_pre)
 
     return {"ok": True, "mode": _mode_internal, "mode_name": state.get("mode_name"),
             "mode_note": _mode_note,
@@ -3834,15 +3943,72 @@ def cmd_sw_proc():
     return {"ok": True, "sw_running": running, "pids": pids, "exe": SW_EXE}
 
 
+def _heartbeat_dirs():
+    """所有可能出现心跳文件的目录（去重、保序）。
+
+    ── 【观察点 11 修复】读取侧必须同时看【两份副本】──────────────────────
+    工程模式在磁盘上有两份副本，`heartbeats/` 因此可能出现两处：
+      · STATE_DIR/heartbeats —— _store.state_dir() 决定的权威落点（通常安装副本）；
+      · _BASE_DIR/heartbeats —— 脚本自身目录（从工作区调用脚本时的落点）。
+    实测症状（观察点 11）：`壳体机架` 的 `room-status` 报 no_heartbeat
+      （heartbeat_age_sec: null），但磁盘上 `壳体机架.heartbeat` 的 mtime 很新 ——
+      因为**写入方与读取方看的不是同一份目录**。
+    修复：读取时把两处都查一遍，取【最新】的那个作为权威年龄。
+    这样"从哪份调用都不会误判为无心跳"，且不改变写入落点（写入仍由
+    _heartbeat_path 统一到 STATE_DIR，避免重新制造分裂）。
+    """
+    out = []
+    for _d in (HEARTBEAT_DIR, os.path.join(_BASE_DIR, "heartbeats")):
+        try:
+            _a = os.path.abspath(_d)
+        except Exception:
+            continue
+        if _a not in out:
+            out.append(_a)
+    return out
+
+
 def _heartbeat_age(room):
-    """返回房间心跳年龄（秒）；无心跳返回 None。"""
-    try:
-        hb = _heartbeat_path(room)
-        if os.path.exists(hb):
-            return round(time.time() - os.path.getmtime(hb), 1)
-    except Exception:
-        pass
-    return None
+    """返回房间心跳年龄（秒）；无心跳返回 None。
+
+    ── 【观察点 11 修复】取【两处候选里最新】的心跳 ──────────────────────
+    原实现只读 HEARTBEAT_DIR，若心跳被写到另一份副本就判 no_heartbeat，
+    进而误触发 recover/restart（观察点 11 的"与实际文件时间不一致"）。
+    现在扫描全部候选目录，返回最小年龄（= 最新心跳）。
+    """
+    safe = "".join(c for c in room if c.isalnum() or c in " _-").strip()
+    if not safe:
+        return None
+    newest = None
+    for _d in _heartbeat_dirs():
+        try:
+            hb = os.path.join(_d, safe + ".heartbeat")
+            if os.path.exists(hb):
+                age = os.path.getmtime(hb)
+                if newest is None or age > newest:
+                    newest = age
+        except Exception:
+            continue
+    if newest is None:
+        return None
+    return round(time.time() - newest, 1)
+
+
+def _heartbeat_age_detail(room):
+    """返回心跳细节（供 room-status 排障：到底哪份目录有文件）。"""
+    safe = "".join(c for c in room if c.isalnum() or c in " _-").strip()
+    detail = []
+    for _d in _heartbeat_dirs():
+        hb = os.path.join(_d, safe + ".heartbeat")
+        try:
+            if os.path.exists(hb):
+                detail.append({"dir": _d, "file": hb,
+                               "age_sec": round(time.time() - os.path.getmtime(hb), 1)})
+            else:
+                detail.append({"dir": _d, "file": hb, "age_sec": None})
+        except Exception as e:
+            detail.append({"dir": _d, "error": repr(e)})
+    return detail
 
 
 def cmd_sw_status():

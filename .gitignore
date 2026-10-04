@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -29,3 +29,14 @@ dist/
 
 # Logs
 *.log
+
+# 本地开发用：DSH 源码检出（约 114MB，仅供本机对照官方 API）
+# 它不属于本分发包的内容，别人 clone 应自行获取。
+work/
+
+# 历史调试残留（备份/损坏副本），不该随包分发
+*.bak-*
+*.bak_*
+*.CORRUPTED-*
+_sync_backup/
+%SystemDrive%/

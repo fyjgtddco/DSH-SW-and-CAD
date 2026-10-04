@@ -30,6 +30,7 @@ import os
 import sys
 import time
 import json
+import subprocess
 
 import pythoncom
 import win32com.client
@@ -51,6 +52,32 @@ _COLOR_INFO = 3        # 绿色
 
 
 # ==================== 连接 ====================
+
+def _acad_process_running():
+    """进程层探测 AutoCAD 是否已在运行（【连接自检修复】）。
+
+    为什么需要它：`Dispatch('AutoCAD.Application')` 在 AutoCAD 已安装但
+      未运行时【会触发 COM 激活 → 尝试启动 AutoCAD】，可能挂起数分钟，
+      甚至在安装/许可异常时把 CAD 弄崩（实测事故）。
+      先做一次纯进程探测（tasklist，与 sw_bridge 的进程探测手段一致），
+      没有 acad.exe 就一个 COM 调用都不发 ——
+      保证本模块【永不启动、也永不搞崩】用户的 AutoCAD。
+
+    Returns: True/False；探测手段不可用时返回 True（保守放行，
+      让 COM 层自己去报错，避免因探测失败而误判"CAD 没开"）。
+    """
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq acad.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=15)
+        _txt = (out.stdout or "")
+        if "no tasks are running" in _txt.lower() or "没有运行的任务" in _txt:
+            return False
+        # tasklist 命中时输出 CSV 行，其中含 acad.exe
+        return "acad.exe" in _txt.lower()
+    except Exception:
+        return True
+
 
 def connect(timeout=30):
     """连接运行中的 AutoCAD 实例。
@@ -78,9 +105,33 @@ class AutoCADBridge:
         self._drawing_name = None
 
     def _do_connect(self, timeout=30):
-        """尝试连接 AutoCAD（带超时和重试）。"""
+        """尝试连接 AutoCAD（带超时和重试）。
+
+        ── 【连接自检修复·安全前置检查】 AutoCAD 未运行 → 直接失败，不激活 COM ──
+        原缺陷（实测事故）：直接 `Dispatch('AutoCAD.Application')` 在
+          "AutoCAD 已安装但【未运行】"的机器上会触发 COM 激活 ——
+          Windows 会尝试【启动 AutoCAD】（含许可检查/启动画面）。
+          后果：
+            · 命令挂起数分钟（远超 30s 超时，因为激活本身阻塞在循环里）；
+            · 若 AutoCAD 安装已损坏/许可异常，这次激活会把 CAD 【弄崩】；
+            · 用户并未要求启动 CAD，却被动收获一个崩掉的 CAD 进程。
+        修复：Dispatch 之前【先进程层探测】。没有 acad.exe 就直接返回 False，
+          一个 COM 调用都不发 —— 保证本模块【永远不会】启动或搞崩 AutoCAD
+          （这也与文档承诺一致：只挂接已运行实例，不自行启动）。
+        """
+        # ── 安全前置检查：AutoCAD 没在跑就立刻放弃（绝不激活 COM）────────
+        if not _acad_process_running():
+            print("[ac_bridge] AutoCAD 未在运行 —— 不尝试激活 COM"
+                  "（避免启动/搞崩 AutoCAD）。请手动启动 AutoCAD 后重试。")
+            self.doc = None
+            self.acad = None
+            return False
+
         deadline = time.time() + timeout
         esc_sent = False
+        # 连续【非忙】失败计数：AutoCAD 在跑但 COM 始终连不上时快速失败，
+        #   不再把 30s 超时白白耗光（原来每轮 sleep 1s，最多空转 30 次）。
+        hard_fail = 0
         while time.time() < deadline:
             try:
                 pythoncom.CoInitialize()
@@ -107,15 +158,24 @@ class AutoCADBridge:
                     time.sleep(delay)
                     pythoncom.PumpWaitingMessages()
                 else:
-                    print(f"[ac_bridge] COM error (attempt): {e}")
-                    time.sleep(1.0)
+                    # 非"忙"类错误（服务器运行失败/被拒/许可等）→ 快速失败。
+                    hard_fail += 1
+                    print(f"[ac_bridge] COM error (attempt {hard_fail}): {e}")
                     self.doc = None
                     self.acad = None
+                    if hard_fail >= 2:
+                        print("[ac_bridge] 连续 COM 失败，放弃重试"
+                              "（AutoCAD 可能正在启动或状态异常）。")
+                        return False
+                    time.sleep(1.0)
             except Exception as e:
-                print(f"[ac_bridge] Connection failed: {e}")
-                time.sleep(1.0)
+                hard_fail += 1
+                print(f"[ac_bridge] Connection failed (attempt {hard_fail}): {e}")
                 self.doc = None
                 self.acad = None
+                if hard_fail >= 2:
+                    return False
+                time.sleep(1.0)
         return False
 
     @property

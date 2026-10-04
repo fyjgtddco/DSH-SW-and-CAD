@@ -363,8 +363,42 @@ python "$T\sw_bridge.py" doctor          # SW 环境自检
 | `.dsh/profiles/web/node_modules/` | 插件生效位置（真正加载的） |
 | `Desktop/DSH-SW-and-CAD-main/engineering/` | 源码仓库 |
 
+> **实测修正（2026-10-03）**：本机实际路径与上表略有出入，以实际为准：
+> - 插件真正加载的位置是 `.dsh/profiles/**desktop**/node_modules/dsh-engineering-ui/`
+>   （`profiles/web/` 下**不存在**该目录；`profiles/desktop/` 才是生效的那份）。
+> - `.dsh/.agent-presets/engineering/` 只含 `tools/` + `README.md` +
+>   `常见SW启动失败问题.md`，**没有** `agent.cordis.yml`、`plugins/`、`skills/`。
+> - 因此**智能体提示词的实际加载源**是插件目录里的
+>   `preset-engineering.patch.yml`（由 `package.json` 的 `dsh.bundle.patch` 声明），
+>   而仓库根的 `agent.cordis.yml` 是**同内容的源码镜像**。
+>   ⇒ 改提示词时**两处都要改**，否则重启后生效的仍是旧文案。
+> - `skills/` 的生效位置是 `~/.dsh/skills/`（第三处，不在上表内），
+>   当前与仓库 `engineering/skills/` 完全一致。
+
 插件 host 半（`index.js`）与宿主层配置（`cordis.patch.yml`）是**进程级**，
 改完**必须重启 DSH**；client 半（`client.js`）改动刷新页面即可。
 
-> 运行时状态文件（`mode_state.json` / `workflow_state.json` / `sw_state.json`）
+> 运行时状态文件（`mode_state.json` / `workflow_state.json` / `sw_state.json`
+> / `connection_state.json`）
 > 是会话现场数据，**三处保持独立**，不要互相同步，否则会覆盖现场导致流程误判。
+
+## 连接区（设置页「连接区」）
+
+设置页的「SW 连接」/「CAD连接」按钮与 AI 流程共读同一份状态文件
+`<状态目录>/connection_state.json`（由 `tools/conn_state.py` 维护）。
+放着 localStorage 不用是因为 AI 读不到浏览器存储，无法做"流程中代码判断"。
+
+| 命令 | 作用 |
+|------|------|
+| `python tools/sw_bridge.py conn-probe [--target sw\|cad] [--no-com]` | 探测并落盘（`--no-com` 只查进程，绝不发 COM） |
+| `python tools/sw_bridge.py conn-status` | 只读状态摘要 |
+| `python tools/sw_bridge.py conn-gate --target sw` | ★流程判断：`skip_startup` 决定是否跳过启动排障 |
+
+- **路径发现覆盖任意盘符**：`swapi._drive_roots()` 枚举 A~Z 全部真实盘符，
+  `swapi._sw_template_dirs()` 按「盘符 × Program Files × SOLIDWORKS 变体」展开。
+  ⇒ SW/CAD 换装到 C/D/G/Q 等**任意盘**都能被找到。
+- **CAD 安全前置**：`ac_bridge` 在 `acad.exe` 未运行时**绝不激活 COM**
+  （`Dispatch` 会尝试启动 AutoCAD，可能挂起数分钟甚至在安装/许可异常时把 CAD 弄崩）。
+- **过期保守回退**：状态超过 900 秒即视为未连接，`skip_startup` 返回 `false`，
+  宁可多启动一次也不因陈旧状态跳过必要步骤。
+

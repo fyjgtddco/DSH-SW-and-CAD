@@ -188,17 +188,402 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 
+def _import_sibling(name):
+    """import 与【本文件同目录】的同级模块，绝不拿到别的副本。
+
+    ── 【连接区修复 · 静默取到旧副本】─────────────────────────────────────
+    实测事故：`python sw_bridge.py conn-log` 报
+        module 'conn_state' has no attribute 'launch_log'
+    而源码里明明有该函数。根因是【同名模块被解析到了另一份副本】：
+
+      · mode_gate.py 在导入时会把 _store.state_dir()（= 安装副本 tools）插入
+        sys.path[0]（见 mode_gate.py:170-177，用于让 mode_gate/defense_gate
+        能被 import）；
+      · 于是后续【懒加载】的 `import conn_state` 会命中【安装副本】里的旧版
+        conn_state.py，而不是与 sw_bridge.py 同目录的这一份；
+      · 旧副本没有新函数 → AttributeError，且报错信息极具误导性
+        （看起来像"源码写错了"，实际是"加载了别的文件"）。
+
+    修复：导入前把【本文件所在目录】重新提到 sys.path 最前，再 import。
+      这样无论从哪个目录、哪份副本启动，
+      sw_bridge 与其同级模块【永远来自同一目录】，不会串副本。
+    """
+    try:
+        while _HERE in sys.path:
+            sys.path.remove(_HERE)
+    except Exception:
+        pass
+    try:
+        sys.path.insert(0, _HERE)
+    except Exception:
+        pass
+    import importlib
+    mod = importlib.import_module(name)
+    # 校验：拿到的必须是【本目录】的文件，否则宁可报错也不要静默用错副本
+    _f = os.path.abspath(getattr(mod, "__file__", "") or "")
+    if _f and os.path.dirname(_f) != _HERE:
+        raise ImportError(
+            "模块 %s 解析到了非同级副本：%s（期望目录 %s）。"
+            "这会导致调用到旧版本代码。" % (name, _f, _HERE))
+    return mod
+
+
 def _doc_type_name(t):
     return {1: "PART", 2: "ASSEMBLY", 3: "DRAWING"}.get(t, str(t))
+
+
+# ══ 【连接自检修复】补上三个"登记了却没实现"的子命令 ═════════════════════
+# 原缺陷（实测复现）：`sw-proc` / `ping` / `version` 被写进了豁免集合
+#   （_NO_LOCK_CMDS），main() 里【却没有对应的 elif 分支】：
+#     · `python sw_bridge.py sw-proc` → {"error": "unknown command: sw-proc"}
+#     · `python sw_bridge.py ping`    → {"error": "unknown command: ping"}
+#     · `python sw_bridge.py version` → {"error": "unknown command: version"}
+#   更糟的是 cmd_status 的 hint 【主动指引】AI 去跑 `sw_bridge.py sw-proc`
+#   以查看 SLDWORKS.EXE 进程 —— AI 照做后撞进 "unknown command" 死胡同，
+#   且因为错误串以 "unknown command" 开头，还会被 main() 判为【调用错误】
+#   以 exit 2 收场（即便它被登记为合法命令）。
+# 修复：三个命令全部落地实现，且都【零副作用】（不连 SW、不取锁）。
+
+def _sw_processes():
+    """枚举 SLDWORKS.EXE 进程（tasklist 优先，回退 PowerShell/wmic）。
+
+    返回 (procs, err)：
+      procs = [{"pid": int, "name": "SLDWORKS.EXE", "mem": "..."}]
+      err   = 全部探测手段都失败时的原因字符串，否则 None
+    """
+    procs = []
+    err = None
+    # ① tasklist（与 _sw_locked_by_other 的探测手段保持一致，最轻量）
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq SLDWORKS.EXE",
+             "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=15)
+        _txt = (out.stdout or "").strip()
+        if "SLDWORKS.EXE" in _txt.upper():
+            import csv as _csv
+            import io as _io
+            for _row in _csv.reader(_io.StringIO(_txt)):
+                if not _row:
+                    continue
+                _name = (_row[0] or "").strip().strip('"')
+                if _name.upper() != "SLDWORKS.EXE":
+                    continue
+                try:
+                    _pid = int(str(_row[1]).strip().strip('"'))
+                except (ValueError, IndexError):
+                    _pid = None
+                procs.append({
+                    "pid": _pid,
+                    "name": _name,
+                    "mem": (_row[4].strip().strip('"')
+                            if len(_row) > 4 else None),
+                })
+            return procs, None
+        # tasklist 正常返回但没匹配 → 确实没有 SW 进程
+        return [], None
+    except Exception as _e:
+        err = "tasklist 失败: %r" % (_e,)
+    # ② PowerShell 回退
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-Process sldworks -ErrorAction SilentlyContinue | "
+             "Select-Object Id,ProcessName | ConvertTo-Json -Compress"],
+            capture_output=True, text=True, timeout=20)
+        _txt = (out.stdout or "").strip()
+        if _txt:
+            _data = json.loads(_txt)
+            if isinstance(_data, dict):
+                _data = [_data]
+            for _d in _data or []:
+                procs.append({
+                    "pid": _d.get("Id"),
+                    "name": _d.get("ProcessName"),
+                    "mem": None,
+                })
+        return procs, None
+    except Exception as _e2:
+        err = "%s; powershell 回退也失败: %r" % (err or "", _e2)
+    return [], err
+
+
+def cmd_sw_proc():
+    """【连接自检修复】查看 SLDWORKS.EXE 进程与 PID（零副作用，不连 SW）。
+
+    为什么单独需要它：`status` 只有在 COM 连接【成功】时才能给出 PID
+    （`sw.GetProcessID`）；而当 SW 根本没启动、或 COM 被拒时，
+    恰恰最需要知道"进程到底在不在"。本命令绕开 COM，纯进程层探测，
+    因此是连接排查链路上不可替代的一环 ——
+    也是 cmd_status 的 hint 一直在指引、却从未实现的命令。
+    """
+    procs, err = _sw_processes()
+    out = {
+        "ok": True,
+        "command": "sw-proc",
+        "running": bool(procs),
+        "count": len(procs),
+        "pids": [p.get("pid") for p in procs],
+        "processes": procs,
+        "note": ("检测到 SLDWORKS.EXE 进程。若 status 仍报未连接，"
+                 "说明 COM 连接被拒（尝试用 doctor 进一步定位）。"
+                 if procs else
+                 "未检测到 SLDWORKS.EXE 进程 —— 请先手动启动 SolidWorks。"),
+    }
+    if err:
+        # 探测手段本身失败 ≠ 没有进程，必须区分开，避免误导成"SW 没启动"
+        out["ok"] = False
+        out["error"] = "进程探测失败: %s" % err
+        out["running"] = None
+        out["note"] = ("无法确定 SLDWORKS.EXE 是否在运行（探测手段失败，"
+                       "这不等于 SW 未启动）。")
+    return out
+
+
+def cmd_ping():
+    """【连接自检修复】轻量存活探测（零副作用，不连 SW，不取锁）。
+
+    只证明"sw_bridge.py 本身能被调用、Python 与依赖可导入"，
+    用于把【工具链问题】与【SW/CAD 连接问题】区分开。
+    """
+    out = {
+        "ok": True,
+        "command": "ping",
+        "pong": True,
+        "python": sys.version.split()[0],
+        "executable": sys.executable,
+        "bridge": os.path.abspath(__file__),
+        "cwd": os.getcwd(),
+    }
+    # 依赖可用性（不导入重模块，失败只记录不报错）
+    for _mod in ("win32com", "pythoncom", "swapi", "ac_bridge", "ac_validate"):
+        try:
+            __import__(_mod)
+            out["modules"] = out.get("modules") or {}
+            out["modules"][_mod] = True
+        except Exception as _e:
+            out["modules"] = out.get("modules") or {}
+            out["modules"][_mod] = "MISSING: %s" % _e
+    return out
+
+
+def cmd_version():
+    """【连接自检修复】返回桥接与依赖版本（零副作用）。"""
+    out = {
+        "ok": True,
+        "command": "version",
+        "bridge": "sw_bridge.py",
+        "bridge_path": os.path.abspath(__file__),
+        "python": sys.version.split()[0],
+        "platform": sys.platform,
+    }
+    try:
+        import swapi as _sp
+        out["swapi"] = getattr(_sp, "__file__", None)
+        out["swapi_lines"] = None
+    except Exception as _e:
+        out["swapi"] = "MISSING: %s" % _e
+    for _k, _mod in (("pywin32", "win32com"), ("mss", "mss"), ("pillow", "PIL")):
+        try:
+            _m = __import__(_mod)
+            out[_k] = getattr(_m, "__version__", "installed")
+        except Exception as _e:
+            out[_k] = "MISSING: %s" % _e
+    return out
+
+
+# ══ 【连接区】SW/CAD 连接状态：探测 / 落盘 / 供 AI 判断 ═══════════════════
+# 设置页「连接区」的「SW 连接」/「CAD连接」按钮，与 AI 流程里的判断，
+# 共用 tools/conn_state.py 这一份状态文件（见该模块顶部说明）。
+# 这三个子命令都是【零副作用的探测编排】，不取 SW 独占锁。
+
+def cmd_conn_probe(target=None, with_com=True, resolve_paths=False):
+    """探测连接状态并落盘。
+
+    用法：
+      conn-probe                     # 探测 SW + CAD（含路径解析）
+      conn-probe --target sw         # 只探测 SW
+      conn-probe --target cad        # 只探测 CAD
+      conn-probe --no-com            # 只查进程，不发任何 COM 调用
+      conn-probe --resolve-paths     # 强制重新解析安装路径（全盘扫描）
+    """
+    try:
+        _cs = _import_sibling("conn_state")
+    except Exception as e:
+        return {"ok": False, "error": "conn_state.py 不可用: %r" % (e,)}
+    try:
+        if target in ("sw", "cad"):
+            st = _cs.probe_target(target, with_com=with_com)
+        else:
+            st = _cs.probe_all(with_com=with_com, resolve_paths=True)
+        if resolve_paths:
+            st["paths"] = _cs.discover_paths(force=True)
+            _cs.save(st)
+        out = _cs.summary()
+        out["command"] = "conn-probe"
+        return out
+    except Exception as e:
+        return {"ok": False, "error": "连接探测失败: %r" % (e,)}
+
+
+def cmd_conn_status():
+    """读取（不重新探测）连接区当前状态摘要。"""
+    try:
+        _cs = _import_sibling("conn_state")
+        out = _cs.summary()
+        out["command"] = "conn-status"
+        return out
+    except Exception as e:
+        return {"ok": False, "error": "conn_state.py 不可用: %r" % (e,)}
+
+
+def cmd_conn_gate(target="sw"):
+    """【流程判断入口】已连接 → 跳过启动；未连接 → 走原有启动流程。"""
+    try:
+        _cs = _import_sibling("conn_state")
+        out = _cs.gate(target)
+        out["command"] = "conn-gate"
+        return out
+    except Exception as e:
+        # 判断不可用时【必须保守】：宁可走原有启动流程，也不要误判"已连接"
+        return {
+            "ok": False,
+            "target": target,
+            "connected": False,
+            "skip_startup": False,
+            "error": "conn_state.py 不可用: %r" % (e,),
+            "next": "按原有流程启动（连接状态不可用，保守回退）。",
+        }
+
+
+def cmd_conn_launch(target, exe=None, connect=True, wait_window=120):
+    """【启动按钮】显式启动 SW / CAD，全程记录日志。
+
+    与 conn-probe 的区别：
+      · conn-probe  —— 只探测，不启动（安全默认）
+      · conn-launch —— 真的把软件拉起来（用户主动点击才走这里）
+
+    用户诉求："给俩个都搞一个按键，自动启动吧……就是启动成不需要 SW 自己
+      跳出来的那种，然后要是报错的话，就贴出错误日志。"
+    """
+    try:
+        _cs = _import_sibling("conn_state")
+    except Exception as e:
+        return {"ok": False, "error": "conn_state.py 不可用: %r" % (e,)}
+    t = str(target or "").strip().lower()
+    if t not in ("sw", "cad"):
+        return {"ok": False, "error": "target 必须是 'sw' 或 'cad'"}
+    try:
+        out = _cs.launch(t, exe=exe, wait_window=wait_window, connect=connect)
+        out["command"] = "conn-launch"
+        # 无论成败都附上可读日志，UI 可直接贴出来
+        out["log_text"] = _cs.format_launch_log(t)
+        return out
+    except Exception as e:
+        return {"ok": False, "target": t,
+                "error": "启动失败: %r" % (e,),
+                "log_text": _cs.format_launch_log(t)}
+
+
+def cmd_conn_log(target):
+    """读取某目标最近一次启动日志（供 UI 展示 / 发给模型诊断）。"""
+    try:
+        _cs = _import_sibling("conn_state")
+    except Exception as e:
+        return {"ok": False, "error": "conn_state.py 不可用: %r" % (e,)}
+    t = str(target or "").strip().lower()
+    if t not in ("sw", "cad"):
+        return {"ok": False, "error": "target 必须是 'sw' 或 'cad'"}
+    r = _cs.launch_log(t)
+    r["log_text"] = _cs.format_launch_log(t)
+    r["command"] = "conn-log"
+    return r
+
+
+# ── 【连接自检修复】最近一次 SW 连接失败的原因（供诊断类命令回显）────────
+# main() 在 get_sw() 抛异常时写入本变量，随后 doctor/status 把它作为
+# error 回显，AI 就能区分"SW 没启动"与"COM 连接失败"等具体原因，
+# 而不是拿到一坨 traceback。
+_LAST_SW_CONNECT_ERROR = None
+
+
+def _sw_not_connected_result(cmd, error=None):
+    """统一的"SW 未连接"结构化结果（【连接自检修复】）。
+
+    给所有【需要真实 SW 连接】的命令复用，保证：
+      · 绝不抛 AttributeError + traceback（AI 要的是结论，不是栈）；
+      · 明确区分"连接尝试失败"与"命令本就不连 SW"两种情况；
+      · hint 里的自救命令都是【真实存在】的（见下方修复说明）。
+    """
+    _err = error or _LAST_SW_CONNECT_ERROR
+    out = {
+        "ok": False,
+        "connected": False,
+        "command": cmd,
+        "error": _err or "sw not connected",
+        "hint": (
+            "SolidWorks 未连接。请按顺序自检：\n"
+            "  1) python sw_bridge.py doctor      # 环境自检（依赖/安装路径/模板）\n"
+            "  2) python sw_bridge.py sw-proc     # 查看 SLDWORKS.EXE 进程与 PID\n"
+            "  3) python sw_bridge.py status      # 再看一次连接状态\n"
+            "常见原因：SW 未启动、被其它房间独占、或 COM 连接被拒。"
+        ),
+    }
+    if _err:
+        # 连接失败的具体原因（来自 main() 捕获的异常）单独回显，便于定位。
+        out["connect_error"] = _err
+        out["hint"] = (
+            "SolidWorks 连接尝试失败，原因见 connect_error。请依次排查：\n"
+            "  1) python sw_bridge.py doctor      # 环境自检\n"
+            "  2) python sw_bridge.py sw-proc     # 确认 SLDWORKS.EXE 是否在跑\n"
+            "  3) 无 SW 进程 → 先手动启动 SolidWorks，再重试本命令"
+        )
+    return out
 
 
 def get_sw():
     """连接运行中的 SolidWorks；若未运行则启动它（LocalServer32）。
 
+    ── 【连接自检修复】绑定方式必须与 swapi.get_sw() 保持一致：静态优先 ──
+    原缺陷：本函数用 `dynamic.Dispatch`（后期绑定），而 swapi.get_sw() 早已
+      修成"静态绑定优先、动态回退"（Bug3）。两条连接路径不一致 →
+        经 sw_bridge 直接拿到的 sw 是动态绑定对象，late-binding 下
+        `IBody2.SetMaterialProperty()` 恒定失败（返回 1/6），
+        材料永远写不进 → 密度停在 1000 kg/m³（水）。
+      本函数把 sw 交给 cmd_run 的 wrapper、再传给脚本，
+        脚本里 `swapi.from_active(sw)` 复用的就是这个动态对象，
+        于是 swapi 侧的静态绑定修复被绕过 —— 属于"修了 A 路径、
+        漏了 B 路径"的典型回归。
+    修复：与 swapi 完全同构（静态优先 + 动态回退），并把实际绑定方式写入
+      `sw.__dict__["_dsh_binding"]`，便于排查。
+
     通用版：连接后立即禁用草图吸附（不同版本枚举值自动适配）。
     """
     pythoncom.CoInitialize()
-    sw = win32com.client.dynamic.Dispatch('SldWorks.Application')
+    sw = None
+    _binding = None
+    # ① 静态绑定（首选）—— 与 swapi.get_sw() 一致
+    try:
+        sw = win32com.client.Dispatch('SldWorks.Application')
+        _binding = "static"
+    except Exception:
+        sw = None
+    # ② 回退 late-binding
+    if sw is None:
+        try:
+            sw = win32com.client.dynamic.Dispatch('SldWorks.Application')
+            _binding = "dynamic"
+        except Exception:
+            sw = None
+    if sw is None:
+        raise RuntimeError("无法连接 SolidWorks（静态/动态绑定均失败）")
+    try:
+        sw.__dict__["_dsh_binding"] = _binding
+    except Exception:
+        try:
+            setattr(sw, "_dsh_binding", _binding)
+        except Exception:
+            pass
     try:
         import swapi
         swapi._disable_snapping(sw)
@@ -213,6 +598,22 @@ def _prop(obj, name):
 
 
 def cmd_status(sw):
+    """SW 连接与文档状态。
+
+    ── 【观察点 8 修复】必须判空：`sw is None` 时优雅返回，而不是崩溃 ──────
+    原实现直接访问 `sw.RevisionNumber`。而 `sw` 在两处会是 None：
+      · 命令属于 _NO_SW_CMDS（纯计算）时，main() 显式把 sw 置为 None；
+      · SW 未安装 / COM 连接失败 / 被其它房间独占导致 Dispatch 失败。
+    此时抛 `AttributeError: 'NoneType' object has no attribute 'RevisionNumber'`，
+    主对话无法用它诊断"SW 到底连上没有"，排查效率极低。
+    现在统一返回 {"ok": false, "connected": false, "error": "sw not connected"}。
+
+    ⚠️ 本函数【只报告拿到的东西】，不主动去连接 SolidWorks ——
+       连接动作由建模命令（get_sw）承担；查询状态不应有启动软件的副作用。
+    """
+    if sw is None:
+        # ── 【连接自检修复】统一走结构化结果（含连接失败的具体原因）──────
+        return _sw_not_connected_result("status")
     docs = []
     try:
         dl = sw.GetDocuments
@@ -227,12 +628,24 @@ def cmd_status(sw):
                     })
     except Exception as e:
         docs = [{"error": str(e)}]
+    # 各字段独立取值：任一 COM 成员不可用不应让整条 status 崩掉。
+    _fields = {}
+    for _k, _acc in (("revision", lambda: sw.RevisionNumber),
+                     ("visible", lambda: sw.Visible),
+                     ("pid", lambda: sw.GetProcessID),
+                     ("doc_count", lambda: sw.GetDocumentCount)):
+        try:
+            _fields[_k] = _acc()
+        except Exception as e:
+            _fields[_k] = None
+            docs.append({"warn": "%s unavailable: %s" % (_k, e)})
     return {
+        "ok": True,
         "connected": True,
-        "revision": sw.RevisionNumber,
-        "visible": sw.Visible,
-        "pid": sw.GetProcessID,
-        "doc_count": sw.GetDocumentCount,
+        "revision": _fields.get("revision"),
+        "visible": _fields.get("visible"),
+        "pid": _fields.get("pid"),
+        "doc_count": _fields.get("doc_count"),
         "docs": docs,
     }
 
@@ -267,18 +680,36 @@ def cmd_doctor(sw):
         result["pillow"] = f"MISSING: {e}"
 
     # SolidWorks 连接与版本
-    try:
+    # ── 【连接自检修复】必须判空：sw 为 None 时【不再】报
+    #    "'NoneType' object has no attribute 'RevisionNumber'" ────────────
+    # 原缺陷（实测复现）：doctor 被误列入"不连 SW"的集合 → sw=None →
+    #   本块 except 捕到 AttributeError → 输出
+    #     "solidworks": {"connected": false,
+    #                    "error": "'NoneType' object has no attribute 'RevisionNumber'"}
+    #   连带 get_part_template(None) 也失败 → 假报"未找到零件模板" →
+    #   ok:false、problems 里两条全是误报。而它正是 persona 指定的
+    #   SW 自检入口，"自检永远失败"直接把 AI 的连接确认链路掐断。
+    # 修复：① sw is None 时给出【真实原因】（_LAST_SW_CONNECT_ERROR）；
+    #      ② 模板探测只在拿到 sw 时才做，避免第二条假报错。
+    if sw is None:
         result["solidworks"] = {
-            "connected": True,
-            "revision": str(sw.RevisionNumber),
-            "visible": bool(sw.Visible),
+            "connected": False,
+            "error": _LAST_SW_CONNECT_ERROR or "sw not connected（未建立 COM 连接）",
         }
-        import swapi
-        result["solidworks"]["version_major"] = swapi._version_major(sw)
-        tmpl = swapi.get_part_template(sw)
-        result["template"] = tmpl or "NOT FOUND (请检查 SolidWorks 模板目录)"
-    except Exception as e:
-        result["solidworks"] = {"connected": False, "error": str(e)}
+    else:
+        try:
+            result["solidworks"] = {
+                "connected": True,
+                "revision": str(sw.RevisionNumber),
+                "visible": bool(sw.Visible),
+                "binding": getattr(sw, "_dsh_binding", None),
+            }
+            import swapi
+            result["solidworks"]["version_major"] = swapi._version_major(sw)
+            tmpl = swapi.get_part_template(sw)
+            result["template"] = tmpl or "NOT FOUND (请检查 SolidWorks 模板目录)"
+        except Exception as e:
+            result["solidworks"] = {"connected": False, "error": str(e)}
 
     # 【B1修复】SW 可执行文件路径探测（注册表优先 + 全盘符扫描）
     # 旧版只扫 C/D/E/F 盘，装在 Z 盘等非标准位置会误判"SW 未安装"。
@@ -304,8 +735,14 @@ def cmd_doctor(sw):
                         "请确认 SolidWorks 已安装，或手动设置环境变量 DSH_SW_EXE 指向可执行文件。"
                         % result.get("install_drives_scanned"))
     if not result.get("solidworks", {}).get("connected"):
-        problems.append("无法连接 SolidWorks: 请先启动 SolidWorks")
-    if not result.get("template"):
+        # ── 【连接自检修复】把【真实原因】带进 problems ────────────────────
+        # 原来只有一句"请先启动 SolidWorks"，而 SW 明明没启动时会误导，
+        # 连接被拒/绑定失败时又完全看不出原因。
+        _cerr = result.get("solidworks", {}).get("error")
+        problems.append("无法连接 SolidWorks: %s" % (_cerr or "请先启动 SolidWorks"))
+        # SW 未连接时模板探测本就无法进行 —— 【不能】据此再报一条
+        # "未找到零件模板"（那是连带假报错，会让 AI 误判 SW 安装损坏）。
+    elif not result.get("template"):
         problems.append("未找到零件模板")
     result["ok"] = len(problems) == 0
     result["problems"] = problems
@@ -425,6 +862,12 @@ def cmd_new(sw, template):
 
 
 def cmd_info(sw):
+    # ── 【连接自检修复】必须判空 ────────────────────────────────────────────
+    # 原实现直接 `sw.ActiveDoc`。sw 为 None 时抛
+    #   AttributeError: 'NoneType' object has no attribute 'ActiveDoc'
+    # 并一路冒泡成 exit 1 + traceback，AI 拿到的是栈而不是结论。
+    if sw is None:
+        return _sw_not_connected_result("info")
     d = sw.ActiveDoc
     if d is None:
         return {"ok": False, "error": "no active document"}
@@ -438,6 +881,9 @@ def cmd_info(sw):
 
 
 def cmd_list(sw):
+    # ── 【连接自检修复】必须判空（同 cmd_info）────────────────────────────
+    if sw is None:
+        return _sw_not_connected_result("list")
     try:
         docs = sw.GetDocuments
         out = []
@@ -966,9 +1412,35 @@ def cmd_run(sw, script_path, extra_args, room=None):
 
 
 def cmd_show(sw, screenshot_path=None):
-    """窗口前台 + 等轴测视图 + 截图（展示给用户看成品）。"""
+    """窗口前台 + 等轴测视图 + 截图（展示给用户看成品）。
+
+    ── 【观察点 8 修复】同样必须判空：sw 为 None 时返回可读 JSON，
+    而不是在 `swapi.from_active(None)` 里抛 AttributeError。
+    """
+    if sw is None:
+        # ── 【连接自检修复】统一走结构化结果（含连接失败的具体原因）──────
+        return _sw_not_connected_result("show")
     import swapi
-    m = swapi.from_active(sw)
+    # ── 【连接自检修复】无活动文档时也不抛 traceback ──────────────────────
+    # 原缺陷：`swapi.from_active(sw)` 在没有打开文档时 raise
+    #   RuntimeError("no active document")，冒泡到 main() → exit 1 +
+    #   traceback。而"SW 连着但没开文档"是完全正常的状态，
+    #   主对话（观察点 10 的全局看一眼场景）最常撞上的就是它 ——
+    #   应该给一句可操作的结论，而不是一坨栈。
+    try:
+        m = swapi.from_active(sw)
+    except Exception as _e_active:
+        return {
+            "ok": False,
+            "connected": True,
+            "command": "show",
+            "error": "no active document",
+            "detail": str(_e_active),
+            "hint": ("SolidWorks 已连接，但【没有打开任何文档】。"
+                     "请先打开/新建零件再截图，例如：\n"
+                     "  python sw_bridge.py open <零件.SLDPRT>\n"
+                     "  或 python sw_bridge.py new"),
+        }
     m.set_view_iso()
     m.bring_to_front()
     shot = m.screenshot(screenshot_path)
@@ -1085,6 +1557,59 @@ def _move_view(view, cx, cy):
     return False
 
 
+def _task_work_dir():
+    """当前任务的交付目录（workflow_state.json 的 work_dir）。
+
+    ── 【观察点 22 修复】drawing/dwg 默认输出到 <任务根>\\drawings\\ ────────
+    原先 `cmd_drawing` 在未给 output_path 时把工程图存到
+    `os.path.dirname(part_path)`（= 零件所在的 `parts\\`），导致：
+      · 图纸与零件混放，用户难以区分交付物；
+      · `drawings\\` 目录根本不会被创建（子代理 prompt 却明确要求输出到那里）；
+      · 若 `parts\\` 被清理，工程图会随零件一起丢失。
+    这里按"显式 output_path > 任务 work_dir > 零件目录"的顺序解析任务根。
+    读不到 work_dir 时返回 None，由调用方回退到零件目录（保持旧行为可用）。
+    """
+    # ① 环境变量优先（便于测试与多实例隔离，与 _store.py 口径一致）
+    for _k in ("DSH_TASK_WORK_DIR", "DSH_WORK_DIR"):
+        _v = (os.environ.get(_k) or "").strip()
+        if _v and os.path.isdir(_v):
+            return os.path.abspath(_v)
+    # ② workflow_state.json 的 work_dir（init 时为每个任务创建）
+    try:
+        import _store as _st
+        _p = _st.state_path("workflow_state.json")
+        if os.path.isfile(_p):
+            with open(_p, "r", encoding="utf-8-sig") as _f:
+                _j = json.load(_f)
+            _wd = str((_j or {}).get("work_dir") or "").strip()
+            if _wd:
+                return os.path.abspath(_wd)
+    except Exception:
+        pass
+    return None
+
+
+def _default_drawing_path(part_path, ext):
+    """给 drawing/dwg 解析默认输出路径。
+
+    优先 `<任务根>\\drawings\\<名>.<ext>`，并自动创建该目录；
+    拿不到任务根时回退到零件同目录（旧行为），保证命令仍可用。
+    """
+    import re as _re
+    part_name = os.path.basename(part_path)
+    name_no_ext = os.path.splitext(part_name)[0]
+    ascii_name = _re.sub(r"[^\w\-]", "_", name_no_ext)
+    _wd = _task_work_dir()
+    if _wd:
+        _ddir = os.path.join(_wd, "drawings")
+        try:
+            os.makedirs(_ddir, exist_ok=True)
+            return os.path.join(_ddir, ascii_name + ext)
+        except Exception:
+            pass
+    return os.path.join(os.path.dirname(part_path), ascii_name + ext)
+
+
 def cmd_drawing(sw, part_path, output_path=None):
     """从零件生成工程图（标准三视图 + 等轴测）。
 
@@ -1133,10 +1658,8 @@ def cmd_drawing(sw, part_path, output_path=None):
         return {"ok": False, "error": "no drawing template found"}
 
     if not output_path:
-        part_name = os.path.basename(part_path)
-        name_no_ext = os.path.splitext(part_name)[0]
-        ascii_name = re.sub(r"[^\w\-]", "_", name_no_ext)
-        output_path = os.path.join(os.path.dirname(part_path), ascii_name + ".slddrw")
+        # ── 【观察点 22 修复】默认落到 <任务根>\drawings\，不再混进 parts\ ──
+        output_path = _default_drawing_path(part_path, ".slddrw")
 
     part_abs = os.path.abspath(part_path)
 
@@ -2106,10 +2629,8 @@ def cmd_dwg(sw, part_path, output_path=None):
 
     # 2. 确定输出路径
     if not output_path:
-        import re
-        part_name = os.path.basename(part_path)
-        name_no_ext = re.sub(r'[^\w\-]', '_', os.path.splitext(part_name)[0])
-        output_path = os.path.join(os.path.dirname(part_path), name_no_ext + ".dwg")
+        # ── 【观察点 22 修复】默认落到 <任务根>\drawings\ ──────────────────
+        output_path = _default_drawing_path(part_path, ".dwg")
 
     # 3. 打开工程图并导出 DWG
     saving = dwg_result.get("path")
@@ -2165,10 +2686,17 @@ def _dwg_to_dxf(dwg_path):
     # ── 方式1: ODA File Converter ──────────────────────────────────────
     try:
         oda_cands = []
-        for drive in ("C:", "D:", "E:", "Z:"):
+        # 【连接区修复】改为枚举【全部真实盘符】，不再硬编码 C/D/E/Z ——
+        #   用户把 ODA 或 SW/CAD 换装到 G:/Q: 等盘时也能找到。
+        try:
+            import swapi as _sw_drives
+            _drive_roots = _sw_drives._drive_roots()
+        except Exception:
+            _drive_roots = [d + ":\\" for d in ("C", "D", "E", "Z")]
+        for drive in _drive_roots:
             oda_cands += [
-                os.path.join(drive + "\\", "Program Files", "ODA", "ODAFileConverter"),
-                os.path.join(drive + "\\", "Program Files (x86)", "ODA", "ODAFileConverter"),
+                os.path.join(drive, "Program Files", "ODA", "ODAFileConverter"),
+                os.path.join(drive, "Program Files (x86)", "ODA", "ODAFileConverter"),
             ]
         oda_exe = None
         for base in oda_cands:
@@ -2504,6 +3032,102 @@ def cmd_dxf(sw, part_path, output_path=None):
     return result
 
 
+# ── 【连接自检修复】AutoCAD 连接确认的统一实现 ────────────────────────────
+# 这两条命令【只跟 AutoCAD 通信】，与 SolidWorks 无关：
+#   · 不取 SW 独占锁（已加入 _NO_LOCK_CMDS）；
+#   · main() 里 sw 被置为 None（已加入 _CAD_ONLY_CMDS）——
+#     因此在没有装 SW 的机器上也能确认 CAD 连接。
+# 二者都遵循"单次 get_ac() + 用后 close()"，避免重复 Dispatch 与连接泄漏。
+
+def _ac_bridge_unavailable():
+    return {
+        "ok": False,
+        "connected": False,
+        "error": "ac_bridge 模块未找到，请确保 engineering/tools/ 下有 ac_bridge.py",
+    }
+
+
+def _ac_connect_failure(hint_extra=""):
+    """AutoCAD 连接失败的结构化结果（可操作）。"""
+    out = {
+        "ok": False,
+        "connected": False,
+        "error": "无法连接 AutoCAD",
+        "hint": ("请确认 AutoCAD 正在运行且已打开（或新建）一张图纸 —— "
+                 "ac_bridge 只挂接【已运行】的 AutoCAD 实例，不会自行启动它。\n"
+                 "排查步骤：\n"
+                 "  1) 手动启动 AutoCAD，打开任意图纸；\n"
+                 "  2) 若 AutoCAD 正忙（弹出对话框/命令执行中），按 ESC 取消后再试；\n"
+                 "  3) 纯 SW 出图链路【不需要】AutoCAD："
+                 "python sw_bridge.py dxf <零件.SLDPRT> 可直接产出 DXF 供 "
+                 "cad-validate 验证。"),
+    }
+    if hint_extra:
+        out["hint"] = out["hint"] + "\n" + hint_extra
+    return out
+
+
+def _ac_status_result():
+    """ac-status 的实现：单次连接、取状态、用后释放。"""
+    ac = None
+    try:
+        ac = ac_bridge.get_ac()          # 只调用一次（原实现调了两次）
+        if not ac:
+            return _ac_connect_failure()
+        res = ac.status()
+        if isinstance(res, dict):
+            res.setdefault("ok", True)
+            res.setdefault("connected", True)
+            res["command"] = "ac-status"
+            return res
+        return {"ok": True, "connected": True, "command": "ac-status",
+                "status": res}
+    except Exception as e:
+        out = _ac_connect_failure()
+        out["error"] = "AutoCAD 状态查询异常: %s" % e
+        return out
+    finally:
+        # ── 【连接自检修复】用后释放，避免 COM 连接泄漏 ──────────────────
+        # ac_bridge.close() 只断开 Python 侧引用，【不关闭】AutoCAD 本身。
+        try:
+            if ac is not None:
+                ac.close()
+        except Exception:
+            pass
+
+
+def _ac_export_result(out_path=""):
+    """ac-export 的实现：单次连接、导出 DXF、用后释放。"""
+    ac = None
+    try:
+        ac = ac_bridge.get_ac()
+        if not ac:
+            return _ac_connect_failure()
+        dxf_path = ac.export_dxf(out_path) if out_path else ac.export_dxf()
+        ok = bool(dxf_path) and os.path.exists(str(dxf_path))
+        out = {
+            "ok": ok,
+            "connected": True,
+            "command": "ac-export",
+            "dxf_path": str(dxf_path) if dxf_path else None,
+        }
+        if not ok:
+            out["error"] = "AutoCAD 未产出 DXF（export_dxf 返回空或文件不存在）"
+            out["hint"] = ("请确认当前 AutoCAD 文档已保存且包含实体；"
+                           "或改用纯 SW 链路：python sw_bridge.py dxf <零件.SLDPRT>")
+        return out
+    except Exception as e:
+        out = _ac_connect_failure()
+        out["error"] = "AutoCAD 导出 DXF 异常: %s" % e
+        return out
+    finally:
+        try:
+            if ac is not None:
+                ac.close()
+        except Exception:
+            pass
+
+
 def cmd_cleanup(sw, temp_dir=None):
     """清理临时文件和截图。"""
     import glob
@@ -2557,8 +3181,10 @@ def cmd_vision_fallback(sw, description="", auto_save=True):
 
     # 确定保存路径
     if auto_save:
-        out_dir = r"C:\Users\j1877\Desktop\DSH-Check"
-        os.makedirs(out_dir, exist_ok=True)
+        # 【连接自检修复】不再硬编码 C:\Users\j1877\Desktop\DSH-Check ——
+        # 改用 swapi.vision_shot_dir() 自动探测（环境变量 DSH_VISION_DIR
+        # 可覆盖；桌面不存在/不可写时自动兜底）。
+        out_dir = swapi.vision_shot_dir()
         # 使用描述作为文件名的一部分
         safe_desc = "".join(c if c.isalnum() or c in " _-" else "_" for c in description)[:20]
         shot_path = os.path.join(out_dir, f"vision_fallback_{safe_desc}_{int(time.time())}.png")
@@ -2596,11 +3222,21 @@ def cmd_check_vision(sw):
     import swapi
     import time
 
-    result = {"ok": False, "backend": "agnes/agnes-2.5-flash", "available": False}
+    result = {"ok": False, "available": False}
 
     # 尝试截取一张测试图
-    out_dir = r"C:\Users\j1877\Desktop\DSH-Check"
-    os.makedirs(out_dir, exist_ok=True)
+    # 【连接自检修复】① 不再硬编码作者桌面路径；② 不再硬编码后端名 ——
+    #   原实现把 "agnes/agnes-2.5-flash" 写死且 available 恒为 False，
+    #   无论实际后端是否可用都报"不可用"，是纯粹误导。
+    #   现改为回显环境变量里的真实配置（未配置则如实说明"未探测"）。
+    _be = (os.environ.get("DSH_VISION_BACKEND")
+           or os.environ.get("DSH_VISION_MODEL") or "").strip()
+    result["backend"] = _be or None
+    result["backend_note"] = ("已由环境变量 DSH_VISION_BACKEND / DSH_VISION_MODEL 指定"
+                              if _be else
+                              "未配置视觉后端（DSH_VISION_BACKEND 未设置）；"
+                              "本命令只负责产出截图供前端识图插件使用")
+    out_dir = swapi.vision_shot_dir()
     test_shot = os.path.join(out_dir, "vision_test_screenshot.png")
 
     try:
@@ -3137,6 +3773,9 @@ def main():
             "commands": {
                 "status": "连接状态 / 版本 / 已开文档（只读）",
                 "doctor": "环境自检（新电脑先跑这个，只读）",
+                "sw-proc": "查看 SLDWORKS.EXE 进程与 PID（只读，不连 SW）",
+                "ping": "轻量存活探测（只读，不连 SW）",
+                "version": "桥接与依赖版本（只读，不连 SW）",
                 "self-path": "返回本脚本绝对路径（只读）",
                 "open/new/info/list/massprops/close/save": "文档基本操作",
                 "sketch-rect": "画矩形并拉伸（快速验证）",
@@ -3152,6 +3791,8 @@ def main():
                 "title-block <图纸> [字段=值 ...]": "【Bug-34】填写标题栏"
                                                     "（材料/比例/图号/设计者/日期）",
                 "cad-validate <图纸>": "CADX 几何验证（7 项检查）",
+                "ac-status": "AutoCAD 连接状态（只读，不需要 SW/房间锁）",
+                "ac-export [out.dxf]": "导出当前 AutoCAD 图纸为 DXF",
                 "cad-validate-live": "验证当前 AutoCAD 活动文档",
                 "physics-status": "FEA 求解器后端状态",
                 "physics-validate-case <case.json>": "校验载荷工况",
@@ -3207,26 +3848,98 @@ def main():
     except Exception:
         pass
     _lock = None
-    # 【B5修复】只读/自检命令不需要 SW 独占权，跳过锁与 --room 强制要求。
-    # 原先 doctor 因 parallel_mode=D 被强制要求 --room，无法做独立环境自检。
-    _READONLY_CMDS = {"self-path", "doctor", "status", "info", "list",
-                      "sw-proc", "help", "version", "ping",
-                      # ── 【BUG-02 实机补强】physics-* 全部是【纯计算】命令 ──
-                      # 它们只读载荷工况 JSON、用 numpy 算，完全不碰 SolidWorks，
-                      # 不产生文件冲突，因此不需要 SW 独占权、也不该被
-                      # "并行模式必须带 --room"拦住。
-                      # 实机教训（2026-09-27）：physics-fatigue 因未列入本集合，
-                      # 在并行模式下被拒（exit=2），疲劳校核链路直接断掉 ——
-                      # 这正是"修复后仍跑不通"的隐蔽原因。
-                      #
-                      # cad-validate 同理：它只解析已有的 DXF 文件（ezdxf 本地计算），
-                      # 既不连 SW 也不写 CAD 产物 → 归入只读，不再强制 --room。
-                      # （真正需要 SW 的是上游的 `dxf` 导出命令，那个仍需 --room。）
-                      "physics-status", "physics-demo", "physics-report",
-                      "physics-recommend", "physics-fatigue",
-                      "physics-list-domains", "physics-validate-domain",
-                      "physics-validate-case", "physics-optimize",
-                      "cad-validate"}
+    # ══ 【连接自检修复】把"跳锁"与"不连 SW"两件事【彻底分开】══════════════
+    # 原缺陷（实测复现，AI 连接确认链路被自己掐断）：
+    #   `_READONLY_CMDS` 被当成两个语义复用 ——
+    #     ① 【B5修复】用它表示"不需要 SW 独占权、豁免 --room"；
+    #     ② 【BUG-02 修复】又写 `_NO_SW_CMDS = _READONLY_CMDS` 表示"纯计算、
+    #        不连 SolidWorks"，于是 main() 把 sw 置为 None。
+    #   两个语义叠在一起后，doctor / status / info / list 既是"只读"（跳锁）
+    #   又成了"不连 SW"（sw=None），结果：
+    #     · `doctor` 恒报 connected:false（"'NoneType' has no attribute
+    #       'RevisionNumber'"）+ 连带假报"未找到零件模板"→ ok:false；
+    #     · `status` 恒报 {"error":"sw not connected"}；
+    #     · `info` / `list` 直接抛 AttributeError + traceback（exit 1）。
+    #   而这三个恰恰是 persona 指定的 SW 连接确认入口 —— 自检永远失败。
+    # 修复：拆成四个互不重叠的集合，语义单一。
+    #   ① `_NO_LOCK_CMDS`     —— 不取 SW 独占锁、豁免 --room（★但仍按需连 SW★）
+    #   ② `_NO_SW_CMDS`       —— 真正【完全不碰 SolidWorks】的命令
+    #   ③ `_CAD_ONLY_CMDS`    —— 只跟 AutoCAD 打交道（不该被 SW 房间锁拦住）
+    #   ④ `_LOCAL_CMDS`       —— 纯本地元信息，既不连 SW 也不连 CAD
+    #
+    # ① 跳锁/豁免 --room：只读诊断类不需要 SW 独占权。
+    #    原先 doctor 因 parallel_mode=D 被强制要求 --room，无法做独立环境自检。
+    #    ⚠️ 在本集合【不等于】不连 SW —— doctor/status/info/list 必须连，
+    #       否则无法回答"SW 到底连上没有"（这正是本集合存在的意义）。
+    _NO_LOCK_CMDS = {"self-path", "doctor", "status", "info", "list",
+                     "sw-proc", "help", "version", "ping",
+                     # ── 【BUG-02 实机补强】physics-* 全部是【纯计算】命令 ──
+                     # 它们只读载荷工况 JSON、用 numpy 算，完全不碰 SolidWorks，
+                     # 不产生文件冲突，因此不需要 SW 独占权、也不该被
+                     # "并行模式必须带 --room"拦住。
+                     # 实机教训（2026-09-27）：physics-fatigue 因未列入本集合，
+                     # 在并行模式下被拒（exit=2），疲劳校核链路直接断掉 ——
+                     # 这正是"修复后仍跑不通"的隐蔽原因。
+                     #
+                     # cad-validate 同理：它只解析已有的 DXF 文件（ezdxf 本地计算），
+                     # 既不连 SW 也不写 CAD 产物 → 归入只读，不再强制 --room。
+                     # （真正需要 SW 的是上游的 `dxf` 导出命令，那个仍需 --room。）
+                     "physics-status", "physics-demo", "physics-report",
+                     "physics-recommend", "physics-fatigue",
+                     "physics-list-domains", "physics-validate-domain",
+                     "physics-validate-case", "physics-optimize",
+                     "cad-validate",
+                     # ── 【连接自检修复】AutoCAD 侧命令同样豁免 SW 锁 ──────
+                     # ac-status / ac-export / cad-validate-live 只与
+                     #   AutoCAD 进程通信；假设 SW 未启动或锁被别的房间占着，
+                     #   也【不该】影响"确认 CAD 连上没有"。
+                     # 原缺陷：ac-status 不在任何豁免集合里 → 并行模式下返回
+                     #   {"error":"并行模式下必须指定 --room <房间名>！"}，
+                     #   而 active_rooms 为空 → 提示里的 <房间名> 无解，
+                     #   CAD 连接确认入口实际不可用。
+                     "ac-status", "ac-export", "cad-validate-live",
+                     # ── 【连接区】连接探测/状态/判断同样是零副作用只读 ──
+                     # conn-probe 只做进程与 COM 连接探测，不改模型、不写业务产物。
+                     # conn-launch 会拉起进程，但这正是它的语义（用户主动点击），
+                     #   且它不写 SW 业务产物、不抢 SW 独占锁。
+                     "conn-probe", "conn-status", "conn-gate",
+                     "conn-launch", "conn-log"}
+    # ② 真正不碰 SolidWorks 的命令（main() 据此把 sw 置为 None）。
+    #    ⚠️ 绝不包含 doctor / status / info / list —— 它们必须连 SW。
+    #
+    # ── 【BUG-02 实机补强】纯计算命令【不连接 SolidWorks】─────────────
+    # 原实现无条件 get_sw()，即使 physics-* 这类完全不碰 SW 的命令
+    #   也会把 SolidWorks 拉起来 —— 实测副作用：
+    #     · 白白占用 SW 独占窗口，阻塞真正在建模的房间；
+    #     · 在没有装 SW 的机器上，纯 FEA/疲劳计算直接失败；
+    #     · 启动 SW 要几十秒，纯计算命令被拖慢一个数量级。
+    _PURE_COMPUTE_CMDS = {"physics-status", "physics-demo", "physics-report",
+                          "physics-recommend", "physics-fatigue",
+                          "physics-list-domains", "physics-validate-domain",
+                          "physics-validate-case", "physics-optimize",
+                          "cad-validate"}
+    # ③ 只连 AutoCAD 的命令（不碰 SW）。
+    _CAD_ONLY_CMDS = {"ac-status", "ac-export", "cad-validate-live"}
+    # ④ 纯本地元信息命令（既不连 SW 也不连 CAD）。
+    #    【连接区】conn-* 也在此列：它们【自己】按需探测（且未运行时不发 COM），
+    #      main() 不应为它们预先建立 SW 连接 —— 否则"只想看看连没连"
+    #      反而把 SolidWorks 拉起来了。
+    _LOCAL_CMDS = {"self-path", "help", "version", "ping", "sw-proc",
+                   "conn-probe", "conn-status", "conn-gate",
+                   "conn-launch", "conn-log"}
+    _NO_SW_CMDS = _PURE_COMPUTE_CMDS | _CAD_ONLY_CMDS | _LOCAL_CMDS
+    # ── 【观察点 10 修复】只读诊断类：需要连 SW，但不该强制 --room ─────────
+    # ⚠️ 必须与 _READONLY_CMDS【分开】—— 后者会被 `_NO_SW_CMDS = _READONLY_CMDS`
+    #   复用，把命令的 sw 置为 None。而本集合里的命令【恰恰需要真实 SW 连接】。
+    #
+    # 用户诉求（观察点 10）：`show` 只做"前台 + 等轴测视图 + 截图"，不改模型
+    #   几何、不写业务产物；主对话（不属于任何房间）想全局看一眼 SW 现状时，
+    #   原先被"并行模式下必须指定 --room"直接拒掉(exit=2)，而主对话没有
+    #   --room 归属 → 全局诊断路径彻底断掉。
+    # 因此：本集合豁免 --room 与 SW 锁，但【仍然】执行 get_sw()。
+    # 注意：真正写文件的 drawing / dwg / run / annotate / title-block 等
+    #   【仍强制】--room（见 _ROOM_REQUIRED_CMDS），锁与产物归属不受影响。
+    _DIAG_NO_ROOM_CMDS = {"show"}
     # 【测试反馈 Bug4 修复】SW【收尾类】命令也不该强制 --room：
     #   close-all 的语义就是"关闭 SolidWorks 并释放使用权"，它本身就是释放动作。
     #   若还要求先指定房间才能释放，会出现"锁被上一家占着 → 想释放却因没带 room
@@ -3240,7 +3953,11 @@ def main():
     # 修复：--room 从任意位置（含 --room=xxx）摘掉，业务只看 _args。
     _clean_args, _room_from_strip = _strip_room_args(args)
     _args = _clean_args if _room_from_strip else args
-    if cmd not in _READONLY_CMDS and cmd not in _NO_ROOM_CMDS:
+    # ── 【观察点 10 修复】_DIAG_NO_ROOM_CMDS 也豁免 --room 与 SW 锁 ────────
+    # 它们需要连 SW（故不在 _READONLY_CMDS），但不抢占独占权、不产出业务文件，
+    # 因此并行模式下不应强制 --room（主对话没有房间归属）。
+    if (cmd not in _NO_LOCK_CMDS and cmd not in _NO_ROOM_CMDS
+            and cmd not in _DIAG_NO_ROOM_CMDS):
         _room_id = _room_from_strip or _detect_gate_room(args)
         # ── 【Bug5 修复】并行模式下这些命令【强制】要求 --room ────────────
         # 它们既要抢占 SW 独占权、又要产出文件；无 room 会导致锁无归属、
@@ -3306,18 +4023,55 @@ def main():
             # 让调用方能识别"需要重试"而不是"已完成"。
             sys.exit(3)
     try:
-        # ── 【BUG-02 实机补强】纯计算命令【不连接 SolidWorks】─────────────
-        # 原实现无条件 get_sw()，即使 physics-* 这类完全不碰 SW 的命令
-        #   也会把 SolidWorks 拉起来 —— 实测副作用：
-        #     · 白白占用 SW 独占窗口，阻塞真正在建模的房间；
-        #     · 在没有装 SW 的机器上，纯 FEA/疲劳计算直接失败；
-        #     · 启动 SW 要几十秒，纯计算命令被拖慢一个数量级。
-        # 复用 _READONLY_CMDS：其中 physics-* 与 cad-validate 都是纯本地计算。
-        _NO_SW_CMDS = _READONLY_CMDS
+        # ── 【连接自检修复】只把【真正不碰 SW】的命令置 None ─────────────
+        # _NO_SW_CMDS 现在只含 纯计算(physics-*/cad-validate) / 仅CAD(ac-*) /
+        #   纯本地元信息(self-path/version/ping/sw-proc) 三类。
+        #   doctor / status / info / list 【不在】其中 → 它们会真实建立 SW
+        #   连接，从而能回答"SW 到底连上没有"（原先它们被误置 None，
+        #   导致自检永远失败）。
+        #
+        # ── 【连接自检修复】连接失败【不再】把 traceback 抛给 AI ──────────
+        # 原实现 get_sw() 一旦抛异常就冒泡到外层 except → exit 1 + traceback，
+        #   doctor / status 这类【本就用来诊断连接】的命令反而以"未预期异常"
+        #   收场，主对话只能看到一坨栈，拿不到可操作的结论。
+        # 现在：连接失败 → sw=None，并把原因记入全局 _LAST_SW_CONNECT_ERROR，
+        #   交给各命令的空值防御分支返回结构化错误（ok:false + error + hint）。
+        global _LAST_SW_CONNECT_ERROR
+        _LAST_SW_CONNECT_ERROR = None
         if cmd in _NO_SW_CMDS:
             sw = None
         else:
-            sw = get_sw()
+            try:
+                sw = get_sw()
+            except Exception as _e_conn:
+                sw = None
+                _LAST_SW_CONNECT_ERROR = "%s: %s" % (type(_e_conn).__name__, _e_conn)
+
+        # ══ 【连接自检修复】系统性兜底：SW 连接不可用时【绝不】让命令崩溃 ══
+        # 原缺陷：open/new/massprops/close/save/sketch-rect/export-pdf/run/
+        #   drawing/dwg/dxf/annotate/title-block/vision-fallback/
+        #   check-vision/reading 这些命令【全都假设 sw 非 None】，
+        #   一旦连接失败就抛
+        #     AttributeError: 'NoneType' object has no attribute 'ActiveDoc' /
+        #     'GetDocumentCount' / ...
+        #   冒泡成 exit 1 + traceback 抛给 AI。
+        #   逐个函数加判空既啰嗦又容易漏（info/list 就是这么漏掉的）——
+        #   这里统一在【派发之前】拦一次，语义单一、不可能漏。
+        #
+        # 三类命令【必须放行】，它们各自的语义本来就不依赖 sw：
+        #   · status / doctor  —— 【诊断类】：sw=None 恰恰是它们要报告的事实；
+        #   · close-all         —— 【释放类】：本体是 taskkill 兜底，
+        #        恰恰在 SW 卡死/连不上时最需要能用（拦截它会形成死结：
+        #        "连不上 → 想关掉它 → 因连不上被拒"）；
+        #   · cleanup / check-part —— 纯文件操作，函数体根本不碰 sw。
+        _SW_TOLERANT_CMDS = {"status", "doctor", "close-all",
+                             "cleanup", "check-part"}
+        if sw is None and cmd not in _NO_SW_CMDS \
+                and cmd not in _SW_TOLERANT_CMDS:
+            result = _sw_not_connected_result(cmd)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+
         if cmd == "status":
             result = cmd_status(sw)
         elif cmd == "doctor":
@@ -3418,21 +4172,86 @@ def main():
         elif cmd == "self-path":
             # Bug-26: 返回本脚本的绝对路径，解决"路径错误"问题
             result = {"ok": True, "command": "self-path", "path": _SW_BRIDGE_SELF, "dir": os.path.dirname(_SW_BRIDGE_SELF)}
+        # ── 【连接自检修复】三个"登记了却没实现"的命令，现已落地 ──────────
+        elif cmd == "sw-proc":
+            result = cmd_sw_proc()
+        elif cmd == "ping":
+            result = cmd_ping()
+        elif cmd == "version":
+            result = cmd_version()
+        # ── 【连接区】SW/CAD 连接探测与流程判断（零副作用，不取 SW 锁）──
+        elif cmd == "conn-probe":
+            _ct = None
+            for _i in range(1, len(_args)):
+                if _args[_i] == "--target" and _i + 1 < len(_args):
+                    _ct = str(_args[_i + 1]).strip().lower()
+                elif _args[_i].startswith("--target="):
+                    _ct = _args[_i].split("=", 1)[1].strip().lower()
+            result = cmd_conn_probe(
+                target=_ct,
+                with_com=("--no-com" not in _args),
+                resolve_paths=("--resolve-paths" in _args))
+        elif cmd == "conn-status":
+            result = cmd_conn_status()
+        elif cmd == "conn-gate":
+            _gt = "sw"
+            for _i in range(1, len(_args)):
+                if _args[_i] == "--target" and _i + 1 < len(_args):
+                    _gt = str(_args[_i + 1]).strip().lower()
+                elif _args[_i].startswith("--target="):
+                    _gt = _args[_i].split("=", 1)[1].strip().lower()
+            result = cmd_conn_gate(_gt)
+        elif cmd == "conn-launch":
+            # ── 【启动按钮】显式启动 SW / CAD（用户主动点击才走这里）──────
+            _lt = "sw"
+            _lexe = None
+            _lwait = 120
+            for _i in range(1, len(_args)):
+                if _args[_i] == "--target" and _i + 1 < len(_args):
+                    _lt = str(_args[_i + 1]).strip().lower()
+                elif _args[_i].startswith("--target="):
+                    _lt = _args[_i].split("=", 1)[1].strip().lower()
+                elif _args[_i] == "--exe" and _i + 1 < len(_args):
+                    _lexe = _args[_i + 1]
+                elif _args[_i].startswith("--exe="):
+                    _lexe = _args[_i].split("=", 1)[1]
+                elif _args[_i] == "--wait" and _i + 1 < len(_args):
+                    try:
+                        _lwait = int(_args[_i + 1])
+                    except ValueError:
+                        pass
+            result = cmd_conn_launch(
+                _lt, exe=_lexe, wait_window=_lwait,
+                connect=("--no-connect" not in _args))
+        elif cmd == "conn-log":
+            _gt2 = "sw"
+            for _i in range(1, len(_args)):
+                if _args[_i] == "--target" and _i + 1 < len(_args):
+                    _gt2 = str(_args[_i + 1]).strip().lower()
+                elif _args[_i].startswith("--target="):
+                    _gt2 = _args[_i].split("=", 1)[1].strip().lower()
+            result = cmd_conn_log(_gt2)
+        # ── 【连接自检修复】AutoCAD 侧命令：只连 CAD，不碰 SW ─────────────
+        # 原缺陷（实测复现）：
+        #   ① ac-status 不在任何豁免集合里 → 并行模式下被 SW 房间锁拦下，
+        #      返回 {"error":"并行模式下必须指定 --room <房间名>！"}，
+        #      而 active_rooms 为空 → 提示里的 <房间名> 无解，
+        #      CAD 连接确认入口【实际不可用】；
+        #   ② ac-status 里 `ac_bridge.get_ac()` 被调用了【两次】——
+        #      每次都执行一次完整的 COM Dispatch + 最多 30 秒重试，
+        #      既慢一倍，又可能第一次成功、第二次失败导致误报"无法连接"；
+        #   ③ 全脚本从未调用 bridge.close() → COM 连接泄漏。
+        # 修复：单次 get_ac()、判空后取 status()、用后 close() 释放。
         elif cmd == "ac-status":
             if not _HAS_CADX:
-                result = {"ok": False, "error": "ac_bridge 未找到，请确保 engineering/tools/ 下有 ac_bridge.py"}
+                result = _ac_bridge_unavailable()
             else:
-                result = ac_bridge.get_ac().status() if ac_bridge.get_ac() else {"ok": False, "error": "无法连接 AutoCAD"}
+                result = _ac_status_result()
         elif cmd == "ac-export":
             if not _HAS_CADX:
-                result = {"ok": False, "error": "ac_bridge 未找到"}
+                result = _ac_bridge_unavailable()
             else:
-                ac = ac_bridge.get_ac()
-                if not ac:
-                    result = {"ok": False, "error": "无法连接 AutoCAD，请先启动 AutoCAD"}
-                else:
-                    out_path = _args[1] if len(_args) > 1 else ""
-                    result = {"ok": True, "dxf_path": ac.export_dxf(out_path)}
+                result = _ac_export_result(_args[1] if len(_args) > 1 else "")
         elif cmd == "cad-validate":
             if not _HAS_CADX:
                 result = {"ok": False, "error": (
@@ -3489,11 +4308,25 @@ def main():
             if not _HAS_CADX:
                 result = {"ok": False, "error": "ac_validate 未找到"}
             else:
-                ac = ac_bridge.get_ac()
-                if not ac:
-                    result = {"ok": False, "error": "无法连接 AutoCAD，请先启动 AutoCAD"}
-                else:
-                    result = ac_validate.validate_live(ac, rules="mechanical")
+                # ── 【连接自检修复】单次连接 + 用后释放 + 结构化失败提示 ──
+                # 原实现：① 连接失败只给一句"请先启动 AutoCAD"（无可操作信息）；
+                #   ② 从不 close() → COM 连接泄漏。
+                _ac = None
+                try:
+                    _ac = ac_bridge.get_ac()
+                    if not _ac:
+                        result = _ac_connect_failure()
+                    else:
+                        result = ac_validate.validate_live(_ac, rules="mechanical")
+                except Exception as _e_live:
+                    result = _ac_connect_failure()
+                    result["error"] = "AutoCAD 现场验证异常: %s" % _e_live
+                finally:
+                    try:
+                        if _ac is not None:
+                            _ac.close()
+                    except Exception:
+                        pass
         # ── Physics-in-the-Loop 命令 ────────────────────────────
         elif cmd == "physics-demo":
             if not _HAS_PHYSICS:

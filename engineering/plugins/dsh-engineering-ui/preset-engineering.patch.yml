@@ -18,7 +18,7 @@
 # ── 与 standard preset 的差异（刻意为工程模式保留） ──────────────────────────
 #   · persona：工程设计人设（含 DSH_SW / CADX / physics / 图纸排版全量流程说明）
 #   · plan-mode：工程设计计划模式（需求分析→尺寸可行性→设计步骤→验证计划→风险）
-#   · tool-todo：allowParallelInProgress = false（工程设计强制串行）
+#   · tool-todo：allowParallelInProgress = true（并行模式 D 下需同时标多个房间）
 #   · tool-web：fetch = false（只搜索不抓取）
 #   · 无 command-goal / present / tool-plugin-manager（与旧工程预设保持一致）
 #
@@ -179,6 +179,37 @@
                 3. 查看结果 JSON 和截图
 
                 ### ⚠️ 启动失败排查（优先执行）
+
+                #### 第 0 步（必做 · 连接区代码判断）：先问连接区，再决定要不要启动
+
+                在按下面 1~7 步排查【之前】，先跑一次连接区判断：
+
+                ```
+                python <包目录>\sw_bridge.py conn-gate --target sw
+                ```
+
+                读返回的 `skip_startup` 字段，**严格照它分支**（这是代码级判断，不要自己猜）：
+
+                - **`skip_startup: true`**（连接区已连上 SW）
+                  → **直接开始建模**，跳过下面 1~7 步的全部排查。
+                  连接区已经把 SW 连好、并探测出了安装路径，
+                  直接用返回的 `paths.sldworks_exe` / `exe` 即可，
+                  **不要再去全盘符找 SolidWorks 装在哪块盘**（本机装在 Z 盘，
+                  全盘扫描既慢又是重复劳动）。
+                  顺带：`conn-gate` 返回的 `paths` 里也有 `acad_exe`，出工程图/验证时直接复用。
+
+                - **`skip_startup: false`**（没连上 / 从未探测 / 状态已过期）
+                  → **完全按原有流程走**：执行下面 1~7 步排查，
+                  该启动 SW 就启动 SW、该启动 CAD 就启动 CAD，一步都不要省。
+
+                > 说明：用户在【设置 → 连接区】点了「SW 连接」/「CAD连接」后，
+                > 结果会落盘到 `connection_state.json`（与 mode_state.json 同目录），
+                > `conn-gate` 读的就是它。若提示"从未探测过"，
+                > 可以让用户去设置页点一下「连接」，或自己跑：
+                > `python <包目录>\sw_bridge.py conn-probe --target sw`
+                > （默认只探测，不会把没开的软件拉起来）。
+
+                #### 第 1~7 步（仅在 skip_startup=false 时执行）
                 **如启动 SW 失败，优先看《常见SW启动失败问题》：`<工程模式根目录>/常见SW启动失败问题.md`**
                 按顺序排查：
                 1. Python 版本是否正常（`python --version`，要求 3.8+ / 64 位）
@@ -929,7 +960,14 @@
           - id: tool-todo
             name: '@deepseek-ai/dsh-tool-todo'
             config:
-              allowParallelInProgress: false  # 工程设计必须串行执行，确保质量
+              # ── 【观察点 3 修复】并行模式(D)下必须允许多个 in_progress ──────
+              # 原值 false 会硬拒「at most one task may be in_progress (got 3)」。
+              # 但工程模式的 D 模式（部分小屋并行）本来就是**多个房间同时在跑**，
+              # 主对话无法把并行房间如实标为进行中 —— 清单与实际状态不符，
+              # todo_write 反而成了误导源。
+              # 现改为 true：串行(E)模式由主对话自行只标一个（流程约定），
+              # 并行(D)模式则可如实标注多个进行中。
+              allowParallelInProgress: true
 
           # ── 网络搜索 ────────────────────────────────────────────────────────────────
           # 用于查询技术标准、标准件参数、材料数据等

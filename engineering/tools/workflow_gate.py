@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import json, os, sys, time
+import math
 
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -696,6 +697,23 @@ def estimate_mechanics(task, context=None):
     elif any(k in t for k in ["壳体", "机架", "housing", "frame", "承载", "support", "bearing"]):
         sf = max(sf, 2.5)
 
+    # ── 【观察点 21 修复】FDM 打印件必须计入【各向异性折减】──────────────
+    # 原实现的安全系数只按负载性质取（静载 2.0），**完全忽略制造工艺**。
+    # 但 FDM 熔融沉积件是各向异性的：层间（Z 向）结合强度显著低于层内
+    #   （实测通常只有 50%~80%），而受力方向往往正好跨层。
+    # 若仍按各向同性材料的 2.0 判合格，实际零件在层间先开裂 ——
+    #   校核结论偏乐观，属于"看起来过了、实际会断"。
+    # 修复：识别 FDM 工艺后，把要求的安全系数除以折减系数（等价于把
+    #   许用强度乘 0.8）。折减系数显式落盘，便于复核与覆盖。
+    _is_fdm = any(k in t for k in
+                  ["3d打印", "3D打印", "3d 打印", "fdm", "FDM", "熔融沉积",
+                   "打印件", "增材", "pla", "PLA", "petg", "PETG", "abs", "ABS"])
+    anisotropy_factor = 0.8 if _is_fdm else 1.0
+    sf_base = sf
+    if _is_fdm:
+        # 除以折减系数即"提高要求的安全系数"；向上取整到 0.5 的倍数便于阅读
+        sf = math.ceil((sf / anisotropy_factor) * 2) / 2
+
     # ── 4) 材料推荐（【Bug-04/11 修复】先读用户回答，再退回关键词）──────
     # 原缺陷：这里是一条硬编码关键词链，"轻量/6061" 命中就给铝，完全不读
     #   用户 Q13「材料倾向」/Q14「加工方式」的回答。实测任务写明
@@ -743,6 +761,16 @@ def estimate_mechanics(task, context=None):
         # ── 兼容旧字段（字符串形式，供旧文案直接引用）──
         "load_estimate": "%d N" % round(design_load),
         "safety_factor": sf,
+        # ── 【观察点 21 修复】把工艺折减如实落盘，便于复核与覆盖 ──────────
+        "safety_factor_base": sf_base,
+        "process": ("FDM 增材制造" if _is_fdm else "未指定（按各向同性）"),
+        "anisotropy_factor": anisotropy_factor,
+        "safety_factor_note": (
+            ("FDM 各向异性折减系数 %.2f：层间强度按层内的 %.0f%% 计入，"
+             "故要求安全系数由 %.1f 提高到 %.1f。"
+             % (anisotropy_factor, anisotropy_factor * 100, sf_base, sf))
+            if _is_fdm else
+            "未识别为 FDM 打印件，按各向同性材料取安全系数 %.1f。" % sf_base),
         "material_recommend": mat,
         "scenario": "通用工业场景",
         "notes": notes,
@@ -1077,6 +1105,11 @@ def write_load_case_file(state, mechanics, work_dir=None):
                 "analysis_type": "linear_static",
                 "min_safety_factor": float(mechanics.get("safety_factor") or 2.0),
                 "target_safety_factor_max": 5.0,
+                # ── 【观察点 21 修复】FDM 各向异性折减（物理校核据此判合格）──
+                # anisotropy_factor < 1 表示"层间强度只按层内的该比例计入"，
+                #   要求的安全系数已在上游相应提高（见 estimate_mechanics）。
+                "anisotropy_factor": float(mechanics.get("anisotropy_factor") or 1.0),
+                "process": mechanics.get("process"),
                 "max_displacement_mm": None,
                 "min_wall_thickness_mm": None,
                 "max_mass_kg": None,
@@ -1889,6 +1922,47 @@ def _residue_check(auto_clean=False, force=False):
                 "has_residue": False, "alive": [], "counts": {}}
 
 
+def _image_ref_hint(task_desc, state=None):
+    """任务描述引用了图片（"如图所示"）时给出索取附件的提示（观察点 7）。
+
+    ── 为什么需要 ──────────────────────────────────────────────────────
+    实测（2026-10-03）：用户任务写「比赛路线如图所示」，但对话中并没有图片
+    附件。门禁当时**毫无提示**，主对话也没主动索取，于是设计按默认赛道进行，
+    出图后才发现与真实比赛场地不符 —— 属于"信息缺失未被暴露"造成的返工。
+
+    本函数只做**关键词探测并返回提示**，不阻断流程、不猜测内容：
+    是否真的有附件、要不要继续，由主对话向用户确认。
+
+    Args:
+        task_desc: 任务描述原文。
+        state: 可选的门禁状态（保留参数位，便于将来接入附件清单）。
+    Returns:
+        dict，含 ok / hint / keywords / advice；未命中时为 {"ok": False}。
+    """
+    _ = state  # 目前无需读状态；保留参数以兼容后续扩展
+    _t = str(task_desc or "")
+    if not _t:
+        return {"ok": False}
+    _KEYWORDS = ["如图所示", "如下图所示", "见图", "见附图", "见附件", "如下图",
+                 "参考图", "上图", "下图", "附图", "图纸见", "照片见",
+                 "see image", "see the image", "as shown", "see figure",
+                 "attached image", "refer to the image"]
+    _hit = [k for k in _KEYWORDS if k in _t]
+    if not _hit:
+        return {"ok": False}
+    return {
+        "ok": True,
+        "keywords": _hit,
+        "hint": ("任务描述引用了图片（命中：%s），但【无法从文本确认】对话里"
+                 "是否真的带了图片附件。" % "、".join(_hit[:3])),
+        "advice": ("请在发【第 0 题】之前先向用户确认并索取图片："
+                   "若用户尚未上传，明确请他补发；"
+                   "若只是口头引用而确实没有图，请让用户确认可以按默认/通用尺寸设计。"
+                   "⚠️ 不要自行假设图片内容 —— 基于臆测的赛道/结构会让后续全部设计返工。"),
+        "blocking": False,
+    }
+
+
 def cmd_init(task_desc):
     """【问题2 修复】门禁第一步只问 1 题（参数需求强度），不再一次抛 17 题。
 
@@ -2205,6 +2279,14 @@ def cmd_init(task_desc):
                 if _wd_info.get("ok") else
                 ("⚠️ 交付目录创建失败（%s），将沿用默认目录 —— "
                  "注意同名零件可能覆盖上一轮成果。" % _wd_info.get("error"))),
+            # ── 【观察点 7 修复】任务描述提到"如图"却没有图片附件时主动提示 ──
+            # 实测：用户写"比赛路线如图所示"，但对话里没有实际附件。
+            #   门禁当时毫无提示，主对话也没主动索取 → 设计基于默认赛道，
+            #   最终成果与真实比赛场地不符（发现时已出完图）。
+            # 这里只做【关键词探测 + 提示字段】，不阻断流程：
+            #   真正的判断（"确实没附件"）只有主对话/用户知道，
+            #   门禁的职责是把这件事【显式摆到台面上】。
+            "image_missing_hint": _image_ref_hint(task_desc, state),
             # ── 【Bug-02 修复】上一轮 finished 后自动开新任务（无需手动 reset）──
             "previous_task_archived": bool(_auto_new_task),
             "previous_task_snapshot": (_prev_archive if _auto_new_task else None),
@@ -2252,6 +2334,27 @@ def cmd_provide_context(context_text):
         → 判定 depth（full/lite）→ step=context_asked → 返回第二段问题
     第二段：step=context_asked，收到的是对【第二段全部问题】的回答
         → 力学估算 → step=mechanics_done → 返回 A/B/C + D/E 选项
+
+    ── 【观察点 5 修复】`context_text` 支持的【回答格式】────────────────
+    必须【原样透传】用户/主对话给出的回答原文（不要自己改写、概括或翻译），
+    因为解析依赖用户写下的数字与关键词。按题号识别，以下格式均受支持：
+
+      ✅ 逐题一行（推荐，最稳）：
+           1. 轴承支架
+           2. 你决定
+           3. 10kg
+      ✅ 自然语言分段 / 带编号的连续文本：
+           "不强：先出大致结构即可 1.轴承支架;2.你决定;3.10kg;4.静态保持;5.无"
+      ✅ Markdown 列表（`- 10kg`）或有序列表（`1. 10kg`）
+      ✅ JSON 对象（`{"3": "10kg"}`）—— 键为题号
+
+      ⚠️ 解析是"按题号/关键词"的宽松匹配，因此：
+        · Markdown 表格（`| 3 | 10kg |`）**不保证**正确解析；
+        · 多行自由文本若没有题号，可能被当成同一题的答案；
+        · 数字请与单位一起写（`10kg` / `100N`），否则会被当成无载荷信息。
+
+    载荷数值只认用户明确写出的量（`100N` / `10kg` / `0.1kN`）；
+      "冲击/动态"这类关键词**只决定动载系数**，不会放大用户给的额定值。
     """
     state = load_state()
     step = state.get("step")

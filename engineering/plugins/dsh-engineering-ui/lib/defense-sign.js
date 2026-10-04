@@ -23,10 +23,52 @@ import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import pathSync from 'node:path';
 
-/** 签名有效期（毫秒）。超过即视为过期，防重放旧签名。 */
-export const SIG_TTL_MS = 10 * 60 * 1000;
-/** nonce 缓存上限。 */
+/**
+ * 签名有效期（毫秒）。超过即视为过期，防重放旧签名。
+ *
+ * ── 【观察点 14 修复 · 阻断级】从 10 分钟放宽到 24 小时 ──────────────────
+ * 原值 `10 * 60 * 1000` 与工程模式的实际作业节奏不匹配，导致**多零件装配
+ * 必然无法完成 room-end**：
+ *   · 每个零件 `save()` 时各签发一份材料凭据，各自带独立 `_ts`；
+ *   · `room-end` 要校验【房间内全部零件】的凭据；
+ *   · 大型装配的零件分散保存（实测 9~21 件跨 18:30~18:51，跨度 21 分钟）；
+ *   · 最早签发的凭据 10 分钟后即过期 → `host_verify_credential` 返回
+ *     `{'ok': False, 'reason': 'signature expired'}` → 门禁报
+ *     "【防线①材料】xxx.sldprt: 验签失败（signature expired）"。
+ *   即：只要房间内零件数 > 1 且保存时间跨度 > 10 分钟，room-end 必然失败，
+ *   只能靠 `--force` 绕过（留痕），三道防线被架空。
+ *
+ * 新值取 24 小时：覆盖"一天内完成一个装配任务"的正常节奏，同时仍能防住
+ *   "隔天拿旧凭据重放"。可用 `DSH_DEFENSE_SIG_TTL_MS` 覆盖（毫秒）。
+ *
+ * ⚠️ 不要为了省事设成 `Infinity`：那会让重放旧凭据永久有效，防线失去意义。
+ */
+function resolveSigTtlMs() {
+  try {
+    const raw = process.env.DSH_DEFENSE_SIG_TTL_MS;
+    if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
+      const v = Number(String(raw).trim());
+      if (Number.isFinite(v) && v > 0) return v;
+    }
+  } catch (e) {
+    // 环境变量不可读 → 用默认值
+  }
+  return 24 * 60 * 60 * 1000;
+}
+export const SIG_TTL_MS = resolveSigTtlMs();
+/** nonce 缓存上限（用于 this.nonces 的过期清理阈值）。 */
 const NONCE_MAX = 4000;
+/**
+ * 已签发 nonce 台账的【硬上限】（仅防内存无界增长，不参与正确性判定）。
+ *
+ * ── 【观察点 14 修复·连带】必须显著大于"一个任务可能签发的凭据数" ──────
+ * 原实现用 NONCE_MAX(4000) 当裁剪线，且 TTL 只有 10 分钟。TTL 放宽到 24 小时
+ * 后，一天内签发量很容易超过 4000（每个零件至少 1 份材料凭据，加上物理/领域
+ * 凭据与重签），若仍按 4000 裁剪就会把【仍在有效期内】的 nonce 删掉，
+ * 使合法凭据被 verify() 判为 'nonce not issued by this host'。
+ * 故这里给一个宽松的兜底值；真正决定 nonce 是否可用的判据是【年龄】。
+ */
+const NONCE_HARD_MAX = 200000;
 /** 工程模式下的防线目录名。 */
 export const DEFENSE_DIR_NAME = '.defense';
 
@@ -69,8 +111,14 @@ export class DefenseSigner {
     this.startedAt = Date.now();
     /** nonce → 首次出现时间（防重放）。 */
     this.nonces = new Map();
-    /** 本宿主签发过的 nonce 台账：验签时核对，挡住伪造/跨语境复用。 */
-    this.signedNonces = new Set();
+    /**
+     * 本宿主签发过的 nonce 台账：验签时核对，挡住伪造/跨语境复用。
+     *
+     * ── 【观察点 14 修复·连带】类型从 Set 改为 Map(nonce → 签发时间) ──────
+     * 只存 nonce 无法按【年龄】裁剪；TTL 放宽到 24 小时后必须能区分
+     * "已过期可删" 与 "仍在有效期内必须保留"，否则合法凭据会被误判为伪造。
+     */
+    this.signedNonces = new Map();
     /** 签发台账（审计与守卫比对）。 */
     this.ledger = [];
     /** 守卫观察到的基线：路径 → sha256。 */
@@ -164,19 +212,46 @@ export class DefenseSigner {
       const mac = crypto.createHmac('sha256', this.key)
         .update(canonicalJson(payload), 'utf8').digest('base64');
       this.nonces.set(nonce, ts);
-      if (!this.signedNonces) this.signedNonces = new Set();
-      this.signedNonces.add(nonce);
-      // 台账容量控制：只保留最近 NONCE_MAX 个（凭据 TTL 仅 10 分钟，
-      //   更早的 nonce 对应的凭据早已过期，无需保留）。
-      if (this.signedNonces.size > NONCE_MAX * 2) {
-        this.signedNonces = new Set(Array.from(this.signedNonces).slice(-NONCE_MAX));
-      }
+      if (!this.signedNonces) this.signedNonces = new Map();
+      this.signedNonces.set(nonce, ts);
+      // ── 【观察点 14 修复·连带】nonce 台账改为【按年龄】裁剪 ──────────────
+      // 原实现按【条数】裁剪（> NONCE_MAX*2 就只留最近 NONCE_MAX 条），
+      //   当时的理由是"凭据 TTL 仅 10 分钟，更早的 nonce 对应凭据早已过期"。
+      //   TTL 放宽到 24 小时后该前提不再成立：若一天内签发超过 NONCE_MAX 份
+      //   凭据，早期 nonce 会被裁掉，而它对应的凭据【仍在有效期内】→
+      //   verify() 返回 'nonce not issued by this host' → 凭据被误判为伪造。
+      // 现改为：① 先按 TTL 清掉确实过期的 nonce（过期凭据本就该失败）；
+      //         ② 再保留一个【宽松的】硬上限兜底内存（NONCE_HARD_MAX），
+      //            仅防无界增长，正常装配任务远达不到。
+      this.pruneSignedNonces(ts);
       this.ledger.push({ kind: 'sign', ts, nonce, room: payload.room, run_id: payload.run_id });
       if (this.ledger.length > 4000) this.ledger = this.ledger.slice(-4000);
       return { _sig: mac, _kid: this.kid, _ts: ts, _nonce: nonce };
     } catch (e) {
       this.log('sign failed: ' + String((e && e.message) || e));
       return null;
+    }
+  }
+
+  /**
+   * 清理已过期的已签发 nonce 台账。
+   *
+   * 只要 nonce 对应的凭据可能仍在 TTL 内，就必须保留它 —— 否则 verify()
+   * 会把一份【合法且未过期】的凭据判成 'nonce not issued by this host'。
+   * @param now - 当前时间戳（毫秒）。
+   */
+  pruneSignedNonces(now) {
+    if (!this.signedNonces || this.signedNonces.size === 0) return;
+    // ① 按年龄清理（过期的凭据本来就会因 'signature expired' 被拒，无需再记）
+    for (const [n, t] of this.signedNonces) {
+      if (now - t > SIG_TTL_MS) this.signedNonces.delete(n);
+    }
+    // ② 硬上限兜底：只防无界增长，不参与正确性判定
+    if (this.signedNonces.size > NONCE_HARD_MAX) {
+      const keep = Array.from(this.signedNonces.entries())
+        .sort((a, b) => a[1] - b[1])
+        .slice(-NONCE_HARD_MAX);
+      this.signedNonces = new Map(keep);
     }
   }
 

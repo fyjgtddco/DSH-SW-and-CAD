@@ -1,0 +1,9 @@
+{
+  "design_params": {
+    "wall_thickness_mm": 2.0,
+    "thickness_mm": 2.0,
+    "rib_height_mm": 8.0
+  },
+  "source": "人工提供",
+  "room": "壳体机架"
+}

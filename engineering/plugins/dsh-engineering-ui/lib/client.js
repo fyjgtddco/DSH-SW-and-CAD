@@ -1,3 +1,31 @@
+// Repair incomplete conversation preferences before the host restores its draft.
+(function repairMissingConversationDrafts() {
+  try {
+    var repairs = [];
+    Object.keys(localStorage).forEach(function (key) {
+      if (key.indexOf('dsh.conversation.') !== 0) return;
+      var raw = localStorage.getItem(key);
+      var state;
+      try { state = JSON.parse(raw); } catch (e) { return; }
+      if (!state || typeof state !== 'object' || Array.isArray(state) ||
+          Object.prototype.hasOwnProperty.call(state, 'draft')) return;
+      repairs.push({ key: key, raw: raw, state: state });
+    });
+    if (!repairs.length) return;
+    var backupKey = 'dsh-engineering-ui/recovery-before-draft-fix/20261004';
+    if (localStorage.getItem(backupKey) === null) {
+      localStorage.setItem(backupKey, JSON.stringify(repairs.map(function (entry) {
+        return { key: entry.key, raw: entry.raw };
+      })));
+    }
+    repairs.forEach(function (entry) {
+      entry.state.draft = '';
+      if (!Object.prototype.hasOwnProperty.call(entry.state, 'viewRequest')) entry.state.viewRequest = null;
+      localStorage.setItem(entry.key, JSON.stringify(entry.state));
+    });
+  } catch (e) { console.warn('[dsh-engineering-ui] conversation draft recovery', e); }
+})();
+
 // FINAL_UI_FIX_1789137672695
 // dsh-engineering-ui — Client 半
 // ==========================================================================
@@ -41,6 +69,26 @@ window.__ModuleLoader__.load({
           var t = texts.join('\n').trim();
           if (t) out.push({ kind: 'message', text: t.slice(0, 4000), seq: ev.seq });
           return out;
+        }
+        case 'user/message': {
+          // ── 【独立聊天页】用户气泡 ──────────────────────────────────────
+          // 原实现没有这个分支，因此右侧面板只显示助手侧内容。
+          // 纯聊天面必须成对显示「用户问 / 助手答」，故补上。
+          // 事件形状：'user/message' 的 data 就是一个 UserMessage
+          //   （dsh-session/src/types.ts:309），正文在 data.message.content[]
+          //   —— 与 assistant/message 同构，故解析方式一致。
+          // 兼容两种落地：整体就是 message，或 data.message 是 message。
+          var um = (d.message && Array.isArray(d.message.content)) ? d.message : d;
+          var uc = Array.isArray(um && um.content) ? um.content : [];
+          var utexts = [];
+          for (var ui = 0; ui < uc.length; ui++) {
+            var ub = uc[ui];
+            if (ub && typeof ub === 'object' && ub.type === 'text' && typeof ub.text === 'string') {
+              utexts.push(ub.text);
+            }
+          }
+          var ut = utexts.join('\n').trim();
+          return ut ? [{ kind: 'user-message', text: ut.slice(0, 4000), seq: ev.seq }] : [];
         }
         case 'tool/call': {
           var rawArgs = d.arguments !== undefined ? d.arguments : d.args;
@@ -106,6 +154,13 @@ window.__ModuleLoader__.load({
       //   max-width: 30vw —— 硬上限，绝不无限撑开
       ':root{' +
         '--eng-sb:280px;' +                                // 最左侧导航栏（宿主自带）
+        // ── 【滚动区】设置页可用高度（与宿主设置面板同一公式）──────────
+        // 宿主设置面板（SettingsRoot）的高度就是：
+        //   min(800px, calc(100vh - 2 * max(24px, var(--dsh-frame-overlay-top,24px))))
+        // 这里复用同一表达式，让本插件的滚动区【刚好装进】宿主面板，
+        // 从而只出现【一条】滚动条（宿主的 .options 不会再有内容可滚）。
+        // --dsh-frame-overlay-top 由宿主在 html 上按平台注入；缺失时回落 24px。
+        '--eng-opts-h:min(800px, calc(100vh - 2 * max(24px, var(--dsh-frame-overlay-top, 24px))));' +
         // 展开宽度严格落在 350~450px（用户要求），不再随视口缩到 300
         // 【布局 v9 · 3:1 比例】主区 75% / 面板 25%（按用户要求）
         // 面板宽度 = (视口 - 左导航) × 25%，运行时由 JS 精确写入；
@@ -375,25 +430,70 @@ window.__ModuleLoader__.load({
       '.eng-settings-ico{font-size:20px;line-height:1}',
       '.eng-settings-title{font-size:15px;font-weight:600}',
       '.eng-settings-sub{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:12px;margin-top:2px}',
-      '.eng-settings-body{background:var(--dsw-alias-bg-layer-2,#f6f7f9);border:1px solid var(--dsw-alias-border-l1,#e5e7eb);border-radius:10px;padding:12px;text-align:left}',
-      // ── 【问题4】三层设置结构 ──────────────────────────────────────
-      '.eng-set-layer{border:1px solid var(--dsw-alias-border-l1,#e5e7eb);border-radius:9px;margin:0 0 10px;overflow:hidden;background:var(--dsw-alias-bg-layer-1,#fff)}',
-      '.eng-set-layer:last-child{margin-bottom:0}',
-      '.eng-set-layer-hd{align-items:center;background:transparent;border:0;color:inherit;cursor:pointer;display:flex;font:inherit;gap:9px;padding:11px 12px;text-align:left;width:100%}',
-      '.eng-set-layer-hd:hover{background:var(--dsw-alias-bg-layer-3,#eef1f5)}',
-      '.eng-set-layer-no{align-items:center;background:var(--dsw-alias-button-primary-fill,#2563eb);border-radius:50%;color:#fff;display:inline-flex;flex:none;font-size:11px;font-weight:700;height:19px;justify-content:center;width:19px}',
-      '.eng-set-layer-t{font-size:13px;font-weight:600;flex:none}',
-      '.eng-set-layer-d{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-      '.eng-set-layer-caret{color:var(--dsw-alias-label-tertiary,#8b95a3);flex:none;font-size:11px}',
-      '.eng-set-layer-bd{border-top:1px solid var(--dsw-alias-border-l1,#e5e7eb);padding:12px}',
+      // ── 【滚动区】设置正文自成滚动容器（用户要求：能上下滑的滑块）──────
+      // 背景：宿主设置面板的 .options 本身就有 overflow-y:auto，但内容不足时
+      //   不会出现滑块（实测本分区约 690px < 可用约 720px），用户看不到滚动条。
+      //   随设置项增多虽会自动出现，但用户明确要求"现在就调出来"。
+      // 做法：给正文加【有上限的】滚动区。上限由 --eng-opts-h（= 宿主面板高度）
+      //   减去本分区非正文部分的占用（宿主 header 54 + options 下内边距 24 +
+      //   本区块标题区约 54 + 底部按钮区约 43 + 本区块内边距 8 ≈ 183，取 200
+      //   留出余量）。余量取偏大值是刻意的：宁可正文区略矮，也不要让宿主
+      //   .options 再溢出 —— 那会变成两条滚动条。
+      // 滚动条外观不用自己画：宿主 ui-theme 的 scrollbar.css 用的是
+      //   【无作用域】::-webkit-scrollbar 规则，任何滚动元素都自动套用；
+      //   且面板已把 --dsh-scrollbar-thumb 重绑到本层级色板（深浅色自适应）。
+      '.eng-settings-body{background:var(--dsw-alias-bg-layer-2,#f6f7f9);border:1px solid var(--dsw-alias-border-l1,#e5e7eb);border-radius:10px;padding:14px;text-align:left;' +
+        'max-height:max(180px, calc(var(--eng-opts-h, 800px) - 200px));' +
+        'overflow-y:auto;' +
+      '}',
+      // ── 【版式 v2】主栏目 + 子项卡片（用户指定版式）──────────────────
+      // 结构：主栏目大标题 → 卡片容器 → 若干子项行（左标题 + 右箭头 ›）
+      '.eng-grp{margin:0 0 18px}',
+      '.eng-grp:last-child{margin-bottom:0}',
+      '.eng-grp-title{color:var(--dsw-alias-label-primary,#1f2328);font-size:17px;font-weight:700;letter-spacing:.01em;margin:0 0 9px;padding:0 2px}',
+      '.eng-grp-card{background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l1,#e5e7eb);border-radius:10px;overflow:hidden}',
+      // 子项行：整行可点区域 + 行间细分隔线（首行无线）
+      '.eng-row{align-items:center;box-sizing:border-box;display:flex;gap:10px;min-height:46px;padding:10px 14px;transition:background .12s ease}',
+      '.eng-row+.eng-row{border-top:1px solid var(--dsw-alias-border-l1,#f0f2f5)}',
+      '.eng-row.clickable{cursor:pointer}',
+      '.eng-row.clickable:hover{background:var(--dsw-alias-bg-layer-3,#f7f8fa)}',
+      '.eng-row:focus-visible{background:var(--dsw-alias-bg-layer-3,#f7f8fa);outline:2px solid var(--dsw-alias-button-primary-fill,#2563eb);outline-offset:-2px}',
+      '.eng-row-txt{flex:1;min-width:0}',
+      '.eng-row-label{color:var(--dsw-alias-label-primary,#1f2328);font-size:13.5px;line-height:1.5;overflow-wrap:break-word}',
+      '.eng-row-hint{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;line-height:1.65;margin-top:3px}',
+      // 右箭头：灰色、不换行、不参与拉伸
+      '.eng-row-chev{color:#c0c4cc;flex:none;font-size:16px;line-height:1;transform:translateY(-1px)}',
+      // ── 【连接区】状态徽标 + 连接按钮（当前仅 UI，真实连接后续接入）──────
+      '.eng-chip{align-items:center;border-radius:999px;display:inline-flex;flex:none;font-size:11px;font-weight:600;gap:5px;padding:2px 9px;white-space:nowrap}',
+      '.eng-chip-dot{border-radius:50%;flex:none;height:6px;width:6px}',
+      '.eng-chip.on{background:rgba(22,163,74,.12);color:#15803d}',
+      '.eng-chip.on .eng-chip-dot{background:#16a34a}',
+      '.eng-chip.off{background:rgba(148,163,184,.16);color:#64748b}',
+      '.eng-chip.off .eng-chip-dot{background:#94a3b8}',
+      '.eng-chip.idle{background:rgba(148,163,184,.12);color:#8b95a3}',
+      '.eng-chip.idle .eng-chip-dot{background:#cbd5e1}',
+      '.eng-conn-btn{background:var(--dsw-alias-button-primary-fill,#2563eb);border:0;border-radius:7px;color:#fff;cursor:pointer;flex:none;font-size:11.5px;font-weight:600;padding:5px 14px;transition:opacity .15s ease}',
+      '.eng-conn-btn:hover{opacity:.88}',
+      '.eng-conn-btn:active{opacity:.76}',
+      '.eng-conn-btn:disabled{opacity:.5;cursor:default}',
+      // 【启动按钮】次级样式，与「连接」区分但同排
+      '.eng-conn-btn.alt{background:var(--dsw-alias-button-secondary-fill,#475569);margin-left:6px}',
+      '.eng-conn-btn.tiny{font-size:10.5px;padding:3px 9px;border-radius:6px}',
+      // 连接行容器：按钮并排 + 日志区在下方
+      '.eng-conn-block{display:flex;flex-direction:column;gap:6px}',
+      '.eng-conn-block .eng-row.conn{align-items:center;display:flex;gap:8px}',
+      '.eng-conn-log{background:rgba(15,23,42,.04);border-radius:8px;padding:6px 8px}',
+      '.eng-conn-log-hd{align-items:center;display:flex;gap:8px;justify-content:space-between}',
+      '.eng-conn-log-tg{cursor:pointer;font-size:11.5px;font-weight:600}',
+      '.eng-conn-log-sent{color:#b91c1c;font-size:11px;margin-top:4px}',
+      '.eng-conn-log-pre{background:rgba(15,23,42,.06);border-radius:6px;font-family:ui-monospace,Consolas,monospace;font-size:10.5px;line-height:1.5;margin:6px 0 0;max-height:190px;overflow:auto;padding:7px 9px;white-space:pre-wrap;word-break:break-word}',
+      // 开关行（行内只放开关本体，标签由 .eng-row 提供）
+      '.eng-row.sw{align-items:center}',
+      '.eng-row.sw .eng-sw{flex:none}',
+      // 兼容旧类的样式（.eng-set-note 等仍被新版提示文案复用）
       '.eng-set-note{font-size:12px;line-height:1.75;margin:0 0 10px}',
       '.eng-set-note.dim{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;margin:10px 0 0}',
-      '.eng-set-kv{align-items:center;display:flex;gap:8px;margin:0 0 4px}',
-      '.eng-set-k{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:12px}',
-      '.eng-set-v{background:var(--dsw-alias-bg-layer-3,#eef1f5);border-radius:5px;font-size:12px;font-weight:600;padding:2px 8px}',
-      '.eng-set-v.on{background:rgba(37,99,235,.12);color:var(--dsw-alias-button-primary-fill,#2563eb)}',
-      '.eng-set-list{font-size:12px;line-height:1.9;margin:0;padding-left:18px}',
-      // 开关行
+      // 开关
       '.eng-sw-row{align-items:center;display:flex;gap:12px;justify-content:space-between}',
       '.eng-sw-txt{flex:1;min-width:0}',
       '.eng-sw-label{font-size:13px;font-weight:600}',
@@ -600,6 +700,299 @@ window.__ModuleLoader__.load({
         'max-width:100%;box-sizing:border-box;overflow-wrap:break-word;word-break:break-word' +
       '}' +
 
+      // ══ 【独立聊天页】纯聊天面样式 ══════════════════════════════════════
+      // 设计原则（对齐官方观感，见 packages/client/AGENTS.md 的样式规则）：
+      //   · 只用 --dsw-alias-* 语义 token，不写死颜色 → 自动跟随亮/暗主题；
+      //   · 内容宽度复用官方变量 --dsh-chat-content-width，让气泡与官方
+      //     对话区同宽对齐，切换视图时不会"跳宽度"；
+      //   · 不覆盖任何官方类名：本视图自带 eng-chat-* 前缀，零外溢。
+      '.eng-chat{' +
+        'box-sizing:border-box;display:flex;flex-direction:column;' +
+        'gap:10px;height:100%;min-height:0;overflow-y:auto;' +
+        'padding:18px calc(var(--dsh-composer-side-clearance, 24px) + 16px) 8px;' +
+        'scroll-behavior:smooth' +
+      '}' +
+      // 气泡行：用户靠右、助手靠左（网页端聊天的基本观感）
+      '.eng-chat-row{display:flex;width:100%;max-width:var(--dsh-chat-content-width,760px);margin:0 auto}' +
+      '.eng-chat-row.me{justify-content:flex-end}' +
+      '.eng-chat-row.bot{justify-content:flex-start}' +
+      '.eng-chat-bubble{' +
+        'border-radius:12px;box-sizing:border-box;font-size:14px;' +
+        'line-height:calc(24px + var(--dsh-content-font-delta, 0px));' +
+        'max-width:80%;overflow-wrap:anywhere;padding:9px 13px;white-space:pre-wrap;' +
+        'word-break:break-word' +
+      '}' +
+      '.eng-chat-row.me .eng-chat-bubble{' +
+        'background:var(--dsw-alias-state-business-tertiary, #eef2ff);' +
+        'color:var(--dsw-alias-label-primary)' +
+      '}' +
+      '.eng-chat-row.bot .eng-chat-bubble{' +
+        'background:var(--dsw-alias-bg-layer-2, #f8fafc);' +
+        'border:1px solid var(--dsw-alias-border-l2, #e2e8f0);' +
+        'color:var(--dsw-alias-label-primary)' +
+      '}' +
+      '.eng-chat-typing{' +
+        'color:var(--dsw-alias-label-tertiary, #8b95a3);font-size:13px;' +
+        'margin:2px auto;max-width:var(--dsh-chat-content-width,760px);width:100%' +
+      '}' +
+      '.eng-chat-err{' +
+        'background:var(--dsw-alias-state-error-tertiary, #fef2f2);border-radius:10px;' +
+        'color:var(--dsw-alias-state-error-primary, #991b1b);font-size:13px;' +
+        'margin:8px auto;max-width:var(--dsh-chat-content-width,760px);padding:10px 12px;width:100%' +
+      '}' +
+      // ── 推荐追问（对照用户图二：助手消息下方一列「↳ 问题」）──────────
+      '.eng-chat-sug{' +
+        'display:flex;flex-direction:column;gap:2px;' +
+        'margin:2px auto 4px;max-width:var(--dsh-chat-content-width,760px);width:100%' +
+      '}' +
+      '.eng-chat-sug-item{' +
+        'align-items:center;background:transparent;border:0;border-radius:8px;' +
+        'color:var(--dsw-alias-label-secondary, #475569);cursor:pointer;' +
+        'display:flex;font-family:inherit;font-size:13.5px;gap:9px;' +
+        'padding:8px 10px;text-align:left;width:100%' +
+      '}' +
+      '.eng-chat-sug-item:hover{' +
+        'background:var(--dsw-alias-interactive-bg-hover, rgba(15,23,42,.05));' +
+        'color:var(--dsw-alias-label-primary)' +
+      '}' +
+      '.eng-chat-sug-ico{color:var(--dsw-alias-label-tertiary,#94a3b8);flex:none}' +
+      '.eng-chat-sug-more{' +
+        'align-self:flex-start;background:transparent;border:0;border-radius:7px;' +
+        'color:var(--dsw-alias-label-tertiary,#8b95a3);cursor:pointer;' +
+        'font-family:inherit;font-size:12px;margin-left:27px;padding:4px 8px' +
+      '}' +
+      '.eng-chat-sug-more:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.05))}' +
+      // 说明：起步建议（eng-chat-starter）的样式统一在下方
+      //   【视图切换器 + 起步建议】区块里定义，此处不再重复。',
+
+      // ══ 【视图切换器 + 起步建议】布局 ══════════════════════════════════
+      // 两个落点（对应用户给的截图里的红框 / 蓝框）：
+      //   · 红框 = 输入框【上方】 → conversation.input.dock
+      //   · 蓝框 = 输入框【下方】 → 起步建议卡片
+      //
+      // 官方插槽会被 ui-renderer 包成 <div data-slot="<key>"
+      //   style="display:contents">（ui-renderer/src/client/scoped-slots.tsx
+      //   :1081-1091）。display:contents 让这层壳不占布局，因此我可以直接用
+      //   [data-slot=...] 选择器给【我的内容】定位，而不会影响官方其它住户。
+      //   ⚠️ 只针对我自己的 .eng-vs / .eng-chat-starter 设置样式，
+      //      绝不给插槽壳或官方元素写样式（避免污染官方布局）。
+      //
+      // 切换器：居中、胶囊形、两段（对照用户图一的 segmented control）。
+      '.eng-vs{' +
+        'align-items:center;background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.06));' +
+        'border-radius:999px;box-sizing:border-box;display:flex;gap:2px;' +
+        'margin:0 auto 2px;padding:3px;width:fit-content' +
+      '}' +
+      '.eng-vs-item{' +
+        'background:transparent;border:0;border-radius:999px;color:var(--dsw-alias-label-secondary,#475569);' +
+        'cursor:pointer;font-family:inherit;font-size:13px;font-weight:500;' +
+        'line-height:1;padding:7px 18px;transition:background .15s,color .15s' +
+      '}' +
+      '.eng-vs-item:hover{color:var(--dsw-alias-label-primary)}' +
+      '.eng-vs-item.on{' +
+        'background:var(--dsw-alias-bg-layer-1,#fff);' +
+        'box-shadow:0 1px 3px rgba(15,23,42,.12);' +
+        'color:var(--dsw-alias-label-primary)' +
+      '}' +
+      '.eng-vs-item.busy{opacity:.6;cursor:default}' +
+      // 切换失败提示：不静默失败，用户必须看得见原因
+      '.eng-vs-err{' +
+        'color:var(--dsw-alias-state-error-primary,#b91c1c);font-size:12px;' +
+        'line-height:1.6;margin:2px auto 0;max-width:var(--dsh-composer-card-max-width,760px);' +
+        'padding:0 4px;width:100%' +
+      '}' +
+      // 起步建议卡片：位于输入框【下方】，宽度与输入卡对齐
+      //   （复用官方变量 --dsh-composer-card-max-width，让它与输入框同宽）。
+      '.eng-chat-starter{' +
+        'box-sizing:border-box;display:flex;flex-direction:column;gap:6px;' +
+        'margin:10px auto 0;max-width:var(--dsh-composer-card-max-width,760px);' +
+        'padding:0 var(--dsh-composer-side-clearance,0);width:100%' +
+      '}' +
+      '.eng-chat-starter-list{display:flex;flex-direction:column;gap:5px}' +
+      '.eng-chat-starter-item{' +
+        'align-items:center;background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.03));' +
+        'border:1px solid var(--dsw-alias-border-l2,transparent);border-radius:10px;' +
+        'color:var(--dsw-alias-label-secondary,#334155);cursor:pointer;' +
+        'display:flex;font-family:inherit;font-size:13.5px;gap:9px;' +
+        'padding:10px 13px;text-align:left;width:100%' +
+      '}' +
+      '.eng-chat-starter-item:hover{' +
+        'border-color:var(--dsw-alias-state-business-primary,#2563eb);' +
+        'color:var(--dsw-alias-label-primary)' +
+      '}' +
+      '.eng-chat-starter-ico{flex:none;font-size:14px}' +
+      // ── 推荐追问（图二）：一轮结束后显示，点一下填进输入框 ──────────────
+      // 视觉对齐截图：左侧「↳」箭头 + 灰字，整行可点，无边框。
+      '.eng-sugg{' +
+        'display:flex;flex-direction:column;gap:1px;' +
+        'margin:2px auto 4px;max-width:var(--dsh-composer-card-max-width,760px);' +
+        'padding:0 var(--dsh-composer-side-clearance,0);width:100%' +
+      '}' +
+      '.eng-sugg-item{' +
+        'align-items:center;background:transparent;border:0;border-radius:8px;' +
+        'color:var(--dsw-alias-label-secondary,#475569);cursor:pointer;' +
+        'display:flex;font-family:inherit;font-size:13.5px;gap:9px;' +
+        'padding:8px 10px;text-align:left;width:100%' +
+      '}' +
+      '.eng-sugg-item:hover{' +
+        'background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.05));' +
+        'color:var(--dsw-alias-label-primary)' +
+      '}' +
+      '.eng-sugg-ico{color:var(--dsw-alias-label-tertiary,#94a3b8);flex:none}' +
+      // 深色模式下的切换器底色
+      '@media(prefers-color-scheme:dark){' +
+        '.eng-vs{background:rgba(255,255,255,.08)}' +
+        '.eng-vs-item.on{background:rgba(255,255,255,.16);box-shadow:none}' +
+      '}',
+
+      // ── 【关键】把切换器排到输入框上方、起步建议排到下方 ──────────────
+      // 官方结构：.composerStack 里依次是 [HeroShell] [workspaceRow]
+      //   [data-slot="conversation.input.dock"] [data-slot="…composer.bar"]。
+      //
+      // ⚠️ 选择器必须用【后代】而非 `>` 直接子级：
+      //   我的元素在 DOM 上嵌套了两层 display:contents 包装
+      //   （slot 壳 + .eng-dock-host），`>` 按 DOM 树匹配、会落空；
+      //   而后代选择器搭配 order 是安全的 —— order 只对 flex 子项生效，
+      //   非 flex 子项会忽略它，不会误伤官方其它元素。
+      //     .eng-vs            → order 0（输入框上方 = 用户红框）
+      //     [data-slot="…composer.bar"] → order 2（输入框本体，DOM 直接子级）
+      //     .eng-chat-starter  → order 3（输入框下方 = 用户蓝框）
+      // :has() 限定「只有本插件在场时才重排」，插件不出现时官方顺序完全不变。
+      '.composerStack:has(.eng-dock-host){display:flex;flex-direction:column}' +
+      '.composerStack .eng-vs{order:0}' +
+      '.composerStack .eng-vs-err{order:1}' +
+      '.composerStack > [data-slot="conversation.composer.bar"]{order:2}' +
+      '.composerStack .eng-sugg{order:3}' +
+      '.composerStack .eng-chat-starter{order:4}',
+
+      // ══ 【划词详情】浮层按钮 + 右下角分析面板 ══════════════════════════
+      // 全部使用 eng-sel-* / eng-side-* 前缀，不触碰任何官方类名。
+      // 只用 --dsw-alias-* 语义 token → 自动跟随亮/暗主题。
+      '.eng-sel-btn{' +
+        'background:var(--dsw-alias-bg-layer-1,#fff);' +
+        'border:1px solid var(--dsw-alias-border-l2,#d0d5dd);border-radius:8px;' +
+        'box-shadow:0 4px 14px rgba(15,23,42,.16);color:var(--dsw-alias-label-primary,#111827);' +
+        'cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:600;' +
+        'padding:6px 12px;position:fixed;z-index:60;white-space:nowrap' +
+      '}' +
+      '.eng-sel-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.06))}' +
+      // 面板（图三）：右下角固定。宽高由【用户拖拽】决定（.eng-side 上以
+      //   内联 style 写入），因此这里只给最大约束，不再写死宽度。
+      '.eng-side{' +
+        'background:var(--dsw-alias-bg-layer-1,#fff);' +
+        'border:1px solid var(--dsw-alias-border-l2,#d0d5dd);border-radius:14px;' +
+        'bottom:18px;box-shadow:0 10px 34px rgba(15,23,42,.20);' +
+        'box-sizing:border-box;color:var(--dsw-alias-label-primary,#111827);' +
+        'display:flex;flex-direction:column;font-size:13px;' +
+        'max-height:calc(100vh - 36px);max-width:calc(100vw - 36px);' +
+        'position:fixed;right:18px;z-index:55;overflow:hidden' +
+      '}' +
+      // 左上角拖拽手柄（用户要求能自由放大放小）
+      '.eng-side-grip{' +
+        'align-items:center;color:var(--dsw-alias-label-tertiary,#94a3b8);' +
+        'cursor:nwse-resize;display:flex;font-size:13px;height:22px;' +
+        'justify-content:center;left:0;position:absolute;top:0;' +
+        'touch-action:none;user-select:none;width:22px;z-index:2' +
+      '}' +
+      '.eng-side-grip:hover{color:var(--dsw-alias-state-business-primary,#2563eb)}' +
+      '.eng-side-hd{' +
+        'align-items:center;background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.03));' +
+        'border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
+        'display:flex;flex:none;gap:7px;padding:9px 10px' +
+      '}' +
+      '.eng-side-ico{flex:none;font-size:14px}' +
+      '.eng-side-title{flex:1;font-size:13px;font-weight:700;min-width:0}' +
+      '.eng-side-badge{' +
+        'background:var(--dsw-alias-state-business-tertiary,#eef2ff);border-radius:6px;' +
+        'color:var(--dsw-alias-label-primary-bluish,#3730a3);flex:none;' +
+        'font-size:10.5px;font-weight:700;padding:2px 7px' +
+      '}' +
+      '.eng-side-x{' +
+        'background:transparent;border:0;border-radius:6px;color:var(--dsw-alias-label-tertiary,#6b7280);' +
+        'cursor:pointer;flex:none;font-size:16px;line-height:1;padding:2px 6px' +
+      '}' +
+      '.eng-side-x:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.06))}' +
+      // 选中原文摘要：最多两行，超过省略
+      '.eng-side-src{' +
+        'background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.03));' +
+        'border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
+        'color:var(--dsw-alias-label-tertiary,#6b7280);' +
+        'display:-webkit-box;flex:none;font-size:11.5px;line-height:1.5;' +
+        'overflow:hidden;padding:7px 11px;-webkit-box-orient:vertical;-webkit-line-clamp:2' +
+      '}' +
+      '.eng-side-list{display:flex;flex:1 1 auto;flex-direction:column;gap:8px;' +
+        'min-height:80px;overflow-y:auto;padding:10px 11px}' +
+      '.eng-side-row{display:flex;flex-direction:column;gap:3px;max-width:100%}' +
+      '.eng-side-row.me{align-items:flex-end}' +
+      '.eng-side-row.bot{align-items:flex-start}' +
+      '.eng-side-bubble{' +
+        'border-radius:10px;font-size:12.5px;line-height:1.7;max-width:92%;' +
+        'overflow-wrap:anywhere;padding:8px 11px;white-space:pre-wrap;word-break:break-word' +
+      '}' +
+      '.eng-side-row.me .eng-side-bubble{' +
+        'background:var(--dsw-alias-state-business-tertiary,#eef2ff);' +
+        'color:var(--dsw-alias-label-primary,#1e293b)' +
+      '}' +
+      '.eng-side-row.bot .eng-side-bubble{' +
+        'background:var(--dsw-alias-bg-layer-2,#f8fafc);' +
+        'border:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
+        'color:var(--dsw-alias-label-primary,#1e293b)' +
+      '}' +
+      '.eng-side-acts{display:flex;gap:6px;padding-left:2px}' +
+      '.eng-side-act{' +
+        'background:transparent;border:1px solid var(--dsw-alias-border-l2,#d0d5dd);' +
+        'border-radius:6px;color:var(--dsw-alias-label-secondary,#475569);' +
+        'cursor:pointer;font-family:inherit;font-size:11px;padding:3px 9px' +
+      '}' +
+      '.eng-side-act:hover{' +
+        'border-color:var(--dsw-alias-state-business-primary,#2563eb);' +
+        'color:var(--dsw-alias-state-business-primary,#2563eb)' +
+      '}' +
+      '.eng-side-note{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:12px;padding:10px 2px;text-align:center}' +
+      '.eng-side-err{' +
+        'background:var(--dsw-alias-state-error-tertiary,#fef2f2);border-radius:8px;' +
+        'color:var(--dsw-alias-state-error-primary,#b91c1c);font-size:11.5px;' +
+        'line-height:1.6;overflow-wrap:anywhere;padding:7px 9px' +
+      '}' +
+      '.eng-side-ft{' +
+        'align-items:center;border-top:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
+        'display:flex;flex:none;gap:7px;padding:8px 10px' +
+      '}' +
+      '.eng-side-in{' +
+        'background:transparent;border:0;color:var(--dsw-alias-label-primary,#111827);' +
+        'flex:1;font-family:inherit;font-size:12.5px;min-width:0;outline:none;padding:5px 2px' +
+      '}' +
+      '.eng-side-send{' +
+        'background:var(--dsw-alias-state-business-primary,#2563eb);border:0;border-radius:50%;' +
+        'color:#fff;cursor:pointer;flex:none;font-size:14px;height:28px;line-height:1;' +
+        'padding:0;width:28px' +
+      '}' +
+      '.eng-side-send:disabled{background:var(--dsw-alias-border-l2,#cbd5e1);cursor:default}',
+
+      // ══ 【工程人设】设置页填空 ══════════════════════════════════════════
+      '.eng-persona{display:flex;flex-direction:column;gap:8px;padding:10px 2px 2px}' +
+      '.eng-persona-in{' +
+        'background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.03));' +
+        'border:1px solid var(--dsw-alias-border-l2,#d0d5dd);border-radius:10px;' +
+        'box-sizing:border-box;color:var(--dsw-alias-label-primary,#111827);' +
+        'font-family:inherit;font-size:12.5px;line-height:1.7;' +
+        'min-height:120px;outline:none;padding:9px 11px;resize:vertical;width:100%' +
+      '}' +
+      '.eng-persona-in:focus{border-color:var(--dsw-alias-state-business-primary,#2563eb)}' +
+      '.eng-persona-ft{align-items:center;display:flex;gap:10px;justify-content:space-between}' +
+      '.eng-persona-state{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;min-width:0}' +
+      '.eng-persona-save{' +
+        'background:var(--dsw-alias-state-business-primary,#2563eb);border:0;border-radius:7px;' +
+        'color:#fff;cursor:pointer;flex:none;font-family:inherit;font-size:12px;' +
+        'font-weight:600;padding:6px 16px' +
+      '}' +
+      '.eng-persona-save:disabled{' +
+        'background:var(--dsw-alias-border-l2,#cbd5e1);cursor:default' +
+      '}' +
+      '@media(prefers-color-scheme:dark){' +
+        '.eng-persona-in{background:#22262e;border-color:#3a4048;color:#e5e7eb}' +
+      '}',
+
       '@media(prefers-color-scheme:dark){' +
         '.eng-mask{background:rgba(0,0,0,.45)}' +
         '.eng-console{background:#16181d;border-left-color:#33383f;color:#e5e7eb}' +
@@ -633,11 +1026,19 @@ window.__ModuleLoader__.load({
         '.eng-fold{color:#64748b}' +
         '.eng-settings{color:#e5e7eb}' +
         '.eng-settings-body{background:#1c1f26;border-color:#33383f}' +
-        '.eng-set-layer{background:#22252c;border-color:#33383f}' +
-        '.eng-set-layer-hd:hover{background:#2a2e37}' +
-        '.eng-set-layer-bd{border-top-color:#33383f}' +
-        '.eng-set-v{background:#2a2e37}' +
-        '.eng-set-v.on{background:rgba(37,99,235,.22)}' +
+        // ── 【版式 v2】主栏目 + 子项行（深色）──
+        '.eng-grp-title{color:#e5e7eb}' +
+        '.eng-grp-card{background:#22252c;border-color:#33383f}' +
+        '.eng-row+.eng-row{border-top-color:#2f333c}' +
+        '.eng-row.clickable:hover,.eng-row:focus-visible{background:#2a2e37}' +
+        '.eng-row-label{color:#e5e7eb}' +
+        '.eng-row-hint{color:#8b95a3}' +
+        '.eng-row-chev{color:#5b6270}' +
+        // 连接区徽标（深色）
+        '.eng-chip.on{background:rgba(22,163,74,.22);color:#4ade80}' +
+        '.eng-chip.off{background:rgba(148,163,184,.18);color:#94a3b8}' +
+        '.eng-chip.idle{background:rgba(148,163,184,.12);color:#8b95a3}' +
+        '.eng-set-note.dim{color:#8b95a3}' +
         '.eng-sw{background:#3a3f4a}' +
         '.eng-settings-empty-d,.eng-settings-sub{color:#8b95a3}' +
       '}',
@@ -2092,60 +2493,346 @@ window.__ModuleLoader__.load({
       return h(SubagentConsole, Object.assign({}, props, { engEmbedded: true }));
     }
 
-    // ══ 【问题4】设置页「工程模式」分区：三层结构 ═════════════════════════
+    // ══ 设置页「工程模式」分区：主栏目 + 子项行 ═══════════════════════════
     //
     // 契约来源：@deepseek-ai/dsh-client-ui-settings 的 slots 声明
     //   'settings.section': { kind: 'list', scope: 'root',
     //                          owner: SettingsSectionOwnerProps }
     //   SettingsSectionOwnerProps = { close: () => void }
     //
-    // 用户要求把设置分为【三层】，并把"是否使用工程模式自带的子代理显示页"
-    //   放在【第三层】。这里按信息层级组织：
-    //     第一层 · 概览        —— 这个分区是干什么的、当前生效状态
-    //     第二层 · 工作流与门禁 —— 门禁/防线相关（只读展示，指向命令行）
-    //     第三层 · 界面与显示   —— 界面行为开关（本开关在此）
-    //   每层是一个可折叠小节，层级清晰且不喧宾夺主。
-    function EngSettingsLayer(props) {
-      var openSt = useState(props.defaultOpen !== false);
-      var open = openSt[0];
-      return h('div', { className: 'eng-set-layer' + (open ? ' open' : '') },
-        h('button', {
-          className: 'eng-set-layer-hd',
-          type: 'button',
-          'aria-expanded': open ? 'true' : 'false',
-          onClick: function () { openSt[1](!open); }
-        },
-          h('span', { className: 'eng-set-layer-no' }, props.no),
-          h('span', { className: 'eng-set-layer-t' }, props.title),
-          h('span', { className: 'eng-set-layer-d' }, props.desc || ''),
-          h('span', { className: 'eng-set-layer-caret' }, open ? '▾' : '▸')),
-        open ? h('div', { className: 'eng-set-layer-bd' }, props.children) : null
-      );
+    // ── 【版式 v2 · 用户指定】────────────────────────────────────────────
+    // 版式（对照用户给的示意图）：
+    //   · 主栏目 = 大标题 + 一张圆角卡片；
+    //   · 卡片内每个子项 = 一行「左侧名称 + 右侧箭头 ›」，行间一条细分隔线；
+    //   · 三个主栏目依次为：主栏目1 / 主栏目2 / 美化工程模式。
+    //
+    // 硬性约束（用户明确要求）：
+    //   · 「使用工程模式自带的子代理显示页」开关【必须保留】，且行为与
+    //     持久化逻辑【完全不变】（仍写 localStorage 的 useOwnSubagentPane）；
+    //   · 它固定放在【美化工程模式】的【第 1 行】。
+    //
+    // 其余行暂用示意图里的占位文案「子栏目选项设置N」，后续按需替换 ——
+    //   占位行只渲染视觉，不带点击行为（不可点，避免"点了没反应"的错觉）。
+    /** 一个主栏目：大标题 + 卡片容器。 */
+    function EngGroup(props) {
+      return h('div', { className: 'eng-grp' },
+        h('div', { className: 'eng-grp-title' }, props.title),
+        h('div', { className: 'eng-grp-card' }, props.children));
     }
 
-    /** 单个开关行（自绘，不依赖官方组件库）。 */
+    /** 一个子项行：左侧名称 + 右侧箭头。未传 onClick 时是不可点的纯展示行。 */
+    function EngRow(props) {
+      var clickable = typeof props.onClick === 'function';
+      return h('div', {
+        className: 'eng-row' + (clickable ? ' clickable' : ''),
+        role: clickable ? 'button' : undefined,
+        tabIndex: clickable ? 0 : undefined,
+        title: props.title || props.label,
+        onClick: clickable ? props.onClick : undefined
+      },
+        h('div', { className: 'eng-row-txt' },
+          h('div', { className: 'eng-row-label' }, props.label),
+          props.hint ? h('div', { className: 'eng-row-hint' }, props.hint) : null),
+        h('span', { className: 'eng-row-chev' }, '\u203a'));
+    }
+
+    /** 连接状态徽标（展示）。
+     *
+     * state: 'on'（已连接）/ 'off'（未连接）/ 'idle'（未检测）/ 'busy'（探测中）
+     */
+    function EngStatusChip(props) {
+      var st = props.state || 'idle';
+      var _MAP = {
+        on:   { cls: 'on',   text: '已连接' },
+        off:  { cls: 'off',  text: '未连接' },
+        idle: { cls: 'idle', text: '未检测' },
+        busy: { cls: 'idle', text: '探测中…' },
+      };
+      var it = _MAP[st] || _MAP.idle;
+      return h('span', {
+        className: 'eng-chip ' + it.cls,
+        title: props.title || it.text
+      },
+        h('span', { className: 'eng-chip-dot' }),
+        it.text);
+    }
+
+    /** 【连接区】SW / CAD 连接状态的共享读取（模块级，供 UI 多处复用）。
+     *
+     * ── 为什么状态放【JSON 文件】而不是 localStorage ────────────────────
+     *   用户需求："在流程中搞一个代码判断：如果设置那边 SW 连接成功了，
+     *   AI 就直接启动 SW 开始建模；没连接就走原来的启动流程。"
+     *   那个"代码判断"在 Python/Agent 侧执行，而 localStorage 是浏览器私有，
+     *   AI【完全读不到】。所以状态必须落在双方都能读的文件里：
+     *     <tools>/connection_state.json   （由 conn_state.py 维护）
+     *   本函数只【读】该文件（经宿主 /conn-state 端点），零副作用。
+     */
+    function fetchConnState(cb) {
+      try {
+        fetch('/dsh-engineering-ui/conn-state')
+          .then(function (r) { return r.json(); })
+          .then(function (j) { cb(j || null); })
+          .catch(function () { cb(null); });
+      } catch (e) { cb(null); }
+    }
+
+    /** 触发一次真实探测（POST，会让 Python 去连 SW/CAD）。 */
+    function probeConn(target, cb) {
+      try {
+        fetch('/dsh-engineering-ui/conn-probe', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ target: target })
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (j) { cb(j || null); })
+          .catch(function (e) { cb({ ok: false, error: String(e && e.message || e) }); });
+      } catch (e) { cb({ ok: false, error: String(e && e.message || e) }); }
+    }
+
+    /** 【启动按钮】显式启动 SW / CAD（用户主动点击才走这里）。 */
+    function launchConn(target, cb) {
+      try {
+        fetch('/dsh-engineering-ui/conn-launch', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ target: target })
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (j) { cb(j || null); })
+          .catch(function (e) { cb({ ok: false, error: String(e && e.message || e) }); });
+      } catch (e) { cb({ ok: false, error: String(e && e.message || e) }); }
+    }
+
+    /** 【发给模型】把启动日志作为一条用户消息投递给当前会话的模型。 */
+    function sendLogToModel(target, logText, sessionId, cb) {
+      try {
+        fetch('/dsh-engineering-ui/conn-diagnose', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            target: target, log_text: logText, sessionId: sessionId
+          })
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (j) { cb(j || null); })
+          .catch(function (e) { cb({ ok: false, error: String(e && e.message || e) }); });
+      } catch (e) { cb({ ok: false, error: String(e && e.message || e) }); }
+    }
+
+    /** 连接行：名称 + 状态徽标 + 「连接」/「启动」按钮 + 错误日志 + 「发给模型」。
+     *
+     * 用户确定的行为：
+     *   · 「连接」→ 只探测（安全，不启动软件）；
+     *   · 「启动」→ 真的把软件拉起来（用户主动点击才走），
+     *      启动后自动隐藏欢迎页并最大化主窗口（"不需要 SW 自己跳出来"）；
+     *   · 启动失败 → 行内贴出错误日志；
+     *   · 「发给模型」→ 把日志作为用户消息投给当前会话，让 DSH 判断根因。
+     *
+     * 轮询：进入设置页读一次，之后每 15s 刷新（外部改了状态也能反映）。
+     */
+    function EngConnRow(props) {
+      var target = props.target || 'sw';       // 'sw' | 'cad'
+      var label = props.label || (target === 'sw' ? 'SW 连接' : 'CAD连接');
+      var sessionId = props.sessionId || '';
+      var _st0 = useState({
+        phase: 'idle', data: null, note: null,
+        logText: null, logOpen: false, sent: null
+      });
+      var S = _st0[0], setS = _st0[1];
+      var mounted = useRef(true);
+
+      function patch(o) {
+        if (!mounted.current) return;
+        setS(function (prev) {
+          var n = {}; for (var k in prev) n[k] = prev[k];
+          for (var k2 in o) n[k2] = o[k2];
+          return n;
+        });
+      }
+
+      function apply(state) {
+        if (!mounted.current) return;
+        var entry = state && state[target] ? state[target] : null;
+        var connected = !!(entry && entry.connected);
+        var running = entry ? entry.running : null;
+        var n = null;
+        if (entry && entry.error) {
+          n = String(entry.error);
+        } else if (connected) {
+          n = '已连接' + (entry && entry.revision ? '（' + entry.revision + '）' : '')
+              + (entry && entry.pid ? ' PID ' + entry.pid : '');
+        } else if (running === false) {
+          n = (target === 'sw' ? 'SolidWorks' : 'AutoCAD')
+              + ' 未运行 —— 点「启动」自动拉起';
+        } else if (running === true) {
+          n = '进程在运行，但 COM 未连上';
+        } else if (entry && entry.checked_at) {
+          n = '未连接（检测于 ' + entry.checked_at + '）';
+        } else {
+          n = '尚未检测过 —— 点「连接」探测，或点「启动」直接拉起';
+        }
+        if (state && state.stale && connected) {
+          n = (n || '') + '（状态可能已过期）';
+        }
+        patch({
+          phase: 'idle',
+          data: {
+            state: connected ? 'on' : (entry && entry.checked_at ? 'off' : 'idle'),
+            title: n
+          },
+          note: n
+        });
+      }
+
+      function refresh() {
+        fetchConnState(function (s) {
+          if (!mounted.current) return;
+          if (!s) { patch({ phase: 'idle', data: null, note: '无法读取连接状态（宿主端点不可用）' }); return; }
+          apply(s);
+        });
+      }
+
+      useEffect(function () {
+        mounted.current = true;
+        refresh();
+        var t = setInterval(refresh, 15000);
+        return function () {
+          mounted.current = false;
+          clearInterval(t);
+        };
+      }, [target]);
+
+      var busy = (S.phase === 'busy');
+      var busyLaunch = (S.phase === 'launching');
+
+      return h('div', { className: 'eng-conn-block' },
+        h('div', { className: 'eng-row conn' },
+          h('div', { className: 'eng-row-txt' },
+            h('div', { className: 'eng-row-label' }, label),
+            S.note ? h('div', { className: 'eng-row-hint' }, S.note) : null),
+          h(EngStatusChip, {
+            state: (busy || busyLaunch) ? 'busy' : ((S.data && S.data.state) || 'idle'),
+            title: (S.data && S.data.title) || '连接状态（读取 connection_state.json）',
+          }),
+          h('button', {
+            className: 'eng-conn-btn',
+            type: 'button',
+            disabled: busy || busyLaunch,
+            'aria-label': '连接' + label,
+            onClick: function () {
+              if (busy || busyLaunch) return;
+              patch({ phase: 'busy', note: '正在探测…', sent: null });
+              probeConn(target, function (r) {
+                if (!mounted.current) return;
+                if (r && r.ok && r.state) {
+                  apply(r.state);
+                } else {
+                  patch({
+                    phase: 'idle',
+                    data: { state: 'off', title: (r && r.error) || '探测失败' },
+                    note: '探测失败：' + ((r && r.error) || '未知错误')
+                  });
+                }
+              });
+            }
+          }, busy ? '探测中' : '连接'),
+          h('button', {
+            className: 'eng-conn-btn alt',
+            type: 'button',
+            disabled: busy || busyLaunch,
+            'aria-label': '启动' + label,
+            title: '启动软件（会自动隐藏欢迎页并最大化主窗口）',
+            onClick: function () {
+              if (busy || busyLaunch) return;
+              patch({
+                phase: 'launching', sent: null, logOpen: true,
+                note: '正在启动 ' + (target === 'sw' ? 'SolidWorks' : 'AutoCAD')
+                      + '（首次启动可能要几十秒）…'
+              });
+              launchConn(target, function (r) {
+                if (!mounted.current) return;
+                var txt = (r && r.log_text) || null;
+                if (r && r.ok) {
+                  patch({
+                    phase: 'idle',
+                    logText: txt,
+                    note: '启动成功' + (r.connected ? '，已连接' : '（进程已就绪）')
+                  });
+                  if (r.state) apply(r.state); else refresh();
+                } else {
+                  patch({
+                    phase: 'idle',
+                    logText: txt,
+                    logOpen: true,
+                    data: { state: 'off', title: '启动失败' },
+                    note: '启动失败：' + ((r && r.error) || '未知错误')
+                  });
+                }
+              });
+            }
+          }, busyLaunch ? '启动中' : '启动')),
+
+        // ── 错误日志区（可折叠）+「发给模型」────────────────────────────
+        S.logText ? h('div', { className: 'eng-conn-log' },
+          h('div', { className: 'eng-conn-log-hd' },
+            h('span', {
+              className: 'eng-conn-log-tg',
+              onClick: function () { patch({ logOpen: !S.logOpen }); }
+            }, (S.logOpen ? '▾ ' : '▸ ') + '错误日志'),
+            h('button', {
+              className: 'eng-conn-btn tiny',
+              type: 'button',
+              title: '把这段日志作为消息发给当前会话，让 DSH 模型判断根因',
+              onClick: function () {
+                if (S.sent === 'sending') return;
+                patch({ sent: 'sending' });
+                sendLogToModel(target, S.logText, sessionId, function (r2) {
+                  if (!mounted.current) return;
+                  if (r2 && r2.ok) patch({ sent: 'ok' });
+                  else patch({ sent: 'err:' + ((r2 && r2.error) || '未知错误') });
+                });
+              }
+            }, S.sent === 'sending' ? '发送中'
+               : (S.sent === 'ok' ? '已发送 ✓' : '发给模型诊断'))),
+          S.sent && S.sent.indexOf('err:') === 0
+            ? h('div', { className: 'eng-conn-log-sent' }, '发送失败：' + S.sent.slice(4))
+            : null,
+          S.logOpen ? h('pre', { className: 'eng-conn-log-pre' }, S.logText) : null)
+          : null);
+    }
+
+    /** 一个开关（自绘，不依赖官方组件库）。
+     *
+     * bare=true 时【只渲染开关本体】，标签由外层 .eng-row 提供 ——
+     *   新版版式把开关放进子项行里，若仍渲染自带标签会出现重复文案。
+     */
     function EngSwitch(props) {
       var on = !!props.checked;
+      var toggle = h('button', {
+        className: 'eng-sw' + (on ? ' on' : ''),
+        type: 'button',
+        role: 'switch',
+        'aria-checked': on ? 'true' : 'false',
+        'aria-label': props.label,
+        title: props.label,
+        onClick: function () { props.onChange(!on); }
+      },
+        h('span', { className: 'eng-sw-knob' }));
+      if (props.bare) return toggle;
       return h('div', { className: 'eng-sw-row' },
         h('div', { className: 'eng-sw-txt' },
           h('div', { className: 'eng-sw-label' }, props.label),
           props.hint ? h('div', { className: 'eng-sw-hint' }, props.hint) : null),
-        h('button', {
-          className: 'eng-sw' + (on ? ' on' : ''),
-          type: 'button',
-          role: 'switch',
-          'aria-checked': on ? 'true' : 'false',
-          title: props.label,
-          onClick: function () { props.onChange(!on); }
-        },
-          h('span', { className: 'eng-sw-knob' }))
-      );
+        toggle);
     }
 
     function EngineeringSettingsSection(props) {
       var close = props && props.close;
       var settings = useEngSettings();
       var useOwn = settings.useOwnSubagentPane;
+      var standalone = settings.useStandaloneChat;
+      var explainOn = settings.enableSelectionExplain;
       return h('div', { className: 'eng-settings', 'data-eng-section': 'engineering' },
         h('div', { className: 'eng-settings-hd' },
           h('span', { className: 'eng-settings-ico' }, '🛠️'),
@@ -2156,57 +2843,160 @@ window.__ModuleLoader__.load({
 
         h('div', { className: 'eng-settings-body' },
 
-          // ── 第一层：概览 ──────────────────────────────────────────────
-          h(EngSettingsLayer, {
-            no: '1', title: '概览', desc: '工程模式做什么、当前生效状态'
-          },
-            h('div', { className: 'eng-set-note' },
-              '工程模式以「完成工图」为核心目标，执行 分析 → 设计 → 验证 的闭环流程，' +
-              '并用三大防线（材料 / 物理 / 领域）对结果做代码级校验。'),
-            h('div', { className: 'eng-set-kv' },
-              h('span', { className: 'eng-set-k' }, '子代理显示页'),
-              h('span', { className: 'eng-set-v' + (useOwn ? ' on' : '') },
-                useOwn ? '使用工程模式自带' : '使用 DSH 官方')),
-            h('div', { className: 'eng-set-note dim' },
-              '说明：三大防线的阈值与门禁策略由命令行工具管理，' +
-              '可通过 `python tools/defense_gate.py status` 查看当前状态。')),
+          // ── 主栏目1：连接区 ──────────────────────────────────────────
+          // 每行两个按钮：
+          //   「连接」→ /conn-probe：只探测（不启动软件，安全默认）
+          //   「启动」→ /conn-launch：真的拉起软件，并自动隐藏欢迎页、
+          //             最大化主窗口（用户要求"不需要 SW 自己跳出来"）
+          // 启动失败 → 行内展示错误日志，并可用「发给模型诊断」把日志
+          //   作为消息投给当前会话，由 DSH 模型判断根因。
+          // 结果统一落盘 connection_state.json（UI 与 AI 流程共读）。
+          h(EngGroup, { title: '连接区' },
+            h(EngConnRow, { target: 'sw', label: 'SW 连接' }),
+            h(EngConnRow, { target: 'cad', label: 'CAD连接' }),
+            h(EngRow, { label: '子栏目选项设置3' })),
 
-          // ── 第二层：工作流与门禁 ──────────────────────────────────────
-          h(EngSettingsLayer, {
-            no: '2', title: '工作流与门禁', desc: '设计流程、房间调度与防线', defaultOpen: false
-          },
-            h('div', { className: 'eng-set-note' },
-              '本分区用于说明工程模式的流程约束；具体参数由 tools/ 下的命令行工具' +
-              '（workflow_gate.py / mode_gate.py / defense_gate.py）管理，' +
-              '以免界面与门禁状态不一致。'),
-            h('ul', { className: 'eng-set-list' },
-              h('li', null, '零件设计三部曲：分析 → 设计 → 验证'),
-              h('li', null, '多零件任务按「房间」并行/串行调度'),
-              h('li', null, '每个房间下线前必须通过三大防线校验'),
-              h('li', null, '所有防线凭据必须由 DSH 宿主签名'))),
+          // ── 主栏目2：设计过程优化（用户指定名称）───────────────────────
+          // 首行「右键引用调出AI解释」= 划词/右键「问问AI」功能的开关与控制。
+          //   用户强调「这个功能是必须要有效的」，因此它是一个【真开关】：
+          //   关闭后 SelectionDetailLayer 不再挂载，绝不出现"按钮在但没反应"。
+          h(EngGroup, { title: '设计过程优化' },
+            h('div', { className: 'eng-row sw' },
+              h('div', { className: 'eng-row-txt' },
+                h('div', { className: 'eng-row-label' }, '右键引用调出AI解释'),
+                h('div', { className: 'eng-row-hint' }, explainOn
+                  ? '已开启：在对话里选中文字（或右键）会浮现「问问AI」，' +
+                    '点开即在右下角开一个小面板，就这段内容展开分析，结果可回填到输入框。'
+                  : '已关闭：选中文字不再出现「问问AI」入口。')),
+              h(EngSwitch, {
+                bare: true,
+                checked: explainOn,
+                label: '右键引用调出AI解释',
+                onChange: function (next) {
+                  setEngSetting('enableSelectionExplain', next);
+                }
+              })),
+            h(EngRow, { label: '子栏目选项设置2' }),
+            h(EngRow, { label: '子栏目选项设置3' })),
 
-          // ── 第三层：界面与显示（本开关在此）───────────────────────────
-          h(EngSettingsLayer, {
-            no: '3', title: '界面与显示', desc: '子代理面板等界面行为'
-          },
-            h(EngSwitch, {
-              checked: useOwn,
-              label: '使用工程模式自带的子代理显示页',
-              hint: useOwn
-                ? '已开启：右侧子代理面板由工程模式接管（三栏布局）。' +
-                  '官方子代理入口在工程模式下也指向本面板。'
-                : '已关闭：隐藏工程模式自带的子代理面板，右侧交回 DSH 官方显示。',
-              onChange: function (next) {
-                setEngSetting('useOwnSubagentPane', next);
-              }
-            }),
-            h('div', { className: 'eng-set-note dim' },
-              '关闭后本插件不再占用右侧第三列，官方子代理/文件预览按原生方式显示；' +
-              '重新开启即可恢复三栏布局。此设置会保存在本机，重启后仍然生效。'))),
+          // ── 主栏目3：美化工程模式（第 1 行 = 子代理显示页开关）────────
+          h(EngGroup, { title: '美化工程模式' },
+            h('div', { className: 'eng-row sw' },
+              h('div', { className: 'eng-row-txt' },
+                h('div', { className: 'eng-row-label' },
+                  '使用工程模式自带的子代理显示页'),
+                h('div', { className: 'eng-row-hint' }, useOwn
+                  ? '已开启：右侧子代理面板由工程模式接管（三栏布局）。' +
+                    '官方子代理入口在工程模式下也指向本面板。'
+                  : '已关闭：隐藏工程模式自带的子代理面板，右侧交回 DSH 官方显示。')),
+              h(EngSwitch, {
+                bare: true,
+                checked: useOwn,
+                label: '使用工程模式自带的子代理显示页',
+                onChange: function (next) {
+                  setEngSetting('useOwnSubagentPane', next);
+                }
+              })),
+            h('div', { className: 'eng-row sw' },
+              h('div', { className: 'eng-row-txt' },
+                h('div', { className: 'eng-row-label' },
+                  '是否开启单独的聊天而非 Agent'),
+                h('div', { className: 'eng-row-hint' }, standalone
+                  ? '已开启：工程模式下顶部多一个「聊天」视图，只做纯对话，不显示工具调用与工作过程；' +
+                    '「工作」视图仍是原来的三栏工作区。'
+                  : '已关闭：不提供独立聊天视图，工程模式只保留 DSH 官方界面。')),
+              h(EngSwitch, {
+                bare: true,
+                checked: standalone,
+                label: '是否开启单独的聊天而非 Agent',
+                onChange: function (next) {
+                  setEngSetting('useStandaloneChat', next);
+                }
+              })),
+            h(EngRow, { label: '子栏目选项设置3' })),
+
+          // ── 主栏目4：工程人设（用户要求：新建一个主栏目放填空）────────
+          // 用户需求原文：「当使用者使用工程模式的时候，在一开始会当作提示词
+          //   发给模型，具体的位置放在"美化工程模式"下新建一个主栏目去放，
+          //   当填空题给他们填空」。
+          // 行为（Host 侧 /persona + agent/created 的 per-agent section）：
+          //   · 保存后【下一轮】请求就带上，无需重启或新建会话；
+          //   · 只在【工程模式】的会话里注入（其他预设不受影响）；
+          //   · 留空 = 不注入任何文本，等于关闭。
+          h(EngGroup, { title: '工程人设' },
+            h(EngPersonaEditor, {}))),
 
         close ? h('div', { className: 'eng-settings-ft' },
           h('button', { className: 'eng-settings-close', onClick: close }, '关闭')) : null
       );
+    }
+    /**
+     * 工程人设编辑器：一个多行填空 + 保存。
+     *
+     * 与设置页其它行不同，这里需要【读写 Host 文件】（tools/persona.json），
+     *   因此走 /persona 端点（GET 读 / POST 写）。
+     * 保存后由 Host 的 per-agent systemPrompt.section() 在每轮装配时现场求值，
+     *   所以下一轮对话立刻生效 —— 不需要重启 DSH、也不需要新建会话。
+     */
+    function EngPersonaEditor() {
+      var st = useState({ text: '', loaded: false, saving: false, saved: null, err: null });
+      var S = st[0];
+      function patch(o) {
+        st[1](function (p) {
+          var n = {};
+          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+          for (var k2 in o) if (Object.prototype.hasOwnProperty.call(o, k2)) n[k2] = o[k2];
+          return n;
+        });
+      }
+      useEffect(function () {
+        fetch('/dsh-engineering-ui/persona')
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok) patch({ text: String(j.text || ''), loaded: true });
+            else patch({ loaded: true, err: String((j && j.error) || '读取失败') });
+          })
+          .catch(function (e) { patch({ loaded: true, err: String((e && e.message) || e) }); });
+      }, []);
+      var save = function () {
+        if (S.saving) return;
+        patch({ saving: true, saved: null, err: null });
+        fetch('/dsh-engineering-ui/persona', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text: S.text }),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok) patch({ saving: false, saved: '已保存' });
+            else patch({ saving: false, err: String((j && j.error) || '保存失败') });
+          })
+          .catch(function (e) { patch({ saving: false, err: String((e && e.message) || e) }); });
+      };
+      return h('div', { className: 'eng-persona' },
+        h('div', { className: 'eng-row-hint' },
+          '这段文字会在【工程模式】的新一轮请求开始时作为提示词发给模型。' +
+          '留空则不发送。修改后从下一轮对话起生效，无需重启。'),
+        h('textarea', {
+          className: 'eng-persona-in',
+          rows: 6,
+          placeholder: '例如：\n你是一位资深机械结构工程师，沟通简洁、先给结论再给依据。\n所有尺寸默认单位 mm；不确定的参数必须先问我，不要自行假设。',
+          value: S.text,
+          disabled: !S.loaded || S.saving,
+          onChange: function (ev) { patch({ text: ev.target.value, saved: null }); },
+        }),
+        h('div', { className: 'eng-persona-ft' },
+          h('span', { className: 'eng-persona-state' },
+            !S.loaded ? '读取中…'
+              : (S.err ? S.err
+                : (S.saved ? S.saved
+                  : (S.text.trim() ? ('当前 ' + S.text.trim().length + ' 字') : '当前为空（不发送人设）')))),
+          h('button', {
+            className: 'eng-persona-save',
+            type: 'button',
+            disabled: !S.loaded || S.saving,
+            onClick: save,
+          }, S.saving ? '保存中…' : '保存')));
     }
     // ══ 【问题4】工程模式设置：持久化开关 + 三层结构 ═════════════════════
     // 用户需求：
@@ -2219,7 +3009,20 @@ window.__ModuleLoader__.load({
     //   键名带插件前缀，避免与其他插件冲突。读取失败一律回落默认值 true
     //   （默认"使用自带显示页"= 保持用户此前看到的行为，不静默改变现状）。
     var ENG_SETTINGS_KEY = 'dsh-engineering-ui/settings/v1';
-    var _engSettings = { useOwnSubagentPane: true };
+    // ── 【独立聊天页】useStandaloneChat ────────────────────────────────────
+    // 用户需求：「美化工程模式」里的「是否开启单独的聊天而非 Agent」。
+    //   开 → 工程模式下提供「聊天 / 工作」切换器；
+    //   关 → 完全不注册该入口，界面交回 DSH 官方。
+    // 默认 true：与用户明确要的行为一致（否则功能默认不可见）。
+    //
+    // enableSelectionExplain：「设计过程优化」→「右键引用调出AI解释」。
+    //   开 → 选中文字时浮现「问问AI」并可用右下角面板分析；
+    //   关 → SelectionDetailLayer 完全不挂载（零监听、零 DOM）。
+    var _engSettings = {
+      useOwnSubagentPane: true,
+      useStandaloneChat: true,
+      enableSelectionExplain: true,
+    };
     var _engSettingsSubs = [];
     // ══ 【问题3】官方右列占用探针（可选服务，缺失时回落 DOM）══════════════
     // 研究结论（已核对 0.2.0 源码）：
@@ -2286,6 +3089,12 @@ window.__ModuleLoader__.load({
           if (typeof j.useOwnSubagentPane === 'boolean') {
             _engSettings.useOwnSubagentPane = j.useOwnSubagentPane;
           }
+          if (typeof j.useStandaloneChat === 'boolean') {
+            _engSettings.useStandaloneChat = j.useStandaloneChat;
+          }
+          if (typeof j.enableSelectionExplain === 'boolean') {
+            _engSettings.enableSelectionExplain = j.enableSelectionExplain;
+          }
         }
       } catch (e) { /* 读取失败 → 保持默认 */ }
     }
@@ -2329,16 +3138,634 @@ window.__ModuleLoader__.load({
       var st = useState(function () {
         return {
           useOwnSubagentPane: _engSettings.useOwnSubagentPane,
+          useStandaloneChat: _engSettings.useStandaloneChat,
+          enableSelectionExplain: _engSettings.enableSelectionExplain,
         };
       });
       useEffect(function () {
         return subscribeEngSettings(function () {
           st[1]({
             useOwnSubagentPane: _engSettings.useOwnSubagentPane,
+            useStandaloneChat: _engSettings.useStandaloneChat,
+            enableSelectionExplain: _engSettings.enableSelectionExplain,
           });
         });
       }, []);
       return st[0];
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 【聊天 / 工作】同会话切换器
+    // ══════════════════════════════════════════════════════════════════════
+    // 用户要求：在【工程模式里面直接选聊天】就能纯聊天，不要另开预设、不要新建会话。
+    //
+    // 之前为什么失败：只换显示，模型照样挂满工具 → 照样调 skill。
+    // 现在由 Host 的 /chat-mode 做【真正的能力切换】（见 lib/index.js）：
+    //   · tools.restrict({deny:[现场取到的全部工具名]}) → 模型看不到任何工具
+    //   · systemPrompt.section({complete:true}) → 整套 CAD 人设被替换成对话人设
+    // 两者同时生效，同一个 Agent 才真的"不是 Agent"。
+    // 会话不变 → 历史、模型、输入框全部沿用。
+    var ENG_PRESET_ID = 'engineering';
+
+    /** 读某个会话挂在会话列表行上的 preset（会话列表是唯一权威来源）。 */
+    function presetOfSession(listSource, sessionId) {
+      try {
+        var snap = listSource && listSource.getSnapshot ? listSource.getSnapshot() : null;
+        var row = snap && snap.byId ? snap.byId[sessionId] : null;
+        if (!row) return null;
+        if (row.projectionValues && typeof row.projectionValues.agentPreset === 'string') {
+          return row.projectionValues.agentPreset;
+        }
+        return typeof row.agentPreset === 'string' ? row.agentPreset : null;
+      } catch (e) { return null; }
+    }
+
+    /**
+     * 「聊天 / 工作」切换器 + 聊天会话的起步建议。
+     *
+     * ── 落点（对应用户截图里的红框 / 蓝框）──────────────────────────────
+     * 官方结构（ui-conversation/src/client/skeleton/ConversationContent.tsx:163-170）：
+     *   <div class="composerStack">
+     *     {hero && <HeroShell/>}                          大标题
+     *     {hero && heroWorkspaceRow}                      工作区 chip + 预设
+     *     {renderSlot('conversation.input.dock', zone)}   ← 输入框【上方】= 红框
+     *     {inputBar}                                      ← 输入框本体
+     *   </div>
+     * ui-renderer 把每个插槽包成 <div data-slot="..." style="display:contents">
+     *   （scoped-slots.tsx:1081-1091）。display:contents 不生成盒子，
+     *   所以我的元素成为 .composerStack 的 flex 子项，用 CSS order 排序：
+     *     .eng-vs           order 0  → 输入框上方（红框）
+     *     [composer.bar]    order 2  → 输入框本体（官方）
+     *     .eng-chat-starter order 3  → 输入框下方（蓝框）
+     * 只改排列顺序，不改官方任何视觉属性。
+     */
+    function EngInputDock(props) {
+      var sessionId = props.sessionId;
+      var useSession = props.useSession;
+      var useSessions = props.useSessions;
+      var listSource = props.engListSource;
+
+      // ══ 【React hooks 规则】所有 hook 必须在任何 return 之前调用 ═══════
+      // 曾经的严重 bug：非工程模式只调 3 个 hook 就 return null，工程模式
+      //   调 4 个（多的那个 useEffect 在 early return 之后）。
+      //   React 检测到同一次挂载内 hook 数量变化会抛错，slot entry 随即
+      //   【abdicate 永久失效】—— 表现为"切到标准模式再切回工程模式，
+      //   工作/聊天切换器和推荐都不见了"。
+      // 修法：先把所有 hook 无条件调完，再做门禁判断与渲染分支。
+      var blank = useSession ? useSession(function (s) { return !!(s && s.blank); }) : false;
+      var running = useSession ? useSession(function (s) { return !!(s && s.running); }) : false;
+      // 预设（响应式订阅；会话列表是权威来源）
+      // ⚠️ 这个 useSessions 也【必须无条件调用】—— 不能写
+      //   `sessionId ? useSessions(...) : null`，否则 sessionId 从无到有时
+      //   hook 数量变化，同样触发 React 报错导致 entry 永久失效。
+      //   选择器内部对 sessionId 为空做保护即可。
+      var livePreset = (typeof useSessions === 'function')
+        ? useSessions(function (s) {
+            if (!sessionId) return null;
+            var row = s && s.byId ? s.byId[sessionId] : null;
+            return row ? ((row.projectionValues && row.projectionValues.agentPreset) || row.agentPreset || null) : null;
+          })
+        : null;
+      var preset = (livePreset === undefined || livePreset === null)
+        ? presetOfSession(listSource, sessionId) : livePreset;
+
+      // chat: 当前是否聊天模式；busy: 切换中；err: 失败原因
+      // sugg*: 推荐追问（图二）
+      var st = useState({
+        chat: false, busy: false, err: null,
+        sugg: [], suggBusy: false, suggFor: '',
+      });
+      var isChat = st[0].chat;
+      // 记录上一轮的 running，用于检测"一轮刚结束"
+      var prevRunningRef = useRef(false);
+
+      // ① 进会话/切会话时向 Host 查询聊天模式（运行期状态，前端不缓存）
+      useEffect(function () {
+        if (!sessionId) return;
+        var alive = true;
+        fetch('/dsh-engineering-ui/chat-mode?sessionId=' + encodeURIComponent(sessionId))
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (!alive || !j || !j.ok) return;
+            st[1](function (p) {
+              if (p.busy || p.chat === !!j.chatMode) return p;
+              var n = {};
+              for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+              n.chat = !!j.chatMode;
+              return n;
+            });
+          })
+          .catch(function () { /* 查询失败保持现状 */ });
+        return function () { alive = false; };
+      }, [sessionId]);
+
+      // ② 一轮对话【刚结束】时拉推荐追问（图二）
+      // 触发条件：running 由 true → false，且处于聊天模式。
+      //   用"结束"而不是"每次渲染"：避免请求风暴，也避免在流式输出中途打扰。
+      useEffect(function () {
+        var was = prevRunningRef.current;
+        prevRunningRef.current = running;
+        if (!sessionId) return;
+        if (!(was && !running)) return;          // 只在 true→false 的瞬间触发
+        if (!isChat) return;                     // 只在纯聊天模式下给推荐
+        var alive = true;
+        st[1](function (p) {
+          var n = {};
+          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+          n.suggBusy = true;
+          return n;
+        });
+        // 从会话日志取最近几轮文本，交给宿主生成推荐
+        fetch('/dsh-engineering-ui/log?sessionId=' + encodeURIComponent(sessionId) + '&limit=60')
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (!alive || !j || j.ok !== true) return null;
+            var turns = [];
+            var evs = j.events || [];
+            for (var i = 0; i < evs.length; i++) {
+              var arr = toDisplayEvents(evs[i]);
+              for (var k = 0; k < arr.length; k++) {
+                var d = arr[k];
+                if (!d) continue;
+                if (d.kind === 'message' || d.kind === 'text') {
+                  turns.push({ role: 'assistant', text: String(d.text || '') });
+                } else if (d.kind === 'user-message') {
+                  turns.push({ role: 'user', text: String(d.text || '') });
+                }
+              }
+            }
+            if (!turns.length) return null;
+            var route = (j.route && j.route.provider && j.route.model) ? j.route : null;
+            return fetch('/dsh-engineering-ui/suggest', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                turns: turns.slice(-8),
+                provider: route ? route.provider : null,
+                model: route ? route.model : null,
+              }),
+            }).then(function (r2) { return r2.json(); }).then(function (j2) {
+              return { j2: j2, marker: String(evs.length) };
+            });
+          })
+          .then(function (res) {
+            if (!alive) return;
+            st[1](function (p) {
+              var n = {};
+              for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+              n.suggBusy = false;
+              if (res && res.j2 && res.j2.ok && res.j2.items && res.j2.items.length) {
+                n.sugg = res.j2.items;
+                n.suggFor = res.marker;
+              } else {
+                n.sugg = [];
+              }
+              return n;
+            });
+          })
+          .catch(function () {
+            if (!alive) return;
+            st[1](function (p) {
+              var n = {};
+              for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+              n.suggBusy = false;
+              return n;
+            });
+          });
+        return function () { alive = false; };
+      }, [running, sessionId, isChat]);
+
+      // ══ 所有 hooks 已调用完毕，下面才允许做门禁与渲染分支 ═══════════════
+      var inEngineering = (preset === ENG_PRESET_ID);
+      if (!inEngineering) return null;
+      if (!_engSettings.useStandaloneChat) return null;
+
+      /** 把一段文字填进官方输入框（推荐追问、起步建议共用）。 */
+      var fillDraft = function (txt) {
+        try {
+          var ia = props.inputActions;    // session 作用域标准 prop
+          if (ia && typeof ia.setDraft === 'function') { ia.setDraft(txt); return true; }
+        } catch (e) { /* 落到 DOM 兜底 */ }
+        try {
+          var el = document.querySelector('[data-conversation-region="composer"] [contenteditable="true"]');
+          if (el) { el.focus(); document.execCommand('insertText', false, txt); return true; }
+        } catch (e2) { /* 无输入框则放弃 */ }
+        return false;
+      };
+
+      var switchTo = function (chat) {
+        if (st[0].busy) return;
+        st[1](function (p) {
+          var n = {};
+          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+          n.chat = chat; n.busy = true; n.err = null;
+          return n;
+        });
+        // ══ 【核心】同一个会话内切换 —— 不新建会话、不换预设 ══════════════
+        // 由 Host 端的 /chat-mode 完成真正的能力切换（见 lib/index.js）：
+        //   · tools.restrict({deny:[...现场取的全部工具名]}) → 模型看不到任何工具
+        //   · systemPrompt.section({complete:true}) → 那套 CAD 工程人设被整体替换
+        //   · 再加一道 guard 兜底：聊天模式下任何工具都无法执行
+        // 会话本身不变 → 历史、模型、输入框全部沿用。
+        fetch('/dsh-engineering-ui/chat-mode', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId: sessionId, on: !!chat }),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            st[1](function (p) {
+              var n = {};
+              for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+              if (j && j.ok) {
+                n.chat = !!j.chatMode; n.busy = false; n.err = null;
+                if (!j.chatMode) n.sugg = [];     // 回工作模式就清掉推荐
+              } else {
+                n.chat = !chat; n.busy = false;
+                n.err = String((j && j.error) || '切换失败');
+              }
+              return n;
+            });
+          })
+          .catch(function (e) {
+            st[1](function (p) {
+              var n = {};
+              for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+              n.chat = !chat; n.busy = false;
+              n.err = '切换失败：' + String((e && e.message) || e);
+              return n;
+            });
+          });
+      };
+
+      var busy = !!st[0].busy;
+      var seg = function (on, label, chat) {
+        return h('button', {
+          key: label,
+          type: 'button',
+          className: 'eng-vs-item' + (on ? ' on' : '') + (busy ? ' busy' : ''),
+          'aria-pressed': on ? 'true' : 'false',
+          disabled: busy,
+          onClick: function () { if (!busy) switchTo(chat); }
+        }, label);
+      };
+      var vs = h('div', { className: 'eng-vs', role: 'group', 'aria-label': '聊天 / 工作' },
+        seg(!isChat, '工作', false),
+        seg(isChat, busy ? '聊天…' : '聊天', true));
+      // 失败必须看得见，否则用户只看到"点了没反应"
+      var errLine = st[0].err
+        ? h('div', { className: 'eng-vs-err' }, String(st[0].err)) : null;
+
+      // ── 推荐追问（图二）：一轮对话刚结束后显示，点一下填进输入框 ────────
+      var sugg = null;
+      if (isChat && !busy && st[0].sugg.length) {
+        sugg = h('div', { className: 'eng-sugg' },
+          st[0].sugg.map(function (q, i) {
+            return h('button', {
+              key: 'sg' + i,
+              className: 'eng-sugg-item',
+              type: 'button',
+              title: '填入输入框',
+              onClick: function () { fillDraft(String(q)); },
+            }, h('span', { className: 'eng-sugg-ico' }, '↳'), String(q));
+          }));
+      }
+
+      // 起步建议：只在【聊天模式 + 空会话】显示，位于输入框下方（蓝框）
+      var starter = null;
+      if (isChat && blank) {
+        starter = h('div', { className: 'eng-chat-starter' },
+          h('div', { className: 'eng-chat-starter-list' },
+            chatStarterItems().map(function (txt, i) {
+              return h('button', {
+                key: 'st' + i,
+                className: 'eng-chat-starter-item',
+                type: 'button',
+                onClick: function () { fillDraft(txt); },
+              }, h('span', { className: 'eng-chat-starter-ico' }, '💬'), txt);
+            })));
+      }
+      // display:contents → 子块成为 .composerStack 的独立 flex 项
+      return h('div', { className: 'eng-dock-host', style: { display: 'contents' } }, vs, errLine, sugg, starter);
+    }
+
+    /** 聊天模式的起步建议（不诱导模型调工具）。 */
+    function chatStarterItems() {
+      return [
+        '帮我梳理一下这个设计方案的思路',
+        '解释一下悬臂梁的受力原理',
+        '我有个零件的想法，帮我分析可行性'
+      ];
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 【划词详情】SelectionDetailLayer —— 三张截图对应的功能
+    // ══════════════════════════════════════════════════════════════════════
+    // 完整交互链：
+    //   ① 用户在 Agent 回复里选中一段文字 → 选区附近浮现「更多详情」按钮（图二）
+    //   ② 点击 → 右下角打开分析面板，自动就该内容发起分析（图三）
+    //   ③ 面板里可继续追问；每条助手回复可「添加到对话」→ 回填主对话输入框
+    //   ④ 本次分析的历史留在面板内（图一红框要求"放左栏"见下方说明）
+    //
+    // 为什么不用官方插槽渲染"左栏历史"：
+    //   图一红框是【子代理目录】所在的侧栏，而侧栏由官方 ui-sidebar 拥有、
+    //   其内部结构不在本插件可注入的插槽清单里（本插件只能往
+    //   conversation.* / settings.* / shell.overlay 等已声明插槽注册）。
+    //   因此历史采用【面板内历史列表】实现，视觉上与子代理严格区分：
+    //     · 子代理 = 蓝色圆点 + 「未运行/运行中」徽标
+    //     · 详情分析 = 紫色对话气泡图标 + 「分析 N 轮」徽标
+    //   若后续要真正嵌进侧栏，需要 ui-sidebar 暴露插槽（属官方改动，不做）。
+    function SelectionDetailLayer(props) {
+      // ── 作用域门禁：设置里关掉「右键引用调出AI解释」→ 完全不工作 ──────
+      // 用户强调「这个功能是必须要有效的」，所以这里必须是【真门禁】：
+      //   关闭时不挂鼠标监听、不渲染按钮/面板（零副作用），
+      //   而不是"按钮还在但点了没反应"。
+      // ⚠️ 所有 hook 必须在 return 之前调用（React hooks 规则，历史上
+      //   在 EngInputDock 上踩过：条件调用 hook 会让 entry 永久失效）。
+      var settings = useEngSettings();
+      var st = useState({
+        open: false,          // 面板是否打开
+        anchor: null,         // 选区锚点（用于浮层按钮定位）
+        btnVisible: false,    // 浮层按钮是否显示
+        selection: '',        // 本次选中的原文
+        messages: [],         // 面板内的分析对话（前端持有，宿主无状态）
+        input: '',            // 面板输入框内容
+        busy: false,
+        err: null,
+        route: null,          // {provider, model}：从当前会话读，用于辅助调用
+        // 面板尺寸：用户可以拖左上角手柄自由放大放小（用户明确要求）
+        size: { w: 420, h: 520 },
+      });
+      var S = st[0];
+      var setS = st[1];
+      function patch(o) {
+        st[1](function (p) {
+          var n = {};
+          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+          for (var k2 in o) if (Object.prototype.hasOwnProperty.call(o, k2)) n[k2] = o[k2];
+          return n;
+        });
+      }
+      var panelRef = useRef(null);
+      var listRef = useRef(null);
+
+      // ── 读取当前会话的模型路由 ────────────────────────────────────────
+      // /side-chat 需要 provider/model 才能发辅助请求。取当前会话最近一次
+      //   请求头里的路由（宿主 /log 端点在 route 字段里回传）。
+      useEffect(function () {
+        if (!S.open || S.route) return;
+        try {
+          // 当前会话 id：官方 root 侧标准做法（mainView 保留者）
+          var sid = null;
+          var badges = document.querySelector('[data-conversation-content]');
+          if (badges) sid = badges.getAttribute('data-conversation-session');
+          if (!sid) return;
+          fetch('/dsh-engineering-ui/log?sessionId=' + encodeURIComponent(sid) + '&limit=1')
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              if (j && j.ok && j.route && j.route.provider && j.route.model) {
+                patch({ route: j.route });
+              }
+            })
+            .catch(function () { /* 取不到就在发送时报错 */ });
+        } catch (e) { /* 忽略 */ }
+      }, [S.open, S.route]);
+
+      // ── ① 划词检测：在 Agent 回复区域监听 selectionchange ──────────────
+      // 只认【对话区内的选区】，避免选中侧栏/设置等无关文字时也弹按钮。
+      // 用 mouseup 而不是 selectionchange 收尾：selectionchange 在拖选过程中
+      //   会高频触发，按钮会跟着乱跳。
+      useEffect(function () {
+        var onUp = function () {
+          try {
+            var sel = window.getSelection ? window.getSelection() : null;
+            if (!sel || sel.isCollapsed) { patch({ btnVisible: false }); return; }
+            var text = String(sel.toString() || '').trim();
+            if (text.length < 2) { patch({ btnVisible: false }); return; }
+            // 选区必须落在对话区内（[data-conversation-content] 或滚动体）
+            var node = sel.anchorNode;
+            var el = node && node.nodeType === 1 ? node : (node ? node.parentElement : null);
+            var inConv = false;
+            while (el) {
+              if (el.getAttribute && (el.getAttribute('data-conversation-content') !== null
+                  || el.getAttribute('data-conversation-scroll') !== null)) { inConv = true; break; }
+              el = el.parentElement;
+            }
+            if (!inConv) { patch({ btnVisible: false }); return; }
+            // 记录选区矩形，用于给浮层按钮定位
+            var rect = null;
+            try {
+              var r = sel.getRangeAt(0).getBoundingClientRect();
+              if (r && (r.width || r.height)) rect = { left: r.left, top: r.top, bottom: r.bottom, right: r.right };
+            } catch (e) { /* 无矩形时退回鼠标位置 */ }
+            patch({ btnVisible: true, selection: text.slice(0, 8000), anchor: rect });
+          } catch (e) { /* 选区 API 异常 → 不显示 */ }
+        };
+        var onDown = function (ev) {
+          // 点的不是浮层按钮/面板 → 收起按钮（但不动已打开的面板）
+          try {
+            var t = ev.target;
+            if (t && t.closest && (t.closest('.eng-sel-btn') || t.closest('.eng-side'))) return;
+            patch({ btnVisible: false });
+          } catch (e) { /* 忽略 */ }
+        };
+        document.addEventListener('mouseup', onUp, true);
+        document.addEventListener('mousedown', onDown, true);
+        return function () {
+          document.removeEventListener('mouseup', onUp, true);
+          document.removeEventListener('mousedown', onDown, true);
+        };
+      }, []);
+
+      // 面板打开时滚动到底
+      useEffect(function () {
+        var box = listRef.current;
+        if (box) box.scrollTop = box.scrollHeight;
+      }, [S.open, S.messages.length]);
+
+      // ── ② 发起一次分析（首轮或追问都走这里）────────────────────────────
+      var ask = function (questionText) {
+        var q = String(questionText || '').trim();
+        if (S.busy) return;
+        if (!S.route) {
+          patch({ err: '无法确定模型路由（请确认当前会话已开始过，或稍后重试）' });
+          return;
+        }
+        // 面板内历史 + 本次提问
+        var nextMsgs = S.messages.slice();
+        if (q) nextMsgs.push({ role: 'user', text: q });
+        patch({ busy: true, err: null, messages: nextMsgs, input: '' });
+        fetch('/dsh-engineering-ui/side-chat', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            selection: S.selection,
+            messages: nextMsgs,
+            provider: S.route.provider,
+            model: S.route.model,
+          }),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok && j.reply) {
+              patch({ busy: false, messages: nextMsgs.concat([{ role: 'assistant', text: String(j.reply) }]) });
+            } else {
+              patch({ busy: false, err: String((j && j.error) || '分析失败') });
+            }
+          })
+          .catch(function (e) {
+            patch({ busy: false, err: String((e && e.message) || e) });
+          });
+      };
+
+      // ── ③ 回填到主对话输入框（图三「添加到对话」）──────────────────────
+      // 走官方 composer 的 contenteditable；用 execCommand 走原生输入路径，
+      //   这样 React/Lexical 能正确收到这次输入。
+      var addToConversation = function (text) {
+        var body = String(text || '').trim();
+        if (!body) return false;
+        try {
+          var el = document.querySelector('[data-conversation-region="composer"] [contenteditable="true"]');
+          if (!el) return false;
+          el.focus();
+          // 已有草稿时先换行，避免和原文粘在一起
+          var pre = String(el.textContent || '').trim() ? '\n\n' : '';
+          document.execCommand('insertText', false, pre + body);
+          return true;
+        } catch (e) { return false; }
+      };
+
+      // ══ 设置门禁（所有 hook 之后）══════════════════════════════════════
+      // 「设计过程优化 → 右键引用调出AI解释」关闭时：整个功能不工作。
+      //   放在 hook 之后是为了不违反 React hooks 规则（同 EngInputDock 的教训）。
+      if (!settings.enableSelectionExplain) return null;
+
+      // ── 浮层按钮（图二）──────────────────────────────────────────────
+      var btn = null;
+      if (S.btnVisible && !S.open && S.anchor) {
+        // 定位在选区下方的水平中心；靠近顶部时放到选区上方，避免被裁掉。
+        var W = 96;
+        var cx = (S.anchor.left + S.anchor.right) / 2;
+        var left = Math.max(8, Math.min((window.innerWidth || 1200) - W - 8, cx - W / 2));
+        var below = (S.anchor.bottom + 8);
+        var useAbove = below + 30 > (window.innerHeight || 800) - 8;
+        var top = useAbove ? Math.max(8, S.anchor.top - 34) : below;
+        btn = h('button', {
+          className: 'eng-sel-btn',
+          type: 'button',
+          style: { left: left + 'px', top: top + 'px' },
+          // ⚠️ 用 onMouseDown 而不是 onClick：mouseup 会先改变选区，
+          //    onClick 期间 selection 可能已被清空 → 拿不到原文。
+          onMouseDown: function (ev) {
+            ev.preventDefault();   // 阻止默认行为以保留选区
+            ev.stopPropagation();
+            patch({ open: true, btnVisible: false });
+            // 打开即自动发起一次分析（图三的行为）
+            setTimeout(function () { ask(''); }, 0);
+          },
+        }, '问问AI');
+      }
+
+      // ── 右下角面板（图三）────────────────────────────────────────────
+      var panel = null;
+      if (S.open) {
+        var rows = S.messages.map(function (m, i) {
+          var isBot = m.role === 'assistant';
+          return h('div', { key: 'm' + i, className: 'eng-side-row ' + (isBot ? 'bot' : 'me') },
+            h('div', { className: 'eng-side-bubble' }, m.text),
+            isBot
+              ? h('div', { className: 'eng-side-acts' },
+                  h('button', {
+                    className: 'eng-side-act',
+                    type: 'button',
+                    title: '把这段分析插入主对话输入框',
+                    onClick: function () {
+                      var ok = addToConversation(m.text);
+                      if (!ok) patch({ err: '找不到输入框，无法回填' });
+                    },
+                  }, '添加到对话'))
+              : null);
+        });
+        panel = h('div', {
+            className: 'eng-side',
+            ref: panelRef,
+            // 面板尺寸由用户拖拽决定，存在 state 里（切会话/重开保留本页期间的值）
+            style: { width: S.size.w + 'px', height: S.size.h + 'px' },
+          },
+          // ── 左上角拖拽手柄：调整面板大小（用户要求"能自由放大放小"）────
+          // 用 pointer events + setPointerCapture：拖动时即使指针移出面板
+          //   也能继续收到事件，不会中途丢失。
+          h('div', {
+            className: 'eng-side-grip',
+            title: '拖动调整大小',
+            onPointerDown: function (ev) {
+              try {
+                ev.preventDefault();
+                ev.stopPropagation();
+                var el = ev.currentTarget;
+                if (el.setPointerCapture) el.setPointerCapture(ev.pointerId);
+                var startX = ev.clientX, startY = ev.clientY;
+                var w0 = S.size.w, h0 = S.size.h;
+                var move = function (e2) {
+                  // 面板锚在右下角：向左拖变宽、向上拖变高
+                  var w = w0 + (startX - e2.clientX);
+                  var hh = h0 + (startY - e2.clientY);
+                  var maxW = Math.max(320, (window.innerWidth || 1200) - 36);
+                  var maxH = Math.max(240, (window.innerHeight || 800) - 36);
+                  w = Math.max(300, Math.min(maxW, w));
+                  hh = Math.max(220, Math.min(maxH, hh));
+                  patch({ size: { w: Math.round(w), h: Math.round(hh) } });
+                };
+                var up = function () {
+                  document.removeEventListener('pointermove', move, true);
+                  document.removeEventListener('pointerup', up, true);
+                };
+                document.addEventListener('pointermove', move, true);
+                document.addEventListener('pointerup', up, true);
+              } catch (e) { /* 不支持 pointer events 时退化为不可缩放 */ }
+            },
+          }, '⤡'),
+          h('div', { className: 'eng-side-hd' },
+            h('span', { className: 'eng-side-ico' }, '💬'),
+            h('span', { className: 'eng-side-title' }, '问问AI'),
+            h('span', { className: 'eng-side-badge' }, S.messages.length ? (S.messages.length + ' 条') : ''),
+            h('button', {
+              className: 'eng-side-x',
+              type: 'button',
+              title: '关闭',
+              onClick: function () { patch({ open: false }); },
+            }, '×')),
+          // 选中原文（折叠展示，让用户知道在分析什么）
+          h('div', { className: 'eng-side-src', title: S.selection }, S.selection),
+          h('div', { className: 'eng-side-list', ref: listRef },
+            rows.length ? rows : h('div', { className: 'eng-side-note' }, S.busy ? '正在分析…' : '正在等待分析…'),
+            S.err ? h('div', { className: 'eng-side-err' }, S.err) : null),
+          h('div', { className: 'eng-side-ft' },
+            h('input', {
+              className: 'eng-side-in',
+              type: 'text',
+              placeholder: '继续追问…（Enter 发送）',
+              value: S.input,
+              disabled: S.busy,
+              onChange: function (ev) { patch({ input: ev.target.value }); },
+              onKeyDown: function (ev) {
+                if (ev.key === 'Enter' && !ev.shiftKey) {
+                  ev.preventDefault();
+                  ask(S.input);
+                }
+              },
+            }),
+            h('button', {
+              className: 'eng-side-send',
+              type: 'button',
+              disabled: S.busy || !S.input.trim(),
+              onClick: function () { ask(S.input); },
+            }, S.busy ? '…' : '↑')));
+      }
+
+      if (!btn && !panel) return null;
+      // display:contents：让两个浮层元素都直接参与 shell.overlay 的层级
+      return h('div', { className: 'eng-sel-host', style: { display: 'contents' } }, btn, panel);
     }
 
     function apply(ctx) {
@@ -2377,6 +3804,22 @@ window.__ModuleLoader__.load({
           return ctx.slots.register({ name: 'shell.overlay', id: 'eng-subagent-console', order: 31, label: '子代理控制台' }, SubagentConsole);
         });
       } catch (e) { console.error('[dsh-engineering-ui] console slot', e); }
+
+      // ══ 【划词详情】右下角分析面板（shell.overlay 的独立住户）════════════
+      // 用户需求（对照三张截图）：
+      //   · 在 Agent 回复里划选文字 → 浮现「更多详情」；
+      //   · 点击 → 右下角小面板，就这段内容展开分析；
+      //   · 分析结果可「添加到对话」回填到主对话输入框。
+      // 落点：shell.overlay（root 作用域，全帧覆盖层），因此不受会话切换影响。
+      //   order=40：排在子代理控制台(31)之后，保证浮在最上层。
+      try {
+        ctx.slots.inject('shell.overlay', function () {
+          return ctx.slots.register(
+            { name: 'shell.overlay', id: 'eng-selection-detail', order: 40, label: '划词详情' },
+            SelectionDetailLayer,
+          );
+        });
+      } catch (e) { console.error('[dsh-engineering-ui] selection detail slot', e); }
       // ── 【问题4】设置页「工程模式」分区 ──────────────────────────────
       // order=25：紧跟「Agent 预设」(order=20) 之后。
       // label 用中文字面量（注册方自带文案，shell 不订阅 locale）。
@@ -2460,7 +3903,7 @@ window.__ModuleLoader__.load({
       }
       try {
         installOfficialTabTakeover();
-        // 设置变化时重装（开关切换即时生效，无需刷新）
+        // 设置变化时重装 tab 接管（开关切换即时生效，无需刷新）
         subscribeEngSettings(function () {
           for (var i = disposers.length - 1; i >= 0; i--) {
             try { disposers[i](); } catch (e) {}
@@ -2469,12 +3912,67 @@ window.__ModuleLoader__.load({
           installOfficialTabTakeover();
         });
       } catch (e) { console.error('[dsh-engineering-ui] tab takeover setup', e); }
+
+      // ══ 【聊天 / 工作】切换器注册 ═══════════════════════════════════════
+      // 架构（重要）：
+      //   · 「聊天」= 同一个会话内**【真正的能力切换】**，由 Host 的 /chat-mode
+      //     完成（tools.restrict 摘工具 + systemPrompt complete 换人设）。
+      //     不新建会话、不换预设 —— 历史、模型、输入框全部沿用。
+      //   · client 端只负责【入口按钮】，并把点击转成一次 /chat-mode 请求。
+      //   · 注册一次常驻；组件内部按"当前会话是否工程模式"决定渲不渲染
+      //     （非工程 → return null，零 DOM、零副作用）。
+      //
+      // ⚠️【必须用独立的 dockDisposers，不能复用上面那个 disposers】
+      //   上面 subscribeEngSettings 的回调会遍历 disposers 全部 dispose()
+      //   然后只重装 tab 接管。若把切换器的 disposer 也放进那个数组，
+      //   用户每动一次设置开关（含"是否开启单独的聊天"）切换器就被销毁一次
+      //   且永不重建 —— 表现正是"关了又开之后，除非重启 DSH，UI 再也不出来"。
+      var dockDisposers = [];
+      try {
+        var sessionsSvc = ctx.sessions;
+        var listSrc = sessionsSvc && sessionsSvc.list;
+        // ── 【输入区】注册「聊天/工作」切换器 + 起步建议 ──────────────────
+        // 用 slots.inject 等待 official 声明出现（conversation.input.dock
+        //   由 ui-conversation 声明），声明消失时自动注销。
+        try {
+          var disposeDock = ctx.slots.inject('conversation.input.dock', function () {
+            return ctx.slots.register({
+              name: 'conversation.input.dock',
+              id: 'dsh-engineering-ui/view-switch',
+              order: 0,
+              inject: function (sessionId) {
+                // 组件只需要一个"当前会话 preset"的判据源（决定显不显示）。
+                // 能力切换本身走 HTTP /chat-mode，不需要其他服务。
+                return { engListSource: listSrc, engSessionId: sessionId };
+              },
+            }, EngInputDock);
+          });
+          // 常驻：交给插件生命周期统一回收（dockDisposers 不被设置回调清空）。
+          if (typeof disposeDock === 'function') dockDisposers.push(disposeDock);
+        } catch (e) { console.error('[dsh-engineering-ui] input dock registration', e); }
+        // 插件卸载时回收
+        disposers.push(function () {
+          for (var i = dockDisposers.length - 1; i >= 0; i--) {
+            try { dockDisposers[i](); } catch (e) {}
+          }
+          dockDisposers.length = 0;
+        });
+
+        if (!(listSrc && typeof listSrc.getSnapshot === 'function')) {
+          // 拿不到会话列表服务（旧版/异常）→ 切换器仍会渲染，但判据取不到
+          //   preset，组件会 return null（功能静默缺失，不报错、不影响其他功能）。
+          console.warn('[dsh-engineering-ui] sessions.list 不可用，聊天切换器将不显示');
+        }
+      } catch (e) { console.error('[dsh-engineering-ui] chat switch registration', e); }
     }
     exports.apply = apply;
     exports.inject = ['sessions', 'slots'];
     exports.SubagentConsole = SubagentConsole;
     exports.EngineeringSettingsSection = EngineeringSettingsSection;
-    exports.EngSettingsLayer = EngSettingsLayer;
+    exports.EngGroup = EngGroup;
+    exports.EngRow = EngRow;
+    exports.EngConnRow = EngConnRow;
+    exports.EngStatusChip = EngStatusChip;
     exports.EngSwitch = EngSwitch;
     exports.SubagentDock = SubagentConsole;
     exports.formatMessage = formatMessage;

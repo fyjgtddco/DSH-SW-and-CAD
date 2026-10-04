@@ -110,11 +110,17 @@ function harness(handles = {}) {
   return { ctx, root, routes, hooks, asks, dispose, request };
 }
 
-test('全部 13 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
+test('全部 21 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
   const h = harness();
   try {
-    // 9 条基础/提问/通知路由 + 4 条【三大防线】签名路由 = 13
-    assert.equal(h.routes.size, 13, '路由数量应为 13（原先断言 9 已过期）');
+    // 9 条基础/提问/通知路由 + 4 条【三大防线】签名路由
+    //   + 4 条【连接区】路由（conn-state / conn-probe
+    //     / conn-launch / conn-diagnose）
+    //   + 1 条【独立聊天页】推荐追问路由（/suggest）
+    //   + 1 条【划词详情】侧边分析路由（/side-chat）
+    //   + 1 条【工程人设】读写路由（/persona）
+    //   + 1 条【聊天模式】同会话能力切换路由（/chat-mode）= 21
+    assert.equal(h.routes.size, 21, '路由数量应为 21（含 /suggest、/side-chat、/persona、/chat-mode）');
     for (const p of [
       '/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
       '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
@@ -123,6 +129,10 @@ test('全部 13 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/notify-room',
       '/dsh-engineering-ui/defense/sign', '/dsh-engineering-ui/defense/verify',
       '/dsh-engineering-ui/defense/info', '/dsh-engineering-ui/defense/judge',
+      '/dsh-engineering-ui/conn-state', '/dsh-engineering-ui/conn-probe',
+      '/dsh-engineering-ui/conn-launch', '/dsh-engineering-ui/conn-diagnose',
+      '/dsh-engineering-ui/suggest', '/dsh-engineering-ui/side-chat',
+      '/dsh-engineering-ui/persona', '/dsh-engineering-ui/chat-mode',
     ]) {
       assert.ok(h.routes.has(p), 'missing route ' + p);
     }

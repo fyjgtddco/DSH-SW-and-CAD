@@ -37,6 +37,41 @@ import win32com.client
 # 静默子进程（Windows 下不弹窗）
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
+
+def _drive_roots():
+    """枚举系统上【真实存在】的所有盘符根（如 "C:\\\\", "Z:\\\\", "G:\\\\"）。
+
+    ── 【连接区修复】为什么必须有这个函数 ──────────────────────────────────
+    用户诉求原文："以后这个 SW 关了也好，我重新下到其他的 C，D，G，Q
+      任意一个盘也好，点那个连接就可以直接找到地方的哦，CAD 也是。"
+
+    原缺陷：若干处把盘符【硬编码】成 ("C:","D:","E:","F:") 或加上 "Z:"。
+    后果：用户把 SolidWorks / AutoCAD 换装到 G:、Q: 等未列出的盘 →
+      全盘扫描逻辑直接跳过该盘 → "找不到安装位置"，
+      而且报错信息会误导（看起来像"没装"）。
+
+    本函数【枚举 A~Z 全部盘符并逐个探测其是否存在】，因此对任意盘符都成立。
+    注意：A/B 通常是软驱位（不存在会被 os.path.exists 过滤掉），
+      网络盘/虚拟盘只要已挂载且可访问也会被纳入。
+
+    Returns: ["C:\\\\", "D:\\\\", ...]；一个都没有时退回 ["C:\\\\"]。
+    """
+    roots = []
+    try:
+        import string
+        for letter in string.ascii_uppercase:
+            root = letter + ":\\"
+            try:
+                if os.path.exists(root):
+                    roots.append(root)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if not roots:
+        roots = ["C:\\"]
+    return roots
+
 # SolidWorks 类型库标识（Bug5：用于生成/取用前期绑定缓存）
 SW_TLB_IID = "{83A33D31-27C5-11CE-BFD4-00400513BB57}"
 SW_TLB_VER = (0, 33, 0)   # (lcid, major, minor) —— 实机 sldworks.tlb 为 33.0
@@ -77,27 +112,122 @@ def _find_sldworks_tlb():
                 winreg.CloseKey(_k)
     except Exception:
         pass
-    # ② 常见安装位置（含非 C 盘，用户机器装在 Z 盘）
+    # ② 常见安装位置（【全盘符】—— 用户机器可能装在 Z / G / Q 等任意盘）
+    # 【连接区修复】原实现硬编码 ("C:","D:","E:","Z:","F:") 五个盘符，
+    #   用户把 SW 换装到 G:/Q: 等盘就【永远找不到 sldworks.tlb】→
+    #   类型库缓存生成失败 → MathUtility 相关功能挂掉。
+    #   改为枚举系统上【真实存在】的所有盘符。
+    #
+    # ── 【连接区加固 · 2026-10-04】再补两条更可靠的路子 ──────────────────
+    #   上面的 glob 仍假设安装形态是 `...\Program Files\SOLIDWORKS*\SOLIDWORKS`。
+    #   若 SW 装在 `Z:\7-Zip\SolidWorks 2025` 这类目录（本机 AutoCAD 就是这种
+    #   装法），glob 依然找不到。因此：
+    #     ① 先从注册表拿到【真实安装目录】，直接拼 sldworks.tlb（最可靠）；
+    #     ② 再从 SLDWORKS.exe 所在目录反推（同目录通常就有 .tlb）。
     _cands = []
+    # ① 注册表安装目录 → 拼 .tlb（支持 SOLIDWORKS 子目录与直接安装两种形态）
+    try:
+        for _d in _sw_install_from_registry():
+            for _sub in ("sldworks.tlb",
+                         _os.path.join("SOLIDWORKS", "sldworks.tlb")):
+                _p = _os.path.join(_d, _sub)
+                if _os.path.isfile(_p):
+                    return _p
+                _cands.append(_p)
+    except Exception:
+        pass
+    # ② 从 SLDWORKS.exe 所在目录反推
+    try:
+        _exe = find_sldworks_exe()
+        if _exe:
+            _dir = _os.path.dirname(_exe)
+            for _p in (_os.path.join(_dir, "sldworks.tlb"),
+                       _os.path.join(_dir, "..", "sldworks.tlb")):
+                if _os.path.isfile(_p):
+                    return _os.path.abspath(_p)
+    except Exception:
+        pass
+    # ③ 全盘符常见目录 glob（兜底，保持原有行为）
     try:
         import glob as _glob
-        for _root in ("C:", "D:", "E:", "Z:", "F:"):
+        for _root in _drive_roots():
             _cands.extend(_glob.glob(_os.path.join(
                 _root, "Program Files", "SOLIDWORKS*", "SOLIDWORKS", "sldworks.tlb")))
             _cands.extend(_glob.glob(_os.path.join(
                 _root, "Program Files", "SOLIDWORKS Corp*", "SOLIDWORKS",
                 "sldworks.tlb")))
+            # 放宽：盘符根下任意含 SOLIDWORKS 的一级目录
+            _cands.extend(_glob.glob(_os.path.join(
+                _root, "*SOLIDWORKS*", "sldworks.tlb")))
+            _cands.extend(_glob.glob(_os.path.join(
+                _root, "*SOLIDWORKS*", "*", "sldworks.tlb")))
     except Exception:
         pass
     for _c in _cands:
-        if _os.path.exists(_c):
-            return _c
+        try:
+            if _os.path.isfile(_c):
+                return _os.path.abspath(_c)
+        except Exception:
+            continue
     return None
 
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 MM = 0.001  # 毫米 → 米
+
+
+def vision_shot_dir():
+    """返回"供 DSH 前端识图插件读取"的截图目录（自动探测，可覆盖）。
+
+    ── 【连接自检修复】消除硬编码的【作者本机桌面路径】──────────────────
+    原缺陷：三处把路径写死成 `C:\\Users\\j1877\\Desktop\\DSH-Check`
+      （swapi.screenshot(for_vision=True)、sw_bridge.cmd_vision_fallback、
+      cmd_check_vision）。后果：
+        · 换一台电脑 / 换用户名 → 目录不存在或不可写，
+          识图降级链路静默失效（截图存到了别人的桌面）；
+        · 同步到其它预设副本时还会在别人机器上凭空造目录。
+
+    探测顺序（第一个可写者胜出）：
+      1) 环境变量 DSH_VISION_DIR（显式覆盖，最高优先）
+      2) <用户桌面>\\DSH-Check（沿用历史语义，但跟随真实用户名）
+      3) <工具目录>\\vision_shots（桌面不可写时的兜底）
+
+    Returns: 绝对路径（已确保存在）。
+    """
+    import tempfile as _tempfile
+    cands = []
+    _env = (os.environ.get("DSH_VISION_DIR") or "").strip()
+    if _env:
+        cands.append(_env)
+    # ② 用户桌面（用 USERPROFILE 推导，不再写死用户名）
+    try:
+        _home = os.path.expanduser("~")
+        if _home and _home != "~":
+            cands.append(os.path.join(_home, "Desktop", "DSH-Check"))
+    except Exception:
+        pass
+    # ③ 工具目录兜底（一定存在且通常可写）
+    cands.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "vision_shots"))
+    for c in cands:
+        try:
+            os.makedirs(c, exist_ok=True)
+            # 实地写测试：目录存在但无写权限时要能发现
+            _probe = os.path.join(c, ".dsh_write_probe")
+            with open(_probe, "w", encoding="utf-8") as f:
+                f.write("ok")
+            os.remove(_probe)
+            return os.path.abspath(c)
+        except Exception:
+            continue
+    # 全失败 → 退回系统临时目录（绝不返回 None）
+    _fallback = os.path.join(_tempfile.gettempdir(), "DSH-Check")
+    try:
+        os.makedirs(_fallback, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.abspath(_fallback)
 
 # ==================== 自动探测 ====================
 
@@ -107,10 +237,34 @@ def _version_year(major):
 
 
 def _sw_install_from_registry():
-    r"""【B1修复】从注册表读取 SolidWorks 安装路径（最可靠，跨盘符）。
+    r"""【B1修复 + 连接区加固】从注册表读取 SolidWorks 安装路径（跨盘符）。
 
-    读取 HKLM\SOFTWARE\SolidWorks\Applications 的 FullName 值，
-    该值由安装程序写入，无论装到哪个盘都能找到。
+    ── 【连接区加固 · 2026-10-04】原实现读的是【空键】──────────────────
+    实测（本机 SW2025 装在 Z 盘）：
+        `_sw_install_from_registry()` 返回 []（一条都读不到）
+      因为原实现只读 `HKLM\SOFTWARE\SolidWorks\Applications`，
+      而该键在本机【只有 (default)、没有任何值】。
+      ⇒ SW 的路径发现一直【完全依赖全盘扫描】，注册表这条路是死的。
+        一旦 SW 装在扫描白名单之外的目录（如 CAD 那样装在
+        `Z:\7-Zip\AutoCAD 2020`），就会"装没装都找不到"。
+
+    实测找到的【真正权威】位置（递归搜索得知）：
+      · `HKLM\SOFTWARE\SolidWorks\SOLIDWORKS 2025\Setup`
+            「SolidWorks Folder」= Z:\Program Files\SOLIDWORKS Corp2025\SOLIDWORKS\
+        —— 这是安装程序写的实际安装目录，最权威。
+      · `HKLM\SOFTWARE\SolidWorks\IM`
+            「InstallDir 2025」  = Z:\Program Files\SOLIDWORKS Corp2025
+        —— 安装管理程序记录的安装根。
+      · 各版本子键下的 `InstallDir` / `InstallLocation` / `Path`。
+
+    加固策略（按可靠性从高到低）：
+      ① 递归遍历 `SOFTWARE\SolidWorks`（深度受限），
+         凡值名含 Folder/InstallDir/InstallLocation/Path/Location 且值像路径的，
+         一律收集 —— 不预设层级，避免再次"少读一层就全盘失效"。
+      ② 保留原 Applications 读取（老版本 SW 该键是有值的，不能删）。
+      ③ 额外显式补几个已知权威键，作为递归之外的双保险。
+
+    返回：候选路径/目录字符串列表（调用方负责判断存在性并拼 SLDWORKS.exe）。
     """
     cands = []
     if sys.platform != "win32":
@@ -119,6 +273,76 @@ def _sw_install_from_registry():
         import winreg
     except Exception:
         return cands
+
+    def _add(v):
+        """收集看起来像"安装路径"的字符串。"""
+        try:
+            if not isinstance(v, str):
+                return
+            v = v.strip().strip('"')
+            if not v or len(v) < 4:
+                return
+            # 只收绝对路径（盘符或 UNC），排除 URL / 纯命令
+            if not ((":" in v and ("\\" in v or "/" in v))
+                    or v.startswith("\\\\")):
+                return
+            if v.lower().startswith(("http://", "https://")):
+                return
+            if v not in cands:
+                cands.append(v)
+        except Exception:
+            pass
+
+    # ── ① 递归遍历（主力）：不预设层级，任何深度都能命中 ──────────────
+    #   值名关键字：本机实测是「SolidWorks Folder」「InstallDir 2025」
+    _NAME_KEYS = ("folder", "installdir", "installlocation", "install path",
+                  "path", "location")
+    _MAX_DEPTH = 4
+
+    def _walk(hive, path, depth):
+        if depth > _MAX_DEPTH:
+            return
+        try:
+            k = winreg.OpenKey(hive, path)
+        except Exception:
+            return
+        try:
+            i = 0
+            while True:
+                try:
+                    name, value, _t = winreg.EnumValue(k, i)
+                    i += 1
+                except OSError:
+                    break
+                _ln = str(name).lower()
+                if any(kk in _ln for kk in _NAME_KEYS):
+                    _add(value)
+                elif isinstance(value, str) and \
+                        value.lower().endswith(("sldworks.exe", "sldworks")):
+                    _add(value)
+            j = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(k, j)
+                    j += 1
+                except OSError:
+                    break
+                _walk(hive, path + "\\" + sub, depth + 1)
+        finally:
+            try:
+                winreg.CloseKey(k)
+            except Exception:
+                pass
+
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for base in (r"SOFTWARE\SolidWorks",
+                     r"SOFTWARE\WOW6432Node\SolidWorks"):
+            try:
+                _walk(hive, base, 0)
+            except Exception:
+                continue
+
+    # ── ② 原 Applications 读取（老版本 SW 该键有值，保留兼容）──────────
     reg_paths = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\SolidWorks\Applications"),
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\SolidWorks\Applications"),
@@ -135,32 +359,132 @@ def _sw_install_from_registry():
                     except OSError:
                         break
                     if isinstance(value, str) and value.lower().endswith(".exe"):
-                        cands.append(value)
+                        _add(value)
         except Exception:
             continue
-    # 也试 SolidWorks 主键下的 InstallDir / 各版本子键
+
+    # ── ③ 双保险：显式补已知权威键（递归之外再钉一遍）────────────────
     for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
         for base in (r"SOFTWARE\SolidWorks", r"SOFTWARE\WOW6432Node\SolidWorks"):
             try:
                 with winreg.OpenKey(hive, base) as k:
-                    i = 0
+                    j = 0
                     while True:
                         try:
-                            sub = winreg.EnumKey(k, i)
-                            i += 1
+                            sub = winreg.EnumKey(k, j)
+                            j += 1
                         except OSError:
                             break
-                        for vname in ("InstallDir", "InstallLocation", "Path"):
-                            try:
-                                with winreg.OpenKey(hive, base + "\\" + sub) as sk:
-                                    val, _ = winreg.QueryValueEx(sk, vname)
-                                    if isinstance(val, str) and val:
-                                        cands.append(val)
-                            except Exception:
-                                pass
+                        # 版本子键（SOLIDWORKS 2025 / SolidWorks 2024 …）
+                        for subsub in ("", "\\Setup", "\\General"):
+                            for vname in ("SolidWorks Folder", "InstallDir",
+                                          "InstallLocation", "Path",
+                                          "Location"):
+                                try:
+                                    with winreg.OpenKey(
+                                            hive,
+                                            base + "\\" + sub + subsub) as sk:
+                                        val, _ = winreg.QueryValueEx(sk, vname)
+                                        _add(val)
+                                except Exception:
+                                    pass
             except Exception:
                 continue
+
+    # ── ④ 按"可靠性"重排（避免把 C:\SOLIDWORKS Data 这类无关目录排在前面）──
+    #   判据（越靠前越可能是真正的安装根）：
+    #     a) 该目录下确实存在 SLDWORKS.exe        —— 铁证，排最前
+    #     b) 值本身以 sldworks.exe 结尾           —— 直接就是可执行文件
+    #     c) 路径形如 ...\SOLIDWORKS CorpXXXX\SOLIDWORKS —— 典型安装形态
+    #     d) 明显无关的（Data/Downloads/IM/Posts/TBM/lang/templates）往后压
+    def _rank(v):
+        lv = str(v).lower()
+        s = 50
+        try:
+            for _n in ("SLDWORKS.exe", "sldworks.exe"):
+                if os.path.isfile(os.path.join(v, _n)):
+                    s -= 60
+                    break
+        except Exception:
+            pass
+        if lv.endswith("sldworks.exe"):
+            s -= 40
+        if lv.rstrip("\\/").endswith("solidworks"):
+            s -= 25
+        if "program files" in lv or "corp" in lv:
+            s -= 10
+        if any(x in lv for x in ("data\\", "downloads", "\\im\\", "sldim",
+                                 "posts", "tbm", "camera", "lang\\",
+                                 "templates", "toolbox")):
+            s += 40
+        return s
+
+    try:
+        cands.sort(key=_rank)
+    except Exception:
+        pass
     return cands
+
+
+def walk_drive_for_exe(drive, exe_names, keyword="solidworks", max_depth=3):
+    """在【单个盘符】内做有界深度遍历，寻找指定的可执行文件。
+
+    ── 【连接区加固 · 2026-10-04】为什么需要它 ──────────────────────────
+    实测缺口：本机 AutoCAD 装在 `Z:\\7-Zip\\AutoCAD 2020\\acad.exe`。
+    `glob` 模式（如 `Z:\\*SOLIDWORKS*`、`Z:\\*\\*`）只能覆盖 1~2 层，
+    这种"盘符根 → 中继目录 → 软件目录"的嵌套结构【扫不到】；
+    实测 4 种布局里，`盘根/7-Zip/SolidWorks 2025` 与更深的都 glob 不中。
+
+    做法（代价可控，不会全盘暴力遍历）：
+      · 深度限制 max_depth（默认 3）；
+      · 【剪枝】：只有目录名含 keyword（solidworks / autocad）才继续下钻；
+        浅层（<=1）的目录也下钻，以穿透 Program Files / 7-Zip 这类中继目录；
+      · 跳过 Windows/Users/ProgramData/$Recycle 等无关大目录。
+
+    Args:
+        drive: 形如 "Z:" 或 "Z:\\"
+        exe_names: 目标文件名元组，如 ("SLDWORKS.exe",)
+        keyword: 深钻白名单关键字
+        max_depth: 最大目录深度
+
+    Returns: 命中的绝对路径，或 None。
+    """
+    _kw = str(keyword or "").lower()
+    _names = tuple(str(n).lower() for n in (exe_names or ()))
+    _skip = ("$recycle", "system volume", "windows", "programdata",
+             "users", "appdata", "program files\\windows")
+    try:
+        base = drive if str(drive).endswith("\\") else str(drive) + "\\"
+        if not os.path.isdir(base):
+            return None
+        for root, dirs, _files in os.walk(base):
+            try:
+                _depth = root[len(base):].count(os.sep)
+            except Exception:
+                _depth = 0
+            if _depth >= max_depth:
+                dirs[:] = []
+                continue
+            _bl = os.path.basename(root).lower()
+            if any(_bl.startswith(_s) for _s in _skip):
+                dirs[:] = []
+                continue
+            for _n in _names:
+                _cand = os.path.join(root, _n)
+                if os.path.isfile(_cand):
+                    return os.path.abspath(_cand)
+            # 剪枝：含关键字的目录继续下钻；浅层目录也下钻（穿透中继层）
+            _keep = []
+            for _d in dirs:
+                _dl = _d.lower()
+                if _kw and _kw in _dl:
+                    _keep.append(_d)
+                elif _depth <= 1 and not any(_dl.startswith(_s) for _s in _skip):
+                    _keep.append(_d)
+            dirs[:] = _keep
+    except Exception:
+        return None
+    return None
 
 
 def _all_drive_letters():
@@ -184,12 +508,30 @@ def find_sldworks_exe():
     """【B1修复】定位 SLDWORKS.exe 真实路径。
 
     搜索顺序（从最可靠到兜底）：
+      0. 环境变量 DSH_SW_EXE（用户显式指定，最高优先）
       1. 注册表 FullName（安装程序写入的绝对路径）
       2. 注册表 InstallDir 下的 SLDWORKS.exe
       3. 所有盘符的常见安装目录（含 Program Files\\SOLIDWORKS Corp*）
       4. 运行中进程的可执行文件路径
     返回第一个存在的绝对路径；找不到返回 None。
+
+    ── 【连接区修复 · 兑现环境变量承诺】──────────────────────────────────
+    实测事故：连接区启动失败的提示写着
+      "可设置环境变量 DSH_SW_EXE 显式指定路径"，
+    但全代码库【没有任何地方读取该变量】—— 用户照做也无效，属空头承诺。
+    现真正支持：DSH_SW_EXE 可指向 exe 本身或其所在目录。
     """
+    # 0) 环境变量显式指定（最高优先，用于非常规安装位置）
+    _env = (os.environ.get("DSH_SW_EXE") or "").strip().strip('"')
+    if _env:
+        for _c in (_env,
+                   os.path.join(_env, "SLDWORKS.exe"),
+                   os.path.join(_env, "sldworks.exe")):
+            try:
+                if os.path.isfile(_c):
+                    return os.path.abspath(_c)
+            except Exception:
+                pass
     seen = set()
     # 1) 注册表直给的可执行文件
     for v in _sw_install_from_registry():
@@ -223,6 +565,14 @@ def find_sldworks_exe():
         r"SOLIDWORKS Corp*",
         r"Program Files\SolidWorks Corp*\SolidWorks",
         r"Program Files (x86)\SOLIDWORKS Corp*\SOLIDWORKS",
+        # ── 【连接区加固】放宽到"盘符根下任何含 SOLIDWORKS 的目录" ──────
+        #   本机 AutoCAD 装在 `Z:\7-Zip\AutoCAD 2020`（非 Program Files），
+        #   SW 也可能被这样安装。仅靠上面几条 Program Files 模式会漏。
+        r"*SOLIDWORKS*",
+        r"*SOLIDWORKS*\SOLIDWORKS",
+        r"*SOLIDWORKS*\*",
+        r"*SolidWorks*",
+        r"*SolidWorks*\SolidWorks",
     ]
     for drive in _all_drive_letters():
         for pat in sub_patterns:
@@ -236,6 +586,21 @@ def find_sldworks_exe():
                                 return cand
             except Exception:
                 continue
+
+    # 2b) 【连接区加固】有界深度遍历：兜住 glob 覆盖不到的【多层】自定义目录
+    #   实测缺口：`盘符根\7-Zip\SolidWorks 2025\SLDWORKS.exe`（正是本机
+    #     AutoCAD 的装法 `Z:\7-Zip\AutoCAD 2020`）—— glob 模式只能覆盖
+    #     1~2 层，这种 2 层以上嵌套【扫不到】。
+    #   做法：对每个盘符做【深度受限】的遍历（见 walk_drive_for_exe），
+    #     只在目录名含 solidworks 时继续下钻，命中即返回。
+    for drive in _all_drive_letters():
+        try:
+            _hit = walk_drive_for_exe(drive, exe_names,
+                                      keyword="solidworks", max_depth=3)
+            if _hit:
+                return _hit
+        except Exception:
+            continue
 
     # 3) 运行中进程的可执行路径（已启动时最准）
     try:
@@ -907,16 +1272,57 @@ def _custom_material_path():
 
 
 def load_custom_materials():
-    """读取用户自定义材料库（不存在返回 {}）。"""
+    """读取用户自定义材料库（不存在返回 {}）。
+
+    ── 【观察点 12 修复 · 阻断级】必须用 `utf-8-sig` 兼容 BOM ──────────────
+    原实现用 `encoding="utf-8"` 读取。若该文件被 PowerShell
+    （`[System.IO.File]::WriteAllText(..., UTF8Encoding)`）或某些编辑器
+    写成 **UTF-8 with BOM**，`json.load` 会抛
+    `JSONDecodeError: Unexpected UTF-8 BOM`，而原来的 `except: pass`
+    把它【静默吞掉】→ 返回 `{}` → `is_valid_material()` 对所有自定义材料
+    一律返回 False → 所有零件材料凭据判 `material_invalid` → 物理防线 FAIL。
+
+    这是**阻断级且极其隐蔽**的缺陷：文件内容看起来完全正常，只是开头多了
+    3 个字节（EF BB BF）。`utf-8-sig` 解码时自动剥离 BOM，对无 BOM 文件
+    行为与 `utf-8` 完全一致，因此是零风险替换。
+
+    同时不再静默吞错：解析失败会打 stderr 提示（见下），避免"文件坏了却
+    毫无线索"。
+    """
     p = _custom_material_path()
+    if not os.path.isfile(p):
+        return {}
+    # ① 首选 utf-8-sig（兼容 BOM 与无 BOM）
     try:
-        if os.path.isfile(p):
-            with open(p, "r", encoding="utf-8") as f:
+        with open(p, "r", encoding="utf-8-sig") as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            return d
+        _warn_stderr("custom_materials.json 顶层不是对象，已忽略: %s" % p)
+        return {}
+    except Exception as e:
+        # ② 回退：极少数情况下文件可能是 UTF-16（记事本"另存为 Unicode"）
+        try:
+            with open(p, "r", encoding="utf-16") as f:
                 d = json.load(f)
-            return d if isinstance(d, dict) else {}
+            if isinstance(d, dict):
+                _warn_stderr("custom_materials.json 以 UTF-16 读取成功: %s" % p)
+                return d
+        except Exception:
+            pass
+        # ③ 两种编码都失败 → 必须让调用方知道（原实现静默返回 {}）
+        _warn_stderr("custom_materials.json 解析失败（已按空库处理）: %s :: %r"
+                     % (p, e))
+        return {}
+
+
+def _warn_stderr(msg):
+    """把非致命告警打到 stderr（不抛异常、不影响主流程）。"""
+    try:
+        sys.stderr.write("[swapi][WARN] " + str(msg) + "\n")
+        sys.stderr.flush()
     except Exception:
         pass
-    return {}
 
 
 def save_custom_material(name, e_mpa=None, yield_mpa=None, uts_mpa=None,
@@ -1135,15 +1541,16 @@ def _find_template(sw=None):
     for ver_dir in glob.glob(r"C:\ProgramData\SolidWorks\SOLIDWORKS*"):
         cands.append(os.path.join(ver_dir, "templates"))
 
-    # 4) 常见安装位置（任意盘符）
-    for drive in ("C:", "D:", "E:", "F:"):
-        for sw_dir in glob.glob(drive + r"\*SOLIDWORKS*") + \
-                       glob.glob(drive + r"\SOLIDWORKS*"):
-            cands.append(os.path.join(sw_dir, "templates"))
-            # 也试试 ProgramData 下的
-            cands.append(os.path.join(sw_dir, "..", "..", "ProgramData",
-                                      "SolidWorks", "SOLIDWORKS 2022",
-                                      "templates"))
+    # 4) 安装目录下的模板（【全盘符 + Program Files】—— 见 _drive_roots）
+    #    ── 【连接区修复】原 glob 写成 `drive + r"*SOLIDWORKS*"`，
+    #       实际展开为 `C:\*SOLIDWORKS*` —— 只匹配【盘符根目录】下的文件夹，
+    #       而 SW 的真实安装是 `Z:\Program Files\SOLIDWORKS Corp2025\...`，
+    #       藏在 Program Files 里 → 这条扫描【从来没命中过】用户的真实安装，
+    #       一直靠 ProgramData 兜着。一旦 ProgramData 模板缺失
+    #       （换电脑/换盘/重装），就会误报"未找到零件模板"。
+    #       现改为按 _sw_template_dirs() 统一枚举（含 Program Files 各变体）。
+    for _d in _sw_template_dirs():
+        cands.append(_d)
 
     # 4) 从候选目录里找零件模板
     tmpl_names = ["gb_part.prtdot", "Part.prtdot", "零件.prtdot",
@@ -1160,6 +1567,74 @@ def _find_template(sw=None):
         if found:
             return found[0]
     return None
+
+
+def _sw_template_dirs():
+    """枚举【所有盘符】下可能的 SOLIDWORKS 模板目录（单一事实来源）。
+
+    ── 【连接区修复】为什么单独抽出来 ──────────────────────────────────────
+    用户诉求："以后这个 SW 关了也好，我重新下到其他的 C，D，G，Q 任意一个
+      盘也好，点那个连接就可以直接找到地方的。"
+
+    原实现有两个叠加缺陷：
+      ① 盘符硬编码成 ("C:","D:","E:","F:") → 换到 G:/Q: 盘直接找不到；
+      ② glob 写成 `drive + r"*SOLIDWORKS*"`（展开为 `C:\\*SOLIDWORKS*`），
+         只扫【盘符根目录】，而真实安装位于
+         `Z:\\Program Files\\SOLIDWORKS Corp2025\\SOLIDWORKS\\...`，
+         藏在 Program Files 里 → 【从来没命中过】真实安装。
+
+    本函数按"盘符 × 常见安装前缀 × SOLIDWORKS 变体"三层展开并去重，
+    供零件模板 / 装配体模板 / 材质库等共用。
+
+    Returns: 去重后的目录候选列表（不保证存在，由调用方判断）。
+    """
+    out = []
+    seen = set()
+
+    def _add(p):
+        try:
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+        except Exception:
+            pass
+
+    # 安装前缀：Program Files 各变体 + 盘符根（兼容绿色版/自定义安装）
+    prefixes = []
+    for _root in _drive_roots():
+        prefixes.append(os.path.join(_root, "Program Files"))
+        prefixes.append(os.path.join(_root, "Program Files (x86)"))
+        prefixes.append(_root)          # 兜底：有的装法直接落在盘符根
+
+    # SOLIDWORKS 目录名变体（不同年份/语言的安装命名）
+    sw_names = [
+        "SOLIDWORKS Corp*", "SolidWorks Corp*", "SOLIDWORKS*", "SolidWorks*",
+        "SOLIDWORKS Corp*\\SOLIDWORKS", "SolidWorks Corp*\\SolidWorks",
+    ]
+    for pre in prefixes:
+        for nm in sw_names:
+            try:
+                for d in glob.glob(os.path.join(pre, nm)):
+                    _add(os.path.join(d, "templates"))
+                    # 有些安装把模板放在子版本目录下
+                    _add(os.path.join(d, "SOLIDWORKS", "templates"))
+            except Exception:
+                continue
+    return out
+
+
+_TEMPLATE_DIRS_CACHE = None
+
+
+def _sw_template_dirs_cached():
+    """_sw_template_dirs() 的缓存版（全盘扫描较慢，同一进程内复用）。"""
+    global _TEMPLATE_DIRS_CACHE
+    if _TEMPLATE_DIRS_CACHE is None:
+        try:
+            _TEMPLATE_DIRS_CACHE = _sw_template_dirs()
+        except Exception:
+            _TEMPLATE_DIRS_CACHE = []
+    return _TEMPLATE_DIRS_CACHE
 
 
 _TEMPLATE_CACHE = None
@@ -1188,11 +1663,10 @@ def _find_asm_template(sw=None):
     # 3) ProgramData 标准位置
     for ver_dir in glob.glob(r"C:\ProgramData\SolidWorks\SOLIDWORKS*"):
         cands.append(os.path.join(ver_dir, "templates"))
-    # 4) 常见安装位置
-    for drive in ("C:", "D:", "E:", "F:"):
-        for sw_dir in glob.glob(drive + r"\*SOLIDWORKS*") + \
-                       glob.glob(drive + r"\SOLIDWORKS*"):
-            cands.append(os.path.join(sw_dir, "templates"))
+    # 4) 安装目录下的模板（【全盘符 + Program Files】—— 见 _sw_template_dirs）
+    for _d in _sw_template_dirs():
+        cands.append(_d)
+    for drive in _drive_roots():
         cands.append(os.path.join(drive, "ProgramData", "SolidWorks"))
     tmpl_names = ["gb_assembly.asmdot", "Assembly.asmdot", "装配体.asmdot",
                   "assembly.asmdot", "ASM.asmdot"]
@@ -1663,6 +2137,18 @@ def new_part(sw=None, material=None, density=None):
                 m._pending_material = DEFAULT_PART_MATERIAL
                 m._material_source = "default(DEFAULT_PART_MATERIAL)"
     m._pending_density = density
+    # ── 【观察点 13 修复】单独记录【用户传入的原始材料名】，且永不清空 ──────
+    # `_pending_material` 在材质成功写入后会被置 None（见
+    # _try_apply_pending_material）。于是 save() 生成凭据时只能回退到从 SW
+    # 读回的【映射名】（如 PETG → SW 无此牌号 → 近似成 PET），导致：
+    #   · 凭据写 requested_material = "PET"（而非用户要的 "PETG"）；
+    #   · `set_custom_material("PETG", ...)` 登记的 PETG 属性对校验【不生效】
+    #     （因为校验用的是映射名 PET）；
+    #   · 只要映射名不在合法库中，凭据就判 material_invalid —— 用户明明
+    #     登记了 PETG 也无济于事。
+    # 这里保存一份原始名，供 save() 优先按【用户本意】校验与记录。
+    m._requested_material = m._pending_material
+    m._requested_material_source = m._material_source
     m.material_result = {"ok": False, "method": None, "pending": True,
                          "material": m._pending_material,
                          "applied_material": None,
@@ -2339,9 +2825,27 @@ class SWModel:
             # 修复：写凭据/请求签名【之前】先做严格的材料合法性校验；
             #   不合法则【不请求签名】，凭据明确标 material_invalid=true，
             #   由 defense_gate 在防线①直接拦下。
-            _req_name = (getattr(self, "_pending_material", None)
-                         or _mr.get("applied_name") or _mr.get("material"))
+            # ── 【观察点 13 修复】凭据优先按【用户传入的原始材料名】校验 ────
+            # 原实现只看 `_pending_material`（材质写入成功后被清空）→ 回退到
+            # 从 SW 读回的【映射名】（PETG 被 SW 近似成 PET），于是：
+            #   · 凭据写 requested_material="PET" 而非用户要的 "PETG"；
+            #   · set_custom_material("PETG", ...) 的登记对校验不生效；
+            #   · 映射名不在库中时凭据判 invalid —— 用户登记了 PETG 也没用。
+            # 现改为：① 原始名优先；② 原始名不合法时，若【映射名】合法则采纳
+            # 映射名（并如实记录 requested vs applied 的差异，便于排查）；
+            # ③ 两者都不合法才判 material_invalid（Bug16 的严格性不受影响）。
+            _orig_name = getattr(self, "_requested_material", None)
+            _mapped_name = (_mr.get("applied_name") or _mr.get("material")
+                            or getattr(self, "_pending_material", None))
+            _req_name = _orig_name or _mapped_name
             _mat_ok, _mat_info, _mat_reason = is_valid_material(_req_name)
+            _name_used = _req_name
+            if not _mat_ok and _mapped_name and _mapped_name != _req_name:
+                # 原始名不在库中（例如拼写或 SW 无此牌号）→ 尝试映射名
+                _m_ok, _m_info, _m_reason = is_valid_material(_mapped_name)
+                if _m_ok:
+                    _mat_ok, _mat_info, _mat_reason = _m_ok, _m_info, _m_reason
+                    _name_used = _mapped_name
             if not _mat_ok:
                 _invalid = {
                     "schema": "dsh-material-attestation/1",
@@ -2382,8 +2886,13 @@ class SWModel:
             _att_info = {
                 "ok": bool(_mr.get("ok")),
                 "method": _mr.get("method"),
-                "requested_material": getattr(self, "_pending_material", None)
-                                      or _mr.get("material"),
+                # ── 【观察点 13 修复】如实记录"用户要的"与"实际生效的" ──────
+                # requested_material = 用户传入的原始名（PETG），用于回答
+                #   "我明明要 PETG，为什么凭据里是 PET"；
+                # applied_name = SW 实际匹配到的牌号（PET）。
+                # 校验用 _name_used（原始名合法就用原始名，否则用映射名）。
+                "requested_material": _orig_name or _req_name,
+                "attested_material_name": _name_used,
                 "applied_name": _mr.get("applied_name") or _mr.get("material"),
                 "database_name": _mr.get("database_name"),
                 "match_level": _mr.get("match_level"),
@@ -2394,7 +2903,11 @@ class SWModel:
                 # 修复：密度优先取【真实写入值】；若它等于 1000(水) 或缺失，
                 #   而内置表/自定义库有该材料的期望密度，则用期望值并标注来源，
                 #   避免凭据把"未生效的默认值"当成材料事实。
-                "density_kg_m3": _pick_attested_density(_mr, _req_name),
+                # ── 【观察点 13 修复】用【校验通过的名字】取期望密度 ────────
+                # 原实现传 _req_name（可能是映射名 PET）→ 取到 PET 的密度 1420；
+                #   而用户要的是 PETG（1270）。改用 _name_used 后，只要 PETG
+                #   在库中（内置或 custom_materials.json），就拿 PETG 的正确属性。
+                "density_kg_m3": _pick_attested_density(_mr, _name_used),
                 "density_before_kg_m3": _mr.get("density_before_kg_m3"),
                 "density_error_pct": _mr.get("density_error_pct"),
                 "approximate_match": bool(_mr.get("approximate_match")),
@@ -2439,6 +2952,23 @@ class SWModel:
                 "attested_family": _att_info.get("attested_family"),
             })
             if _signed_m and _signed_m.get("ok") and isinstance(_signed_m["credential"], dict):
+                # ── 【观察点 13/15 修复】材料被近似替换时必须显式告警 ────────
+                # 用户明确要求 PETG，SW 材料库无此牌号时会被近似成 PET
+                # （密度 1420 vs PETG 1270）。原实现对此【完全静默】——
+                # 凭据里悄悄写着 PET，用户直到物理防线 FAIL 才发现材料不对。
+                # 现在把"要的"与"实际生效的"不一致打成 WARN，让主对话/小屋
+                # 当场就能看到，而不是等到 room-end 才暴露。
+                try:
+                    _want = str(_orig_name or "").strip()
+                    _got = str(_mr.get("applied_name") or _mr.get("material") or "").strip()
+                    if _want and _got and _want.lower() != _got.lower():
+                        self._warn(
+                            "材料被近似替换：请求 '%s'，SW 实际生效 '%s'"
+                            "（密度 %s）。若二者属性不同（如 PETG 1270 vs PET 1420），"
+                            "物理校核会按实际材料判定，请确认是否可接受。"
+                            % (_want, _got, _att_info.get("density_kg_m3")))
+                except Exception:
+                    pass
                 # ── 【签后补字段 BUG 修复】宿主已签名 → 【原样落盘】──────────
                 #   原先这里 _cred_m.update({...5 个字段})：在签名之后改凭据体，
                 #   HMAC 必然失配 → 防线①永远验签失败。
@@ -3303,8 +3833,8 @@ class SWModel:
         """
         if path is None:
             if for_vision:
-                # 保存到 DSH-Check 目录，便于 DSH 前端识图插件读取
-                path = os.path.join(r"C:\Users\j1877\Desktop\DSH-Check",
+                # 供 DSH 前端识图插件读取（【连接自检修复】不再硬编码作者桌面）
+                path = os.path.join(vision_shot_dir(),
                                     "solidworks_vision_screenshot.png")
             else:
                 path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
