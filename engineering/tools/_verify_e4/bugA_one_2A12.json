@@ -1,0 +1,482 @@
+{
+ "grade": "2A12",
+ "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_2A12.SLDPRT",
+ "extrude": "<COMObject <unknown>>",
+ "set_material": {
+  "ok": false,
+  "material": "2A12",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 '2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12（旧称 LY12）（硬铝）' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'LY12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12-T4' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'GB_2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12（旧称 LY12）（硬铝）' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'LY12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12-T4' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'GB_2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12（旧称 LY12）（硬铝）' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'LY12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12-T4' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'GB_2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12（旧称 LY12）（硬铝）' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'LY12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12-T4' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'GB_2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 2780.0,
+  "canonical": "2A12",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0000000000001,
+  "rejected_candidates": [
+   {
+    "name": "2A12",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12（旧称 LY12）（硬铝）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "LY12",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12-T4",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "GB_2A12",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12（旧称 LY12）（硬铝）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "LY12",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12-T4",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "GB_2A12",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12（旧称 LY12）（硬铝）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "LY12",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12-T4",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "GB_2A12",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12（旧称 LY12）（硬铝）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "LY12",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12-T4",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "GB_2A12",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   }
+  ],
+  "error": "没有找到与 '2A12' 材质相符的材料：尝试了 20 个候选，其中 20 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：2A12(1000); 2A12（旧称 LY12）（硬铝）(1000); LY12(1000); 2A12-T4(1000)\n期望密度约 2780.0 kg/m³（aluminum 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('2A12', density=2780.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "material_result": {
+  "ok": false,
+  "material": "2A12",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 '2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12（旧称 LY12）（硬铝）' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'LY12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12-T4' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'GB_2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12（旧称 LY12）（硬铝）' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'LY12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12-T4' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'GB_2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12（旧称 LY12）（硬铝）' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'LY12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12-T4' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'GB_2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12（旧称 LY12）（硬铝）' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'LY12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 '2A12-T4' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符",
+   "候选 'GB_2A12' 被拒：实际密度 1000(plastic) 与期望 2780(aluminum) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 2780.0,
+  "canonical": "2A12",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0000000000001,
+  "rejected_candidates": [
+   {
+    "name": "2A12",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12（旧称 LY12）（硬铝）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "LY12",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12-T4",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "GB_2A12",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12（旧称 LY12）（硬铝）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "LY12",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12-T4",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "GB_2A12",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12（旧称 LY12）（硬铝）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "LY12",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12-T4",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "GB_2A12",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12（旧称 LY12）（硬铝）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "LY12",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "2A12-T4",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   },
+   {
+    "name": "GB_2A12",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "aluminum",
+    "expected_density_kg_m3": 2780.0
+   }
+  ],
+  "error": "没有找到与 '2A12' 材质相符的材料：尝试了 20 个候选，其中 20 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：2A12(1000); 2A12（旧称 LY12）（硬铝）(1000); LY12(1000); 2A12-T4(1000)\n期望密度约 2780.0 kg/m³（aluminum 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('2A12', density=2780.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "massprops": {
+  "ok": true,
+  "volume_mm3": 32000.000000000004,
+  "surface_area_mm2": 8800.0,
+  "mass_kg": 0.03200000000000001,
+  "density_kg_m3": 1000.0000000000001,
+  "center_of_mass_mm": [
+   40.0,
+   20.0,
+   5.0
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "save": {
+  "ok": true,
+  "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_2A12.SLDPRT",
+  "saved": true,
+  "updated": true,
+  "content_changed": true,
+  "content_same": false,
+  "md5_before": "752cfce2fcb02524d5b1057d7b172441",
+  "md5_after": "521381e86c3bd3ca93031a9b11a8a400",
+  "rc": 0,
+  "size": 59963,
+  "note": "内容已更新",
+  "applied_material": "2A12",
+  "material_source": "explicit(new_part material=)",
+  "material_attestation": {
+   "file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_2A12.SLDPRT.material.json",
+   "material": "2A12",
+   "density_kg_m3": 1000.0000000000001,
+   "family": "water",
+   "signed": true
+  }
+ },
+ "save_material_summary": {
+  "ok": false,
+  "error": "没有找到与 '2A12' 材质相符的材料：尝试了 20 个候选，其中 20 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：2A12(1000); 2A12（旧称 LY12）（硬铝）(1000); LY12(1000); 2A12-T4(1000)\n期望密度约 2780.0 kg/m³（aluminum 族）。",
+  "density_before_kg_m3": 1000.0000000000001,
+  "expected_density_kg_m3": 2780.0
+ },
+ "part_exists": true,
+ "attestation_exists": true,
+ "attestation": {
+  "kind": "material",
+  "schema": "dsh-material-attestation/1",
+  "room": "",
+  "at": "2026-10-07T05:56:21.842Z",
+  "ts": 1791352581842,
+  "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_2A12.SLDPRT",
+  "part_name": "DSH_bugA_2A12",
+  "part_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_2A12.SLDPRT",
+  "part_sha256": "43b477e83811acd8e47f3d5534168aaa14fc557f698c97b6fbcbcbde79d2ee53",
+  "part_size_bytes": 59963,
+  "part_md5": "521381e86c3bd3ca93031a9b11a8a400",
+  "applied_name": "2A12",
+  "density_kg_m3": 1000.0000000000001,
+  "source": "explicit(new_part material=)",
+  "attested_material": "2A12",
+  "attested_density_kg_m3": 1000.0000000000001,
+  "attested_family": "water",
+  "ok": false,
+  "approximate_match": false,
+  "material_mismatch_rejected": true,
+  "requested_material": "2A12",
+  "attested_material_name": "2A12",
+  "cross_standard": false,
+  "cross_standard_note": "null",
+  "expected_yield_mpa": 275,
+  "expected_density_kg_m3": 2780,
+  "applied_yield_mpa": 275,
+  "applied_density_kg_m3": 2780,
+  "yield_deviation_pct": 0,
+  "_sig": "Wo7DWPKG3Y3Sn4kcnlVfAbBlUayze4592GbfpuOj3pM=",
+  "_kid": "7633096ee4ddb3f9",
+  "_ts": 1791352581842,
+  "_nonce": "35678ce3e6e298877f4413a177b08934"
+ }
+}

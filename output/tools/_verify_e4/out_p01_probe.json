@@ -1,0 +1,384 @@
+{
+ "status": {
+  "loaded": true,
+  "count": 18,
+  "identity_count": 18,
+  "ready_count": 14,
+  "equivalent_ready_count": 1,
+  "pending_count": 3,
+  "native_ready_ids": [
+   "GB_Q235",
+   "GB_45#",
+   "GB_40Cr",
+   "GB_6061_T6",
+   "GB_304",
+   "GB_Q355",
+   "GB_20CrMnTi",
+   "GB_QT500_7",
+   "GB_7075_T6",
+   "GB_2A12",
+   "GB_65Mn",
+   "GB_316",
+   "GB_ZCuSn10P1",
+   "GB_H62"
+  ],
+  "equivalent_ready_ids": [
+   "GB_Cr12MoV"
+  ],
+  "file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\gb_materials.json",
+  "source": "《国标材料官方标准汇总》（标准身份）+ 《国标材料力学性能数据（E-ν-σy-σb-ρ）》（全 5 字段性能）+ 项目原有牌号数据",
+  "error": "以下 4 个牌号【仅确认标准身份，力学数值待补全】：GB_GCr15, GB_HT200, GB_Cr12MoV, GB_ZL104",
+  "searched": [
+   "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\gb_materials.json",
+   "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\gb_materials.json",
+   "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\rules\\gb_materials.json"
+  ]
+ },
+ "rows": [
+  {
+   "id": "GB_20CrMnTi",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 835.0,
+   "sb": 1080.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_SCAN",
+    "uts_mpa": "GB_SCAN",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_2A12",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 275.0,
+   "sb": 425.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_SCAN",
+    "uts_mpa": "GB_SCAN",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_304",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 205.0,
+   "sb": 515.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_STANDARD",
+    "uts_mpa": "GB_STANDARD",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_316",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 205.0,
+   "sb": 515.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_STANDARD",
+    "uts_mpa": "GB_STANDARD",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_40Cr",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 785.0,
+   "sb": 980.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_SCAN",
+    "uts_mpa": "GB_SCAN",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_45#",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 355.0,
+   "sb": 600.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_STANDARD",
+    "uts_mpa": "GB_STANDARD",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_6061_T6",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 276.0,
+   "sb": 310.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_SCAN",
+    "uts_mpa": "GB_SCAN",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_65Mn",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 785.0,
+   "sb": 980.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_STANDARD",
+    "uts_mpa": "GB_STANDARD",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_7075_T6",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 503.0,
+   "sb": 572.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_SCAN",
+    "uts_mpa": "GB_SCAN",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_Cr12MoV",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 655,
+   "sb": 760,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "EQUIVALENT_FALLBACK",
+    "uts_mpa": "EQUIVALENT_FALLBACK",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）；yield_mpa, uts_mpa 为等效兜底（Steel AISI 4140 (quenched & tempered)）",
+   "guard": null,
+   "eqf": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "eqn": "Steel AISI 4140 (quenched & tempered)"
+  },
+  {
+   "id": "GB_GCr15",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": null,
+   "sb": 1617.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "MISSING",
+    "uts_mpa": "GB_HARDNESS_ONLY",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：E_mpa, nu, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）；仍缺 yield_mpa",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_H62",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 200.0,
+   "sb": 290.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "HANDBOOK",
+    "uts_mpa": "GB_STANDARD",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, yield_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_HT200",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": null,
+   "sb": 200.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "MISSING",
+    "uts_mpa": "GB_STANDARD",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）；仍缺 yield_mpa",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_Q235",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 235.0,
+   "sb": 375.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_STANDARD",
+    "uts_mpa": "GB_STANDARD",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_Q355",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 355.0,
+   "sb": 470.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_STANDARD",
+    "uts_mpa": "GB_STANDARD",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_QT500_7",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 320.0,
+   "sb": 500.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_STANDARD",
+    "uts_mpa": "GB_STANDARD",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_ZCuSn10P1",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": 130.0,
+   "sb": 220.0,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "GB_STANDARD",
+    "uts_mpa": "GB_STANDARD",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+   "guard": null,
+   "eqf": null,
+   "eqn": null
+  },
+  {
+   "id": "GB_ZL104",
+   "vfg": false,
+   "pure_fallback": false,
+   "impossible": false,
+   "sy": null,
+   "sb": null,
+   "srcs": {
+    "E_mpa": "HANDBOOK",
+    "nu": "HANDBOOK",
+    "yield_mpa": "MISSING",
+    "uts_mpa": "MISSING",
+    "density_kg_m3": "HANDBOOK"
+   },
+   "vs": "混合来源：E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）；仍缺 yield_mpa, uts_mpa",
+   "guard": "顶层 σy/σb 已撤回：二者关系 σb(150.0) < σy(160.0) 物理上不可能。常见原因是【两者材料状态不一致】（例如 σy 取 T6 态、σb 取 F 态）。请按同一状态重新取值后填入。",
+   "eqf": null,
+   "eqn": null
+  }
+ ]
+}

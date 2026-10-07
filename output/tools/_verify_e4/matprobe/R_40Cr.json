@@ -1,0 +1,213 @@
+{
+ "grade": "40Cr",
+ "set_material": {
+  "ok": true,
+  "material": "40Cr",
+  "method": "PartDoc.SetMaterialPropertyName2",
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "材料已写入(IdName=SolidWorks DIN Materials|1.2083 (X40Cr14)|84)但密度与之前相同",
+   "⚠️ 材料名 '40Cr' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 '40Cr'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7820.0,
+  "canonical": "40Cr",
+  "configuration": "默认",
+  "density_before_kg_m3": 7740.0,
+  "material_mismatch_rejected": false,
+  "applied_name": "40Cr",
+  "match_level": "none",
+  "density_after_kg_m3": 7740.0,
+  "material_id_name": "SolidWorks DIN Materials|1.2083 (X40Cr14)|84",
+  "density_kg_m3": 7740.0,
+  "density_changed": false,
+  "approximate_match": true,
+  "warning": "⚠️ 材料名 '40Cr' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 '40Cr'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。",
+  "density_error_pct": 1.02
+ },
+ "material_result": {
+  "ok": true,
+  "material": "40Cr",
+  "method": "PartDoc.SetMaterialPropertyName2",
+  "database": null,
+  "database_name": "SolidWorks DIN Materials",
+  "warnings": [
+   "⚠️ 材料名 '40Cr' 在库 'SolidWorks DIN Materials' 中没有精确匹配，已选用最接近的 '1.2083 (X40Cr14)'（匹配级别=loose）。【跨标准替代】请求 40Cr（GB 体系），实际生效 1.2083 (X40Cr14)（EN 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。 如果这不是你要的材料，请用 swapi.list_materials('SolidWorks DIN Materials') 查看库中可用名称后重新指定。"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7820.0,
+  "canonical": "40Cr",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [],
+  "rejected_candidates_before_success": [
+   {
+    "name": "40Cr",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "40Cr（合金结构钢，调质）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "AISI 5140",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "5140",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "Chromium Steel",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "GB_40Cr",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "40Cr",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "40Cr（合金结构钢，调质）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "AISI 5140",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "5140",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "Chromium Steel",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "GB_40Cr",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   }
+  ],
+  "material_mismatch_rejected": false,
+  "applied_name": "1.2083 (X40Cr14)",
+  "match_level": "loose",
+  "density_after_kg_m3": 7740.0,
+  "material_id_name": "SolidWorks DIN Materials|1.2083 (X40Cr14)|84",
+  "density_kg_m3": 7740.0,
+  "density_changed": true,
+  "approximate_match": true,
+  "cross_standard": true,
+  "cross_standard_note": "【跨标准替代】请求 40Cr（GB 体系），实际生效 1.2083 (X40Cr14)（EN 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。",
+  "warning": "⚠️ 材料名 '40Cr' 在库 'SolidWorks DIN Materials' 中没有精确匹配，已选用最接近的 '1.2083 (X40Cr14)'（匹配级别=loose）。【跨标准替代】请求 40Cr（GB 体系），实际生效 1.2083 (X40Cr14)（EN 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。 如果这不是你要的材料，请用 swapi.list_materials('SolidWorks DIN Materials') 查看库中可用名称后重新指定。",
+  "density_error_pct": 1.02
+ },
+ "get_material": {
+  "ok": true,
+  "name": "SolidWorks DIN Materials|1.2083 (X40Cr14)|84",
+  "density_kg_m3": 7740.0,
+  "mass_kg": 0.11145600000000001,
+  "volume_mm3": 14400.000000000002
+ },
+ "massprops": {
+  "ok": true,
+  "volume_mm3": 14400.000000000002,
+  "surface_area_mm2": 5039.999999999999,
+  "mass_kg": 0.11145600000000001,
+  "density_kg_m3": 7740.0,
+  "center_of_mass_mm": [
+   29.999999999999996,
+   14.999999999999998,
+   4.0
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "save_ok": true,
+ "part_exists": true,
+ "attestation": {
+  "kind": "material",
+  "schema": "dsh-material-attestation/1",
+  "room": "",
+  "at": "2026-10-07T05:59:17.283Z",
+  "ts": 1791352757283,
+  "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_40Cr.SLDPRT",
+  "part_name": "P_40Cr",
+  "part_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_40Cr.SLDPRT",
+  "part_sha256": "6db2136034bca0085a36e86b6d1c7514c4445ffe6619be3ab36d05b383581d5f",
+  "part_size_bytes": 61453,
+  "part_md5": "4238c2ec17b032ce4f9da75914456b1e",
+  "applied_name": "1.2083 (X40Cr14)",
+  "density_kg_m3": 7740,
+  "source": "explicit(new_part material=)",
+  "attested_material": "1.2083 (X40Cr14)",
+  "attested_density_kg_m3": 7740,
+  "attested_family": "steel",
+  "ok": true,
+  "approximate_match": true,
+  "material_mismatch_rejected": false,
+  "requested_material": "40Cr",
+  "attested_material_name": "40Cr",
+  "cross_standard": true,
+  "cross_standard_note": "【跨标准替代】请求 40Cr（GB 体系），实际生效 1.2083 (X40Cr14)（EN 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。",
+  "expected_yield_mpa": 785,
+  "expected_density_kg_m3": 7820,
+  "applied_yield_mpa": null,
+  "applied_density_kg_m3": null,
+  "yield_deviation_pct": null,
+  "_sig": "J+AodSc5nhhziA9h8BzCpGEzyxU90wLiwusv6BToynY=",
+  "_kid": "7633096ee4ddb3f9",
+  "_ts": 1791352757284,
+  "_nonce": "93b1a05ebbb28a0b7f773059ddd5bf3b"
+ }
+}

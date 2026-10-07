@@ -1,0 +1,425 @@
+{
+  "schema": "dsh-gb-materials/1",
+  "source": "《国标材料官方标准汇总》（用户提供）+ 项目原有牌号数据；标准号与官网来自国家标准全文公开系统 https://std.samr.gov.cn/gb",
+  "note": "本文件是国标材料的【唯一数据源】。标准身份（名称/标准号/年份/官网）已填好；力学数值（E_mpa / nu / yield_mpa / uts_mpa / density_kg_m3）需从标准原文填入 —— 代码不会代填，缺失时如实报『未收录』。",
+  "material_count": 18,
+  "_schema_hint": {
+    "materials": {
+      "<材料ID>": {
+        "name": "标准全名（含标准号）",
+        "name_cn": "中文牌号名",
+        "standard": "标准号与版本",
+        "standard_url": "官方标准查询地址",
+        "standard_year": "标准年份",
+        "E_mpa": "弹性模量 MPa —— FEA 必需",
+        "nu": "泊松比 —— FEA 必需",
+        "yield_mpa": "屈服强度 MPa —— 强度校核必需",
+        "uts_mpa": "抗拉强度 MPa —— 疲劳校核需要",
+        "density_kg_m3": "密度 kg/m³ —— 质量与重力必需",
+        "aliases": [
+          "图纸上可能出现的其它写法"
+        ]
+      }
+    }
+  },
+  "materials": {
+    "GB_Q235": {
+      "name": "GB/T 700-2006 碳素结构钢",
+      "name_cn": "Q235（碳素结构钢）",
+      "standard": "GB/T 700-2006 碳素结构钢",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D7C7C2D3A7E05397BE0A0AB82A",
+      "standard_year": "2006",
+      "E_mpa": 206000,
+      "nu": 0.3,
+      "yield_mpa": 235,
+      "uts_mpa": 370,
+      "density_kg_m3": 7850.0,
+      "aliases": [
+        "Q235",
+        "Q235（碳素结构钢）",
+        "AISI 1020",
+        "Plain Carbon Steel",
+        "碳钢"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "ST_API_S235",
+      "equivalent_note": "Q235 属碳素结构钢，等效 EN S235JR（项目原有映射）",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_45#": {
+      "name": "GB/T 699-2015 优质碳素结构钢",
+      "name_cn": "45#（45 钢）（优质碳素结构钢）",
+      "standard": "GB/T 699-2015 优质碳素结构钢",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D80FD4D3A7E05397BE0A0AB82A",
+      "standard_year": "2015",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": 7850.0,
+      "aliases": [
+        "45#",
+        "45#（45 钢）（优质碳素结构钢）",
+        "45",
+        "AISI 1045",
+        "1045"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "ST_API_4140",
+      "equivalent_note": "45 钢调质后接近 AISI 4140（项目原有映射）",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_40Cr": {
+      "name": "GB/T 3077-2015 合金结构钢",
+      "name_cn": "40Cr（合金结构钢，调质）",
+      "standard": "GB/T 3077-2015 合金结构钢",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D80FB9D3A7E05397BE0A0AB82A",
+      "standard_year": "2015",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": 7850.0,
+      "aliases": [
+        "40Cr",
+        "40Cr（合金结构钢，调质）",
+        "AISI 5140",
+        "5140",
+        "Chromium Steel"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "ST_API_4140",
+      "equivalent_note": "40Cr 调质钢等效 AISI 4140（项目原有映射）",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_6061_T6": {
+      "name": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 6061）；GB/T 6892-2023 一般工业用铝及铝合金挤压型材（T6 状态）",
+      "name_cn": "6061-T6（铝合金，变形铝）",
+      "standard": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 6061）；GB/T 6892-2023 一般工业用铝及铝合金挤压型材（T6 状态）",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=A24AF19F415E5C2EE05397BE0A0A5E0D\nhttps://std.samr.gov.cn/gb/search/gbDetailed?id=053404E3EE848F91E06397BE0A0A9209",
+      "standard_year": "2020",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": 2700.0,
+      "aliases": [
+        "6061-T6",
+        "6061-T6（铝合金，变形铝）",
+        "6061",
+        "Aluminum Alloy 6061",
+        "铝合金"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "AL_6061_T6",
+      "equivalent_note": "6061-T6 与项目内置同名铝材一致",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_304": {
+      "name": "GB/T 20878-2024 不锈钢 牌号及化学成分",
+      "name_cn": "304 / 06Cr19Ni10（奥氏体不锈钢）",
+      "standard": "GB/T 20878-2024 不锈钢 牌号及化学成分",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=1E5A13A77F7ABC8DE06397BE0A0A87E8",
+      "standard_year": "2024",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": 8000.0,
+      "aliases": [
+        "304 / 06Cr19Ni10",
+        "304",
+        "304 / 06Cr19Ni10（奥氏体不锈钢）",
+        "AISI 304",
+        "Stainless Steel",
+        "不锈钢",
+        "06Cr19Ni10",
+        "S30408",
+        "0Cr18Ni9"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "ST_STAINLESS_304",
+      "equivalent_note": "304 与项目内置不锈钢一致",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_Q355": {
+      "name": "GB/T 1591-2018 低合金高强度结构钢",
+      "name_cn": "Q355（旧称 Q345）（低合金高强度结构钢）",
+      "standard": "GB/T 1591-2018 低合金高强度结构钢",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D82AFFD3A7E05397BE0A0AB82A",
+      "standard_year": "2018",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": null,
+      "aliases": [
+        "Q355",
+        "Q355（旧称 Q345）（低合金高强度结构钢）",
+        "Q345",
+        "Q345B",
+        "Q355B"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "ST_API_S235",
+      "equivalent_note": "低合金钢暂按项目原有碳钢映射（偏低保守）",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_20CrMnTi": {
+      "name": "GB/T 3077-2015 合金结构钢",
+      "name_cn": "20CrMnTi（渗碳钢，齿轮用）",
+      "standard": "GB/T 3077-2015 合金结构钢",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D80FB9D3A7E05397BE0A0AB82A",
+      "standard_year": "2015",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": null,
+      "aliases": [
+        "20CrMnTi",
+        "20CrMnTi（渗碳钢，齿轮用）"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "ST_API_4140",
+      "equivalent_note": "渗碳钢按项目原有合金钢映射",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_GCr15": {
+      "name": "GB/T 18254-2016 高碳铬轴承钢",
+      "name_cn": "GCr15（高碳铬轴承钢）",
+      "standard": "GB/T 18254-2016 高碳铬轴承钢",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D8111ED3A7E05397BE0A0AB82A",
+      "standard_year": "2016",
+      "E_mpa": 208000,
+      "nu": 0.3,
+      "yield_mpa": 1700,
+      "uts_mpa": 2000,
+      "density_kg_m3": 7810.0,
+      "aliases": [
+        "GCr15",
+        "GCr15（高碳铬轴承钢）"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": null,
+      "equivalent_note": "项目内无可信的等效材料 —— 请从标准原文补全数值后再校核",
+      "values_status": "待补全（暂无兜底，力学计算不可用）"
+    },
+    "GB_HT200": {
+      "name": "GB/T 9439-2023 灰铸铁件",
+      "name_cn": "HT200（灰铸铁）",
+      "standard": "GB/T 9439-2023 灰铸铁件",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=053404E3EE068F91E06397BE0A0A9209",
+      "standard_year": "2023",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": 7200.0,
+      "aliases": [
+        "HT200",
+        "HT200（灰铸铁）",
+        "Gray Cast Iron",
+        "灰铸铁"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": null,
+      "equivalent_note": "项目内无可信的等效材料 —— 请从标准原文补全数值后再校核",
+      "values_status": "待补全（暂无兜底，力学计算不可用）"
+    },
+    "GB_QT500_7": {
+      "name": "GB/T 1348-2019 球墨铸铁件",
+      "name_cn": "QT500-7（球墨铸铁）",
+      "standard": "GB/T 1348-2019 球墨铸铁件",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=9BFCCC5CEDF00F87E05397BE0A0A747C",
+      "standard_year": "2019",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": null,
+      "aliases": [
+        "QT500-7",
+        "QT500-7（球墨铸铁）",
+        "QT500"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": null,
+      "equivalent_note": "项目内无可信的等效材料 —— 请从标准原文补全数值后再校核",
+      "values_status": "待补全（暂无兜底，力学计算不可用）"
+    },
+    "GB_7075_T6": {
+      "name": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 7075）",
+      "name_cn": "7075-T6（高强铝合金）",
+      "standard": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 7075）",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=A24AF19F415E5C2EE05397BE0A0A5E0D",
+      "standard_year": "2020",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": 2810.0,
+      "aliases": [
+        "7075-T6",
+        "7075-T6（高强铝合金）",
+        "7075"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "AL_7075",
+      "equivalent_note": "7075-T6 与项目内置铝材一致",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_2A12": {
+      "name": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 2A12）",
+      "name_cn": "2A12（旧称 LY12）（硬铝）",
+      "standard": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 2A12）",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=A24AF19F415E5C2EE05397BE0A0A5E0D",
+      "standard_year": "2020",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": null,
+      "aliases": [
+        "2A12",
+        "2A12（旧称 LY12）（硬铝）",
+        "LY12",
+        "2A12-T4"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "AL_7075",
+      "equivalent_note": "2A12 硬铝按项目高强铝映射",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_65Mn": {
+      "name": "GB/T 1222-2025 弹簧钢",
+      "name_cn": "65Mn（弹簧钢）",
+      "standard": "GB/T 1222-2025 弹簧钢",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=42BA7D06A4F0E936E06397BE0A0ACDC9",
+      "standard_year": "2025",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": null,
+      "aliases": [
+        "65Mn",
+        "65Mn（弹簧钢）",
+        "65Mn弹簧钢"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "ST_API_4140",
+      "equivalent_note": "弹簧钢按项目原有合金钢映射",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_Cr12MoV": {
+      "name": "GB/T 1299-2025 工模具钢",
+      "name_cn": "Cr12MoV（冷作模具钢）",
+      "standard": "GB/T 1299-2025 工模具钢",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=42BA7D06A37FE936E06397BE0A0ACDC9",
+      "standard_year": "2025",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": 7700.0,
+      "aliases": [
+        "Cr12MoV",
+        "Cr12MoV（冷作模具钢）",
+        "D2",
+        "Tool Steel"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "ST_API_4140",
+      "equivalent_note": "模具钢按项目原有映射走 4140",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_316": {
+      "name": "GB/T 20878-2024 不锈钢 牌号及化学成分",
+      "name_cn": "316 / 022Cr17Ni12Mo2（耐蚀不锈钢）",
+      "standard": "GB/T 20878-2024 不锈钢 牌号及化学成分",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=1E5A13A77F7ABC8DE06397BE0A0A87E8",
+      "standard_year": "2024",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": 8000.0,
+      "aliases": [
+        "316 / 022Cr17Ni12Mo2",
+        "316",
+        "316 / 022Cr17Ni12Mo2（耐蚀不锈钢）",
+        "AISI 316",
+        "022Cr17Ni12Mo2",
+        "S31603",
+        "00Cr17Ni14Mo2"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "ST_STAINLESS_316",
+      "equivalent_note": "316 与项目内置不锈钢一致",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    },
+    "GB_ZCuSn10P1": {
+      "name": "GB/T 1176-2013 铸造铜及铜合金",
+      "name_cn": "ZCuSn10P1（锡青铜，耐磨）",
+      "standard": "GB/T 1176-2013 铸造铜及铜合金",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D7E5A5D3A7E05397BE0A0AB82A",
+      "standard_year": "2013",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": null,
+      "aliases": [
+        "ZCuSn10P1",
+        "ZCuSn10P1（锡青铜，耐磨）",
+        "10-1锡青铜"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": null,
+      "equivalent_note": "项目内无可信的等效材料 —— 请从标准原文补全数值后再校核",
+      "values_status": "待补全（暂无兜底，力学计算不可用）"
+    },
+    "GB_H62": {
+      "name": "GB/T 5231-2022 加工铜及铜合金牌号和化学成分",
+      "name_cn": "H62（黄铜）",
+      "standard": "GB/T 5231-2022 加工铜及铜合金牌号和化学成分",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=DAB8B4004686896BE05397BE0A0A0B32",
+      "standard_year": "2022",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": null,
+      "aliases": [
+        "H62",
+        "H62（黄铜）"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": null,
+      "equivalent_note": "项目内无可信的等效材料 —— 请从标准原文补全数值后再校核",
+      "values_status": "待补全（暂无兜底，力学计算不可用）"
+    },
+    "GB_ZL104": {
+      "name": "GB/T 1173-2013 铸造铝合金",
+      "name_cn": "ZL104（铸造铝合金）",
+      "standard": "GB/T 1173-2013 铸造铝合金",
+      "standard_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D7E207D3A7E05397BE0A0AB82A",
+      "standard_year": "2013",
+      "E_mpa": null,
+      "nu": null,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": null,
+      "aliases": [
+        "ZL104",
+        "ZL104（铸造铝合金）"
+      ],
+      "data_status": "待补全（标准身份已确认，力学数值需从标准原文填入）",
+      "equivalent_id": "AL_6061_T6",
+      "equivalent_note": "铸铝按项目铝合金映射",
+      "values_status": "待补全（当前用 equivalent_id 的原有数据兜底）"
+    }
+  },
+  "_equivalent_hint": "equivalent_id 指向项目原有材料表里的 id，用于【国标数值尚未补全时】临时提供一组可计算的数值。它不代表国标数值；报告会标注『国标身份 + 等效数值兜底』。补全 E_mpa/nu/yield_mpa/uts_mpa/density_kg_m3 后，系统会自动优先使用国标数值。"
+}

@@ -1,0 +1,94 @@
+﻿====================================================================================================
+Step5e  原生字段 vs 台账来源（不一致 = 误标）
+====================================================================================================
+判定规则：若某字段在 JSON 里【原生就有值】，就不该被标成 EQUIVALENT_FALLBACK
+
+牌号               字段              JSON原值     gb_data状态      台账来源
+----------------------------------------------------------------------------------------------------
+GB_Q235          density_kg_m3   7850.0     None           EQUIVALENT_FALLBACK(equivalent=Steel S235JR (EN 10025))
+GB_45#           density_kg_m3   7850.0     None           EQUIVALENT_FALLBACK(equivalent=Steel AISI 4140 (quenched & tempered))
+GB_40Cr          density_kg_m3   7850.0     None           EQUIVALENT_FALLBACK(equivalent=Steel AISI 4140 (quenched & tempered))
+GB_6061_T6       density_kg_m3   2700.0     None           EQUIVALENT_FALLBACK(equivalent=Aluminum 6061-T6)
+GB_304           density_kg_m3   8000.0     None           EQUIVALENT_FALLBACK(equivalent=Stainless Steel 304)
+GB_HT200         density_kg_m3   7200.0     None           EQUIVALENT_FALLBACK(equivalent=None)
+GB_7075_T6       density_kg_m3   2810.0     None           EQUIVALENT_FALLBACK(equivalent=Aluminum 7075-T6)
+GB_Cr12MoV       density_kg_m3   7700.0     None           EQUIVALENT_FALLBACK(equivalent=Steel AISI 4140 (quenched & tempered))
+GB_316           density_kg_m3   8000.0     None           EQUIVALENT_FALLBACK(equivalent=Stainless Steel 316)
+
+误标总数 = 9
+
+====================================================================================================
+Step5e-2  逐个细看（受影响牌号）
+====================================================================================================
+----------------------------------------------------------------------------------------------------
+[GB_304] equivalent_id=ST_STAINLESS_304  equivalent_name=Stainless Steel 304
+   E_mpa           JSON=None       台账=EQUIVALENT_FALLBACK   
+   nu              JSON=None       台账=EQUIVALENT_FALLBACK   
+   yield_mpa       JSON=205.0      台账=GB_STANDARD           
+   uts_mpa         JSON=515.0      台账=GB_STANDARD           
+   density_kg_m3   JSON=8000.0     台账=EQUIVALENT_FALLBACK     <<< 误标：JSON 原生有值却报兜底
+   values_source = 混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Stainless Steel 304）
+----------------------------------------------------------------------------------------------------
+[GB_316] equivalent_id=ST_STAINLESS_316  equivalent_name=Stainless Steel 316
+   E_mpa           JSON=None       台账=EQUIVALENT_FALLBACK   
+   nu              JSON=None       台账=EQUIVALENT_FALLBACK   
+   yield_mpa       JSON=205.0      台账=GB_STANDARD           
+   uts_mpa         JSON=515.0      台账=GB_STANDARD           
+   density_kg_m3   JSON=8000.0     台账=EQUIVALENT_FALLBACK     <<< 误标：JSON 原生有值却报兜底
+   values_source = 混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Stainless Steel 316）
+----------------------------------------------------------------------------------------------------
+[GB_40Cr] equivalent_id=ST_API_4140  equivalent_name=Steel AISI 4140 (quenched & tempered)
+   E_mpa           JSON=None       台账=EQUIVALENT_FALLBACK   
+   nu              JSON=None       台账=EQUIVALENT_FALLBACK   
+   yield_mpa       JSON=None       台账=EQUIVALENT_FALLBACK   
+   uts_mpa         JSON=None       台账=EQUIVALENT_FALLBACK   
+   density_kg_m3   JSON=7850.0     台账=EQUIVALENT_FALLBACK     <<< 误标：JSON 原生有值却报兜底
+   values_source = 等效兜底（Steel AISI 4140 (quenched & tempered)）—— 国标数值待补全
+----------------------------------------------------------------------------------------------------
+[GB_45#] equivalent_id=ST_API_4140  equivalent_name=Steel AISI 4140 (quenched & tempered)
+   E_mpa           JSON=None       台账=EQUIVALENT_FALLBACK   
+   nu              JSON=None       台账=EQUIVALENT_FALLBACK   
+   yield_mpa       JSON=355.0      台账=GB_STANDARD           
+   uts_mpa         JSON=600.0      台账=GB_STANDARD           
+   density_kg_m3   JSON=7850.0     台账=EQUIVALENT_FALLBACK     <<< 误标：JSON 原生有值却报兜底
+   values_source = 混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Steel AISI 4140 (quenched & tempered)）
+----------------------------------------------------------------------------------------------------
+[GB_6061_T6] equivalent_id=AL_6061_T6  equivalent_name=Aluminum 6061-T6
+   E_mpa           JSON=None       台账=EQUIVALENT_FALLBACK   
+   nu              JSON=None       台账=EQUIVALENT_FALLBACK   
+   yield_mpa       JSON=None       台账=EQUIVALENT_FALLBACK   
+   uts_mpa         JSON=None       台账=EQUIVALENT_FALLBACK   
+   density_kg_m3   JSON=2700.0     台账=EQUIVALENT_FALLBACK     <<< 误标：JSON 原生有值却报兜底
+   values_source = 等效兜底（Aluminum 6061-T6）—— 国标数值待补全
+----------------------------------------------------------------------------------------------------
+[GB_7075_T6] equivalent_id=AL_7075  equivalent_name=Aluminum 7075-T6
+   E_mpa           JSON=None       台账=EQUIVALENT_FALLBACK   
+   nu              JSON=None       台账=EQUIVALENT_FALLBACK   
+   yield_mpa       JSON=None       台账=EQUIVALENT_FALLBACK   
+   uts_mpa         JSON=None       台账=EQUIVALENT_FALLBACK   
+   density_kg_m3   JSON=2810.0     台账=EQUIVALENT_FALLBACK     <<< 误标：JSON 原生有值却报兜底
+   values_source = 等效兜底（Aluminum 7075-T6）—— 国标数值待补全
+----------------------------------------------------------------------------------------------------
+[GB_Cr12MoV] equivalent_id=ST_API_4140  equivalent_name=Steel AISI 4140 (quenched & tempered)
+   E_mpa           JSON=None       台账=EQUIVALENT_FALLBACK   
+   nu              JSON=None       台账=EQUIVALENT_FALLBACK   
+   yield_mpa       JSON=None       台账=EQUIVALENT_FALLBACK   
+   uts_mpa         JSON=None       台账=EQUIVALENT_FALLBACK   
+   density_kg_m3   JSON=7700.0     台账=EQUIVALENT_FALLBACK     <<< 误标：JSON 原生有值却报兜底
+   values_source = 等效兜底（Steel AISI 4140 (quenched & tempered)）—— 国标数值待补全
+----------------------------------------------------------------------------------------------------
+[GB_HT200] equivalent_id=None  equivalent_name=None
+   E_mpa           JSON=None       台账=MISSING               
+   nu              JSON=None       台账=MISSING               
+   yield_mpa       JSON=None       台账=MISSING               
+   uts_mpa         JSON=200.0      台账=GB_STANDARD           
+   density_kg_m3   JSON=7200.0     台账=EQUIVALENT_FALLBACK     <<< 误标：JSON 原生有值却报兜底
+   values_source = 混合来源：uts_mpa 来自 GB 原文；density_kg_m3 为等效兜底（项目原有材料）；仍缺 E_mpa, nu, yield_mpa
+----------------------------------------------------------------------------------------------------
+[GB_Q235] equivalent_id=ST_API_S235  equivalent_name=Steel S235JR (EN 10025)
+   E_mpa           JSON=None       台账=EQUIVALENT_FALLBACK   
+   nu              JSON=None       台账=EQUIVALENT_FALLBACK   
+   yield_mpa       JSON=235.0      台账=GB_STANDARD           
+   uts_mpa         JSON=370.0      台账=GB_STANDARD           
+   density_kg_m3   JSON=7850.0     台账=EQUIVALENT_FALLBACK     <<< 误标：JSON 原生有值却报兜底
+   values_source = 混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Steel S235JR (EN 10025)）

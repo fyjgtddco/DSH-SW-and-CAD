@@ -1,0 +1,9 @@
+﻿{
+  "ok": false,
+  "command": "optimize",
+  "gate": "REAL_GEOMETRY_REQUIRED",
+  "error": "物理校核必须针对真实零件：无法取得真实几何。",
+  "geometry_error": "未提供 part_path —— 物理校核必须针对真实零件；请用 physics-optimize <case.json> --part <零件.SLDPRT> 指定。",
+  "part_path": null,
+  "hint": "物理校核不得校验虚构几何（Bug7）。请传入真实零件：python sw_bridge.py physics-optimize <case.json> --part <零件.SLDPRT> --room <房间>。若零件已存在但仍失败，检查 SolidWorks 是否在运行、以及零件是否有实体（no_body）。"
+}

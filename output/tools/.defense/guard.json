@@ -1,0 +1,17 @@
+{
+  "items": [
+    {
+      "at": "2026-10-07T07:09:29.090Z",
+      "kind": "credential-signature-invalid",
+      "path": "C:\\Users\\j1877\\.dsh\\.agent-presets\\engineering\\tools\\reports\\E2E验证.physics.json",
+      "detail": "key id mismatch (signer restarted?)"
+    },
+    {
+      "at": "2026-10-07T07:09:29.091Z",
+      "kind": "credential-quarantined",
+      "path": "C:\\Users\\j1877\\.dsh\\.agent-presets\\engineering\\tools\\reports\\E2E验证.physics.json",
+      "dest": "C:\\Users\\j1877\\.dsh\\.agent-presets\\engineering\\tools\\.defense\\quarantine\\2026-10-07T07-09-29-090Z__E2E验证.physics.json",
+      "detail": "无效凭据（credential-signature-invalid）已隔离；defense_gate 将因缺少凭据而 fail-closed"
+    }
+  ]
+}

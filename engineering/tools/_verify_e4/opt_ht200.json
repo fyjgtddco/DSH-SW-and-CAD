@@ -1,0 +1,14 @@
+=== EXIT 0 ===
+{
+  "ok": false,
+  "error": "invalid load case",
+  "details": {
+    "ok": false,
+    "errors": [
+      "material.yield_strength_mpa（屈服强度 σy）缺失 —— 已确认标准身份（GB/T 9439-2023 灰铸铁件（2023）），但力学数值缺失：yield_mpa —— 请从标准原文补全后再做校核"
+    ],
+    "warnings": [],
+    "case": null,
+    "path": "_verify_e4\\e2e_case_ht200.json"
+  }
+}

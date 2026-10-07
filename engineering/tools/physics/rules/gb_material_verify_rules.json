@@ -1,0 +1,72 @@
+{
+  "domain_id": "gb_material",
+  "domain_name": "国标材料合规校验（GB/T）",
+  "version": "1.0",
+  "description": "按 GB/T 国标材料体系校核【材料身份与强度裕度】。本领域让国标材料数据（Q235/45#/40Cr/HT200/Cr12MoV/GCr15/20CrMnTi/2A12/06Cr19Ni10…）真正参与领域防线：① 材料必须是可识别的国标牌号；② 安全系数不得低于国标材料对应的许用值；③ 应力不得超过国标材料屈服强度（含各向异性折减）。数值取自 GB/T 标准与公开工程手册。",
+  "rules": [
+    {
+      "id": "GBM-001",
+      "type": "parametric",
+      "target": "material_yield_mpa",
+      "condition": { "min": 1.0, "max": 3000.0 },
+      "severity": "CRITICAL",
+      "message": "材料屈服强度必须可解析且在合理区间（1~3000MPa）—— 缺失或密度=1000(水) 说明 SolidWorks 未真正赋材，任何强度结论都不可信（GB/T 标准牌号见 material_db 的 GB 系列）"
+    },
+    {
+      "id": "GBM-002",
+      "type": "parametric",
+      "target": "material_density_kg_m3",
+      "condition": { "min": 900.0, "max": 9000.0 },
+      "severity": "WARNING",
+      "message": "材料密度应在工程材料区间（900~9000 kg/m³）。低于 900 或高于 9000 已超出常见工程材料范围，需复核"
+    },
+    {
+      "id": "GBM-002b",
+      "type": "parametric",
+      "target": "density_is_water",
+      "condition": { "max": 1.5 },
+      "severity": "CRITICAL",
+      "message": "材料密度恰为 1000 kg/m³（等同【水】）—— 这是 SolidWorks 未赋材质时的默认值，属材料防线明确禁止的情形。必须用 swapi.new_part(material='Q235') 等显式赋材后重新保存"
+    },
+    {
+      "id": "GBM-002c",
+      "type": "parametric",
+      "target": "material_density_missing",
+      "condition": { "max": 1.5 },
+      "severity": "CRITICAL",
+      "message": "材料密度缺失 —— 无法确认材料是否真实写入 SolidWorks，任何质量/强度结论都不可信"
+    },
+    {
+      "id": "GBM-003",
+      "type": "fea",
+      "target": "safety_factor",
+      "condition": { "min": 1.0, "max": 100.0 },
+      "severity": "CRITICAL",
+      "message": "安全系数必须 ≥1.0（σ ≤ σy），否则材料已进入屈服/破坏。注意：本规则只守【材料不失效】的绝对下限；任务要求的 min_safety_factor（如冲击工况 4.0）由物理层的 SAFETY_FACTOR 闸口负责，两者口径不同、不可互相替代"
+    },
+    {
+      "id": "GBM-004",
+      "type": "fea",
+      "target": "max_von_mises_mpa",
+      "condition": { "min": 0.0, "max": 2000.0 },
+      "severity": "WARNING",
+      "message": "最大等效应力超过 2000MPa 已超出绝大多数国标结构钢/铸铁的屈服水平，需复核载荷施加方式与单元尺寸（小块加载额定载荷易导致应力虚高）"
+    },
+    {
+      "id": "GBM-005",
+      "type": "parametric",
+      "target": "material_uts_mpa",
+      "condition": { "min": 1.0, "max": 3500.0 },
+      "severity": "WARNING",
+      "message": "材料抗拉强度应可解析（1~3500MPa）；缺失会导致疲劳校核的 S-N 曲线基准（σf' ≈ Su + 345）无法确定"
+    },
+    {
+      "id": "GBM-006",
+      "type": "parametric",
+      "target": "material_e_mpa",
+      "condition": { "min": 50.0, "max": 500000.0 },
+      "severity": "WARNING",
+      "message": "材料弹性模量应可解析（50~500000MPa）。缺失会让刚度/位移结论失真（塑料 ~2GPa、铝 ~70GPa、钢 ~206GPa）"
+    }
+  ]
+}

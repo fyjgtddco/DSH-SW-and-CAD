@@ -1,0 +1,82 @@
+﻿{
+  "ok": true,
+  "error": "",
+  "script_stdout": "STEP1 新建零件 ...\n  new_part title = 零件1\n  material_result = {'ok': False, 'method': None, 'pending': True, 'material': 'Q235', 'applied_material': None, 'source': 'explicit(new_part material=)', 'note': '待首个实体生成后自动赋材质（BUG-05）'}\nSTEP2 前视基准面 100x60 矩形，拉伸 10mm ...\n  extrude -> <COMObject <unknown>>\nSTEP3 赋材质 Q235 ...\n  set_material -> {'ok': True, 'material': 'Q235', 'method': 'PartDoc.SetMaterialPropertyName2', 'database': None, 'database_name': 'SolidWorks Materials', 'warnings': ['材料已写入(IdName=solidworks materials|AISI 1020|2)但密度与之前相同', \"⚠️ 材料名 'Q235' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'Q235'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。\"], 'error_code': None, 'expected_density_kg_m3': 7850.0, 'canonical': 'Q235', 'configuration': '默认', 'density_before_kg_m3': 7900.0, 'material_mismatch_rejected': False, 'applied_name': 'Q235', 'match_level': 'none', 'density_after_kg_m3': 7900.0, 'material_id_name': 'solidworks materials|AISI 1020|2', 'density_kg_m3': 7900.0, 'density_changed': False, 'approximate_match': True, 'warning': \"⚠️ 材料名 'Q235' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'Q235'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。\", 'density_error_pct': 0.64}\nSTEP4 读取真实几何/质量属性 ...\n  massprops -> {'ok': True, 'volume_mm3': 59999.99999999999, 'surface_area_mm2': 15200.0, 'mass_kg': 0.474, 'density_kg_m3': 7900.0, 'center_of_mass_mm': [2.258754526011468e-15, -1.3234889800848443e-15, 4.999999999999999], 'volume_source': 'GetMassProperties', 'mass_source': 'GetMassProperties'}\n  body_box_mm -> [-50.0, 50.0, -30.0, 30.0, 0.0, 10.0]\n  get_material -> {'ok': True, 'name': 'solidworks materials|AISI 1020|2', 'density_kg_m3': 7900.0, 'mass_kg': 0.474, 'volume_mm3': 59999.99999999999}\nSTEP5 保存 ...\n[swapi][WARN] 跨标准材料替代（凭据层强制检测）：【跨标准替代】请求 Q235（GB 体系），实际生效 AISI 1020（ASTM 体系）—— 两者属不同标准体系，屈服强度 235.0→235.0 MPa（差 0%），必须人工确认后方可采用（材料防线会据此拦截）。\n[swapi][WARN] 材料被近似替换：请求 'Q235'，SW 实际生效 'AISI 1020'（密度 7900.0）。若二者属性不同（如 PETG 1270 vs PET 1420），物理校核会按实际材料判定，请确认是否可接受。\n  save -> {'ok': True, 'path': 'C:\\\\Users\\\\j1877\\\\Desktop\\\\DSH-SW-and-CAD-main\\\\engineering\\\\tools\\\\_verify_out2\\\\DSH_验证板_GB_Q235.SLDPRT', 'saved': True, 'updated': True, 'content_changed': True, 'content_same': False, 'md5_before': None, 'md5_after': '379985b1c8227fa4660f3fc9d82f3a8f', 'rc': 0, 'size': 60008, 'note': '内容已更新', 'material': {'ok': True, 'material': 'Q235', 'method': 'PartDoc.SetMaterialPropertyName2', 'database': None, 'database_name': 'SolidWorks Materials', 'warnings': [], 'error_code': None, 'expected_density_kg_m3': 7850.0, 'canonical': 'Q235', 'configuration': '默认', 'density_before_kg_m3': 1000.0, 'rejected_candidates': [], 'rejected_candidates_before_success': [{'name': 'Q235', 'database': 'SolidWorks Materials', 'density_kg_m3': 1000.0, 'family': 'plastic', 'expected_family': 'steel', 'expected_density_kg_m3': 7850.0}, {'name': 'Q235（碳素结构钢）', 'database': 'SolidWorks Materials', 'density_kg_m3': 1000.0, 'family': 'plastic', 'expected_family': 'steel', 'expected_density_kg_m3': 7850.0}], 'material_mismatch_rejected': False, 'applied_name': 'AISI 1020', 'match_level': 'exact', 'density_after_kg_m3': 7900.0, 'material_id_name': 'solidworks materials|AISI 1020|2', 'density_kg_m3': 7900.0, 'density_changed': True, 'density_error_pct': 0.64}, 'applied_material': 'AISI 1020', 'material_source': 'explicit(new_part material=)', 'material_attestation': {'file': 'C:\\\\Users\\\\j1877\\\\Desktop\\\\DSH-SW-and-CAD-main\\\\engineering\\\\tools\\\\_verify_out2\\\\DSH_验证板_GB_Q235.SLDPRT.material.json', 'material': 'AISI 1020', 'density_kg_m3': 7900, 'family': 'steel', 'signed': True}}\n  exists = True\n",
+  "script_stderr": "",
+  "script_result": {
+    "ok": true,
+    "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_out2\\DSH_验证板_GB_Q235.SLDPRT",
+    "massprops": {
+      "ok": true,
+      "volume_mm3": 59999.99999999999,
+      "surface_area_mm2": 15200.0,
+      "mass_kg": 0.474,
+      "density_kg_m3": 7900.0,
+      "center_of_mass_mm": [
+        2.258754526011468e-15,
+        -1.3234889800848443e-15,
+        4.999999999999999
+      ],
+      "volume_source": "GetMassProperties",
+      "mass_source": "GetMassProperties"
+    },
+    "body_box_mm": [
+      -50.0,
+      50.0,
+      -30.0,
+      30.0,
+      0.0,
+      10.0
+    ],
+    "get_material": {
+      "ok": true,
+      "name": "solidworks materials|AISI 1020|2",
+      "density_kg_m3": 7900.0,
+      "mass_kg": 0.474,
+      "volume_mm3": 59999.99999999999
+    },
+    "set_material": {
+      "ok": true,
+      "material": "Q235",
+      "method": "PartDoc.SetMaterialPropertyName2",
+      "database": null,
+      "database_name": "SolidWorks Materials",
+      "warnings": [
+        "材料已写入(IdName=solidworks materials|AISI 1020|2)但密度与之前相同",
+        "⚠️ 材料名 'Q235' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'Q235'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。"
+      ],
+      "error_code": null,
+      "expected_density_kg_m3": 7850.0,
+      "canonical": "Q235",
+      "configuration": "默认",
+      "density_before_kg_m3": 7900.0,
+      "material_mismatch_rejected": false,
+      "applied_name": "Q235",
+      "match_level": "none",
+      "density_after_kg_m3": 7900.0,
+      "material_id_name": "solidworks materials|AISI 1020|2",
+      "density_kg_m3": 7900.0,
+      "density_changed": false,
+      "approximate_match": true,
+      "warning": "⚠️ 材料名 'Q235' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'Q235'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。",
+      "density_error_pct": 0.64
+    }
+  },
+  "stdout": "99999999999, 'surface_area_mm2': 15200.0, 'mass_kg': 0.474, 'density_kg_m3': 7900.0, 'center_of_mass_mm': [2.258754526011468e-15, -1.3234889800848443e-15, 4.999999999999999], 'volume_source': 'GetMassProperties', 'mass_source': 'GetMassProperties'}\\n  body_box_mm -> [-50.0, 50.0, -30.0, 30.0, 0.0, 10.0]\\n  get_material -> {'ok': True, 'name': 'solidworks materials|AISI 1020|2', 'density_kg_m3': 7900.0, 'mass_kg': 0.474, 'volume_mm3': 59999.99999999999}\\nSTEP5 保存 ...\\n[swapi][WARN] 跨标准材料替代（凭据层强制检测）：【跨标准替代】请求 Q235（GB 体系），实际生效 AISI 1020（ASTM 体系）—— 两者属不同标准体系，屈服强度 235.0→235.0 MPa（差 0%），必须人工确认后方可采用（材料防线会据此拦截）。\\n[swapi][WARN] 材料被近似替换：请求 'Q235'，SW 实际生效 'AISI 1020'（密度 7900.0）。若二者属性不同（如 PETG 1270 vs PET 1420），物理校核会按实际材料判定，请确认是否可接受。\\n  save -> {'ok': True, 'path': 'C:\\\\\\\\Users\\\\\\\\j1877\\\\\\\\Desktop\\\\\\\\DSH-SW-and-CAD-main\\\\\\\\engineering\\\\\\\\tools\\\\\\\\_verify_out2\\\\\\\\DSH_验证板_GB_Q235.SLDPRT', 'saved': True, 'updated': True, 'content_changed': True, 'content_same': False, 'md5_before': None, 'md5_after': '379985b1c8227fa4660f3fc9d82f3a8f', 'rc': 0, 'size': 60008, 'note': '内容已更新', 'material': {'ok': True, 'material': 'Q235', 'method': 'PartDoc.SetMaterialPropertyName2', 'database': None, 'database_name': 'SolidWorks Materials', 'warnings': [], 'error_code': None, 'expected_density_kg_m3': 7850.0, 'canonical': 'Q235', 'configuration': '默认', 'density_before_kg_m3': 1000.0, 'rejected_candidates': [], 'rejected_candidates_before_success': [{'name': 'Q235', 'database': 'SolidWorks Materials', 'density_kg_m3': 1000.0, 'family': 'plastic', 'expected_family': 'steel', 'expected_density_kg_m3': 7850.0}, {'name': 'Q235（碳素结构钢）', 'database': 'SolidWorks Materials', 'density_kg_m3': 1000.0, 'family': 'plastic', 'expected_family': 'steel', 'expected_density_kg_m3': 7850.0}], 'material_mismatch_rejected': False, 'applied_name': 'AISI 1020', 'match_level': 'exact', 'density_after_kg_m3': 7900.0, 'material_id_name': 'solidworks materials|AISI 1020|2', 'density_kg_m3': 7900.0, 'density_changed': True, 'density_error_pct': 0.64}, 'applied_material': 'AISI 1020', 'material_source': 'explicit(new_part material=)', 'material_attestation': {'file': 'C:\\\\\\\\Users\\\\\\\\j1877\\\\\\\\Desktop\\\\\\\\DSH-SW-and-CAD-main\\\\\\\\engineering\\\\\\\\tools\\\\\\\\_verify_out2\\\\\\\\DSH_验证板_GB_Q235.SLDPRT.material.json', 'material': 'AISI 1020', 'density_kg_m3': 7900, 'family': 'steel', 'signed': True}}\\n  exists = True\\n\", \"script_stderr\": \"\", \"script_result\": {\"ok\": true, \"part\": \"C:\\\\Users\\\\j1877\\\\Desktop\\\\DSH-SW-and-CAD-main\\\\engineering\\\\tools\\\\_verify_out2\\\\DSH_验证板_GB_Q235.SLDPRT\", \"massprops\": {\"ok\": true, \"volume_mm3\": 59999.99999999999, \"surface_area_mm2\": 15200.0, \"mass_kg\": 0.474, \"density_kg_m3\": 7900.0, \"center_of_mass_mm\": [2.258754526011468e-15, -1.3234889800848443e-15, 4.999999999999999], \"volume_source\": \"GetMassProperties\", \"mass_source\": \"GetMassProperties\"}, \"body_box_mm\": [-50.0, 50.0, -30.0, 30.0, 0.0, 10.0], \"get_material\": {\"ok\": true, \"name\": \"solidworks materials|AISI 1020|2\", \"density_kg_m3\": 7900.0, \"mass_kg\": 0.474, \"volume_mm3\": 59999.99999999999}, \"set_material\": {\"ok\": true, \"material\": \"Q235\", \"method\": \"PartDoc.SetMaterialPropertyName2\", \"database\": null, \"database_name\": \"SolidWorks Materials\", \"warnings\": [\"材料已写入(IdName=solidworks materials|AISI 1020|2)但密度与之前相同\", \"⚠️ 材料名 'Q235' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'Q235'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。\"], \"error_code\": null, \"expected_density_kg_m3\": 7850.0, \"canonical\": \"Q235\", \"configuration\": \"默认\", \"density_before_kg_m3\": 7900.0, \"material_mismatch_rejected\": false, \"applied_name\": \"Q235\", \"match_level\": \"none\", \"density_after_kg_m3\": 7900.0, \"material_id_name\": \"solidworks materials|AISI 1020|2\", \"density_kg_m3\": 7900.0, \"density_changed\": false, \"approximate_match\": true, \"warning\": \"⚠️ 材料名 'Q235' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'Q235'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。\", \"density_error_pct\": 0.64}}}",
+  "stderr": "",
+  "exit_code": 0,
+  "executed_script": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_out2\\build_plate_gb.py",
+  "executed_script_sha1": "4e370dcfe8fdf8ba124c38fe6af4ea729a714b42",
+  "script_identity_verified": true,
+  "script_ok": true,
+  "screenshot": {
+    "ok": true,
+    "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\solidworks_live.png",
+    "size": "1707x1019",
+    "activated": true,
+    "verified_foreground": true,
+    "window_title": "SOLIDWORKS Premium 2025 SP5.0 - [零件1 *]",
+    "note": "截图取自当前置前的 SolidWorks 窗口"
+  },
+  "screenshot_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\solidworks_live.png"
+}

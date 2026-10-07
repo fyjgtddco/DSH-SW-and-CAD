@@ -1,0 +1,57 @@
+{
+  "kind": "physics",
+  "schema": "dsh-physics-attestation/1",
+  "at": "2026-10-05T08:29:33.779Z",
+  "ts": 1791188973779,
+  "room": "极限测试房",
+  "run_id": "opt_iter_1",
+  "report_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\output\\physics_runs\\opt_GATE_7B82248476CE_1791188970\\iteration_1\\opt_iter_1_report.json",
+  "report_sha256": "106b46fe2a9c1ac590c1f0b30b60e7be11521194e3ff2f7d30b37e32bb274846",
+  "run_dir": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\output\\physics_runs\\opt_GATE_7B82248476CE_1791188970\\iteration_1",
+  "overall": "FAIL",
+  "overall_status": "FAIL",
+  "safety_factor": 0.2,
+  "max_von_mises_mpa": 204.95,
+  "max_displacement_mm": 6.723,
+  "passed_gates": [
+    "DESIGN_SPACE",
+    "CONNECTIVITY",
+    "WALL_THICKNESS",
+    "MAX_DISPLACEMENT",
+    "MESH_QUALITY"
+  ],
+  "failed_gates": [
+    {
+      "id": "SAFETY_FACTOR",
+      "status": "FAIL",
+      "actual": 0.2,
+      "required_min": 4,
+      "required_max": 5,
+      "over_design": false,
+      "note": "强度不足，必须加强"
+    },
+    {
+      "id": "FATIGUE_STRENGTH",
+      "status": "FAIL",
+      "actual_sf": 0.125,
+      "required_min": 1.5,
+      "endurance_limit_mpa": 17.3
+    },
+    {
+      "id": "FATIGUE_LIFE",
+      "status": "FAIL",
+      "required_years": 1,
+      "allowable_life_years": 0.01,
+      "damage_at_required_life": 160
+    }
+  ],
+  "not_evaluated": [],
+  "release_status": "NEEDS_REVISION",
+  "fatigue_verdict": "FAIL",
+  "fatigue_sf": 0.125,
+  "source": "physics_bridge",
+  "_sig": "dZTNEJY7/WFjMSqHBn9gim1n/FJfLgyOSksOQrlTODU=",
+  "_kid": "6effb9bcef4b2181",
+  "_ts": 1791188973779,
+  "_nonce": "0b3a9092df542e193e35fbe7d8afb7de"
+}

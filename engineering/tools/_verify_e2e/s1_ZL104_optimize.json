@@ -1,0 +1,13 @@
+﻿{
+  "ok": false,
+  "error": "invalid load case",
+  "details": {
+    "ok": false,
+    "errors": [
+      "material.yield_strength_mpa（屈服强度 σy）缺失 —— 已确认标准身份（GB/T 1173-2013 铸造铝合金），但力学数值缺失：yield_mpa —— 请从标准原文补全后再做校核"
+    ],
+    "warnings": [],
+    "case": null,
+    "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e2e\\case_ZL104.json"
+  }
+}

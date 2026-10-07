@@ -1,0 +1,11 @@
+=== EXIT 0 ===
+{
+  "ok": false,
+  "command": "fatigue",
+  "gate": "REAL_GEOMETRY_REQUIRED",
+  "verdict": "NOT_EVALUATED",
+  "error": "疲劳校核必须针对真实零件：无法取得真实几何。退回设计域默认几何会把承载截面高估、应力低估（实测可达 95 倍），从而给出虚假 PASS。",
+  "geometry_error": "未提供 --part，无法取得真实零件几何",
+  "part_path": null,
+  "hint": "请传入真实零件：python physics_bridge.py fatigue <case.json> --part <零件.SLDPRT>。若零件已存在但仍失败，检查 SolidWorks 是否在运行、以及零件是否有实体（no_body）。仅在明确知道后果时，才用 --allow-design-domain 做粗估（该结论不得用于设计定型）。"
+}

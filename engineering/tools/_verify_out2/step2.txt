@@ -1,0 +1,108 @@
+﻿====================================================================================================
+Step2  国标数值 vs 兜底数值 —— 实际生效的是哪个？
+====================================================================================================
+----------------------------------------------------------------------------------------------------
+查询: 45#          GB/T 699-2015 =355  vs  AISI4140 兜底 =655
+  命中 id           = None
+  实际 σy           = 355.0 MPa
+  实际 σb           = 600.0 MPa
+  实际 E            = 205000 MPa
+  实际 ν            = 0.29
+  实际 ρ            = 7850.0 kg/m³
+  equivalent_name   = Steel AISI 4140 (quenched & tempered)
+  equivalent_filled = ['E_mpa', 'nu']
+  gb_sourced_fields = ['yield_mpa', 'uts_mpa']
+  fallback_fields   = ['density_kg_m3', 'E_mpa', 'nu']
+  values_from_gb    = True
+  values_pending    = False
+  values_source     = 混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Steel AISI 4140 (quenched & tempered)）
+  >>> PASS  用的是 GB 值 355.0
+----------------------------------------------------------------------------------------------------
+查询: Q355         GB/T 1591-2018 =355  vs  S235JR 兜底 =235
+  命中 id           = None
+  实际 σy           = 355.0 MPa
+  实际 σb           = 470.0 MPa
+  实际 E            = 210000 MPa
+  实际 ν            = 0.3
+  实际 ρ            = 7850 kg/m³
+  equivalent_name   = Steel S235JR (EN 10025)
+  equivalent_filled = ['E_mpa', 'nu', 'density_kg_m3']
+  gb_sourced_fields = ['yield_mpa', 'uts_mpa']
+  fallback_fields   = ['E_mpa', 'nu', 'density_kg_m3']
+  values_from_gb    = True
+  values_pending    = False
+  values_source     = 混合来源：yield_mpa, uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_m3 为等效兜底（Steel S235JR (EN 10025)）
+  >>> PASS  用的是 GB 值 355.0
+----------------------------------------------------------------------------------------------------
+查询: 65Mn         GB/T 1222-2025 =785  vs  AISI4140 兜底 =655
+  命中 id           = None
+  实际 σy           = 785.0 MPa
+  实际 σb           = 980.0 MPa
+  实际 E            = 205000 MPa
+  实际 ν            = 0.29
+  实际 ρ            = 7850 kg/m³
+  equivalent_name   = Steel AISI 4140 (quenched & tempered)
+  equivalent_filled = ['E_mpa', 'nu', 'density_kg_m3']
+  gb_sourced_fields = ['yield_mpa', 'uts_mpa']
+  fallback_fields   = ['E_mpa', 'nu', 'density_kg_m3']
+  values_from_gb    = True
+  values_pending    = False
+  values_source     = 混合来源：yield_mpa, uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_m3 为等效兜底（Steel AISI 4140 (quenched & tempered)）
+  >>> PASS  用的是 GB 值 785.0
+----------------------------------------------------------------------------------------------------
+查询: Q235         GB/T 700-2006 =235  vs  S235JR 兜底 =235（同值，不可区分）
+  命中 id           = None
+  实际 σy           = 235.0 MPa
+  实际 σb           = 370.0 MPa
+  实际 E            = 210000 MPa
+  实际 ν            = 0.3
+  实际 ρ            = 7850.0 kg/m³
+  equivalent_name   = Steel S235JR (EN 10025)
+  equivalent_filled = ['E_mpa', 'nu']
+  gb_sourced_fields = ['yield_mpa', 'uts_mpa']
+  fallback_fields   = ['density_kg_m3', 'E_mpa', 'nu']
+  values_from_gb    = True
+  values_pending    = False
+  values_source     = 混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Steel S235JR (EN 10025)）
+  >>> PASS  用的是 GB 值 235.0
+
+====================================================================================================
+Step2b  别名/写法鲁棒性（图纸上可能出现的写法）
+====================================================================================================
+  45#            -> id=None               σy=355.0    σb=600.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  45 #           -> id=None               σy=355.0    σb=600.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  Q 235          -> id=None               σy=235.0    σb=370.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  q235           -> id=None               σy=235.0    σb=370.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  GB_Q235        -> id=None               σy=235.0    σb=370.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  Q345           -> id=None               σy=355.0    σb=470.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；E_mpa, nu, 
+  Q345B          -> id=None               σy=355.0    σb=470.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；E_mpa, nu, 
+  Q355B          -> id=None               σy=355.0    σb=470.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；E_mpa, nu, 
+  HT200          -> id=None               σy=None     σb=200.0    src=混合来源：uts_mpa 来自 GB 原文；density_kg_m3 为等效兜底（项目
+  灰铸铁            -> id=None               σy=None     σb=200.0    src=混合来源：uts_mpa 来自 GB 原文；density_kg_m3 为等效兜底（项目
+  304            -> id=None               σy=205.0    σb=515.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  06Cr19Ni10     -> id=None               σy=205.0    σb=515.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  S30408         -> id=None               σy=205.0    σb=515.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  0Cr18Ni9       -> id=None               σy=205.0    σb=515.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  AISI 1045      -> id=None               σy=355.0    σb=600.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  1045           -> id=None               σy=355.0    σb=600.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  LY12           -> id=None               σy=503      σb=572      src=等效兜底（Aluminum 7075-T6）—— 国标数值待补全
+  2A12-T4        -> id=None               σy=503      σb=572      src=等效兜底（Aluminum 7075-T6）—— 国标数值待补全
+  GCr15          -> id=None               σy=None     σb=None     src=待补全（无兜底材料）
+  H62            -> id=None               σy=None     σb=None     src=待补全（无兜底材料）
+  ZCuSn10P1      -> id=None               σy=130.0    σb=220.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；无 为等效兜底（项目原
+  ZL104          -> id=None               σy=None     σb=150.0    src=混合来源：uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_
+  7075           -> id=None               σy=503      σb=572      src=等效兜底（Aluminum 7075-T6）—— 国标数值待补全
+  6061-T6        -> id=None               σy=276      σb=310      src=等效兜底（Aluminum 6061-T6）—— 国标数值待补全
+  不锈钢            -> id=None               σy=205.0    σb=515.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  碳钢             -> id=None               σy=235.0    σb=370.0    src=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_
+  铝合金            -> id=None               σy=276      σb=310      src=等效兜底（Aluminum 6061-T6）—— 国标数值待补全
+
+====================================================================================================
+Step2c  关键回归：GB 值是否会被兜底【反向覆盖】？
+====================================================================================================
+  GB_45#     get_material(精确id).σy=355.0     get_material(小写).σy=355.0     GB_MATERIALS[raw].σy=355.0     期望=355.0
+      原始 raw['E_mpa']=None (应为 None，未被就地写入)
+  GB_Q355    get_material(精确id).σy=355.0     get_material(小写).σy=355.0     GB_MATERIALS[raw].σy=355.0     期望=355.0
+      原始 raw['E_mpa']=None (应为 None，未被就地写入)
+  GB_65Mn    get_material(精确id).σy=785.0     get_material(小写).σy=785.0     GB_MATERIALS[raw].σy=785.0     期望=785.0
+      原始 raw['E_mpa']=None (应为 None，未被就地写入)

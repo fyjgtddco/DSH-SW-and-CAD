@@ -1,0 +1,21 @@
+{
+  "name": "机械制图验证规则（DSH 工程模式）",
+  "description": "适用于 GB/T 机械制图的几何/结构验证规则，从 CADX residential/general 适配而来。",
+  "min_room_area_sqm": 6.0,
+  "min_wall_thickness_mm": 100,
+  "max_wall_thickness_mm": 500,
+  "min_door_width_mm": 700,
+  "max_door_width_mm": 2000,
+  "min_window_area_sqm": 0.5,
+  "ventilation_pct_of_floor": 10,
+  "max_stair_riser_mm": 160,
+  "min_stair_tread_mm": 250,
+  "min_ceiling_height_m": 2.7,
+  "required_layers": ["OUTLINE", "THIN", "CENTER", "HIDDEN", "DIM", "TEXT", "HATCH"],
+  "layer_name_pattern": "^[A-Z][A-Z0-9_-]*$",
+  "min_room_width_m": 2.4,
+  "min_room_length_m": 3.0,
+  "max_room_aspect_ratio": 3.0,
+  "unit_scale": 1.0,
+  "gap_threshold_mm": 10.0
+}

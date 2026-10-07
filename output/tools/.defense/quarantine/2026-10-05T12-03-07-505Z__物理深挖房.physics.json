@@ -1,0 +1,31 @@
+{
+  "kind": "physics",
+  "schema": "dsh-physics-attestation/1",
+  "at": "2026-10-05T10:11:28.018Z",
+  "ts": 1791195088018,
+  "room": "物理深挖房",
+  "run_id": "opt_iter_1",
+  "report_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\output\\physics_runs\\opt_GATE_7B82248476CE_1791195086\\iteration_1\\opt_iter_1_report.json",
+  "report_sha256": "c146b3665c5e4f53eb8f51acef800782dfd95a6b2b095ffe7af60c5d3d5ba804",
+  "run_dir": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\output\\physics_runs\\opt_GATE_7B82248476CE_1791195086\\iteration_1",
+  "overall": "UNKNOWN",
+  "overall_status": "UNKNOWN",
+  "safety_factor": null,
+  "max_von_mises_mpa": null,
+  "max_displacement_mm": null,
+  "passed_gates": [
+    "DESIGN_SPACE",
+    "CONNECTIVITY",
+    "WALL_THICKNESS"
+  ],
+  "failed_gates": [],
+  "not_evaluated": [],
+  "release_status": "PENDING",
+  "fatigue_verdict": "",
+  "fatigue_sf": null,
+  "source": "physics_bridge",
+  "_sig": "xtO30HYKePz3RH/PIfPa+5zWS+6P7qtqkuK8yWQb4BI=",
+  "_kid": "2ecf33b3365d9480",
+  "_ts": 1791195088019,
+  "_nonce": "6418cb018cf0c897de55afccb107750f"
+}

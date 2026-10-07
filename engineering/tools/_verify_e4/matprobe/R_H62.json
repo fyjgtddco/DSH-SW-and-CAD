@@ -1,0 +1,123 @@
+{
+ "grade": "H62",
+ "set_material": {
+  "ok": true,
+  "material": "H62",
+  "method": "PartDoc.SetMaterialPropertyName2",
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "材料已写入(IdName=solidworks materials|黄铜|27)但密度与之前相同",
+   "⚠️ 材料名 'H62' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'H62'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 8430.0,
+  "canonical": "H62",
+  "configuration": "默认",
+  "density_before_kg_m3": 8500.0,
+  "material_mismatch_rejected": false,
+  "applied_name": "H62",
+  "match_level": "none",
+  "density_after_kg_m3": 8500.0,
+  "material_id_name": "solidworks materials|黄铜|27",
+  "density_kg_m3": 8500.0,
+  "density_changed": false,
+  "approximate_match": true,
+  "warning": "⚠️ 材料名 'H62' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'H62'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。",
+  "density_error_pct": 0.83
+ },
+ "material_result": {
+  "ok": true,
+  "material": "H62",
+  "method": "PartDoc.SetMaterialPropertyName2",
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "⚠️ 材料名 'H62（黄铜）' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 '黄铜'（匹配级别=loose）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 8430.0,
+  "canonical": "H62",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [],
+  "rejected_candidates_before_success": [
+   {
+    "name": "H62",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "copper",
+    "expected_density_kg_m3": 8430.0
+   }
+  ],
+  "material_mismatch_rejected": false,
+  "applied_name": "黄铜",
+  "match_level": "loose",
+  "density_after_kg_m3": 8500.0,
+  "material_id_name": "solidworks materials|黄铜|27",
+  "density_kg_m3": 8500.0,
+  "density_changed": true,
+  "approximate_match": true,
+  "warning": "⚠️ 材料名 'H62（黄铜）' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 '黄铜'（匹配级别=loose）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。",
+  "density_error_pct": 0.83
+ },
+ "get_material": {
+  "ok": true,
+  "name": "solidworks materials|黄铜|27",
+  "density_kg_m3": 8500.0,
+  "mass_kg": 0.12240000000000001,
+  "volume_mm3": 14400.000000000002
+ },
+ "massprops": {
+  "ok": true,
+  "volume_mm3": 14400.000000000002,
+  "surface_area_mm2": 5039.999999999999,
+  "mass_kg": 0.12240000000000001,
+  "density_kg_m3": 8500.0,
+  "center_of_mass_mm": [
+   30.0,
+   15.0,
+   4.0
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "save_ok": true,
+ "part_exists": true,
+ "attestation": {
+  "kind": "material",
+  "schema": "dsh-material-attestation/1",
+  "room": "",
+  "at": "2026-10-07T06:07:25.309Z",
+  "ts": 1791353245309,
+  "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_H62.SLDPRT",
+  "part_name": "P_H62",
+  "part_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_H62.SLDPRT",
+  "part_sha256": "8acf6ba0049af5454f4dc04bfc9cb732c64e92247175256f9de63a9c508bcd22",
+  "part_size_bytes": 60777,
+  "part_md5": "ee32b13328bf92bb916733f563b552f2",
+  "applied_name": "黄铜",
+  "density_kg_m3": 8500,
+  "source": "explicit(new_part material=)",
+  "attested_material": "黄铜",
+  "attested_density_kg_m3": 8500,
+  "attested_family": "copper",
+  "ok": true,
+  "approximate_match": true,
+  "material_mismatch_rejected": false,
+  "requested_material": "H62",
+  "attested_material_name": "H62",
+  "cross_standard": false,
+  "cross_standard_note": "null",
+  "expected_yield_mpa": 200,
+  "expected_density_kg_m3": 8430,
+  "applied_yield_mpa": null,
+  "applied_density_kg_m3": null,
+  "yield_deviation_pct": null,
+  "_sig": "A9+C5fggBEuHL3oap1QD4kvm1fEAl+zxNZg8w2PMsJs=",
+  "_kid": "7633096ee4ddb3f9",
+  "_ts": 1791353245309,
+  "_nonce": "291c81e16420aacb4239c13f710250e5"
+ }
+}

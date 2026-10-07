@@ -90,5 +90,105 @@
       "ts": 1790859522.8692856,
       "at": "2026-10-01 20:58:42"
     }
+  ],
+  "验证房": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1791175399.0408542,
+      "at": "2026-10-05 12:43:19"
+    }
+  ],
+  "修复验证房": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1791177716.7758741,
+      "at": "2026-10-05 13:21:56"
+    }
+  ],
+  "极限测试房": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1791189338.6067677,
+      "at": "2026-10-05 16:35:38"
+    }
+  ],
+  "对抗综合测试房": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1791189411.4742537,
+      "at": "2026-10-05 16:36:51"
+    }
+  ],
+  "国标材料测试房": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1791189454.1954033,
+      "at": "2026-10-05 16:37:34"
+    }
+  ],
+  "极限测试房2": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1791192906.7703402,
+      "at": "2026-10-05 17:35:06"
+    }
+  ],
+  "CB回退房": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1791194980.0274837,
+      "at": "2026-10-05 18:09:40"
+    }
+  ],
+  "CB临时房": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1791194982.3382826,
+      "at": "2026-10-05 18:09:42"
+    }
+  ],
+  "CB重复房": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1791194984.4830692,
+      "at": "2026-10-05 18:09:44"
+    }
+  ],
+  "材料深挖房": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1791197086.3939211,
+      "at": "2026-10-05 18:44:46"
+    }
   ]
 }

@@ -1,0 +1,709 @@
+{
+ "grade": "65Mn",
+ "expected_density": 7850.0,
+ "A_set_material_density": {
+  "ok": false,
+  "material": "65Mn",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7850.0,
+  "canonical": "65Mn",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [
+   {
+    "name": "65Mn",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   }
+  ],
+  "error": "没有找到与 '65Mn' 材质相符的材料：尝试了 16 个候选，其中 16 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：65Mn(1000); 65Mn（弹簧钢）(1000); 65Mn弹簧钢(1000); GB_65Mn(1000)\n期望密度约 7850.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('65Mn', density=7850.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "A_massprops": {
+  "ok": true,
+  "volume_mm3": 14400.000000000002,
+  "surface_area_mm2": 5039.999999999999,
+  "mass_kg": 0.014400000000000001,
+  "density_kg_m3": 1000.0,
+  "center_of_mass_mm": [
+   29.999999999999996,
+   14.999999999999998,
+   4.0
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "A_material_result": {
+  "ok": false,
+  "material": "65Mn",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7850.0,
+  "canonical": "65Mn",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [
+   {
+    "name": "65Mn",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   }
+  ],
+  "error": "没有找到与 '65Mn' 材质相符的材料：尝试了 16 个候选，其中 16 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：65Mn(1000); 65Mn（弹簧钢）(1000); 65Mn弹簧钢(1000); GB_65Mn(1000)\n期望密度约 7850.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('65Mn', density=7850.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "A_saved": true,
+ "A_att": {
+  "ok": true,
+  "density_kg_m3": null,
+  "expected_density_kg_m3": 7850,
+  "attested_density_kg_m3": null,
+  "cross_standard": false,
+  "applied_name": "65Mn"
+ },
+ "B_save_custom": {
+  "ok": true,
+  "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\custom_materials.json",
+  "material": {
+   "updated_at": "2026-10-07 13:40:43"
+  }
+ },
+ "B_set_material": {
+  "ok": false,
+  "material": "65Mn",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7850.0,
+  "canonical": "65Mn",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [
+   {
+    "name": "65Mn",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   }
+  ],
+  "error": "没有找到与 '65Mn' 材质相符的材料：尝试了 16 个候选，其中 16 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：65Mn(1000); 65Mn（弹簧钢）(1000); 65Mn弹簧钢(1000); GB_65Mn(1000)\n期望密度约 7850.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('65Mn', density=7850.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "B_massprops": {
+  "ok": true,
+  "volume_mm3": 14400.000000000002,
+  "surface_area_mm2": 5039.999999999999,
+  "mass_kg": 0.014400000000000001,
+  "density_kg_m3": 1000.0,
+  "center_of_mass_mm": [
+   29.999999999999996,
+   14.999999999999998,
+   4.0
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "B_material_result": {
+  "ok": false,
+  "material": "65Mn",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn（弹簧钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 '65Mn弹簧钢' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_65Mn' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7850.0,
+  "canonical": "65Mn",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [
+   {
+    "name": "65Mn",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn（弹簧钢）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "65Mn弹簧钢",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_65Mn",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   }
+  ],
+  "error": "没有找到与 '65Mn' 材质相符的材料：尝试了 16 个候选，其中 16 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：65Mn(1000); 65Mn（弹簧钢）(1000); 65Mn弹簧钢(1000); GB_65Mn(1000)\n期望密度约 7850.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('65Mn', density=7850.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "B_saved": true,
+ "B_att": {
+  "ok": true,
+  "density_kg_m3": null,
+  "expected_density_kg_m3": 7850,
+  "attested_density_kg_m3": null,
+  "cross_standard": false,
+  "applied_name": "65Mn"
+ }
+}

@@ -4,32 +4,100 @@
       "active": false,
       "started_at": 1790910071.8440664,
       "ended_at": 1790912659.6242025
+    },
+    "验证房": {
+      "active": false,
+      "started_at": 1791175369.946443,
+      "ended_at": null,
+      "failed_at": 1791175399.0349703
+    },
+    "修复验证房": {
+      "active": false,
+      "started_at": 1791177503.422792,
+      "ended_at": null,
+      "failed_at": 1791177716.7694583
+    },
+    "极限测试房": {
+      "active": false,
+      "started_at": 1791188643.9998443,
+      "ended_at": null,
+      "failed_at": 1791189338.6053662
+    },
+    "国标材料测试房": {
+      "active": false,
+      "started_at": 1791189390.551873,
+      "ended_at": null,
+      "failed_at": 1791190301.9989128
+    },
+    "极限测试房2": {
+      "active": false,
+      "started_at": 1791191461.4810636,
+      "ended_at": null,
+      "failed_at": 1791192906.7690828
+    },
+    "物理深挖房": {
+      "active": true,
+      "started_at": 1791194720.1040742
+    },
+    "材料深挖房": {
+      "active": false,
+      "started_at": 1791194720.215079,
+      "ended_at": null,
+      "failed_at": 1791197086.3922112
+    },
+    "流程深挖房": {
+      "active": true,
+      "started_at": 1791194720.3293014
     }
   },
   "subagents": {
     "结构件": {
       "id": "14d6cecf-4426-4dfc-bb67-8a945ccee8a6",
       "assigned_at": 1790953217.7649565
+    },
+    "物理深挖房": {
+      "id": "f2408e16-5279-48ea-90a8-15342a3945cb",
+      "assigned_at": 1791194840.989003
+    },
+    "材料深挖房": {
+      "id": "21b08706-1ba5-46aa-ba76-b86c5653edf6",
+      "assigned_at": 1791194841.0918536
+    },
+    "流程深挖房": {
+      "id": "f28b73c6-0c11-4ddf-ae53-1e4439b83d7b",
+      "assigned_at": 1791194841.1954174
+    },
+    "不存在房间": {
+      "id": "ghost-id-123",
+      "assigned_at": 1791194977.2474015
+    },
+    "CB未启动房": {
+      "id": "fake-id-456",
+      "assigned_at": 1791194977.3559885
+    },
+    "CB重复房": {
+      "id": "id-B",
+      "assigned_at": 1791194977.6626198
     }
   },
   "sw_lock": {
     "owner": null,
     "queue": [],
     "acquired_at": null,
-    "prev_owner": "结构件",
-    "sw_by_room": true,
-    "cmd_seq": 27,
+    "prev_owner": "材料深挖房",
+    "sw_by_room": false,
+    "cmd_seq": 36,
     "fair_start": 1790907195.4968727,
     "hold_mode": "command",
-    "purged_at": 1790952217.7358148,
-    "purged_by": "结构件",
+    "purged_at": 1791195050.4034991,
+    "purged_by": "材料深挖房",
     "purged_actions": [
-      "SW 进程未运行(prev_owner='结构件')→清"
+      "prev_owner='极限测试房2' 已死/未登记→清"
     ]
   },
   "mode": "2",
   "mode_name": "大型复杂器械装配",
-  "declared_at": 1790907112.9218345,
+  "declared_at": 1791194892.5116608,
   "task_epoch_started_at": 1789737163.1795745,
   "task_epoch_at": "2026-09-18 21:12:43",
   "subagent_history": [
@@ -40,8 +108,8 @@
       "reason": "room-start 重开房间，清除上一波残留"
     }
   ],
-  "parallel_mode_updated_at": 1790858271.7732038,
-  "parallel_mode": "parallel",
+  "parallel_mode_updated_at": 1791194892.6285744,
+  "parallel_mode": "sequential",
   "parallel_mode_repaired_by": "get_parallel_mode(wf)",
   "parallel_mode_synced_at": 1789875200.3143635
 }

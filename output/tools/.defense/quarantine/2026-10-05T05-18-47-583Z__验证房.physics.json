@@ -1,0 +1,52 @@
+{
+  "schema": "dsh-physics-attestation/1",
+  "room": "验证房",
+  "at": "2026-10-05 12:42:00",
+  "ts": 1791175320.851125,
+  "overall": "FAIL",
+  "safety_factor": 0.2,
+  "max_von_mises_mpa": 204.95,
+  "max_displacement_mm": 6.723,
+  "fatigue_verdict": "FAIL",
+  "fatigue_sf": 0.125,
+  "failed_gates": [
+    {
+      "id": "SAFETY_FACTOR",
+      "status": "FAIL",
+      "actual": 0.2,
+      "required_min": 4.0,
+      "required_max": 5.0,
+      "over_design": false,
+      "note": "强度不足，必须加强"
+    },
+    {
+      "id": "FATIGUE_STRENGTH",
+      "status": "FAIL",
+      "actual_sf": 0.125,
+      "required_min": 1.5,
+      "endurance_limit_mpa": 17.3
+    },
+    {
+      "id": "FATIGUE_LIFE",
+      "status": "FAIL",
+      "required_years": 1.0,
+      "allowable_life_years": 0.01,
+      "damage_at_required_life": 160.0
+    }
+  ],
+  "passed_gates": [
+    "DESIGN_SPACE",
+    "CONNECTIVITY",
+    "WALL_THICKNESS",
+    "MAX_DISPLACEMENT",
+    "MESH_QUALITY"
+  ],
+  "not_evaluated": [],
+  "release_status": "NEEDS_REVISION",
+  "run_id": "opt_iter_1",
+  "report_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\..\\..\\output\\physics_runs\\opt_GATE_7B82248476CE_1791175318\\iteration_1\\opt_iter_1_report.json",
+  "case_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\load_cases\\gate_load_case.json",
+  "run_dir": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\..\\..\\output\\physics_runs\\opt_GATE_7B82248476CE_1791175318",
+  "source": "physics_bridge",
+  "_unsigned_reason": "宿主未公布防线端点（runtime.json 缺失或无私端口）"
+}

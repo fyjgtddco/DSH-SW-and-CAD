@@ -1,0 +1,502 @@
+[
+ {
+  "id": "GB_20CrMnTi",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [],
+   "scan_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "yield_mpa",
+    "uts_mpa",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：无 来自国标原文/牌号定义；E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）；其中 yield_mpa, uts_mpa 有国标出处但数值取自手册（该标准官方 PDF 为扫描页，无法文本提取）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "yield_mpa",
+   "uts_mpa",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_2A12",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [],
+   "scan_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "yield_mpa",
+    "uts_mpa",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：无 来自国标原文/牌号定义；E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）；其中 yield_mpa, uts_mpa 有国标出处但数值取自手册（该标准官方 PDF 为扫描页，无法文本提取）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "yield_mpa",
+   "uts_mpa",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_304",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "scan_sourced_fields": [],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：yield_mpa, uts_mpa 来自国标原文/牌号定义；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [
+   "yield_mpa",
+   "uts_mpa"
+  ],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_316",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "scan_sourced_fields": [],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：yield_mpa, uts_mpa 来自国标原文/牌号定义；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [
+   "yield_mpa",
+   "uts_mpa"
+  ],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_40Cr",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [],
+   "scan_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "yield_mpa",
+    "uts_mpa",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：无 来自国标原文/牌号定义；E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）；其中 yield_mpa, uts_mpa 有国标出处但数值取自手册（该标准官方 PDF 为扫描页，无法文本提取）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "yield_mpa",
+   "uts_mpa",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_45#",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "scan_sourced_fields": [],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：yield_mpa, uts_mpa 来自国标原文/牌号定义；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [
+   "yield_mpa",
+   "uts_mpa"
+  ],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_6061_T6",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [],
+   "scan_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "yield_mpa",
+    "uts_mpa",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：无 来自国标原文/牌号定义；E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）；其中 yield_mpa, uts_mpa 有国标出处但数值取自手册（该标准官方 PDF 为扫描页，无法文本提取）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "yield_mpa",
+   "uts_mpa",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_65Mn",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "scan_sourced_fields": [],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：yield_mpa, uts_mpa 来自国标原文/牌号定义；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [
+   "yield_mpa",
+   "uts_mpa"
+  ],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_7075_T6",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [],
+   "scan_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "yield_mpa",
+    "uts_mpa",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：无 来自国标原文/牌号定义；E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）；其中 yield_mpa, uts_mpa 有国标出处但数值取自手册（该标准官方 PDF 为扫描页，无法文本提取）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "yield_mpa",
+   "uts_mpa",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_Cr12MoV",
+  "prov": {
+   "level": "EQUIVALENT_FALLBACK",
+   "claimable_as_gb": false,
+   "equivalent_material": "Steel AISI 4140 (quenched & tempered)",
+   "gb_sourced_fields": [],
+   "note": "力学数值【不是】全部来自 GB 原文：无字段 来自 GB 原文，其余为等效材料「Steel AISI 4140 (quenched & tempered)」的数值兜底；结论可用于工程判断，但不得整体宣称为 GB/T 标准值。"
+  },
+  "gb_sourced": [],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）；yield_mpa, uts_mpa 为等效兜底（Steel AISI 4140 (quenched & tempered)）"
+ },
+ {
+  "id": "GB_GCr15",
+  "prov": {
+   "level": "PENDING_NO_FALLBACK",
+   "claimable_as_gb": false,
+   "missing_fields": [
+    "yield_mpa"
+   ],
+   "note": "该牌号仅确认标准身份，力学数值待补全且无等效兜底材料 —— 强度/寿命类结论不可用，请从标准原文补全数值"
+  },
+  "gb_sourced": [],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "uts_mpa",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：E_mpa, nu, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）；仍缺 yield_mpa"
+ },
+ {
+  "id": "GB_H62",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [
+    "uts_mpa"
+   ],
+   "scan_sourced_fields": [],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "yield_mpa",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：uts_mpa 来自国标原文/牌号定义；E_mpa, nu, yield_mpa, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [
+   "uts_mpa"
+  ],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "yield_mpa",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, yield_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_HT200",
+  "prov": {
+   "level": "PENDING_NO_FALLBACK",
+   "claimable_as_gb": false,
+   "missing_fields": [
+    "yield_mpa"
+   ],
+   "note": "该牌号仅确认标准身份，力学数值待补全且无等效兜底材料 —— 强度/寿命类结论不可用，请从标准原文补全数值"
+  },
+  "gb_sourced": [
+   "uts_mpa"
+  ],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）；仍缺 yield_mpa"
+ },
+ {
+  "id": "GB_Q235",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "scan_sourced_fields": [],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：yield_mpa, uts_mpa 来自国标原文/牌号定义；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [
+   "yield_mpa",
+   "uts_mpa"
+  ],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_Q355",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "scan_sourced_fields": [],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：yield_mpa, uts_mpa 来自国标原文/牌号定义；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [
+   "yield_mpa",
+   "uts_mpa"
+  ],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_QT500_7",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "scan_sourced_fields": [],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：yield_mpa, uts_mpa 来自国标原文/牌号定义；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [
+   "yield_mpa",
+   "uts_mpa"
+  ],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_ZCuSn10P1",
+  "prov": {
+   "level": "MIXED_SOURCE",
+   "claimable_as_gb": false,
+   "gb_sourced_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "scan_sourced_fields": [],
+   "handbook_fields": [
+    "E_mpa",
+    "nu",
+    "density_kg_m3"
+   ],
+   "strength_claimable_as_gb": true,
+   "stiffness_claimable_as_gb": false,
+   "note": "混合来源：yield_mpa, uts_mpa 来自国标原文/牌号定义；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些材料常数）。强度判据（σy/σb）可宣称国标口径；刚度/位移判据（E/ν）为手册值，不可宣称国标口径"
+  },
+  "gb_sourced": [
+   "yield_mpa",
+   "uts_mpa"
+  ],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）"
+ },
+ {
+  "id": "GB_ZL104",
+  "prov": {
+   "level": "PENDING_NO_FALLBACK",
+   "claimable_as_gb": false,
+   "missing_fields": [
+    "yield_mpa",
+    "uts_mpa"
+   ],
+   "note": "该牌号仅确认标准身份，力学数值待补全且无等效兜底材料 —— 强度/寿命类结论不可用，请从标准原文补全数值"
+  },
+  "gb_sourced": [],
+  "handbook": [
+   "E_mpa",
+   "nu",
+   "density_kg_m3"
+  ],
+  "values_source": "混合来源：E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）；仍缺 yield_mpa, uts_mpa"
+ }
+]

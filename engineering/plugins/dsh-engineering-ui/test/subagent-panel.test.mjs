@@ -237,8 +237,19 @@ check('★ 第一个主栏目名为「连接区」', src.includes("'连接区'")
 check('★ 第四个主栏目名为「工程人设」', src.includes('工程人设'));
 check('★ 第二个主栏目名为「设计过程优化」', src.includes('设计过程优化'));
 check('★ 其首行为「右键引用调出AI解释」', src.includes('右键引用调出AI解释'));
-check('★ 连接区前两行为「SW 连接」「CAD连接」',
-  src.includes("'SW 连接'") && src.includes("'CAD连接'"));
+check('★ 连接区含「SOLIDWORKS连接」「AutoCAD 连接」',
+  src.includes("'SOLIDWORKS连接'") && src.includes("'AutoCAD 连接'"));
+// ── 【连接区扩展】Abaqus / NX 为【同款样式的占位按钮】────────────────────
+//   用户要求："先给 abaqus/ansys 做占位符，先不需要做实际连接"
+//            → 后改为 "把 Ansys连接 改为 NX连接"
+//   因此：外观（EngConnRow + eng-conn-btn）与 SW/CAD 完全一致，
+//         但不触发实际探测/启动（placeholder 模式）。
+check('★ 连接区含「Abaqus连接」占位按钮',
+  src.includes("'Abaqus连接'") && src.includes("target: 'abaqus'"));
+check('★ 连接区含「NX连接」占位按钮',
+  src.includes("'NX连接'") && src.includes("target: 'nx'"));
+check('★ Abaqus/NX 为占位模式（不触发实际探测）',
+  src.includes('isPlaceholder') && src.includes('placeholder === true'));
 // ── 【连接区·已接真实探测 + 启动 + 日志诊断】用户要求：
 //   "设置那边『连接区』里的 SW/CAD 连接要能真的连上，
 //    并且流程中要能根据连接结果做代码判断。"
@@ -345,14 +356,57 @@ check('★ 设置分区可渲染且含四个主栏目标题',
   settingsHtml.includes('连接区') && settingsHtml.includes('设计过程优化') &&
   settingsHtml.includes('美化工程模式') && settingsHtml.includes('工程人设'),
   settingsHtml.slice(0, 120));
-check('★ 渲染结果含「SW 连接」「CAD连接」',
-  settingsHtml.includes('SW 连接') && settingsHtml.includes('CAD连接'));
+check('★ 渲染结果含新连接区文案（SOLIDWORKS / AutoCAD / Abaqus / NX）',
+  settingsHtml.includes('SOLIDWORKS连接') && settingsHtml.includes('AutoCAD 连接')
+  && settingsHtml.includes('Abaqus连接') && settingsHtml.includes('NX连接'));
 check('★ 设置分区含开关文案',
   settingsHtml.includes('使用工程模式自带的子代理显示页'));
 check('★ 设置分区含子项行与右箭头',
   settingsHtml.includes('eng-row') && settingsHtml.includes('eng-row-chev'));
 check('★ 「美化工程模式」下第 1 行为开关行（eng-row sw）',
   settingsHtml.includes('eng-row sw'));
+
+// ── 【需求1】工程模式「模式说明 / 如何使用」弹窗 ──────────────────────────
+//   宿主 @deepseek-ai/dsh-client-ui-agent-preset 的说明弹窗是硬编码白名单
+//   （guides Map 只含 standard/ptc/minimal/cordis，且只对"内置"分组生效），
+//   第三方预设拿不到 → 因此在插件内自建同款弹窗。
+//   入口落点：用户明确要求放在【Agent 预设列表里工程模式那张卡片】上
+//   （与内置模式同一位置），因此用 DOM 注入到卡片的 cardFoot 空位。
+//   这里校验：数据、组件、注入器、两 Tab 结构、以及官方同款文案结构。
+check('★ 存在模式说明弹窗组件 EngGuideDialog',
+  typeof client.EngGuideDialog === 'function');
+check('★ 存在预设卡片弹窗宿主 EngPresetGuideHost（挂 shell.overlay）',
+  typeof client.EngPresetGuideHost === 'function'
+  && src.includes("id: 'eng-preset-guide'"));
+check('★ 提供卡片按钮注入器（DOM 注入到预设卡片）',
+  typeof client.injectPresetGuideButtons === 'function'
+  && typeof client.startPresetGuideInjector === 'function');
+check('★ 注入器写入「模式说明」「如何使用」两个按钮',
+  src.includes('eng-preset-help-btn')
+  && src.includes('ENG_GUIDE.modeExplanation')
+  && src.includes('ENG_GUIDE.howToUse'));
+check('★ 注入器监听 DOM 变化（切分组/重渲染后自动补注入）',
+  src.includes('MutationObserver'));
+check('★ 弹窗含两个 Tab（模式说明 / 如何使用）',
+  src.includes('eng-guide-tab') && src.includes('eng-guide-tabs'));
+check('★ 模式说明含「工作方式」「什么时候选」两节（同官方结构）',
+  src.includes('### 工作方式') && src.includes('### 什么时候选'));
+check('★ 如何使用含「示例任务」标签与「预期产出」（同官方结构）',
+  src.includes('guideExampleTask') && src.includes('预期产出'));
+check('★ 弹窗渲染出「模式说明」页内容',
+  (() => {
+    const outG = { text: '' };
+    try { renderDeep(client.EngGuideDialog({ initialPage: 'explanation', onClose: () => {} }), outG); }
+    catch (e) { outG.text = 'ERR:' + e.message; }
+    return outG.text.includes('工作方式') && outG.text.includes('什么时候选');
+  })());
+check('★ 弹窗渲染出「如何使用」页内容',
+  (() => {
+    const outU = { text: '' };
+    try { renderDeep(client.EngGuideDialog({ initialPage: 'usage', onClose: () => {} }), outU); }
+    catch (e) { outU.text = 'ERR:' + e.message; }
+    return outU.text.includes('示例任务') && outU.text.includes('预期产出');
+  })());
 
 console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====`);
 process.exit(fail === 0 ? 0 : 1);

@@ -1,0 +1,14 @@
+{
+  "mode": "1",
+  "rooms": {},
+  "declared_at": null,
+  "mode_name": "基础零件搭建",
+  "sw_lock": {
+    "owner": null,
+    "queue": [],
+    "acquired_at": null,
+    "prev_owner": null,
+    "sw_by_room": false
+  },
+  "subagents": {}
+}

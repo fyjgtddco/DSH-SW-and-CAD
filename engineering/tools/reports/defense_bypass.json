@@ -221,6 +221,171 @@
       "kind": "domain",
       "reason": "领域凭据拒绝签发: 规则文件无法解析 transmission",
       "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-05 12:26:46",
+      "where": "mode_gate.room-end:传动机构",
+      "reason": "--force 显式强制放行（跳过三大防线）",
+      "by": "cli-force"
+    },
+    {
+      "at": "2026-10-05 12:26:47",
+      "where": "mode_gate.room-fail:支撑结构",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】缺少物理校核凭据（reports/支撑结构.physics.json）—— 该房间未做过 FEA/疲劳校核。; 【防线③领域】缺少领域校验凭据（reports/支撑结构.domain.json）—— 未跑 DSVA/GB 规则校验。",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 12:27:06",
+      "where": "mode_gate.room-end:传动机构",
+      "reason": "--force 显式强制放行（跳过三大防线）",
+      "by": "cli-force"
+    },
+    {
+      "at": "2026-10-05 12:27:07",
+      "where": "mode_gate.room-fail:支撑结构",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】缺少物理校核凭据（reports/支撑结构.physics.json）—— 该房间未做过 FEA/疲劳校核。; 【防线③领域】缺少领域校验凭据（reports/支撑结构.domain.json）—— 未跑 DSVA/GB 规则校验。",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 12:27:13",
+      "where": "mode_gate.room-end:结构件",
+      "reason": "DSH_DEFENSE_BYPASS=1",
+      "by": "env"
+    },
+    {
+      "at": "2026-10-05 12:27:14",
+      "where": "mode_gate.room-end:传动机构",
+      "reason": "--force 显式强制放行（跳过三大防线）",
+      "by": "cli-force"
+    },
+    {
+      "at": "2026-10-05 12:27:14",
+      "where": "mode_gate.room-end:壳体机架",
+      "reason": "DSH_DEFENSE_BYPASS=1",
+      "by": "env"
+    },
+    {
+      "at": "2026-10-05 12:27:14",
+      "where": "mode_gate.room-fail:支撑结构",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】缺少物理校核凭据（reports/支撑结构.physics.json）—— 该房间未做过 FEA/疲劳校核。; 【防线③领域】缺少领域校验凭据（reports/支撑结构.domain.json）—— 未跑 DSVA/GB 规则校验。",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 12:27:20",
+      "where": "mode_gate.room-end:结构件",
+      "reason": "DSH_DEFENSE_BYPASS=1",
+      "by": "env"
+    },
+    {
+      "at": "2026-10-05 12:27:21",
+      "where": "mode_gate.room-end:传动机构",
+      "reason": "--force 显式强制放行（跳过三大防线）",
+      "by": "cli-force"
+    },
+    {
+      "at": "2026-10-05 12:27:21",
+      "where": "mode_gate.room-end:壳体机架",
+      "reason": "DSH_DEFENSE_BYPASS=1",
+      "by": "env"
+    },
+    {
+      "at": "2026-10-05 12:27:21",
+      "where": "mode_gate.room-fail:支撑结构",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】缺少物理校核凭据（reports/支撑结构.physics.json）—— 该房间未做过 FEA/疲劳校核。; 【防线③领域】缺少领域校验凭据（reports/支撑结构.domain.json）—— 未跑 DSVA/GB 规则校验。",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 12:40:40",
+      "where": "defense_gate.unsigned:DSH_验证测试_save方式.sldprt",
+      "kind": "material",
+      "reason": "宿主未公布防线端点（runtime.json 缺失或无私端口）",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-05 12:42:00",
+      "where": "defense_gate.unsigned:验证房",
+      "kind": "physics",
+      "reason": "宿主未公布防线端点（runtime.json 缺失或无私端口）",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-05 12:42:35",
+      "where": "defense_gate.unsigned:验证房",
+      "kind": "domain",
+      "reason": "宿主未公布防线端点（runtime.json 缺失或无私端口）",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-05 12:43:19",
+      "where": "mode_gate.room-fail:验证房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】物理凭据未通过签名校验：凭据缺少签名 —— 非宿主签发，疑似伪造; 【防线③领域】领域凭据未通过签名校验：凭据缺少签名 —— 非宿主签发，疑似伪造",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 13:21:56",
+      "where": "mode_gate.room-fail:修复验证房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】缺少物理校核凭据或验签失败（reports/修复验证房.physics.json）; 【防线③领域】缺少领域校验凭据或验签失败（reports/修复验证房.domain.json）",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 16:35:38",
+      "where": "mode_gate.room-fail:极限测试房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/极限测试房.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/极限测试房.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 16:36:51",
+      "where": "mode_gate.room-fail:对抗综合测试房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/对抗综合测试房.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/对抗综合测试房.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 16:37:34",
+      "where": "mode_gate.room-fail:国标材料测试房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/国标材料测试房.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/国标材料测试房.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 16:51:41",
+      "where": "mode_gate.room-fail:国标材料测试房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/国标材料测试房.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/国标材料测试房.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 17:35:06",
+      "where": "mode_gate.room-fail:极限测试房2",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/极限测试房2.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】凭据有效（已验签），但检出 2 条 CRITICAL 违规: MD-004, GBM-003 —— 属【规则不达标】，请按规则修正设计参数",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 18:09:40",
+      "where": "mode_gate.room-fail:CB回退房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/CB回退房.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/CB回退房.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 18:09:42",
+      "where": "mode_gate.room-fail:CB临时房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/CB临时房.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/CB临时房.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 18:09:44",
+      "where": "mode_gate.room-fail:CB重复房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/CB重复房.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/CB重复房.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 18:09:46",
+      "where": "mode_gate.room-fail:CB回退房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/CB回退房.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/CB回退房.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-05 18:44:46",
+      "where": "mode_gate.room-fail:材料深挖房",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/材料深挖房.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/材料深挖房.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
     }
   ]
 }

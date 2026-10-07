@@ -1,11 +1,11 @@
 {
   "schema_version": "1.0",
   "meta": {
-    "problem_id": "GATE_73847749322F",
-    "title": "设计一辆校内比赛用小车，要求速度较快、需要转弯，比赛路线包含直线和弯道。小车需使用3D打印制造，用于实际参赛。",
+    "problem_id": "GATE_7B82248476CE",
+    "title": "校内比赛用竞赛小车设计：场地4.5m×4.5m圆角矩形，含R600圆柱障碍、斜置圆、凹角；需设计小车底盘、驱动传动、车体结构，面向循迹/避障/竞速任务",
     "revision": "A",
     "generated_by": "workflow_gate.estimate_mechanics",
-    "generated_at": "2026-10-03 18:19:13",
+    "generated_at": "2026-10-04 22:55:57",
     "task_type": "vehicle",
     "task_type_label": "轮式车辆 / 小车",
     "design_domain_mm": [
@@ -13,7 +13,7 @@
       180.0,
       120.0
     ],
-    "design_domain_note": "零件包络取自任务/回答中的零件语境尺寸 [300.0, 180.0, 120.0]",
+    "design_domain_note": "未从任务/回答中提取到【零件】包络尺寸（赛道/整机尺寸不计入），已按任务类型取典型零件包络 (300, 180, 120) mm；请在小屋 prompt 中明确零件长宽高。",
     "design_domain_basis": "零件包络（Bug-12：不再沿用赛道/整机尺寸）"
   },
   "units": {
@@ -27,7 +27,7 @@
       "x_min": 0.0,
       "x_max": 300.0,
       "y_min": 0.0,
-      "y_max": 180.0,
+      "y_max": 200.0,
       "z_min": 0.0,
       "z_max": 120.0
     },
@@ -92,7 +92,7 @@
       "id": "load_rated",
       "spatial_selector_id": "load_face",
       "type": "distributed_force",
-      "magnitude_n": 14.71,
+      "magnitude_n": 500.0,
       "direction": [
         0.0,
         0.0,
@@ -105,7 +105,7 @@
       "id": "load_lateral",
       "spatial_selector_id": "load_face",
       "type": "distributed_force",
-      "magnitude_n": 29.42,
+      "magnitude_n": 1000.0,
       "direction": [
         1.0,
         0.0,
@@ -118,7 +118,7 @@
       "id": "load_longitudinal",
       "spatial_selector_id": "load_face",
       "type": "distributed_force",
-      "magnitude_n": 14.71,
+      "magnitude_n": 500.0,
       "direction": [
         0.0,
         1.0,
@@ -162,8 +162,10 @@
   ],
   "acceptance": {
     "analysis_type": "linear_static",
-    "min_safety_factor": 3.0,
+    "min_safety_factor": 4.0,
     "target_safety_factor_max": 5.0,
+    "anisotropy_factor": 0.8,
+    "process": "FDM 增材制造",
     "max_displacement_mm": null,
     "min_wall_thickness_mm": null,
     "max_mass_kg": null,

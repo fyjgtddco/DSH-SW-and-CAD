@@ -1,0 +1,387 @@
+{
+ "grade": "QT500-7",
+ "set_material": {
+  "ok": false,
+  "material": "QT500-7",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 'QT500-7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7（球墨铸铁）' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'GB_QT500_7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7（球墨铸铁）' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'GB_QT500_7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7（球墨铸铁）' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'GB_QT500_7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7（球墨铸铁）' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'GB_QT500_7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7300.0,
+  "canonical": "QT500-7",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [
+   {
+    "name": "QT500-7",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7（球墨铸铁）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "GB_QT500_7",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7（球墨铸铁）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "GB_QT500_7",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7（球墨铸铁）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "GB_QT500_7",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7（球墨铸铁）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "GB_QT500_7",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   }
+  ],
+  "error": "没有找到与 'QT500-7' 材质相符的材料：尝试了 16 个候选，其中 16 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：QT500-7(1000); QT500-7（球墨铸铁）(1000); QT500(1000); GB_QT500_7(1000)\n期望密度约 7300.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('QT500-7', density=7300.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "material_result": {
+  "ok": false,
+  "material": "QT500-7",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 'QT500-7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7（球墨铸铁）' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'GB_QT500_7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7（球墨铸铁）' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'GB_QT500_7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7（球墨铸铁）' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'GB_QT500_7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500-7（球墨铸铁）' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'QT500' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符",
+   "候选 'GB_QT500_7' 被拒：实际密度 1000(plastic) 与期望 7300(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7300.0,
+  "canonical": "QT500-7",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [
+   {
+    "name": "QT500-7",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7（球墨铸铁）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "GB_QT500_7",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7（球墨铸铁）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "GB_QT500_7",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7（球墨铸铁）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "GB_QT500_7",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500-7（球墨铸铁）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "QT500",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   },
+   {
+    "name": "GB_QT500_7",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7300.0
+   }
+  ],
+  "error": "没有找到与 'QT500-7' 材质相符的材料：尝试了 16 个候选，其中 16 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：QT500-7(1000); QT500-7（球墨铸铁）(1000); QT500(1000); GB_QT500_7(1000)\n期望密度约 7300.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('QT500-7', density=7300.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "get_material": {
+  "ok": true,
+  "name": "",
+  "density_kg_m3": 1000.0,
+  "mass_kg": 0.014400000000000001,
+  "volume_mm3": 14400.000000000002
+ },
+ "massprops": {
+  "ok": true,
+  "volume_mm3": 14400.000000000002,
+  "surface_area_mm2": 5039.999999999999,
+  "mass_kg": 0.014400000000000001,
+  "density_kg_m3": 1000.0,
+  "center_of_mass_mm": [
+   29.999999999999996,
+   14.999999999999998,
+   4.0
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "save_ok": true,
+ "part_exists": true,
+ "attestation": {
+  "kind": "material",
+  "schema": "dsh-material-attestation/1",
+  "room": "",
+  "at": "2026-10-07T06:06:40.533Z",
+  "ts": 1791353200533,
+  "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_QT500_7.SLDPRT",
+  "part_name": "P_QT500_7",
+  "part_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_QT500_7.SLDPRT",
+  "part_sha256": "9d7e7469b62f66b6e22dc56ce0e9ae58d711ae0469a29bddb828cc85955aad38",
+  "part_size_bytes": 59846,
+  "part_md5": "bdb74dcfd9a44dc4c4deaae5a6b17645",
+  "applied_name": "QT500-7",
+  "density_kg_m3": 1000,
+  "source": "explicit(new_part material=)",
+  "attested_material": "QT500-7",
+  "attested_density_kg_m3": 1000,
+  "attested_family": "water",
+  "ok": false,
+  "approximate_match": false,
+  "material_mismatch_rejected": true,
+  "requested_material": "QT500-7",
+  "attested_material_name": "QT500-7",
+  "cross_standard": false,
+  "cross_standard_note": "null",
+  "expected_yield_mpa": 320,
+  "expected_density_kg_m3": 7300,
+  "applied_yield_mpa": 320,
+  "applied_density_kg_m3": 7300,
+  "yield_deviation_pct": 0,
+  "_sig": "bMFuRJ/vMXcd9DqNskEvBBQH+gSlrAO1Tku38rFTO5E=",
+  "_kid": "7633096ee4ddb3f9",
+  "_ts": 1791353200533,
+  "_nonce": "57809e704616f7bce1df8ad269ab8392"
+ }
+}

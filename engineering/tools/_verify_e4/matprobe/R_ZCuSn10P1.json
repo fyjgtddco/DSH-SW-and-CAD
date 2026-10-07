@@ -1,0 +1,123 @@
+{
+ "grade": "ZCuSn10P1",
+ "set_material": {
+  "ok": true,
+  "material": "ZCuSn10P1",
+  "method": "PartDoc.SetMaterialPropertyName2",
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "材料已写入(IdName=solidworks materials|铜|28)但密度与之前相同",
+   "⚠️ 材料名 'ZCuSn10P1' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'ZCuSn10P1'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 8800.0,
+  "canonical": "ZCuSn10P1",
+  "configuration": "默认",
+  "density_before_kg_m3": 8899.999999999998,
+  "material_mismatch_rejected": false,
+  "applied_name": "ZCuSn10P1",
+  "match_level": "none",
+  "density_after_kg_m3": 8899.999999999998,
+  "material_id_name": "solidworks materials|铜|28",
+  "density_kg_m3": 8899.999999999998,
+  "density_changed": false,
+  "approximate_match": true,
+  "warning": "⚠️ 材料名 'ZCuSn10P1' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'ZCuSn10P1'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。",
+  "density_error_pct": 1.14
+ },
+ "material_result": {
+  "ok": true,
+  "material": "ZCuSn10P1",
+  "method": "PartDoc.SetMaterialPropertyName2",
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "⚠️ 材料名 'ZCuSn10P1（锡青铜，耐磨）' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 '铜'（匹配级别=loose）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 8800.0,
+  "canonical": "ZCuSn10P1",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [],
+  "rejected_candidates_before_success": [
+   {
+    "name": "ZCuSn10P1",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "copper",
+    "expected_density_kg_m3": 8800.0
+   }
+  ],
+  "material_mismatch_rejected": false,
+  "applied_name": "铜",
+  "match_level": "loose",
+  "density_after_kg_m3": 8899.999999999998,
+  "material_id_name": "solidworks materials|铜|28",
+  "density_kg_m3": 8899.999999999998,
+  "density_changed": true,
+  "approximate_match": true,
+  "warning": "⚠️ 材料名 'ZCuSn10P1（锡青铜，耐磨）' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 '铜'（匹配级别=loose）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。",
+  "density_error_pct": 1.14
+ },
+ "get_material": {
+  "ok": true,
+  "name": "solidworks materials|铜|28",
+  "density_kg_m3": 8899.999999999998,
+  "mass_kg": 0.12816,
+  "volume_mm3": 14400.000000000002
+ },
+ "massprops": {
+  "ok": true,
+  "volume_mm3": 14400.000000000002,
+  "surface_area_mm2": 5039.999999999999,
+  "mass_kg": 0.12816,
+  "density_kg_m3": 8899.999999999998,
+  "center_of_mass_mm": [
+   30.000000000000004,
+   15.000000000000002,
+   4.000000000000001
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "save_ok": true,
+ "part_exists": true,
+ "attestation": {
+  "kind": "material",
+  "schema": "dsh-material-attestation/1",
+  "room": "",
+  "at": "2026-10-07T06:07:02.825Z",
+  "ts": 1791353222825,
+  "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_ZCuSn10P1.SLDPRT",
+  "part_name": "P_ZCuSn10P1",
+  "part_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_ZCuSn10P1.SLDPRT",
+  "part_sha256": "b8dea0f8b15c6a36dafb90cc0ad80f26bef63090e3a87277da5357e90e0d6478",
+  "part_size_bytes": 60836,
+  "part_md5": "58432ceff463ab5d347159274b128bc6",
+  "applied_name": "铜",
+  "density_kg_m3": 8899.999999999998,
+  "source": "explicit(new_part material=)",
+  "attested_material": "铜",
+  "attested_density_kg_m3": 8899.999999999998,
+  "attested_family": "copper",
+  "ok": true,
+  "approximate_match": true,
+  "material_mismatch_rejected": false,
+  "requested_material": "ZCuSn10P1",
+  "attested_material_name": "ZCuSn10P1",
+  "cross_standard": false,
+  "cross_standard_note": "null",
+  "expected_yield_mpa": 130,
+  "expected_density_kg_m3": 8800,
+  "applied_yield_mpa": null,
+  "applied_density_kg_m3": null,
+  "yield_deviation_pct": null,
+  "_sig": "EOFUJgL+D/hwn5bww/64NVKA6GWdcPMwIrmWWTbBECQ=",
+  "_kid": "7633096ee4ddb3f9",
+  "_ts": 1791353222825,
+  "_nonce": "5630b4746f53a38123ecf13f2fe89234"
+ }
+}

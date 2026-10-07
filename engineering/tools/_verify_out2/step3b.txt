@@ -1,0 +1,70 @@
+﻿====================================================================================================
+Step3b  workflow_gate._gb_grade_props() —— 门禁实际会注入 load_case 的材料值
+====================================================================================================
+牌号           E          σy         σb        ν       ρ         from_gb  values_source
+Q235         210000     235.0      370.0     0.3     7850.0    True     混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等
+45#          205000     355.0      600.0     0.29    7850.0    True     混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等
+Q355         210000     355.0      470.0     0.3     7850      True     混合来源：yield_mpa, uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_m3 为等
+65Mn         205000     785.0      980.0     0.29    7850      True     混合来源：yield_mpa, uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_m3 为等
+GCr15        None       None       None      None    None      False    待补全（无兜底材料）
+HT200        None       None       200.0     None    7200.0    False    混合来源：uts_mpa 来自 GB 原文；density_kg_m3 为等效兜底（项目原有材料）；仍缺 E_mpa, 
+QT500-7      None       320.0      500.0     None    None      False    混合来源：yield_mpa, uts_mpa 来自 GB 原文；无 为等效兜底（项目原有材料）；仍缺 E_mpa, n
+ZCuSn10P1    None       130.0      220.0     None    None      False    混合来源：yield_mpa, uts_mpa 来自 GB 原文；无 为等效兜底（项目原有材料）；仍缺 E_mpa, n
+H62          None       None       None      None    None      False    待补全（无兜底材料）
+ZL104        68900      None       150.0     0.33    2700      False    混合来源：uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_m3 为等效兜底（Aluminu
+40Cr         205000     655        760       0.29    7850.0    True     等效兜底（Steel AISI 4140 (quenched & tempered)）—— 国标数值待补全
+20CrMnTi     205000     655        760       0.29    7850      True     等效兜底（Steel AISI 4140 (quenched & tempered)）—— 国标数值待补全
+Cr12MoV      205000     655        760       0.29    7700.0    True     等效兜底（Steel AISI 4140 (quenched & tempered)）—— 国标数值待补全
+304          193000     205.0      515.0     0.3     8000.0    True     混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等
+316          193000     205.0      515.0     0.3     8000.0    True     混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等
+6061-T6      68900      276        310       0.33    2700.0    True     等效兜底（Aluminum 6061-T6）—— 国标数值待补全
+7075         72000      503        572       0.33    2810.0    True     等效兜底（Aluminum 7075-T6）—— 国标数值待补全
+2A12         72000      503        572       0.33    2810      True     等效兜底（Aluminum 7075-T6）—— 国标数值待补全
+
+====================================================================================================
+Step3c  造【新鲜】工况（用当前 material_db 的 Q235）
+====================================================================================================
+  新注入 material = {
+  "id": "Q235",
+  "name": "GB/T 700-2006 碳素结构钢",
+  "youngs_modulus_mpa": 210000,
+  "poissons_ratio": 0.3,
+  "yield_strength_mpa": 235.0,
+  "uts_mpa": 370.0,
+  "density_kg_m3": 7850.0,
+  "standard": "GB/T 700-2006 碳素结构钢",
+  "gb_source": "《国标材料官方标准汇总》（标准身份）+ 《国标材料力学性能数据表》（力学性能）+ 项目原有牌号数据",
+  "source": "workflow_gate._gb_grade_props(外部国标材料库)",
+  "identity_source": "GB（标准身份已确认）",
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Steel S235JR (EN 10025)）",
+  "values_from_gb": true,
+  "values_pending": false,
+  "equivalent_name": "Steel S235JR (EN 10025)"
+}
+  已写出: C:\Users\j1877\Desktop\DSH-SW-and-CAD-main\engineering\tools\_verify_out2\case_Q235_fresh.json
+
+  新注入 GCr15 material = {
+  "id": "GCr15",
+  "name": "GB/T 18254-2016 高碳铬轴承钢",
+  "youngs_modulus_mpa": null,
+  "poissons_ratio": null,
+  "yield_strength_mpa": null,
+  "uts_mpa": null,
+  "density_kg_m3": null,
+  "standard": "GB/T 18254-2016 高碳铬轴承钢",
+  "gb_source": "《国标材料官方标准汇总》（标准身份）+ 《国标材料力学性能数据表》（力学性能）+ 项目原有牌号数据",
+  "source": "workflow_gate._gb_grade_props(国标身份 + 等效数值兜底)",
+  "identity_source": "GB（标准身份已确认）",
+  "values_source": "待补全（无兜底材料）",
+  "values_from_gb": false,
+  "values_pending": true,
+  "equivalent_name": null
+}
+  已写出: C:\Users\j1877\Desktop\DSH-SW-and-CAD-main\engineering\tools\_verify_out2\case_GCr15_fresh.json
+
+====================================================================================================
+Step3d  对比：_verify_out 里的旧工况 vs 当前 material_db
+====================================================================================================
+  旧工况(文件) : σy=235 σb=360 values_from_gb=False values_source=等效兜底（Steel S235JR (EN 10025)）—— 国标数值待补全
+  当前 DB      : σy=235.0 σb=370.0 values_from_gb=True values_source=混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Steel S235JR (EN 10025)）
+  >>> 旧工况文件是【陈旧快照】，未随 gb_materials.json 更新而刷新

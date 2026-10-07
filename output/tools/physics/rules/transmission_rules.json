@@ -1,0 +1,48 @@
+{
+  "domain_id": "transmission",
+  "domain_name": "传动件",
+  "version": "1.0",
+  "description": "齿轮/轴/轴承等传动件的设计规范",
+  "rules": [
+    {
+      "id": "TR-001",
+      "type": "parametric",
+      "target": "shaft_diameter_mm",
+      "condition": {"min": 5.0, "max": 200.0},
+      "severity": "CRITICAL",
+      "message": "轴径应在 5~200mm 之间"
+    },
+    {
+      "id": "TR-002",
+      "type": "parametric",
+      "target": "gear_module",
+      "condition": {"min": 1.0, "max": 10.0},
+      "severity": "CRITICAL",
+      "message": "齿轮模数应在 1~10 之间"
+    },
+    {
+      "id": "TR-003",
+      "type": "fea",
+      "target": "max_von_mises_mpa",
+      "condition": {"max": 200.0},
+      "severity": "CRITICAL",
+      "message": "传动件等效应力不应超过 200MPa（考虑疲劳）"
+    },
+    {
+      "id": "TR-004",
+      "type": "fea",
+      "target": "safety_factor",
+      "condition": {"min": 2.5},
+      "severity": "WARNING",
+      "message": "传动件安全系数应 ≥ 2.5（考虑动载与疲劳）"
+    },
+    {
+      "id": "TR-005",
+      "type": "fea",
+      "target": "max_displacement_mm",
+      "condition": {"max": 0.5},
+      "severity": "CRITICAL",
+      "message": "传动件最大变形 ≤ 0.5mm（保证啮合精度）"
+    }
+  ]
+}

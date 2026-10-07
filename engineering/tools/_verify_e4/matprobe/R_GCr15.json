@@ -1,0 +1,315 @@
+{
+ "grade": "GCr15",
+ "set_material": {
+  "ok": false,
+  "material": "GCr15",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 'GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15（高碳铬轴承钢）' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GB_GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15（高碳铬轴承钢）' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GB_GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15（高碳铬轴承钢）' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GB_GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15（高碳铬轴承钢）' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GB_GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7810.0,
+  "canonical": "GCr15",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [
+   {
+    "name": "GCr15",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15（高碳铬轴承钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GB_GCr15",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15（高碳铬轴承钢）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GB_GCr15",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15（高碳铬轴承钢）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GB_GCr15",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15（高碳铬轴承钢）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GB_GCr15",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   }
+  ],
+  "error": "没有找到与 'GCr15' 材质相符的材料：尝试了 12 个候选，其中 12 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：GCr15(1000); GCr15（高碳铬轴承钢）(1000); GB_GCr15(1000); GCr15(1000)\n期望密度约 7810.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('GCr15', density=7810.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "material_result": {
+  "ok": false,
+  "material": "GCr15",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 'GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15（高碳铬轴承钢）' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GB_GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15（高碳铬轴承钢）' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GB_GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15（高碳铬轴承钢）' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GB_GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GCr15（高碳铬轴承钢）' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符",
+   "候选 'GB_GCr15' 被拒：实际密度 1000(plastic) 与期望 7810(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7810.0,
+  "canonical": "GCr15",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [
+   {
+    "name": "GCr15",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15（高碳铬轴承钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GB_GCr15",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15（高碳铬轴承钢）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GB_GCr15",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15（高碳铬轴承钢）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GB_GCr15",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GCr15（高碳铬轴承钢）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   },
+   {
+    "name": "GB_GCr15",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7810.0
+   }
+  ],
+  "error": "没有找到与 'GCr15' 材质相符的材料：尝试了 12 个候选，其中 12 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：GCr15(1000); GCr15（高碳铬轴承钢）(1000); GB_GCr15(1000); GCr15(1000)\n期望密度约 7810.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('GCr15', density=7810.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "get_material": {
+  "ok": true,
+  "name": "",
+  "density_kg_m3": 1000.0,
+  "mass_kg": 0.014400000000000001,
+  "volume_mm3": 14400.000000000002
+ },
+ "massprops": {
+  "ok": true,
+  "volume_mm3": 14400.000000000002,
+  "surface_area_mm2": 5039.999999999999,
+  "mass_kg": 0.014400000000000001,
+  "density_kg_m3": 1000.0,
+  "center_of_mass_mm": [
+   29.999999999999996,
+   14.999999999999998,
+   4.0
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "save_ok": true,
+ "part_exists": true,
+ "attestation": {
+  "kind": "material",
+  "schema": "dsh-material-attestation/1",
+  "room": "",
+  "at": "2026-10-07T06:09:41.990Z",
+  "ts": 1791353381990,
+  "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_GCr15.SLDPRT",
+  "part_name": "P_GCr15",
+  "part_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_GCr15.SLDPRT",
+  "part_sha256": "51136a37455166073637e726903f213d0ef67bb302f22d6bffa582b8b6c17c9d",
+  "part_size_bytes": 59728,
+  "part_md5": "7c5fd1e571495c1d49b7073a8de2dd0c",
+  "applied_name": "GCr15",
+  "density_kg_m3": 1000,
+  "source": "explicit(new_part material=)",
+  "attested_material": "GCr15",
+  "attested_density_kg_m3": 1000,
+  "attested_family": "water",
+  "ok": false,
+  "approximate_match": false,
+  "material_mismatch_rejected": true,
+  "requested_material": "GCr15",
+  "attested_material_name": "GCr15",
+  "cross_standard": false,
+  "cross_standard_note": "null",
+  "expected_yield_mpa": null,
+  "expected_density_kg_m3": 7810,
+  "applied_yield_mpa": null,
+  "applied_density_kg_m3": 7810,
+  "yield_deviation_pct": null,
+  "_sig": "cGf41SDP3052VN/N48rFAoQI/kLiUBBsZqBfzwRzsV4=",
+  "_kid": "7633096ee4ddb3f9",
+  "_ts": 1791353381990,
+  "_nonce": "2e3ca449f98f4677f88264f1819364e5"
+ }
+}

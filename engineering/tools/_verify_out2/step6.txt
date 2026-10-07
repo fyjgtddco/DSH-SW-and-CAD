@@ -1,0 +1,84 @@
+﻿====================================================================================================
+Step6.1  密度合理性（按材料族判断）
+====================================================================================================
+牌号               类别         密度           合理区间             判定
+----------------------------------------------------------------------------------------------------
+GB_Q235          钢          7850.0       [7600,8100]      OK
+GB_45#           钢          7850.0       [7600,8100]      OK
+GB_40Cr          钢          7850.0       [7600,8100]      OK
+GB_Q355          钢          7850         [7600,8100]      OK
+GB_20CrMnTi      钢          7850         [7600,8100]      OK
+GB_GCr15         钢          None         [7600,8100]      缺失（无法算质量/重力）
+GB_65Mn          钢          7850         [7600,8100]      OK
+GB_Cr12MoV       钢          7700.0       [7600,8100]      OK
+GB_HT200         铸铁         7200.0       [6900,7600]      OK
+GB_QT500_7       铸铁         None         [6900,7600]      缺失（无法算质量/重力）
+GB_6061_T6       铝合金        2700.0       [2600,2900]      OK
+GB_7075_T6       铝合金        2810.0       [2600,2900]      OK
+GB_2A12          铝合金        2810         [2600,2900]      OK
+GB_ZL104         铝合金        2700         [2600,2900]      OK
+GB_304           不锈钢        8000.0       [7800,8200]      OK
+GB_316           不锈钢        8000.0       [7800,8200]      OK
+GB_ZCuSn10P1     铜合金        None         [8200,9000]      缺失（无法算质量/重力）
+GB_H62           铜合金        None         [8200,9000]      缺失（无法算质量/重力）
+
+密度问题： 4
+   - GB_GCr15 : 密度缺失
+   - GB_QT500_7 : 密度缺失
+   - GB_ZCuSn10P1 : 密度缺失
+   - GB_H62 : 密度缺失
+
+====================================================================================================
+Step6.2  疲劳口径：独立 fatigue CLI vs optimize 报告内 —— 同一工况差多少？
+====================================================================================================
+  独立 fatigue CLI (case_Q235_fresh.json，无 real_geometry):
+     peak_stress = 1.93 MPa   fatigue_sf = 94.164   verdict = PASS
+  optimize 报告内 (真实零件 100x60x10):
+     peak_stress = 182.49 MPa fatigue_sf = 0.996    verdict = FAIL
+  >>> 同一 Q235、同一工况文件，结论【完全相反】
+      根因：独立 fatigue 未注入 real_geometry → 退回 design_domain 默认
+      几何（300x200x120），承载截面被严重高估 → 应力被低估 ~95 倍。
+
+====================================================================================================
+Step6.3  最终缺口清单（按工程可用性）
+====================================================================================================
+【A 级 · 完全不可用】关键字段缺失（E/σy/ρ 有缺）
+----------------------------------------------------------------------------------------------------
+  GB_GCr15         缺关键: E_mpa, yield_mpa, density_kg_m3          全部缺失: E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3
+  GB_HT200         缺关键: E_mpa, yield_mpa                         全部缺失: E_mpa, nu, yield_mpa
+  GB_QT500_7       缺关键: E_mpa, density_kg_m3                     全部缺失: E_mpa, nu, density_kg_m3
+  GB_ZCuSn10P1     缺关键: E_mpa, density_kg_m3                     全部缺失: E_mpa, nu, density_kg_m3
+  GB_H62           缺关键: E_mpa, yield_mpa, density_kg_m3          全部缺失: E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3
+  GB_ZL104         缺关键: yield_mpa                                全部缺失: yield_mpa
+
+【B 级 · 可用但数值非国标】有兜底、关键字段齐，但 σy/σb 来自欧美标
+----------------------------------------------------------------------------------------------------
+  GB_40Cr          兜底字段: E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3
+  GB_6061_T6       兜底字段: E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3
+  GB_20CrMnTi      兜底字段: E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3
+  GB_7075_T6       兜底字段: E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3
+  GB_2A12          兜底字段: E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3
+  GB_Cr12MoV       兜底字段: E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3
+
+【C 级 · 国标数值已生效】σy/σb 来自 GB 原文
+----------------------------------------------------------------------------------------------------
+  GB_Q235          GB字段: yield_mpa, uts_mpa               兜底: E_mpa, nu, density_kg_m3 仍缺: 无
+  GB_45#           GB字段: yield_mpa, uts_mpa               兜底: E_mpa, nu, density_kg_m3 仍缺: 无
+  GB_304           GB字段: yield_mpa, uts_mpa               兜底: E_mpa, nu, density_kg_m3 仍缺: 无
+  GB_Q355          GB字段: yield_mpa, uts_mpa               兜底: E_mpa, nu, density_kg_m3 仍缺: 无
+  GB_HT200         GB字段: uts_mpa                          兜底: density_kg_m3 仍缺: E_mpa, nu, yield_mpa
+  GB_QT500_7       GB字段: yield_mpa, uts_mpa               兜底: 无 仍缺: E_mpa, nu, density_kg_m3
+  GB_65Mn          GB字段: yield_mpa, uts_mpa               兜底: E_mpa, nu, density_kg_m3 仍缺: 无
+  GB_316           GB字段: yield_mpa, uts_mpa               兜底: E_mpa, nu, density_kg_m3 仍缺: 无
+  GB_ZCuSn10P1     GB字段: yield_mpa, uts_mpa               兜底: 无 仍缺: E_mpa, nu, density_kg_m3
+  GB_ZL104         GB字段: uts_mpa                          兜底: E_mpa, nu, density_kg_m3 仍缺: yield_mpa
+
+====================================================================================================
+Step6.4  统计总览
+====================================================================================================
+  牌号总数              : 18
+  A 级（关键字段缺失）  : 6  → 无法做 FEA/强度校核
+  C 级（含 GB 原文 σy/σb）: 10
+  E 缺失                : 5 / 18
+  nu 缺失               : 5 / 18
+  density 缺失          : 4 / 18

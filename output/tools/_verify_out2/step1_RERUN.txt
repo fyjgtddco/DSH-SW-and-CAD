@@ -1,0 +1,233 @@
+﻿====================================================================================================
+Step1  gb_materials_status()
+====================================================================================================
+  loaded                   = True
+  count                    = 18
+  identity_count           = 18
+  ready_count              = 0
+  equivalent_ready_count   = 13
+  pending_count            = 5
+  file                     = C:\Users\j1877\Desktop\DSH-SW-and-CAD-main\engineering\tools\physics\gb_materials.json
+  native_ready_ids        = []
+  equivalent_ready_ids    = ['GB_Q235', 'GB_45#', 'GB_40Cr', 'GB_6061_T6', 'GB_304', 'GB_Q355', 'GB_20CrMnTi', 'GB_7075_T6', 'GB_2A12', 'GB_65Mn', 'GB_Cr12MoV', 'GB_316', 'GB_ZL104']
+  error                   = 以下 18 个牌号【仅确认标准身份，力学数值待补全】：GB_Q235, GB_45#, GB_40Cr, GB_6061_T6, GB_304, GB_Q355, GB_20CrMnTi, GB_GCr15, GB_HT200, GB_QT500_7, GB_7075_T6, GB_2A12, GB_65Mn, GB_Cr12MoV, GB_316, GB_ZCuSn10P1, GB_H62, GB_ZL104
+
+====================================================================================================
+Step1b  逐牌号 · 逐字段来源（来自 mdb.get_material(name)['field_provenance']）
+====================================================================================================
+----------------------------------------------------------------------------------------------------
+[GB_Q235] Q235（碳素结构钢）
+    标准: GB/T 700-2006 碳素结构钢
+    equivalent_id: ST_API_S235  (Q235 属碳素结构钢，等效 EN S235JR（项目原有映射）)
+    values_source: 混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Steel S235JR (EN 10025)）
+      E_mpa           = 210000      兜底
+      nu              = 0.3         兜底
+      yield_mpa       = 235.0       GB原文
+      uts_mpa         = 370.0       GB原文
+      density_kg_m3   = 7850.0      兜底
+----------------------------------------------------------------------------------------------------
+[GB_45#] 45#（45 钢）（优质碳素结构钢）
+    标准: GB/T 699-2015 优质碳素结构钢
+    equivalent_id: ST_API_4140  (45 钢调质后接近 AISI 4140（项目原有映射）)
+    values_source: 混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Steel AISI 4140 (quenched & tempered)）
+      E_mpa           = 205000      兜底
+      nu              = 0.29        兜底
+      yield_mpa       = 355.0       GB原文
+      uts_mpa         = 600.0       GB原文
+      density_kg_m3   = 7850.0      兜底
+----------------------------------------------------------------------------------------------------
+[GB_40Cr] 40Cr（合金结构钢，调质）
+    标准: GB/T 3077-2015 合金结构钢
+    equivalent_id: ST_API_4140  (40Cr 调质钢等效 AISI 4140（项目原有映射）)
+    values_source: 等效兜底（Steel AISI 4140 (quenched & tempered)）—— 国标数值待补全
+      E_mpa           = 205000      兜底
+      nu              = 0.29        兜底
+      yield_mpa       = 655         兜底
+      uts_mpa         = 760         兜底
+      density_kg_m3   = 7850.0      兜底
+----------------------------------------------------------------------------------------------------
+[GB_6061_T6] 6061-T6（铝合金，变形铝）
+    标准: GB/T 3190-2020 变形铝及铝合金化学成分（牌号 6061）；GB/T 6892-2023 一般工业用铝及铝合金挤压型材（T6 状态）
+    equivalent_id: AL_6061_T6  (6061-T6 与项目内置同名铝材一致)
+    values_source: 等效兜底（Aluminum 6061-T6）—— 国标数值待补全
+      E_mpa           = 68900       兜底
+      nu              = 0.33        兜底
+      yield_mpa       = 276         兜底
+      uts_mpa         = 310         兜底
+      density_kg_m3   = 2700.0      兜底
+----------------------------------------------------------------------------------------------------
+[GB_304] 304 / 06Cr19Ni10（奥氏体不锈钢）
+    标准: GB/T 20878-2024 不锈钢 牌号及化学成分
+    equivalent_id: ST_STAINLESS_304  (304 与项目内置不锈钢一致)
+    values_source: 混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Stainless Steel 304）
+      E_mpa           = 193000      兜底
+      nu              = 0.3         兜底
+      yield_mpa       = 205.0       GB原文
+      uts_mpa         = 515.0       GB原文
+      density_kg_m3   = 8000.0      兜底
+----------------------------------------------------------------------------------------------------
+[GB_Q355] Q355（旧称 Q345）（低合金高强度结构钢）
+    标准: GB/T 1591-2018 低合金高强度结构钢
+    equivalent_id: ST_API_S235  (低合金钢暂按项目原有碳钢映射（偏低保守）)
+    values_source: 混合来源：yield_mpa, uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_m3 为等效兜底（Steel S235JR (EN 10025)）
+      E_mpa           = 210000      兜底
+      nu              = 0.3         兜底
+      yield_mpa       = 355.0       GB原文
+      uts_mpa         = 470.0       GB原文
+      density_kg_m3   = 7850        兜底
+----------------------------------------------------------------------------------------------------
+[GB_20CrMnTi] 20CrMnTi（渗碳钢，齿轮用）
+    标准: GB/T 3077-2015 合金结构钢
+    equivalent_id: ST_API_4140  (渗碳钢按项目原有合金钢映射)
+    values_source: 等效兜底（Steel AISI 4140 (quenched & tempered)）—— 国标数值待补全
+      E_mpa           = 205000      兜底
+      nu              = 0.29        兜底
+      yield_mpa       = 655         兜底
+      uts_mpa         = 760         兜底
+      density_kg_m3   = 7850        兜底
+----------------------------------------------------------------------------------------------------
+[GB_GCr15] GCr15（高碳铬轴承钢）
+    标准: GB/T 18254-2016 高碳铬轴承钢
+    equivalent_id: None  (项目内无可信的等效材料 —— 请从标准原文补全数值后再校核)
+    values_source: 待补全（无兜底材料）
+      E_mpa           = None        缺失
+      nu              = None        缺失
+      yield_mpa       = None        缺失
+      uts_mpa         = None        缺失
+      density_kg_m3   = None        缺失
+----------------------------------------------------------------------------------------------------
+[GB_HT200] HT200（灰铸铁）
+    标准: GB/T 9439-2023 灰铸铁件
+    equivalent_id: None  (项目内无可信的等效材料 —— 请从标准原文补全数值后再校核)
+    values_source: 混合来源：uts_mpa 来自 GB 原文；density_kg_m3 为等效兜底（项目原有材料）；仍缺 E_mpa, nu, yield_mpa
+      E_mpa           = None        缺失
+      nu              = None        缺失
+      yield_mpa       = None        缺失
+      uts_mpa         = 200.0       GB原文
+      density_kg_m3   = 7200.0      兜底
+----------------------------------------------------------------------------------------------------
+[GB_QT500_7] QT500-7（球墨铸铁）
+    标准: GB/T 1348-2019 球墨铸铁件
+    equivalent_id: None  (项目内无可信的等效材料 —— 请从标准原文补全数值后再校核)
+    values_source: 混合来源：yield_mpa, uts_mpa 来自 GB 原文；无 为等效兜底（项目原有材料）；仍缺 E_mpa, nu, density_kg_m3
+      E_mpa           = None        缺失
+      nu              = None        缺失
+      yield_mpa       = 320.0       GB原文
+      uts_mpa         = 500.0       GB原文
+      density_kg_m3   = None        缺失
+----------------------------------------------------------------------------------------------------
+[GB_7075_T6] 7075-T6（高强铝合金）
+    标准: GB/T 3190-2020 变形铝及铝合金化学成分（牌号 7075）
+    equivalent_id: AL_7075  (7075-T6 与项目内置铝材一致)
+    values_source: 等效兜底（Aluminum 7075-T6）—— 国标数值待补全
+      E_mpa           = 72000       兜底
+      nu              = 0.33        兜底
+      yield_mpa       = 503         兜底
+      uts_mpa         = 572         兜底
+      density_kg_m3   = 2810.0      兜底
+----------------------------------------------------------------------------------------------------
+[GB_2A12] 2A12（旧称 LY12）（硬铝）
+    标准: GB/T 3190-2020 变形铝及铝合金化学成分（牌号 2A12）
+    equivalent_id: AL_7075  (2A12 硬铝按项目高强铝映射)
+    values_source: 等效兜底（Aluminum 7075-T6）—— 国标数值待补全
+      E_mpa           = 72000       兜底
+      nu              = 0.33        兜底
+      yield_mpa       = 503         兜底
+      uts_mpa         = 572         兜底
+      density_kg_m3   = 2810        兜底
+----------------------------------------------------------------------------------------------------
+[GB_65Mn] 65Mn（弹簧钢）
+    标准: GB/T 1222-2025 弹簧钢
+    equivalent_id: ST_API_4140  (弹簧钢按项目原有合金钢映射)
+    values_source: 混合来源：yield_mpa, uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_m3 为等效兜底（Steel AISI 4140 (quenched & tempered)）
+      E_mpa           = 205000      兜底
+      nu              = 0.29        兜底
+      yield_mpa       = 785.0       GB原文
+      uts_mpa         = 980.0       GB原文
+      density_kg_m3   = 7850        兜底
+----------------------------------------------------------------------------------------------------
+[GB_Cr12MoV] Cr12MoV（冷作模具钢）
+    标准: GB/T 1299-2025 工模具钢
+    equivalent_id: ST_API_4140  (模具钢按项目原有映射走 4140)
+    values_source: 等效兜底（Steel AISI 4140 (quenched & tempered)）—— 国标数值待补全
+      E_mpa           = 205000      兜底
+      nu              = 0.29        兜底
+      yield_mpa       = 655         兜底
+      uts_mpa         = 760         兜底
+      density_kg_m3   = 7700.0      兜底
+----------------------------------------------------------------------------------------------------
+[GB_316] 316 / 022Cr17Ni12Mo2（耐蚀不锈钢）
+    标准: GB/T 20878-2024 不锈钢 牌号及化学成分
+    equivalent_id: ST_STAINLESS_316  (316 与项目内置不锈钢一致)
+    values_source: 混合来源：yield_mpa, uts_mpa 来自 GB 原文；density_kg_m3, E_mpa, nu 为等效兜底（Stainless Steel 316）
+      E_mpa           = 193000      兜底
+      nu              = 0.3         兜底
+      yield_mpa       = 205.0       GB原文
+      uts_mpa         = 515.0       GB原文
+      density_kg_m3   = 8000.0      兜底
+----------------------------------------------------------------------------------------------------
+[GB_ZCuSn10P1] ZCuSn10P1（锡青铜，耐磨）
+    标准: GB/T 1176-2013 铸造铜及铜合金
+    equivalent_id: None  (项目内无可信的等效材料 —— 请从标准原文补全数值后再校核)
+    values_source: 混合来源：yield_mpa, uts_mpa 来自 GB 原文；无 为等效兜底（项目原有材料）；仍缺 E_mpa, nu, density_kg_m3
+      E_mpa           = None        缺失
+      nu              = None        缺失
+      yield_mpa       = 130.0       GB原文
+      uts_mpa         = 220.0       GB原文
+      density_kg_m3   = None        缺失
+----------------------------------------------------------------------------------------------------
+[GB_H62] H62（黄铜）
+    标准: GB/T 5231-2022 加工铜及铜合金牌号和化学成分
+    equivalent_id: None  (项目内无可信的等效材料 —— 请从标准原文补全数值后再校核)
+    values_source: 待补全（无兜底材料）
+      E_mpa           = None        缺失
+      nu              = None        缺失
+      yield_mpa       = None        缺失
+      uts_mpa         = None        缺失
+      density_kg_m3   = None        缺失
+----------------------------------------------------------------------------------------------------
+[GB_ZL104] ZL104（铸造铝合金）
+    标准: GB/T 1173-2013 铸造铝合金
+    equivalent_id: AL_6061_T6  (铸铝按项目铝合金映射)
+    values_source: 混合来源：uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_m3 为等效兜底（Aluminum 6061-T6）；仍缺 yield_mpa
+      E_mpa           = 68900       兜底
+      nu              = 0.33        兜底
+      yield_mpa       = None        缺失
+      uts_mpa         = 150.0       GB原文
+      density_kg_m3   = 2700        兜底
+
+====================================================================================================
+Step1c  汇总矩阵（行=牌号, 列=E/nu/σy/σb/ρ；G=GB原文, F=兜底, -=缺失）
+====================================================================================================
+材料               E    nu   sy   sb   rho  | GB齐备     仍缺
+GB_Q235          F    F    G    G    F    | True     无
+GB_45#           F    F    G    G    F    | True     无
+GB_40Cr          F    F    F    F    F    | False    无
+GB_6061_T6       F    F    F    F    F    | False    无
+GB_304           F    F    G    G    F    | True     无
+GB_Q355          F    F    G    G    F    | True     无
+GB_20CrMnTi      F    F    F    F    F    | False    无
+GB_GCr15         -    -    -    -    -    | False    E_mpa,nu,yield_mpa,uts_mpa,density_kg_m3
+GB_HT200         -    -    -    G    F    | False    E_mpa,nu,yield_mpa
+GB_QT500_7       -    -    G    G    -    | False    E_mpa,nu,density_kg_m3
+GB_7075_T6       F    F    F    F    F    | False    无
+GB_2A12          F    F    F    F    F    | False    无
+GB_65Mn          F    F    G    G    F    | True     无
+GB_Cr12MoV       F    F    F    F    F    | False    无
+GB_316           F    F    G    G    F    | True     无
+GB_ZCuSn10P1     -    -    G    G    -    | False    E_mpa,nu,density_kg_m3
+GB_H62           -    -    -    -    -    | False    E_mpa,nu,yield_mpa,uts_mpa,density_kg_m3
+GB_ZL104         F    F    -    G    F    | False    yield_mpa
+
+====================================================================================================
+Step1d  统计
+====================================================================================================
+  E_mpa           : 兜底=13  缺失=5
+  nu              : 兜底=13  缺失=5
+  yield_mpa       : GB原文=8  兜底=6  缺失=4
+  uts_mpa         : GB原文=10  兜底=6  缺失=2
+  density_kg_m3   : 兜底=14  缺失=4
+
+Step1e  物理合理性自动检查（σb < σy / 密度与类别不符）
+====================================================================================================
+  未发现 σb < σy

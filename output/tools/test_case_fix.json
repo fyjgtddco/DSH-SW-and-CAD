@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "meta": {
+    "problem_id": "TEST",
+    "title": "Test Case"
+  },
+  "units": {
+    "length": "mm",
+    "force": "N",
+    "stress": "MPa",
+    "mass": "kg"
+  },
+  "design_domain": {
+    "bounds": {
+      "x_min": 0,
+      "x_max": 100,
+      "y_min": 0,
+      "y_max": 50,
+      "z_min": 0,
+      "z_max": 10
+    }
+  },
+  "material": {
+    "id": "AL_6061_T6",
+    "youngs_modulus_mpa": 68900,
+    "poissons_ratio": 0.33,
+    "yield_strength_mpa": 276,
+    "density_kg_m3": 2700
+  },
+  "loads": [
+    {
+      "type": "concentrated_force",
+      "magnitude_n": 500,
+      "point": [
+        50,
+        25,
+        10
+      ],
+      "direction": [
+        0,
+        0,
+        -1
+      ]
+    }
+  ],
+  "boundary_conditions": [
+    {
+      "type": "fixed_displacement",
+      "face_selector": "x_min"
+    }
+  ],
+  "acceptance": {
+    "min_safety_factor": 2.0,
+    "target_safety_factor_max": 5.0
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "runs": [
+    {
+      "run_id": "opt_iter_1",
+      "iteration": 1,
+      "timestamp": "2026-10-05 18:09:48",
+      "design_params": {
+        "thickness_mm": {
+          "id": "thickness_mm",
+          "value": 5.714,
+          "source": "real-geometry(V/A)"
+        },
+        "min_wall_thickness": {
+          "id": "min_wall_thickness",
+          "value": 2.0,
+          "source": "acceptance.min_wall_thickness_mm(默认 FDM 2.0mm)"
+        }
+      },
+      "geometry_check": {
+        "status": "PASS",
+        "design_space": {
+          "ok": true,
+          "body_bbox_mm": [
+            130.0,
+            170.0,
+            90.0,
+            110.0,
+            55.0,
+            65.0
+          ],
+          "design_bounds": {
+            "x_min": 0.0,
+            "x_max": 300.0,
+            "y_min": 0.0,
+            "y_max": 200.0,
+            "z_min": 0.0,
+            "z_max": 120.0
+          },
+          "per_axis": {
+            "x": {
+              "violated": false
+            },
+            "y": {
+              "violated": false
+            },
+            "z": {
+              "violated": false
+            }
+          },
+          "violation_vol_mm3": 0.0,
+          "violation_pct": 0.0
+        },
+        "connectivity": {
+          "ok": true,
+          "num_bodies": 1,
+          "num_volumes": 1,
+          "single_body": true,
+          "status": "PASS",
+          "note": ""
+        },
+        "wall_thickness_estimate": {
+          "ok": true,
+          "estimated_min_thickness_mm": 5.7143,
+          "volume_mm3": 8000.0,
+          "total_area_mm2": 2800.0,
+          "method": "2V/A_ratio_approximation",
+          "note": "近似估计（2V/A）；精确壁厚需 STEP 网格分析。用于识别明显过薄件。"
+        },
+        "interface_compliance": {
+          "ok": true,
+          "violations": [],
+          "locked_param_changes": []
+        },
+        "gates": [
+          {
+            "id": "DESIGN_SPACE",
+            "status": "PASS"
+          },
+          {
+            "id": "CONNECTIVITY",
+            "status": "PASS"
+          },
+          {
+            "id": "WALL_THICKNESS",
+            "status": "PASS",
+            "estimated_mm": 5.7143,
+            "required_mm": 2.0
+          }
+        ],
+        "geometry_source": "swapi.massprops(真实实体体积)"
+      },
+      "fea_result": {
+        "ok": false,
+        "error": "unsupported operand type(s) for ** or pow(): 'NoneType' and 'int'",
+        "traceback": "Traceback (most recent call last):\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\fea_solver.py\", line 577, in solve_feapy\n    r = solve_cantilever(L, H, W, total_force, E, nu, nx=nx, ny=ny)\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\feapy_solver.py\", line 221, in solve_cantilever\n    return solve_cantilever_2d(L, H, W_or_T, F_load, E, nu, nx=nx, ny=ny)\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\feapy_solver.py\", line 187, in solve_cantilever_2d\n    r=s.solve(E,nu,fixed=fixed,loads=loads)\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\feapy_solver.py\", line 101, in solve\n    D=_D_3d(E,nu) if self.model==\"3d\" else _D_2d(E,nu,self.model)\n                                           ~~~~~^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\feapy_solver.py\", line 8, in _D_2d\n    return E / (1 - nu**2) * np.array([[1, nu, 0], [nu, 1, 0], [0, 0, (1 - nu) / 2]])\n                    ~~^^~\nTypeError: unsupported operand type(s) for ** or pow(): 'NoneType' and 'int'\n"
+      },
+      "report_path": "",
+      "status": "UNKNOWN",
+      "parent_run_id": null,
+      "changes_from_parent": {}
+    }
+  ],
+  "current_run_id": "opt_iter_1",
+  "load_case_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\load_cases\\gate_load_case.json",
+  "updated_at": "2026-10-05 18:09:48"
+}

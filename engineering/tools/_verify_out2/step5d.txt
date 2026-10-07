@@ -1,0 +1,46 @@
+﻿====================================================================================================
+Step5d  插桩：直接手工走一遍 _apply_equivalent 的逻辑
+====================================================================================================
+  raw GB_MATERIALS['GB_ZL104']:
+     E_mpa           = None
+     nu              = None
+     yield_mpa       = None
+     uts_mpa         = 150.0
+     density_kg_m3   = None
+  raw equivalent_id = 'AL_6061_T6'
+  ALL_MATERIALS.get('AL_6061_T6') -> dict
+     src['name']      = 'Aluminum 6061-T6'
+     src['yield_mpa'] = 276
+     src['E_mpa']     = 68900
+     src id()         = 1928405512576
+
+  --- 现在手工调 _apply_equivalent(dict(raw)) ---
+     E_mpa           = 68900
+     nu              = 0.33
+     yield_mpa       = None
+     uts_mpa         = 150.0
+     density_kg_m3   = 2700
+     equivalent_filled = ['E_mpa', 'nu', 'density_kg_m3']
+     values_source     = '混合来源：uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_m3 为等效兜底（Aluminum 6061-T6）；仍缺 yield_mpa'
+
+  --- 对比 get_material('GB_ZL104') ---
+     E_mpa           = 68900
+     nu              = 0.33
+     yield_mpa       = None
+     uts_mpa         = 150.0
+     density_kg_m3   = 2700
+     equivalent_filled = ['E_mpa', 'nu', 'density_kg_m3']
+
+====================================================================================================
+Step5d-2  关键分支检查：get_material 是否走了 _apply_equivalent？
+====================================================================================================
+  ALL_MATERIALS.get('GB_ZL104') 存在?  True
+  'GB_ZL104' in GB_MATERIALS ?      True
+  hit.get('equivalent_id') = 'AL_6061_T6'
+  → 应走 _apply_equivalent(dict(_hit))
+
+====================================================================================================
+Step5d-3  _apply_equivalent 的 _missing 到底含哪些字段
+====================================================================================================
+  _missing = ['E_mpa', 'nu', 'yield_mpa', 'density_kg_m3']
+  _src 有的字段 = ['E_mpa', 'nu', 'yield_mpa', 'uts_mpa', 'density_kg_m3']

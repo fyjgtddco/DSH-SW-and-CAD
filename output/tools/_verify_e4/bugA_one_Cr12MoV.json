@@ -1,0 +1,482 @@
+{
+ "grade": "Cr12MoV",
+ "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_Cr12MoV.SLDPRT",
+ "extrude": "<COMObject <unknown>>",
+ "set_material": {
+  "ok": false,
+  "material": "Cr12MoV",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 'Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV（冷作模具钢）' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'D2' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Tool Steel' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'GB_Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV（冷作模具钢）' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'D2' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Tool Steel' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'GB_Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV（冷作模具钢）' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'D2' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Tool Steel' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'GB_Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV（冷作模具钢）' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'D2' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Tool Steel' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'GB_Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7750.0,
+  "canonical": "Cr12MoV",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0000000000001,
+  "rejected_candidates": [
+   {
+    "name": "Cr12MoV",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV（冷作模具钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "D2",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Tool Steel",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "GB_Cr12MoV",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV（冷作模具钢）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "D2",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Tool Steel",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "GB_Cr12MoV",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV（冷作模具钢）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "D2",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Tool Steel",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "GB_Cr12MoV",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV（冷作模具钢）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "D2",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Tool Steel",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "GB_Cr12MoV",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   }
+  ],
+  "error": "没有找到与 'Cr12MoV' 材质相符的材料：尝试了 20 个候选，其中 20 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：Cr12MoV(1000); Cr12MoV（冷作模具钢）(1000); D2(1000); Tool Steel(1000)\n期望密度约 7750.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('Cr12MoV', density=7750.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "material_result": {
+  "ok": false,
+  "material": "Cr12MoV",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 'Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV（冷作模具钢）' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'D2' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Tool Steel' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'GB_Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV（冷作模具钢）' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'D2' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Tool Steel' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'GB_Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV（冷作模具钢）' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'D2' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Tool Steel' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'GB_Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Cr12MoV（冷作模具钢）' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'D2' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'Tool Steel' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符",
+   "候选 'GB_Cr12MoV' 被拒：实际密度 1000(plastic) 与期望 7750(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7750.0,
+  "canonical": "Cr12MoV",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0000000000001,
+  "rejected_candidates": [
+   {
+    "name": "Cr12MoV",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV（冷作模具钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "D2",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Tool Steel",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "GB_Cr12MoV",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV（冷作模具钢）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "D2",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Tool Steel",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "GB_Cr12MoV",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV（冷作模具钢）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "D2",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Tool Steel",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "GB_Cr12MoV",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Cr12MoV（冷作模具钢）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "D2",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "Tool Steel",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   },
+   {
+    "name": "GB_Cr12MoV",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7750.0
+   }
+  ],
+  "error": "没有找到与 'Cr12MoV' 材质相符的材料：尝试了 20 个候选，其中 20 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：Cr12MoV(1000); Cr12MoV（冷作模具钢）(1000); D2(1000); Tool Steel(1000)\n期望密度约 7750.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('Cr12MoV', density=7750.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "massprops": {
+  "ok": true,
+  "volume_mm3": 32000.000000000004,
+  "surface_area_mm2": 8800.0,
+  "mass_kg": 0.03200000000000001,
+  "density_kg_m3": 1000.0000000000001,
+  "center_of_mass_mm": [
+   40.0,
+   20.0,
+   5.0
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "save": {
+  "ok": true,
+  "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_Cr12MoV.SLDPRT",
+  "saved": true,
+  "updated": true,
+  "content_changed": true,
+  "content_same": false,
+  "md5_before": "77d24262825f5f1081cc000ba4e97494",
+  "md5_after": "8f12504f17347e261a08e55de51b5755",
+  "rc": 0,
+  "size": 58785,
+  "note": "内容已更新",
+  "applied_material": "Cr12MoV",
+  "material_source": "explicit(new_part material=)",
+  "material_attestation": {
+   "file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_Cr12MoV.SLDPRT.material.json",
+   "material": "Cr12MoV",
+   "density_kg_m3": 1000.0000000000001,
+   "family": "steel",
+   "signed": true
+  }
+ },
+ "save_material_summary": {
+  "ok": false,
+  "error": "没有找到与 'Cr12MoV' 材质相符的材料：尝试了 20 个候选，其中 20 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：Cr12MoV(1000); Cr12MoV（冷作模具钢）(1000); D2(1000); Tool Steel(1000)\n期望密度约 7750.0 kg/m³（steel 族）。",
+  "density_before_kg_m3": 1000.0000000000001,
+  "expected_density_kg_m3": 7750.0
+ },
+ "part_exists": true,
+ "attestation_exists": true,
+ "attestation": {
+  "kind": "material",
+  "schema": "dsh-material-attestation/1",
+  "room": "",
+  "at": "2026-10-07T05:53:56.552Z",
+  "ts": 1791352436552,
+  "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_Cr12MoV.SLDPRT",
+  "part_name": "DSH_bugA_Cr12MoV",
+  "part_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_Cr12MoV.SLDPRT",
+  "part_sha256": "e439d27eb17d54dc04d76693e699a61902a90d211b6b7771c3e43034ddf6cdd8",
+  "part_size_bytes": 58785,
+  "part_md5": "8f12504f17347e261a08e55de51b5755",
+  "applied_name": "Cr12MoV",
+  "density_kg_m3": 1000.0000000000001,
+  "source": "explicit(new_part material=)",
+  "attested_material": "Cr12MoV",
+  "attested_density_kg_m3": 1000.0000000000001,
+  "attested_family": "steel",
+  "ok": false,
+  "approximate_match": false,
+  "material_mismatch_rejected": true,
+  "requested_material": "Cr12MoV",
+  "attested_material_name": "Cr12MoV",
+  "cross_standard": false,
+  "cross_standard_note": "null",
+  "expected_yield_mpa": 655,
+  "expected_density_kg_m3": 7750,
+  "applied_yield_mpa": 655,
+  "applied_density_kg_m3": 7750,
+  "yield_deviation_pct": 0,
+  "_sig": "zJuaWbfPxNk8r+W884lja+iDRYO8rZIqdqRP2nTWEBc=",
+  "_kid": "7633096ee4ddb3f9",
+  "_ts": 1791352436552,
+  "_nonce": "c1805a044029889142a16e9585529cd4"
+ }
+}

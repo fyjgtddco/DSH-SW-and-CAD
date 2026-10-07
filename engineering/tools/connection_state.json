@@ -1,0 +1,45 @@
+{
+  "schema": "dsh-connection-state/1",
+  "updated_at": 1791175183.5877626,
+  "updated_at_str": "2026-10-05 12:39:43",
+  "sw": {
+    "running": true,
+    "pid": 33048,
+    "processes": [
+      {
+        "pid": 33048,
+        "name": "SLDWORKS.exe",
+        "mem": "405,900 K"
+      }
+    ],
+    "connected": true,
+    "error": null,
+    "revision": "33.5.0",
+    "binding": "static",
+    "checked_at": "2026-10-05 12:39:41"
+  },
+  "cad": {
+    "connected": false,
+    "running": null,
+    "pid": null,
+    "processes": [],
+    "checked_at": null,
+    "error": null
+  },
+  "paths": {
+    "sldworks_exe": "Z:\\Program Files\\SOLIDWORKS Corp2025\\SOLIDWORKS\\SLDWORKS.exe",
+    "acad_exe": "Z:\\7-Zip\\AutoCAD 2020\\acad.exe",
+    "scanned_drives": [
+      "C:",
+      "D:",
+      "E:",
+      "Z:"
+    ],
+    "resolved_at": 1791175183.5860903,
+    "resolved_at_str": "2026-10-05 12:39:43"
+  },
+  "launch": {
+    "sw": null,
+    "cad": null
+  }
+}

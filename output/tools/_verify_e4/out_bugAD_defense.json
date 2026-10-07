@@ -1,0 +1,602 @@
+[
+ {
+  "part": "P_20CrMnTi.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "密度 1000 kg/m³（等同水）—— 典型的 SolidWorks 未赋材质默认值",
+    "【Bug-C】实得材料密度与请求材料不符：请求 20CrMnTi（期望 7820 kg/m³），实测密度 1000 kg/m³，相差 87.2%（容差 5%）—— 说明 SW 实际生效的不是请求的材料（近似替代），请改用材料库中精确存在的牌号，不要以近似匹配放行。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_20CrMnTi.SLDPRT",
+   "attestation": {
+    "material": "20CrMnTi",
+    "density_kg_m3": 1000,
+    "family": "water",
+    "source": "explicit(new_part material=)",
+    "requested_material": "20CrMnTi",
+    "at": "2026-10-07T06:12:21.763Z"
+   },
+   "material_mismatch_note": "凭据带 material_mismatch_rejected 标志，但请求名与实际生效名一致（20CrMnTi）—— 判为多候选试错的历史记录，不作为阻断依据（MA-01）",
+   "density_deviation_pct": 87.21,
+   "material_density_mismatch": true,
+   "yield_deviation_pct": 0.0
+  }
+ },
+ {
+  "part": "P_2A12.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "密度 1000 kg/m³（等同水）—— 典型的 SolidWorks 未赋材质默认值",
+    "【Bug-C】实得材料密度与请求材料不符：请求 2A12（期望 2780 kg/m³），实测密度 1000 kg/m³，相差 64.0%（容差 5%）—— 说明 SW 实际生效的不是请求的材料（近似替代），请改用材料库中精确存在的牌号，不要以近似匹配放行。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_2A12.SLDPRT",
+   "attestation": {
+    "material": "2A12",
+    "density_kg_m3": 1000,
+    "family": "water",
+    "source": "explicit(new_part material=)",
+    "requested_material": "2A12",
+    "at": "2026-10-07T06:05:05.680Z"
+   },
+   "material_mismatch_note": "凭据带 material_mismatch_rejected 标志，但请求名与实际生效名一致（2A12）—— 判为多候选试错的历史记录，不作为阻断依据（MA-01）",
+   "density_deviation_pct": 64.03,
+   "material_density_mismatch": true,
+   "yield_deviation_pct": 0.0
+  }
+ },
+ {
+  "part": "P_304.SLDPRT",
+  "verdict": {
+   "ok": true,
+   "level": "WARN",
+   "reasons": [
+    "材料为近似匹配（库中无精确同名），建议核对"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_304.SLDPRT",
+   "attestation": {
+    "material": "AISI 304",
+    "density_kg_m3": 8000,
+    "family": "steel",
+    "source": "explicit(new_part material=)",
+    "requested_material": "304",
+    "at": "2026-10-07T06:02:59.890Z"
+   },
+   "density_deviation_pct": 0.88,
+   "material_substitution": {
+    "blocking": false,
+    "reason": "材料被替换（304 → AISI 304），关键属性差异在容差(10%)内，已放行但留痕",
+    "requested": "304",
+    "applied": "AISI 304",
+    "req_props": {
+     "yield_mpa": 205.0,
+     "density": 7930.0,
+     "uts_mpa": 515.0,
+     "standard": "GB/T 20878-2024 不锈钢 牌号及化学成分（2024）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "app_props": {
+     "yield_mpa": 205.0,
+     "density": 7930.0,
+     "uts_mpa": 515.0,
+     "standard": "GB/T 20878-2024 不锈钢 牌号及化学成分（2024）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "deltas": {
+     "yield_pct": 0.0,
+     "density_pct": 0.0
+    }
+   },
+   "material_substitution_note": "材料被替换（304 → AISI 304），关键属性差异在容差(10%)内，已放行但留痕",
+   "yield_deviation_pct": 0.0
+  }
+ },
+ {
+  "part": "P_316.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "跨标准体系材料替代（疑似以欧美标顶替国标牌号）：【跨标准替代】请求 316（GB 体系），实际生效 AISI 316 退火不锈钢条 (SS)（ASTM 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。 请改用国标牌号重新赋材（如 Q235/45#/40Cr/HT200），或用 set_custom_material() 显式登记后重做。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_316.SLDPRT",
+   "attestation": {
+    "material": "AISI 316 退火不锈钢条 (SS)",
+    "density_kg_m3": 8000.000133,
+    "family": "steel",
+    "source": "explicit(new_part material=)",
+    "requested_material": "316",
+    "at": "2026-10-07T06:03:19.743Z"
+   },
+   "density_deviation_pct": 0.25,
+   "material_substitution": {
+    "blocking": false,
+    "reason": "材料被替换（请求 316 → 实际 AISI 316 退火不锈钢条 (SS)），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+    "requested": "316",
+    "applied": "AISI 316 退火不锈钢条 (SS)",
+    "req_props": {
+     "yield_mpa": 205.0,
+     "density": 7980.0,
+     "uts_mpa": 515.0,
+     "standard": "GB/T 20878-2024 不锈钢 牌号及化学成分（2024）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "app_props": null,
+    "deltas": {},
+    "needs_review": true,
+    "degraded": true,
+    "degraded_reason_code": "MATERIAL_PROPS_INCOMPLETE"
+   },
+   "material_substitution_note": "材料被替换（请求 316 → 实际 AISI 316 退火不锈钢条 (SS)），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+   "cross_standard": true
+  }
+ },
+ {
+  "part": "P_40Cr.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "跨标准体系材料替代（疑似以欧美标顶替国标牌号）：【跨标准替代】请求 40Cr（GB 体系），实际生效 1.2083 (X40Cr14)（EN 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。 请改用国标牌号重新赋材（如 Q235/45#/40Cr/HT200），或用 set_custom_material() 显式登记后重做。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_40Cr.SLDPRT",
+   "attestation": {
+    "material": "1.2083 (X40Cr14)",
+    "density_kg_m3": 7740,
+    "family": "steel",
+    "source": "explicit(new_part material=)",
+    "requested_material": "40Cr",
+    "at": "2026-10-07T05:59:17.283Z"
+   },
+   "density_deviation_pct": 1.02,
+   "material_substitution": {
+    "blocking": false,
+    "reason": "材料被替换（请求 40Cr → 实际 1.2083 (X40Cr14)），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+    "requested": "40Cr",
+    "applied": "1.2083 (X40Cr14)",
+    "req_props": {
+     "yield_mpa": 785.0,
+     "density": 7820.0,
+     "uts_mpa": 980.0,
+     "standard": "GB/T 3077-2015 合金结构钢（2015）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "app_props": null,
+    "deltas": {},
+    "needs_review": true,
+    "degraded": true,
+    "degraded_reason_code": "MATERIAL_PROPS_INCOMPLETE"
+   },
+   "material_substitution_note": "材料被替换（请求 40Cr → 实际 1.2083 (X40Cr14)），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+   "cross_standard": true
+  }
+ },
+ {
+  "part": "P_45.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "跨标准体系材料替代（疑似以欧美标顶替国标牌号）：【跨标准替代】请求 45#（GB 体系），实际生效 AISI 1045 钢，冷拔（ASTM 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。 请改用国标牌号重新赋材（如 Q235/45#/40Cr/HT200），或用 set_custom_material() 显式登记后重做。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_45.SLDPRT",
+   "attestation": {
+    "material": "AISI 1045 钢，冷拔",
+    "density_kg_m3": 7849.999999999999,
+    "family": "steel",
+    "source": "explicit(new_part material=)",
+    "requested_material": "45#",
+    "at": "2026-10-07T05:58:44.803Z"
+   },
+   "density_deviation_pct": 0.0,
+   "material_substitution": {
+    "blocking": false,
+    "reason": "材料被替换（请求 45# → 实际 AISI 1045 钢，冷拔），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+    "requested": "45#",
+    "applied": "AISI 1045 钢，冷拔",
+    "req_props": {
+     "yield_mpa": 355.0,
+     "density": 7850.0,
+     "uts_mpa": 600.0,
+     "standard": "GB/T 699-2015 优质碳素结构钢（2015）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "app_props": null,
+    "deltas": {},
+    "needs_review": true,
+    "degraded": true,
+    "degraded_reason_code": "MATERIAL_PROPS_INCOMPLETE"
+   },
+   "material_substitution_note": "材料被替换（请求 45# → 实际 AISI 1045 钢，冷拔），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+   "cross_standard": true
+  }
+ },
+ {
+  "part": "P_6061_T6.SLDPRT",
+  "verdict": {
+   "ok": true,
+   "level": "WARN",
+   "reasons": [
+    "材料为近似匹配（库中无精确同名），建议核对"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_6061_T6.SLDPRT",
+   "attestation": {
+    "material": "6061-T6 (SS)",
+    "density_kg_m3": 2700,
+    "family": "aluminum",
+    "source": "explicit(new_part material=)",
+    "requested_material": "6061-T6",
+    "at": "2026-10-07T06:03:39.392Z"
+   },
+   "density_deviation_pct": 0.0,
+   "material_substitution": {
+    "blocking": false,
+    "reason": "材料被替换（请求 6061-T6 → 实际 6061-T6 (SS)），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+    "requested": "6061-T6",
+    "applied": "6061-T6 (SS)",
+    "req_props": {
+     "yield_mpa": 276.0,
+     "density": 2700.0,
+     "uts_mpa": 310.0,
+     "standard": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 6061）；GB/T 6892-2023 一般工业用铝及铝合金挤压型材（T6 状态）（2020）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "app_props": null,
+    "deltas": {},
+    "needs_review": true,
+    "degraded": true,
+    "degraded_reason_code": "MATERIAL_PROPS_INCOMPLETE"
+   },
+   "material_substitution_note": "材料被替换（请求 6061-T6 → 实际 6061-T6 (SS)），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。"
+  }
+ },
+ {
+  "part": "P_65Mn.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "密度 1000 kg/m³（等同水）—— 典型的 SolidWorks 未赋材质默认值",
+    "【Bug-C】实得材料密度与请求材料不符：请求 65Mn（期望 7850 kg/m³），实测密度 1000 kg/m³，相差 87.3%（容差 5%）—— 说明 SW 实际生效的不是请求的材料（近似替代），请改用材料库中精确存在的牌号，不要以近似匹配放行。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_65Mn.SLDPRT",
+   "attestation": {
+    "material": "65Mn",
+    "density_kg_m3": 1000,
+    "family": "water",
+    "source": "explicit(new_part material=)",
+    "requested_material": "65Mn",
+    "at": "2026-10-07T06:02:37.767Z"
+   },
+   "material_mismatch_note": "凭据带 material_mismatch_rejected 标志，但请求名与实际生效名一致（65Mn）—— 判为多候选试错的历史记录，不作为阻断依据（MA-01）",
+   "density_deviation_pct": 87.26,
+   "material_density_mismatch": true,
+   "yield_deviation_pct": 0.0
+  }
+ },
+ {
+  "part": "P_7075_T6.SLDPRT",
+  "verdict": {
+   "ok": true,
+   "level": "WARN",
+   "reasons": [
+    "材料为近似匹配（库中无精确同名），建议核对"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_7075_T6.SLDPRT",
+   "attestation": {
+    "material": "7075-T6 (SN)",
+    "density_kg_m3": 2810,
+    "family": "aluminum",
+    "source": "explicit(new_part material=)",
+    "requested_material": "7075-T6",
+    "at": "2026-10-07T06:05:30.484Z"
+   },
+   "density_deviation_pct": 0.0,
+   "material_substitution": {
+    "blocking": false,
+    "reason": "材料被替换（请求 7075-T6 → 实际 7075-T6 (SN)），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+    "requested": "7075-T6",
+    "applied": "7075-T6 (SN)",
+    "req_props": {
+     "yield_mpa": 503.0,
+     "density": 2810.0,
+     "uts_mpa": 572.0,
+     "standard": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 7075）（2020）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "app_props": null,
+    "deltas": {},
+    "needs_review": true,
+    "degraded": true,
+    "degraded_reason_code": "MATERIAL_PROPS_INCOMPLETE"
+   },
+   "material_substitution_note": "材料被替换（请求 7075-T6 → 实际 7075-T6 (SN)），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。"
+  }
+ },
+ {
+  "part": "P_Cr12MoV.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "密度 1000 kg/m³（等同水）—— 典型的 SolidWorks 未赋材质默认值",
+    "【Bug-C】实得材料密度与请求材料不符：请求 Cr12MoV（期望 7750 kg/m³），实测密度 1000 kg/m³，相差 87.1%（容差 5%）—— 说明 SW 实际生效的不是请求的材料（近似替代），请改用材料库中精确存在的牌号，不要以近似匹配放行。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_Cr12MoV.SLDPRT",
+   "attestation": {
+    "material": "Cr12MoV",
+    "density_kg_m3": 1000,
+    "family": "steel",
+    "source": "explicit(new_part material=)",
+    "requested_material": "Cr12MoV",
+    "at": "2026-10-07T06:11:05.705Z"
+   },
+   "material_mismatch_note": "凭据带 material_mismatch_rejected 标志，但请求名与实际生效名一致（Cr12MoV）—— 判为多候选试错的历史记录，不作为阻断依据（MA-01）",
+   "density_deviation_pct": 87.1,
+   "material_density_mismatch": true,
+   "yield_deviation_pct": 0.0
+  }
+ },
+ {
+  "part": "P_GCr15.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "密度 1000 kg/m³（等同水）—— 典型的 SolidWorks 未赋材质默认值",
+    "【Bug-C】实得材料密度与请求材料不符：请求 GCr15（期望 7810 kg/m³），实测密度 1000 kg/m³，相差 87.2%（容差 5%）—— 说明 SW 实际生效的不是请求的材料（近似替代），请改用材料库中精确存在的牌号，不要以近似匹配放行。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_GCr15.SLDPRT",
+   "attestation": {
+    "material": "GCr15",
+    "density_kg_m3": 1000,
+    "family": "water",
+    "source": "explicit(new_part material=)",
+    "requested_material": "GCr15",
+    "at": "2026-10-07T06:09:41.990Z"
+   },
+   "material_mismatch_note": "凭据带 material_mismatch_rejected 标志，但请求名与实际生效名一致（GCr15）—— 判为多候选试错的历史记录，不作为阻断依据（MA-01）",
+   "density_deviation_pct": 87.2,
+   "material_density_mismatch": true
+  }
+ },
+ {
+  "part": "P_H62.SLDPRT",
+  "verdict": {
+   "ok": true,
+   "level": "WARN",
+   "reasons": [
+    "材料为近似匹配（库中无精确同名），建议核对"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_H62.SLDPRT",
+   "attestation": {
+    "material": "黄铜",
+    "density_kg_m3": 8500,
+    "family": "copper",
+    "source": "explicit(new_part material=)",
+    "requested_material": "H62",
+    "at": "2026-10-07T06:07:25.309Z"
+   },
+   "density_deviation_pct": 0.83,
+   "material_substitution": {
+    "blocking": false,
+    "reason": "材料被替换（请求 H62 → 实际 黄铜），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+    "requested": "H62",
+    "applied": "黄铜",
+    "req_props": {
+     "yield_mpa": 200.0,
+     "density": 8430.0,
+     "uts_mpa": 290.0,
+     "standard": "GB/T 5231-2022 加工铜及铜合金牌号和化学成分（2022）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "app_props": null,
+    "deltas": {},
+    "needs_review": true,
+    "degraded": true,
+    "degraded_reason_code": "MATERIAL_PROPS_INCOMPLETE"
+   },
+   "material_substitution_note": "材料被替换（请求 H62 → 实际 黄铜），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。"
+  }
+ },
+ {
+  "part": "P_HT200.SLDPRT",
+  "verdict": {
+   "ok": true,
+   "level": "WARN",
+   "reasons": [
+    "材料为近似匹配（库中无精确同名），建议核对"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_HT200.SLDPRT",
+   "attestation": {
+    "material": "灰铸铁",
+    "density_kg_m3": 7200,
+    "family": "null",
+    "source": "explicit(new_part material=)",
+    "requested_material": "HT200",
+    "at": "2026-10-07T06:05:53.020Z"
+   },
+   "density_deviation_pct": 0.0,
+   "material_substitution": {
+    "blocking": false,
+    "reason": "材料被替换（请求 HT200 → 实际 灰铸铁），但请求材料 属性未收录（可能仅有标准身份，力学数值待补全）、实际材料 属性未收录（可能仅有标准身份，力学数值待补全） —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+    "requested": "HT200",
+    "applied": "灰铸铁",
+    "req_props": {
+     "yield_mpa": null,
+     "density": 7200.0,
+     "uts_mpa": 200.0
+    },
+    "app_props": {
+     "yield_mpa": null,
+     "density": 7200.0,
+     "uts_mpa": 200.0
+    },
+    "deltas": {},
+    "needs_review": true,
+    "degraded": true,
+    "degraded_reason_code": "MATERIAL_PROPS_INCOMPLETE"
+   },
+   "material_substitution_note": "材料被替换（请求 HT200 → 实际 灰铸铁），但请求材料 属性未收录（可能仅有标准身份，力学数值待补全）、实际材料 属性未收录（可能仅有标准身份，力学数值待补全） —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。"
+  }
+ },
+ {
+  "part": "P_Q235.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "跨标准体系材料替代（疑似以欧美标顶替国标牌号）：【跨标准替代】请求 Q235（GB 体系），实际生效 AISI 1020（ASTM 体系）—— 两者属不同标准体系，屈服强度 235.0→250 MPa（差 6%），必须人工确认后方可采用（材料防线会据此拦截）。 请改用国标牌号重新赋材（如 Q235/45#/40Cr/HT200），或用 set_custom_material() 显式登记后重做。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_Q235.SLDPRT",
+   "attestation": {
+    "material": "AISI 1020",
+    "density_kg_m3": 7900,
+    "family": "steel",
+    "source": "explicit(new_part material=)",
+    "requested_material": "Q235",
+    "at": "2026-10-07T05:59:42.319Z"
+   },
+   "density_deviation_pct": 0.64,
+   "material_substitution": {
+    "blocking": false,
+    "reason": "材料被替换（Q235 → AISI 1020），关键属性差异在容差(10%)内，已放行但留痕",
+    "requested": "Q235",
+    "applied": "AISI 1020",
+    "req_props": {
+     "yield_mpa": 235.0,
+     "density": 7850.0,
+     "uts_mpa": 375.0,
+     "standard": "GB/T 700-2006 碳素结构钢（2006）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "app_props": {
+     "yield_mpa": 235.0,
+     "density": 7850.0,
+     "uts_mpa": 375.0,
+     "standard": "GB/T 700-2006 碳素结构钢（2006）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "deltas": {
+     "yield_pct": 0.0,
+     "density_pct": 0.0
+    }
+   },
+   "material_substitution_note": "材料被替换（Q235 → AISI 1020），关键属性差异在容差(10%)内，已放行但留痕",
+   "yield_deviation_pct": 6.38,
+   "cross_standard": true
+  }
+ },
+ {
+  "part": "P_Q355.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "密度 1000 kg/m³（等同水）—— 典型的 SolidWorks 未赋材质默认值",
+    "【Bug-C】实得材料密度与请求材料不符：请求 Q355（期望 7850 kg/m³），实测密度 1000 kg/m³，相差 87.3%（容差 5%）—— 说明 SW 实际生效的不是请求的材料（近似替代），请改用材料库中精确存在的牌号，不要以近似匹配放行。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_Q355.SLDPRT",
+   "attestation": {
+    "material": "Q355",
+    "density_kg_m3": 1000,
+    "family": "water",
+    "source": "explicit(new_part material=)",
+    "requested_material": "Q355",
+    "at": "2026-10-07T06:01:27.597Z"
+   },
+   "material_mismatch_note": "凭据带 material_mismatch_rejected 标志，但请求名与实际生效名一致（Q355）—— 判为多候选试错的历史记录，不作为阻断依据（MA-01）",
+   "density_deviation_pct": 87.26,
+   "material_density_mismatch": true,
+   "yield_deviation_pct": 0.0
+  }
+ },
+ {
+  "part": "P_QT500_7.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "密度 1000 kg/m³（等同水）—— 典型的 SolidWorks 未赋材质默认值",
+    "【Bug-C】实得材料密度与请求材料不符：请求 QT500-7（期望 7300 kg/m³），实测密度 1000 kg/m³，相差 86.3%（容差 5%）—— 说明 SW 实际生效的不是请求的材料（近似替代），请改用材料库中精确存在的牌号，不要以近似匹配放行。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_QT500_7.SLDPRT",
+   "attestation": {
+    "material": "QT500-7",
+    "density_kg_m3": 1000,
+    "family": "water",
+    "source": "explicit(new_part material=)",
+    "requested_material": "QT500-7",
+    "at": "2026-10-07T06:06:40.533Z"
+   },
+   "material_mismatch_note": "凭据带 material_mismatch_rejected 标志，但请求名与实际生效名一致（QT500-7）—— 判为多候选试错的历史记录，不作为阻断依据（MA-01）",
+   "density_deviation_pct": 86.3,
+   "material_density_mismatch": true,
+   "yield_deviation_pct": 0.0
+  }
+ },
+ {
+  "part": "P_ZCuSn10P1.SLDPRT",
+  "verdict": {
+   "ok": true,
+   "level": "WARN",
+   "reasons": [
+    "材料为近似匹配（库中无精确同名），建议核对"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_ZCuSn10P1.SLDPRT",
+   "attestation": {
+    "material": "铜",
+    "density_kg_m3": 8899.999999999998,
+    "family": "copper",
+    "source": "explicit(new_part material=)",
+    "requested_material": "ZCuSn10P1",
+    "at": "2026-10-07T06:07:02.825Z"
+   },
+   "density_deviation_pct": 1.14,
+   "material_substitution": {
+    "blocking": false,
+    "reason": "材料被替换（请求 ZCuSn10P1 → 实际 铜），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。",
+    "requested": "ZCuSn10P1",
+    "applied": "铜",
+    "req_props": {
+     "yield_mpa": 130.0,
+     "density": 8800.0,
+     "uts_mpa": 220.0,
+     "standard": "GB/T 1176-2013 铸造铜及铜合金（2013）",
+     "source": "gb_materials.json（外部导入）"
+    },
+    "app_props": null,
+    "deltas": {},
+    "needs_review": true,
+    "degraded": true,
+    "degraded_reason_code": "MATERIAL_PROPS_INCOMPLETE"
+   },
+   "material_substitution_note": "材料被替换（请求 ZCuSn10P1 → 实际 铜），但实际材料 查不到属性 —— 无法做属性级对比；请人工确认该替代是否可接受（跨材质替代不得静默放行）。"
+  }
+ },
+ {
+  "part": "P_ZL104.SLDPRT",
+  "verdict": {
+   "ok": false,
+   "level": "BLOCK",
+   "reasons": [
+    "密度 1000 kg/m³（等同水）—— 典型的 SolidWorks 未赋材质默认值",
+    "【Bug-C】实得材料密度与请求材料不符：请求 ZL104（期望 2700 kg/m³），实测密度 1000 kg/m³，相差 63.0%（容差 5%）—— 说明 SW 实际生效的不是请求的材料（近似替代），请改用材料库中精确存在的牌号，不要以近似匹配放行。"
+   ],
+   "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\matprobe\\P_ZL104.SLDPRT",
+   "attestation": {
+    "material": "ZL104",
+    "density_kg_m3": 1000,
+    "family": "water",
+    "source": "explicit(new_part material=)",
+    "requested_material": "ZL104",
+    "at": "2026-10-07T06:08:23.812Z"
+   },
+   "material_mismatch_note": "凭据带 material_mismatch_rejected 标志，但请求名与实际生效名一致（ZL104）—— 判为多候选试错的历史记录，不作为阻断依据（MA-01）",
+   "density_deviation_pct": 62.96,
+   "material_density_mismatch": true
+  }
+ }
+]

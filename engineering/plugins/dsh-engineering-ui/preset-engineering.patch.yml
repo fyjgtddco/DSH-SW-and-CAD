@@ -377,6 +377,28 @@
                      若用其他材料请显式 `new_part(material="6061-T6")`。
                      材料缺失或密度=1000(水) 时，physics 会直接判 FAIL 并阻断寿命结论 ——
                      此时任何强度/寿命数字都不可信，必须先把材料问题解决。
+
+                   · **【国标材料体系 · 直接用图纸牌号】** 本环境已内置完整的 GB/T 国标材料，
+                     门禁 → 载荷工况 → FEA → 报告【全程保留国标身份】，无需换算成欧美标。
+                     ```
+                     # 国标牌号可直接用（swapi.new_part / load_case.material / material_db）
+                     m = swapi.new_part(material="Q235")   # 或 "45#" / "40Cr" / "HT200" / "Cr12MoV"
+                     ```
+                     已内置的国标牌号（含 GB/T 标准号，18 种）：
+                       · 碳素/合金结构钢：Q235(GB/T 700)、Q355(GB/T 1591)、45(GB/T 699)、
+                         40Cr / 20CrMnTi(GB/T 3077)、65Mn(GB/T 1222)
+                       · 轴承钢 / 模具钢：GCr15(GB/T 18254)、Cr12MoV(GB/T 1299)
+                       · 铸铁：HT200(GB/T 9439)、QT500-7(GB/T 1348)
+                       · 不锈钢：06Cr19Ni10 / 022Cr17Ni12Mo2（GB/T 20878，兼容 304/316 写法）
+                       · 铝合金：6061-T6 / 7075-T6 / 2A12(LY12) / ZL104(GB/T 3190、GB/T 1173)
+                       · 铜合金：ZCuSn10P1(GB/T 1176)、H62(GB/T 5231)
+                     ⚠️ 设计任务来自中国图纸时**优先用国标牌号**。若 SW 材质库无该牌号而被
+                       近似成欧美标（如 Q235→AISI 1020），材料防线会判【跨标准替代】并拦截，
+                       必须改用库中真实存在的国标牌号，或用 set_custom_material() 显式登记。
+                   · **【国标材料合规校验】** 每个房间的领域校验会自动附加 `gb_material` 领域：
+                       · 材料屈服/密度/抗拉/弹性模量必须可解析且落在工程合理区间；
+                       · 密度恰为 1000 kg/m³（=水）→ 判 CRITICAL（SolidWorks 未赋材）；
+                       · 单独复核：`python sw_bridge.py physics-validate-domain gb_material --room <房间>`
                    · **疲劳/30年寿命是必过闸口**：整条链路原先只有线性静力，
                      现已在每次 `solve_fea` 后自动追加疲劳校核（Basquin S-N + Marin 修正
                      + Goodman/Soderberg/Gerber + Miner 累积损伤）。

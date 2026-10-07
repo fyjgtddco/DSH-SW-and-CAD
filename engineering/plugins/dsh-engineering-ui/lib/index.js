@@ -1709,14 +1709,89 @@ export function apply(ctx) {
     try { return JSON.parse(await readBody(req)); } catch (e) { return null; }
   };
 
+  // ══ 【FL-04 修复】请求体【长度 + 嵌套深度】上限 ══════════════════════════
+  // 实测：5000 字符字符串、50 层深嵌套 JSON 都能 200 且签名成功 ——
+  //   虽未触发异常，但缺少输入边界意味着超长/超深 payload 理论上可撑内存，
+  //   而这几个端点的合法输入结构是【已知且很浅】的，没有理由接受任意形状。
+  // 这里给出保守上限（远超正常用量，不会误伤真实调用）。
+  const MAX_BODY_BYTES = 256 * 1024;      // 256 KB
+  const MAX_DEPTH = 12;                   // 凭据体嵌套层级上限
+
+  function jsonDepth(v, d = 0) {
+    if (d > MAX_DEPTH) return d;
+    if (v === null || typeof v !== 'object') return d;
+    let m = d;
+    if (Array.isArray(v)) {
+      for (const it of v) { const x = jsonDepth(it, d + 1); if (x > m) m = x; }
+    } else {
+      for (const k of Object.keys(v)) {
+        const x = jsonDepth(v[k], d + 1); if (x > m) m = x;
+      }
+    }
+    return m;
+  }
+
+  /** 校验请求体规模；返回 null 表示通过，否则返回错误文案。 */
+  function bodyLimitError(rawText, body) {
+    try {
+      if (typeof rawText === 'string' && rawText.length > MAX_BODY_BYTES) {
+        return '请求体过大（' + rawText.length + ' > ' + MAX_BODY_BYTES + ' 字节）';
+      }
+      if (body && jsonDepth(body) > MAX_DEPTH) {
+        return '请求体嵌套过深（> ' + MAX_DEPTH + ' 层）';
+      }
+    } catch (e) { /* 校验本身异常时不阻断（保守放行由签名兜底）*/ }
+    return null;
+  }
+
+  // ══ 【FL-08 修复】防线端点【速率限制】════════════════════════════════════
+  // 实测：100 次 verify 请求 0.81s 全部正常处理 —— 无任何速率约束。
+  // 虽非漏洞（伪造凭据本就会被 HMAC 挡下），但无限速率意味着可以低成本
+  //   反复触发 PowerShell 端口检查 / 文件读，白白消耗宿主资源。
+  // 这里用【滑动窗口】限流：单端点每 10 秒最多 N 次，超出返回 429。
+  //   阈值刻意放宽（正常门禁一次任务只调几十次），不会误伤真实流程。
+  const RATE_WINDOW_MS = 10000;
+  const RATE_MAX = 120;
+  const _rateBuckets = new Map();
+
+  function rateLimited(bucketKey) {
+    try {
+      const now = Date.now();
+      let arr = _rateBuckets.get(bucketKey);
+      if (!Array.isArray(arr)) { arr = []; _rateBuckets.set(bucketKey, arr); }
+      // 丢弃窗口外的记录
+      while (arr.length && (now - arr[0]) > RATE_WINDOW_MS) arr.shift();
+      if (arr.length >= RATE_MAX) return true;
+      arr.push(now);
+      // 防无界增长：桶数过多时清理空桶
+      if (_rateBuckets.size > 64) {
+        for (const [k, v] of _rateBuckets) {
+          if (!v || !v.length || (now - v[v.length - 1]) > RATE_WINDOW_MS) {
+            _rateBuckets.delete(k);
+          }
+        }
+      }
+      return false;
+    } catch (e) { return false; }
+  }
+
   disposers.push(ctx.webServer.register({
     kind: "exact",
     path: PREFIX + "/defense/sign",
     handler: async (req, res) => {
       if (req.method !== "POST") return send(res, 405, { ok: false, error: "POST only" });
       if (!defenseSigner) return send(res, 200, { ok: false, error: "防线签名服务未装配（仅工程模式）" });
-      const body = await readJsonBody(req);
+      // ── 【FL-08 修复】速率限制（滑动窗口，防无成本反复触发）────────────
+      if (rateLimited('defense/sign')) {
+        return send(res, 429, { ok: false, error: '请求过于频繁（防线签发端点已限流，请稍后重试）' });
+      }
+      const _raw = await readBody(req);
+      // ── 【FL-04 修复】请求体长度上限 ─────────────────────────────────
+      let body = null;
+      try { body = JSON.parse(_raw); } catch (e) { body = null; }
       if (!body || typeof body !== "object") return send(res, 400, { ok: false, error: "bad json" });
+      const _lim = bodyLimitError(_raw, body);
+      if (_lim) return send(res, 413, { ok: false, error: _lim });
       const kind = String(body.kind || "");
       const room = String(body.room || "").trim();
       // ── 【Bug8 修复】room 校验按凭据类型区分 ────────────────────────
@@ -1805,6 +1880,19 @@ export function apply(ctx) {
           warnings: Array.isArray(body.warnings) ? body.warnings : [],
           passed: Array.isArray(body.passed) ? body.passed : [],
           source: body.source === undefined ? "physics_bridge" : String(body.source),
+          // ── 【新 Bug 修复】纳入【可追溯标识】────────────────────────────
+          // 校验端要求 run_id 或 checked_at 至少一个存在，否则判
+          //   "缺少可追溯标识（疑似伪造）"→ CRITICAL。原先宿主不签这两个
+          //   字段，而 Python 侧又【不能】在签名后补（会让 HMAC 失配），
+          //   结果每份领域凭据都自带一条防伪造违规。
+          // 现在：由签发调用方提供（Python 已在 payload 里带上），
+          //   宿主原样纳入待签体；缺失时用宿主自己的签发时间兜底，
+          //   保证凭据一定可追溯。
+          run_id: (body.run_id === undefined || body.run_id === null)
+            ? "" : String(body.run_id),
+          checked_at: (body.checked_at === undefined || body.checked_at === null
+                       || String(body.checked_at).trim() === "")
+            ? new Date().toISOString() : String(body.checked_at),
         };
       } else if (kind === "material") {
         const partPath = String(body.part_path || "").trim();
@@ -1856,6 +1944,35 @@ export function apply(ctx) {
           ok: body.ok === undefined ? null : !!body.ok,
           approximate_match: !!body.approximate_match,
           material_mismatch_rejected: !!body.material_mismatch_rejected,
+          // ── 【Bug-04 修复】把"用户请求的材料"纳入待签体 ────────────────
+          // 校验端需要在防线①对比 requested_material 与 applied/attested，
+          //   发现跨材质静默替代（PETG→PET，σy 差约 37%）时拦截。
+          //   这两个字段由 swapi 在申请签发时提交、宿主原样签名，
+          //   之后任何一方都无法静默篡改（否则验签失配）。
+          requested_material: body.requested_material === undefined
+            ? null : String(body.requested_material),
+          attested_material_name: body.attested_material_name === undefined
+            ? null : String(body.attested_material_name),
+          // ── 【Bug-C 修复】跨标准体系替代标记也纳入待签体 ──────────────
+          // Q235(GB) → AISI 1020(ASTM) 这类替代原先只看 approximate_match，
+          //   报告显得像"精确匹配"。签名后不可篡改，防线据此拦截。
+          cross_standard: !!body.cross_standard,
+          cross_standard_note: body.cross_standard_note === undefined
+            ? null : String(body.cross_standard_note),
+          // ── 【Bug-C 运行时修复】属性指纹纳入待签体 ────────────────────
+          // 防线①靠"请求材料 vs 实际材料"的属性差异识别名字看不出、密度差
+          //   也小的替代（6061-T6→7075 屈服差 82%，密度仅差 4.1%）。
+          //   签名后不可篡改，判据才可信。
+          expected_yield_mpa: typeof body.expected_yield_mpa === "number"
+            ? body.expected_yield_mpa : null,
+          expected_density_kg_m3: typeof body.expected_density_kg_m3 === "number"
+            ? body.expected_density_kg_m3 : null,
+          applied_yield_mpa: typeof body.applied_yield_mpa === "number"
+            ? body.applied_yield_mpa : null,
+          applied_density_kg_m3: typeof body.applied_density_kg_m3 === "number"
+            ? body.applied_density_kg_m3 : null,
+          yield_deviation_pct: typeof body.yield_deviation_pct === "number"
+            ? body.yield_deviation_pct : null,
         };
       } else {
         return send(res, 400, { ok: false, error: "unknown kind: " + kind });
@@ -1872,10 +1989,52 @@ export function apply(ctx) {
     handler: async (req, res) => {
       if (req.method !== "POST") return send(res, 405, { ok: false, error: "POST only" });
       if (!defenseSigner) return send(res, 200, { ok: false, error: "防线签名服务未装配" });
-      const cred = await readJsonBody(req);
+      // 【FL-08】限流：防止以极低成本反复触发验签/文件读
+      if (rateLimited('defense/verify')) {
+        return send(res, 429, { ok: false, error: '请求过于频繁（验签端点已限流）' });
+      }
+      const _raw = await readBody(req);
+      let cred = null;
+      try { cred = JSON.parse(_raw); } catch (e) { cred = null; }
       if (!cred || typeof cred !== "object") return send(res, 400, { ok: false, error: "bad json" });
-      const v = defenseSigner.verify(cred);
-      return send(res, 200, { ok: !!v.ok, verified: !!v.ok, reason: v.reason || null, kid: defenseSigner.kid });
+      // 【FL-04】请求体规模上限
+      const _lim = bodyLimitError(_raw, cred);
+      if (_lim) return send(res, 413, { ok: false, error: _lim });
+      // ── 【P2 修复】公开验签端点【单次消费 nonce】，防重放 ──────────────
+      // 实测（子代理3）：同一份凭据原样重放 3 次，全部 verified=true。
+      //   根因是 verify() 只核对"nonce 由本宿主签发"，从不记录"已被消费"。
+      // 现在：本端点 consume=true —— 同一 nonce 第二次出现即判重放并拒绝。
+      // 注意：门禁自身需要对同一凭据做多阶段校验（room-end →
+      //   confirm-assembly → 收尾），那是受信任的内部重复调用，因此走
+      //   /defense/verify-gate（不消费）；公开端点与内部端点分离，
+      //   既堵住外部重放，又不破坏门禁流程。
+      const v = defenseSigner.verify(cred, true);
+      return send(res, 200, { ok: !!v.ok, verified: !!v.ok, reason: v.reason || null,
+                              kid: defenseSigner.kid, replay_protected: true });
+    }
+  }));
+
+  // ── 门禁内部验签端点（不消费 nonce，允许同一凭据多阶段重复校验）────────
+  disposers.push(ctx.webServer.register({
+    kind: "exact",
+    path: PREFIX + "/defense/verify-gate",
+    handler: async (req, res) => {
+      if (req.method !== "POST") return send(res, 405, { ok: false, error: "POST only" });
+      if (!defenseSigner) return send(res, 200, { ok: false, error: "防线签名服务未装配" });
+      // 【FL-08】限流（门禁一轮只调几十次，120/10s 不会误伤）
+      if (rateLimited('defense/verify-gate')) {
+        return send(res, 429, { ok: false, error: '请求过于频繁（门禁验签端点已限流）' });
+      }
+      const _raw = await readBody(req);
+      let cred = null;
+      try { cred = JSON.parse(_raw); } catch (e) { cred = null; }
+      if (!cred || typeof cred !== "object") return send(res, 400, { ok: false, error: "bad json" });
+      const _lim = bodyLimitError(_raw, cred);
+      if (_lim) return send(res, 413, { ok: false, error: _lim });
+      const v = defenseSigner.verify(cred, false);
+      return send(res, 200, { ok: !!v.ok, verified: !!v.ok, reason: v.reason || null,
+                              kid: defenseSigner.kid, replay_protected: false,
+                              scope: "gate-internal（供门禁多阶段校验，不消费 nonce）" });
     }
   }));
 
@@ -1899,8 +2058,17 @@ export function apply(ctx) {
     handler: async (req, res) => {
       if (req.method !== "POST") return send(res, 405, { ok: false, error: "POST only" });
       if (!defenseSigner) return send(res, 200, { ok: false, error: "防线签名服务未装配（仅工程模式）" });
-      const body = await readJsonBody(req);
+      // 【FL-08】限流
+      if (rateLimited('defense/judge')) {
+        return send(res, 429, { ok: false, error: '请求过于频繁（防线判定端点已限流）' });
+      }
+      const _raw = await readBody(req);
+      let body = null;
+      try { body = JSON.parse(_raw); } catch (e) { body = null; }
       if (!body || typeof body !== "object") return send(res, 400, { ok: false, error: "bad json" });
+      // 【FL-04】请求体规模上限
+      const _lim = bodyLimitError(_raw, body);
+      if (_lim) return send(res, 413, { ok: false, error: _lim });
       const room = String(body.room || "").trim();
       if (!ROOM_RE.test(room)) return send(res, 400, { ok: false, error: "bad room" });
       const result = defenseSigner.judgeDefense(room, String(body.kind || "room"), {
@@ -1945,6 +2113,8 @@ export function apply(ctx) {
         stale: true,
         sw: { connected: false, running: null, checked_at: null },
         cad: { connected: false, running: null, checked_at: null },
+        abaqus: { connected: false, running: null, checked_at: null },
+        nx: { connected: false, running: null, checked_at: null },
         paths: {},
       };
     }
@@ -1958,6 +2128,11 @@ export function apply(ctx) {
       stale: age == null || age > 900,
       sw: j.sw || { connected: false, running: null, checked_at: null },
       cad: j.cad || { connected: false, running: null, checked_at: null },
+      // ── 【连接区扩展】把 Abaqus / NX 也透给前端 ─────────────────────
+      //   EngConnRow 按 state[target] 读状态；缺了这两项，新增的两行按钮
+      //   会永远停在"尚未检测过"。
+      abaqus: j.abaqus || { connected: false, running: null, checked_at: null },
+      nx: j.nx || { connected: false, running: null, checked_at: null },
       paths: j.paths || {},
     };
   }
@@ -2038,8 +2213,15 @@ export function apply(ctx) {
       if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
       const body = await readJsonBody(req);
       const target = String((body && body.target) || '').trim().toLowerCase();
-      if (target !== 'sw' && target !== 'cad' && target !== 'all') {
-        return send(res, 400, { ok: false, error: "target 必须是 'sw' | 'cad' | 'all'" });
+      // ── 【连接区扩展】白名单加入 abaqus / nx ──────────────────────────
+      // 连接区新增了「Abaqus连接」「NX连接」两个同款按钮，它们的
+      //   target 必须被放行，否则点「连接」会拿到 HTTP 400。
+      //   （Python 侧 probe_target 亦已支持这两个目标。）
+      if (target !== 'sw' && target !== 'cad' && target !== 'all'
+          && target !== 'abaqus' && target !== 'nx') {
+        return send(res, 400, {
+          ok: false,
+          error: "target 必须是 'sw' | 'cad' | 'abaqus' | 'nx' | 'all'" });
       }
       try {
         const r = runConnProbe(target === 'all' ? null : target);
@@ -2063,8 +2245,14 @@ export function apply(ctx) {
       if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
       const body = await readJsonBody(req);
       const target = String((body && body.target) || '').trim().toLowerCase();
-      if (target !== 'sw' && target !== 'cad') {
-        return send(res, 400, { ok: false, error: "target 必须是 'sw' | 'cad'" });
+      // ── 【连接区扩展】Abaqus / NX 也允许「启动」───────────────────────
+      // 两者无 COM 接口，Python 侧 conn-launch 走"定位 exe → 拉起进程"，
+      //   未安装时如实报错（不伪装成功）。
+      if (target !== 'sw' && target !== 'cad'
+          && target !== 'abaqus' && target !== 'nx') {
+        return send(res, 400, {
+          ok: false,
+          error: "target 必须是 'sw' | 'cad' | 'abaqus' | 'nx'" });
       }
       const dir = findToolsDir();
       if (!dir) return send(res, 200, { ok: false, error: '未定位到 tools 目录' });
@@ -2157,18 +2345,44 @@ export function apply(ctx) {
         });
       }
 
-      const name = target === 'cad' ? 'AutoCAD' : 'SolidWorks';
-      const text = [
-        `【连接区诊断请求】${name} 启动失败，下面是完整日志与机器环境事实。`,
-        '',
-        '请据此判断失败的**根本原因**，并给出**具体可执行的下一步**。',
-        '可用手段：阅读 常见SW启动失败问题.md、运行 sw_bridge.py doctor / sw-proc、',
-        '检查许可证(sw_d.lic)/netapi32.dll/安装盘符/沙箱限制等。',
-        '',
-        '```',
-        logText,
-        '```',
-      ].join('\n');
+      const name = (target === 'cad') ? 'AutoCAD'
+                 : (target === 'abaqus') ? 'Abaqus'
+                 : (target === 'nx') ? 'NX' : 'SolidWorks';
+      // ── 【缺陷修复】文案必须按【日志实际结果】生成，不能一律写"启动失败"──
+      // 实测缺陷：日志里明明写着「结果: 成功」且四步全 [OK]（resolve_path /
+      //   check_running / show_window / connect），但发给模型的消息标题仍是
+      //   "SolidWorks 启动失败" —— 模型被错误前提带偏，去排查并不存在的故障。
+      // 现在从日志文本里解析结果：
+      //   · 成功 → 说明"启动成功"，若要诊断则围绕"真正想解决的问题"提问；
+      //   · 失败 → 保留原排查指引（这才是该模式的本意）。
+      const _okLine = /结果\s*[:：]\s*成功/.test(logText);
+      const _failLine = /结果\s*[:：]\s*失败/.test(logText);
+      const _isOk = _okLine && !_failLine;
+      const text = _isOk
+        ? [
+            `【连接区诊断请求】${name} 启动【成功】，下面是完整日志与机器环境事实。`,
+            '',
+            '日志显示各步骤均已通过。如果你本来是想排查问题，请补充你实际遇到的现象；',
+            '否则无需修复动作，可直接开始建模。',
+            '',
+            '可选的后续核查：运行 `sw_bridge.py doctor` / `sw-proc` 复核环境；',
+            '若建模阶段仍报错，再带上具体报错继续诊断。',
+            '',
+            '```',
+            logText,
+            '```',
+          ].join('\n')
+        : [
+            `【连接区诊断请求】${name} 启动失败，下面是完整日志与机器环境事实。`,
+            '',
+            '请据此判断失败的**根本原因**，并给出**具体可执行的下一步**。',
+            '可用手段：阅读 常见SW启动失败问题.md、运行 sw_bridge.py doctor / sw-proc、',
+            '检查许可证(sw_d.lic)/netapi32.dll/安装盘符/沙箱限制等。',
+            '',
+            '```',
+            logText,
+            '```',
+          ].join('\n');
 
       try {
         const msg = createUserMessage({
@@ -2232,23 +2446,57 @@ export function apply(ctx) {
    * @param options - GenerateOptions。
    * @returns 累计的纯文本（多块按换行拼接）。
    */
-  async function collectLlmText(llm, options, timeoutMs) {
+  async function collectLlmText(llm, options, timeoutMs, onDelta) {
     let text = '';
     let finishKind = null;
     let finishMsg = '';
-    // ── 超时保护（修「有概率超时/报错」）────────────────────────────────
-    // 曾经的问题：流一旦不结束就永远挂着，前端只能一直转圈或被更外层的
-    //   超时打断，错误信息也看不出原因。
-    // 这里主动给一个上限：到点 abort，让它变成一个【可解释】的错误。
-    // 官方适配器契约要求遵守 options.signal（llm/src/index.ts:286-290）。
-    const ms = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 90000;
+    // ── 超时策略（修「一直出不来分析」/「请求被中断（超时）」）─────────────
+    // 原实现给了 90 秒硬上限，实测对 high reasoning 的深度分析太短：
+    //   一次 1200 token 的推理很容易超过 90 秒 → 我自己的计时器把
+    //   本来能成功的请求打断 → 用户看到"请求被中断（超时）"。
+    //
+    // 现在改成【空闲超时】而不是【总时长超时】：
+    //   · 只要模型还在吐 token，就一直等（不打断正常的长回答）；
+    //   · 只有【连续 N 秒没有任何数据】才判定卡死并中断。
+    //   这才是"卡住"与"思考久"的正确区分方式。
+    // 默认 120 秒空闲；可用 DSH_SIDE_CHAT_IDLE_MS 覆盖。
+    let idleMs = 120000;
+    try {
+      const raw = process.env.DSH_SIDE_CHAT_IDLE_MS;
+      if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
+        const v = Number(String(raw).trim());
+        if (Number.isFinite(v) && v > 0) idleMs = v;
+      }
+    } catch (e) { /* 用默认值 */ }
+    // 兼容旧的第三参语义：若调用方显式给了更长的总时限，取较大者作为空闲窗口
+    if (Number.isFinite(timeoutMs) && timeoutMs > idleMs) idleMs = timeoutMs;
+
     const ctrl = new AbortController();
-    const timer = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, ms);
+    let timer = null;
+    let lastActivity = Date.now();
+    const armIdle = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        // 到点再确认一次是否真的无活动，避免边界误杀
+        if (Date.now() - lastActivity >= idleMs) {
+          try { ctrl.abort(); } catch (e) {}
+        } else {
+          armIdle();
+        }
+      }, idleMs);
+    };
+    armIdle();
     try {
       for await (const chunk of llm.stream(Object.assign({}, options, { signal: ctrl.signal }))) {
         if (!chunk || typeof chunk !== 'object') continue;
+        // 任何 chunk 都算活动 → 重置空闲计时
+        lastActivity = Date.now();
         if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
           text += chunk.text;
+          // 边流边回调，让前端能渐进显示（避免长时间空白）
+          if (typeof onDelta === 'function') {
+            try { onDelta(text); } catch (e) { /* 回调异常不影响收流 */ }
+          }
         } else if (chunk.type === 'finish') {
           const reason = chunk.reason || {};
           finishKind = reason.kind || null;
@@ -2256,20 +2504,20 @@ export function apply(ctx) {
         }
       }
     } catch (error) {
-      // 中断 → 给一个用户看得懂的原因，而不是底层 AbortError
       if (ctrl.signal.aborted) {
-        throw new Error('请求超时（超过 ' + Math.round(ms / 1000) + ' 秒未完成）');
+        throw new Error('模型连续 ' + Math.round(idleMs / 1000) + ' 秒没有返回任何内容，已中断'
+          + '（可能是模型无响应或网络问题，请重试）');
       }
       throw error;
     } finally {
       clearTimeout(timer);
     }
     // 只有 stop（或无 finish 帧）算正常收尾；其余都当失败。
-    // aborted 单独说明：多半就是上面的超时。
     if (finishKind && finishKind !== 'stop') {
       if (finishKind === 'aborted') {
-        throw new Error('请求被中断' + (ctrl.signal.aborted ? '（超时）' : '') +
-          (finishMsg ? '：' + finishMsg : ''));
+        // 走到这里说明是【上游】中断的（不是我们的空闲计时器，
+        //   否则上面 catch 就已经抛出了）。如实说明，便于排查。
+        throw new Error('请求被中断' + (finishMsg ? '：' + finishMsg : ''));
       }
       throw new Error('模型返回异常（' + String(finishKind) + '）' + (finishMsg ? '：' + finishMsg : ''));
     }
@@ -2343,18 +2591,37 @@ export function apply(ctx) {
             role: 'user',
             content: [{ type: 'text', text: 'Recent conversation:\n' + transcript }],
           }],
-          maxTokens: 256,
-          // ⚠️ 刻意不传 purpose：它是【闭集】'compaction' | 'session-title'
+          maxTokens: 8192,
+          // ── 【Bug 修复】maxTokens 从 256 提到 8192（用户要求"改大一点"）──
+          // 实测（直接 POST /suggest）返回：
+          //   {"ok":false,"error":"模型返回异常（max-tokens）"}
+          // 根因：本模型带推理（reasoningEffort=high），**推理 token 也计入
+          //   maxTokens**。256 在推理阶段就耗尽，正文一个字都出不来 →
+          //   判为 max-tokens 失败 → 前端静默拿空数组
+          //   → 表现就是"推荐追问一直不出现"。
+          // 8192：推理再长也够用；这只是【上限】，模型写满 3 行短建议就停，
+          //   不会因为上限高而多消耗 token（不设下限、按实际输出计费）。
+          // ⚠️ 仍不传 purpose：它是【闭集】'compaction' | 'session-title'
           //   （types.ts:552），不是可合并扩展的 map。传自定义值非法；
           //   传那两个字面量则语义错误（会改变适配器行为，如关闭思考）。
           //   一次性辅助调用正确做法就是省略它。
         });
         const items = parseSuggestions(text);
-        if (!items.length) return send(res, 200, { ok: false, error: 'empty suggestions' });
+        if (!items.length) {
+          // 模型有输出但解析不出 3 行 → 把原始输出截断带上，便于排查
+          return send(res, 200, {
+            ok: false,
+            error: 'empty suggestions',
+            raw: String(text || '').slice(0, 400),
+          });
+        }
         return send(res, 200, { ok: true, items, provider, model });
       } catch (error) {
-        // 失败静默：推荐追问不是关键路径
-        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+        // 推荐追问是可选增强（前端静默忽略），但错误必须能查到原因：
+        //   历史上正是因为完全静默，max-tokens 这类问题藏了很久。
+        const msg = String((error && error.message) || error);
+        try { console.warn('[dsh-engineering-ui] /suggest 失败:', msg); } catch (e) {}
+        return send(res, 200, { ok: false, error: msg });
       }
     }
   }));
@@ -2440,6 +2707,60 @@ export function apply(ctx) {
         parts.push('请就以上选中内容给出深入分析：关键结论、隐含假设、风险点与下一步建议。');
       }
 
+      // ── 【流式输出】检测前端是否要 SSE ──────────────────────────────────
+      // 修「一直出不来分析」：原来只能等整段生成完才一次性返回，长分析
+      //   （high reasoning + 1200 token）会让面板长时间空白，用户以为坏了。
+      // 现在支持 SSE：边生成边把增量推给前端，面板立刻有字。
+      //   前端用 Accept: text/event-stream 或 ?stream=1 请求该模式。
+      const wantStream = String((payload && payload.stream) || '') === '1'
+        || /text\/event-stream/.test(String(req.headers && req.headers.accept || ''));
+
+      if (wantStream) {
+        try {
+          res.writeHead(200, {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-cache, no-transform',
+            'connection': 'keep-alive',
+            'x-accel-buffering': 'no',
+          });
+        } catch (e) {
+          return send(res, 200, { ok: false, error: '无法开启流式响应' });
+        }
+        const sse = (obj) => {
+          try { res.write('data: ' + JSON.stringify(obj) + '\n\n'); } catch (e) {}
+        };
+        let lastSent = 0;
+        try {
+          const reply = await collectLlmText(llm, {
+            provider,
+            model,
+            system: SIDE_CHAT_SYSTEM,
+            messages: [{
+              role: 'user',
+              content: [{ type: 'text', text: parts.join('\n\n') }],
+            }],
+            maxTokens: 8192,
+          }, 0, (full) => {
+            // 节流：约每 120ms 推一次，避免刷爆连接
+            const now = Date.now();
+            if (now - lastSent < 120) return;
+            lastSent = now;
+            sse({ type: 'delta', text: full });
+          });
+          const text = String(reply || '').trim();
+          if (!text) {
+            sse({ type: 'error', error: '模型未返回内容（可能被安全策略拦截或输出为空）' });
+          } else {
+            sse({ type: 'done', reply: text, provider, model });
+          }
+        } catch (error) {
+          const msg = String((error && error.message) || error);
+          sse({ type: 'error', error: msg });
+        }
+        try { res.end(); } catch (e) {}
+        return undefined;
+      }
+
       try {
         const reply = await collectLlmText(llm, {
           provider,
@@ -2450,8 +2771,8 @@ export function apply(ctx) {
             role: 'user',
             content: [{ type: 'text', text: parts.join('\n\n') }],
           }],
-          maxTokens: 1200,
-        }, 90000);
+          maxTokens: 8192,
+        }, 0);
         const text = String(reply || '').trim();
         if (!text) return send(res, 200, { ok: false, error: '模型未返回内容（可能被安全策略拦截或输出为空）' });
         return send(res, 200, { ok: true, reply: text, provider, model });
@@ -2461,8 +2782,8 @@ export function apply(ctx) {
         return send(res, 200, {
           ok: false,
           error: msg,
-          hint: /超时/.test(msg)
-            ? '模型响应超时。可稍后重试、减少选中文字量，或换一个更快的模型。'
+          hint: /中断|超时/.test(msg)
+            ? '模型长时间无响应。可稍后重试、减少选中文字量，或换一个更快的模型。'
             : (/路由|模型/.test(msg)
               ? '无法确定模型路由：请先在该会话里正常发送一条消息，让会话记录下所用模型。'
               : null),

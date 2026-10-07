@@ -1,218 +1,211 @@
-<#
-.SYNOPSIS
-    Install Engineering Mode for DeepSeek Harness + DSH_SW SolidWorks Bridge
-.DESCRIPTION
-    Installs:
-    1. The Engineering Mode Agent Preset
-    2. The DSH_SW SolidWorks bridge scripts
-    3. All skill files
-#>
+# =============================================================================
+#  install.ps1 - one-click installer for DSH Engineering Mode
+# =============================================================================
+#  WHAT THIS DOES
+#    1. Preflight: locate DSH_HOME (default ~/.dsh) and require profiles to
+#       exist (start DSH once first if they do not).
+#    2. Register the dsh-engineering-ui plugin in EVERY profile
+#       (package.json: dependencies + dsh.profile.bundles). Without this the
+#       engineering UI never loads -- this was a real gap: the 'web' profile
+#       did not declare the plugin while install targeted only 'web'.
+#    3. Sync engineering files to their install locations:
+#         engineering\tools\   -> <DSH>\.agent-presets\engineering\tools
+#         engineering\skills\  -> <DSH>\skills
+#         engineering\plugins\ -> <DSH>\profiles\<profile>\node_modules\...
+#         root scripts / yml   -> <DSH>\.agent-presets\engineering\
+#    4. Verify and remind you to restart DSH.
+#
+#  USAGE
+#    powershell -ExecutionPolicy Bypass -File install.ps1
+#    powershell -ExecutionPolicy Bypass -File install.ps1 -DryRun
+#    powershell -ExecutionPolicy Bypass -File install.ps1 -Profile desktop
+#
+#  SAFETY
+#    * Nothing is ever bulk-deleted: overwritten files are backed up as
+#      <file>.bak-sync-<stamp>.
+#    * Runtime state (current room / material / workflow) is never copied.
+#    * Idempotent - safe to run repeatedly.
+#
+#  NOTE: keep this file ASCII-only. Windows PowerShell 5.1 reads a BOM-less
+#        .ps1 as ANSI, so non-ASCII literals here would corrupt parsing.
+# =============================================================================
+param(
+    [switch]$DryRun,
+    [string[]]$Profile = @()
+)
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# Configuration
-$PRESET_ID = "engineering"
-$DSH_HOME = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
-$PRESET_DIR = Join-Path $DSH_HOME ".agent-presets" $PRESET_ID
-$SKILLS_DIR = Join-Path $DSH_HOME "skills"
-$SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
-$TOOLS_DIR = Join-Path $PRESET_DIR "tools"
-
-# Colors
-$GREEN = [console]::ForegroundColor = "Green"
-$CYAN = [console]::ForegroundColor = "Cyan"
-$YELLOW = [console]::ForegroundColor = "Yellow"
-$RED = [console]::ForegroundColor = "Red"
-$WHITE = [console]::ForegroundColor = "White"
-$RESET = [console]::ForegroundColor = "White"
-
-function Write-Title {
-    param([string]$Text)
-    Write-Host "`n--- $Text ---" -ForegroundColor Cyan
+function Say($m, $c = 'Gray') { Write-Host $m -ForegroundColor $c }
+function Rule($t) {
+    Say ""
+    Say "================================================================" Cyan
+    if ($t) { Say ("  " + $t) Cyan }
+    Say "================================================================" Cyan
 }
 
-function Write-Step {
-    param([string]$Text, [string]$Status = "INFO")
-    switch ($Status) {
-        "OK"    { Write-Host "[$Status] $Text" -ForegroundColor Green }
-        "SKIP"  { Write-Host "[$Status] $Text" -ForegroundColor Yellow }
-        "ERROR" { Write-Host "[$Status] $Text" -ForegroundColor Red }
-        default { Write-Host "[$Status] $Text" -ForegroundColor White }
-    }
-}
+$DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
 
-# Main
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  DSH Engineering Mode Installer" -ForegroundColor Cyan
-Write-Host "  + DSH_SW SolidWorks Bridge" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
+Rule "DSH Engineering Mode - one-click install"
+Say ("  source   : " + $Root) Gray
+Say ("  DSH_HOME : " + $DshHome) Gray
+if ($DryRun) { Say "  *** DRY RUN - nothing will be written ***" Yellow }
 
-# Step 1: Check DSH
-Write-Title "Step 1: Checking DSH Installation"
-if (-not (Test-Path $DSH_HOME)) {
-    Write-Step "DSH home not found: $DSH_HOME" "ERROR"
-    Write-Host "Please install DeepSeek Harness first." -ForegroundColor Red
+# ---- preflight --------------------------------------------------------------
+$ProfilesDir = Join-Path $DshHome 'profiles'
+if (-not (Test-Path $DshHome)) {
+    Say ""
+    Say ("[X] DSH_HOME not found: " + $DshHome) Red
+    Say "    Start DSH once so it creates its home directory, then re-run." Yellow
     exit 1
 }
-Write-Step "DSH home: $DSH_HOME" "OK"
-
-# Step 2: Find DSH_SW source
-Write-Title "Step 2: Finding DSH_SW Source"
-$dsh_sw_source = $null
-$possible_paths = @(
-    "$SCRIPT_DIR\..\DSH_SW-main",
-    "$SCRIPT_DIR\..\DSH_SW",
-    "$env:USERPROFILE\Desktop\DSH_SW-main",
-    "$env:USERPROFILE\Desktop\DSH_SW"
-)
-foreach ($p in $possible_paths) {
-    if (Test-Path $p) {
-        $dsh_sw_source = $p
-        break
-    }
-}
-if (-not $dsh_sw_source) {
-    Write-Step "DSH_SW source not found. Please place it next to this script or on Desktop." "WARN"
-} else {
-    Write-Step "Found DSH_SW at: $dsh_sw_source" "OK"
-}
-
-# Step 3: Install Agent Preset
-Write-Title "Step 3: Installing Agent Preset"
-$sourcePreset = Join-Path $SCRIPT_DIR "engineering"
-if (-not (Test-Path $sourcePreset)) {
-    Write-Step "Preset source not found: $sourcePreset" "ERROR"
+if (-not (Test-Path $ProfilesDir)) {
+    Say ""
+    Say ("[X] profiles directory not found: " + $ProfilesDir) Red
+    Say "    Start DSH once so it creates at least one profile, then re-run." Yellow
     exit 1
 }
 
-if (Test-Path $PRESET_DIR) {
-    Write-Step "Removing existing preset..." "SKIP"
-    Remove-Item -Recurse -Force $PRESET_DIR
-}
-New-Item -ItemType Directory -Path $PRESET_DIR -Force | Out-Null
-Copy-Item -Recurse -Path "$sourcePreset\*" -Destination $PRESET_DIR
-Write-Step "Preset installed to $PRESET_DIR" "OK"
-
-# Step 4: Copy DSH_SW tools
-Write-Title "Step 4: Installing DSH_SW Tools"
-if ($dsh_sw_source) {
-    # Create tools directory
-    New-Item -ItemType Directory -Path $TOOLS_DIR -Force | Out-Null
-    
-    # Copy main files
-    $files_to_copy = @("sw_bridge.py", "swapi.py", "solidworks-modeling.md")
-    foreach ($f in $files_to_copy) {
-        $src = Join-Path $dsh_sw_source $f
-        $dst = Join-Path $TOOLS_DIR $f
-        if (Test-Path $src) {
-            Copy-Item $src $dst -Force
-            Write-Step "Copied $f" "OK"
-        } else {
-            Write-Step "$f not found in source" "WARN"
-        }
-    }
-    
-    # Copy examples
-    $examples_src = Join-Path $dsh_sw_source "examples"
-    $examples_dst = Join-Path $TOOLS_DIR "examples"
-    if (Test-Path $examples_src) {
-        Copy-Item -Recurse $examples_src $examples_dst -Force
-        Write-Step "Copied examples/" "OK"
+$allProfiles = @()
+Get-ChildItem -Directory -LiteralPath $ProfilesDir -ErrorAction SilentlyContinue |
+    ForEach-Object { $allProfiles += $_.Name }
+if ($Profile.Count -gt 0) {
+    $targets = @()
+    foreach ($p in $Profile) {
+        if ($allProfiles -contains $p) { $targets += $p }
+        else { Say ("  [WARN] profile not found, skipped: " + $p) Yellow }
     }
 } else {
-    Write-Step "Skipping DSH_SW tools (source not found)" "SKIP"
+    $targets = $allProfiles
 }
+if ($targets.Count -eq 0) {
+    Say ""
+    Say "[X] no target profile found." Red
+    exit 1
+}
+Say ("  profiles : " + ($targets -join ', ')) Gray
 
-# Step 5: Install Skills
-Write-Title "Step 5: Installing Skills"
-$sourceSkills = Join-Path $sourcePreset "skills"
-if (Test-Path $sourceSkills) {
-    New-Item -ItemType Directory -Path $SKILLS_DIR -Force | Out-Null
-    Get-ChildItem -Path $sourceSkills -Directory | ForEach-Object {
-        $skillName = $_.Name
-        $targetSkillDir = Join-Path $SKILLS_DIR $skillName
-        if (Test-Path $targetSkillDir) {
-            Write-Step "Skill '$skillName' already exists - skipping" "SKIP"
+$UiSrc = Join-Path $Root 'engineering\plugins\dsh-engineering-ui'
+if (-not (Test-Path $UiSrc)) {
+    Say ""
+    Say ("[X] plugin source missing: " + $UiSrc) Red
+    exit 1
+}
+$Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+
+# ---- 1. register plugin in every profile ------------------------------------
+Rule "1/2  register plugin in profiles"
+$regCount = 0
+foreach ($prof in $targets) {
+    $pd  = Join-Path $ProfilesDir $prof
+    $pkg = Join-Path $pd 'package.json'
+    if (-not (Test-Path $pkg)) {
+        Say ("  [skip] " + $prof + " : no package.json") DarkGray
+        continue
+    }
+    $obj = ([System.IO.File]::ReadAllText($pkg)) | ConvertFrom-Json
+
+    $deps = [ordered]@{}
+    foreach ($p in $obj.dependencies.PSObject.Properties) { $deps[$p.Name] = $p.Value }
+    $needDep = -not $deps.Contains('dsh-engineering-ui')
+
+    $bundles = @()
+    if ($obj.dsh -and $obj.dsh.profile -and $obj.dsh.profile.bundles) {
+        foreach ($b in $obj.dsh.profile.bundles) { $bundles += $b }
+    }
+    $needBundle = ($bundles -notcontains 'dsh-engineering-ui')
+
+    if (-not $needDep -and -not $needBundle) {
+        Say ("  [same] " + $prof + " : already registered") DarkGray
+        continue
+    }
+    if ($DryRun) {
+        Say ("    [dry] " + $prof + " : would register (dep=" + $needDep +
+             " bundle=" + $needBundle + ")") DarkGray
+        $regCount++
+        continue
+    }
+
+    if ($needDep) {
+        $deps['dsh-engineering-ui'] = 'file:./node_modules/dsh-engineering-ui'
+    }
+    if ($needBundle) {
+        # Insert right before the web-app bundle so the UI shell the plugin
+        # extends is loaded first; append when the anchor is absent.
+        $idx = [array]::IndexOf($bundles, '@deepseek-ai/dsh-web-app')
+        if ($idx -lt 0) {
+            $bundles += 'dsh-engineering-ui'
         } else {
-            Copy-Item -Recurse $_.FullName $targetSkillDir
-            Write-Step "Skill '$skillName' installed" "OK"
+            $before = @($bundles[0..$idx])
+            $after  = @()
+            if ($idx + 1 -lt $bundles.Count) {
+                $after = @($bundles[($idx + 1)..($bundles.Count - 1)])
+            }
+            $bundles = $before + @('dsh-engineering-ui') + $after
         }
     }
+
+    $out = [ordered]@{}
+    $out['name']    = $obj.name
+    $out['private'] = $true
+    if ($obj.pnpm) { $out['pnpm'] = $obj.pnpm }
+    $out['dependencies'] = $deps
+    $out['dsh'] = [ordered]@{ profile = [ordered]@{ bundles = $bundles } }
+
+    Copy-Item $pkg ($pkg + '.bak-sync-' + $Stamp) -Force
+    [System.IO.File]::WriteAllText($pkg,
+        ($out | ConvertTo-Json -Depth 12),
+        (New-Object System.Text.UTF8Encoding($false)))
+    Say ("  [OK] " + $prof + " : registered") Green
+    $regCount++
 }
 
-# Step 6: Verify
-Write-Title "Step 6: Verification"
-$allOk = $true
-$checks = @(
-    @{ Name = "agent.cordis.yml"; Path = "$PRESET_DIR\agent.cordis.yml" },
-    @{ Name = "preset.yml"; Path = "$PRESET_DIR\preset.yml" },
-    @{ Name = "skills/cad-workflow"; Path = "$PRESET_DIR\skills\cad-workflow" },
-    @{ Name = "skills/sw-design"; Path = "$PRESET_DIR\skills\sw-design" },
-    @{ Name = "skills/solidworks-bridge"; Path = "$PRESET_DIR\skills\solidworks-bridge" }
-)
+# ---- 2. sync code (delegates to the maintained sync script) -----------------
+Rule "2/2  sync engineering code"
+$Sync = Join-Path $Root 'sync-to-dsh.ps1'
+if (-not (Test-Path $Sync)) {
+    Say ("  [X] sync-to-dsh.ps1 not found next to install.ps1: " + $Sync) Red
+    exit 1
+}
+$syncArgs = @()
+if ($DryRun) { $syncArgs += '-DryRun' }
+if ($Profile.Count -gt 0) { $syncArgs += @('-Profile') + $Profile }
+& powershell -NoProfile -ExecutionPolicy Bypass -File $Sync @syncArgs
 
-foreach ($check in $checks) {
-    if (Test-Path $check.Path) {
-        Write- "  [OK] $($check.Name)" "OK"
-    } else {
-        Write- "  [ERROR] $($check.Name) MISSING" "ERROR"
-        $allOk = $false
-    }
+# ---- 3. verify --------------------------------------------------------------
+Rule "verify"
+$PresetDir = Join-Path $DshHome '.agent-presets\engineering'
+$bad = 0
+function Check($name, $path) {
+    if (Test-Path $path) { Say ("  [OK]    " + $name) Green }
+    else { Say ("  [MISS]  " + $name + "  -> " + $path) Red; $script:bad++ }
+}
+Check "agent.cordis.yml"  (Join-Path $PresetDir 'agent.cordis.yml')
+Check "preset.yml"        (Join-Path $PresetDir 'preset.yml')
+Check "install-plugin.ps1" (Join-Path $PresetDir 'install-plugin.ps1')
+Check "tools/swapi.py"    (Join-Path $PresetDir 'tools\swapi.py')
+Check "tools/sw_bridge.py" (Join-Path $PresetDir 'tools\sw_bridge.py')
+Check "tools/physics/material_db.py" (Join-Path $PresetDir 'tools\physics\material_db.py')
+Check "tools/physics/gb_materials.json" (Join-Path $PresetDir 'tools\physics\gb_materials.json')
+Check "skills"            (Join-Path $DshHome 'skills')
+foreach ($prof in $targets) {
+    Check ("plugin@" + $prof) (Join-Path $ProfilesDir ($prof + '\node_modules\dsh-engineering-ui\lib\index.js'))
 }
 
-# Check DSH_SW files
-if ($dsh_sw_source) {
-    if (Test-Path "$TOOLS_DIR\sw_bridge.py" -and Test-Path "$TOOLS_DIR\swapi.py") {
-        Write- "  [OK] tools/sw_bridge.py + swapi.py" "OK"
-    } else {
-        Write- "  [ERROR] DSH_SW tools missing" "ERROR"
-        $allOk = $false
-    }
-}
-
-# Step 7: Python Dependencies
-Write-Title "Step 7: Python Dependencies Check"
-$python_ok = $true
-try {
-    $py_ver = & python --version 2>&1
-    Write- "Python: $py_ver" "OK"
-} catch {
-    Write- "Python not found - please install Python 3.8+" "ERROR"
-    $python_ok = $false
-}
-
-if ($python_ok) {
-    $deps = @("win32com", "mss", "PIL")
-    $missing = @()
-    foreach ($dep in $deps) {
-        $test_result = python -c "import $dep" 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $missing += $dep
-        }
-    }
-    if ($missing.Count -eq 0) {
-        Write- "All Python deps installed" "OK"
-    } else {
-        Write- "Missing: $($missing -join ', ') - run: pip install pywin32 mss Pillow" "WARN"
-    }
-}
-
-# Final
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "  INSTALLATION COMPLETE" -ForegroundColor Green
-Write-Host "========================================" -ForegroundColor Cyan
-
-if ($allOk) {
-    Write-Host ""
-    Write-Host "Next steps:" -ForegroundColor Yellow
-    Write-Host "  1. Restart DeepSeek Harness (refresh the Web UI)" -ForegroundColor White
-    Write-Host "  2. Start a new session and select 'Engineering Mode'" -ForegroundColor White
-    Write-Host "  3. Try: '画一个长11mm的正方形' - AI will drive SolidWorks!" -ForegroundColor White
-    Write-Host ""
-    Write-Host "Preset location: $PRESET_DIR" -ForegroundColor Gray
-    if ($dsh_sw_source) {
-        Write-Host "DSH_SW tools: $TOOLS_DIR" -ForegroundColor Gray
-    }
-} else {
-    Write-Host "Installation completed with warnings." -ForegroundColor Yellow
-}
+# ---- done -------------------------------------------------------------------
+Rule "done"
+Say ("  registered profiles : " + $regCount) Gray
+Say ("  verification errors : " + $bad) Gray
+Say ""
+Say "  NEXT STEPS" Yellow
+Say "    1. FULLY QUIT and reopen DSH." Gray
+Say "       The plugin host half and the .defense trust root are process-level," Gray
+Say "       so a page refresh alone is not enough." Gray
+Say "    2. Settings -> Agent Preset -> pick 'Engineering Mode'." Gray
+Say "    3. On first run .agent-presets\engineering\tools\.defense\runtime.json" Gray
+Say "       is generated and the defense endpoints become available." Gray
+Say ""
+Say "  Desktop and Web profiles are both supported." Gray
+Say "================================================================" Cyan
+if ($bad -gt 0) { exit 1 }

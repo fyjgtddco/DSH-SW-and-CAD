@@ -1,0 +1,12 @@
+﻿{
+  "ok": false,
+  "errors": [
+    "material.youngs_modulus_mpa（弹性模量 E）缺失 —— 已确认标准身份（GB/T 18254-2016 高碳铬轴承钢），但力学数值缺失：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 —— 请从标准原文补全后再做校核",
+    "material.yield_strength_mpa（屈服强度 σy）缺失 —— 已确认标准身份（GB/T 18254-2016 高碳铬轴承钢），但力学数值缺失：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 —— 请从标准原文补全后再做校核",
+    "material.density_kg_m3 缺失（None）—— 密度是质量与重力的计算基准，无法计算；已确认标准身份（GB/T 18254-2016 高碳铬轴承钢），但力学数值缺失：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 —— 请从标准原文补全后再做校核"
+  ],
+  "warnings": [],
+  "case": null,
+  "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_out2\\case_GCr15_fresh.json",
+  "command": "validate-case"
+}

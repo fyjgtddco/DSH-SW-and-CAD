@@ -1,0 +1,115 @@
+{
+  "kind": "domain",
+  "schema": "dsh-domain-attestation/1",
+  "at": "2026-10-05T05:19:48.328Z",
+  "ts": 1791177588328,
+  "room": "修复验证房",
+  "domain": "structural",
+  "rules_sha256": "44a147e12a663e6ff3e51dc645fad1ea38e6c43f62ca08d627b934e7135ca846",
+  "rule_count": 6,
+  "violations": [
+    {
+      "rule_id": "ST-003",
+      "target": "max_von_mises_mpa",
+      "value": 353.91,
+      "severity": "CRITICAL",
+      "message": "最大等效应力不应超过 250MPa（普通钢屈服强度）",
+      "expected": {
+        "max": 250
+      }
+    },
+    {
+      "rule_id": "GBM-003",
+      "target": "safety_factor",
+      "value": 0.11,
+      "severity": "CRITICAL",
+      "message": "安全系数必须 ≥1.0（σ ≤ σy）。国标材料的设计许用应力已含安全裕度：静载一般 n≥1.5、冲击/循环一般 n≥2.5~4.0（见 acceptance.min_safety_factor）",
+      "expected": {
+        "min": 1,
+        "max": 100
+      }
+    }
+  ],
+  "score": 0.714,
+  "checked_items": [],
+  "warnings": [
+    {
+      "rule_id": "ST-004",
+      "target": "max_displacement_mm",
+      "value": 10.0271,
+      "severity": "WARNING",
+      "message": "最大位移不应超过 5mm，避免影响装配",
+      "expected": {
+        "max": 5
+      }
+    },
+    {
+      "rule_id": "ST-005",
+      "target": "safety_factor",
+      "value": 0.11,
+      "severity": "WARNING",
+      "message": "安全系数应在 2~5 之间，过低不安全，过高过度设计",
+      "expected": {
+        "min": 2,
+        "max": 5
+      }
+    }
+  ],
+  "passed": [
+    {
+      "rule_id": "ST-001",
+      "target": "thickness_mm",
+      "value": 4.317
+    },
+    {
+      "rule_id": "ST-002",
+      "target": "fillet_mm",
+      "value": 0.8
+    },
+    {
+      "rule_id": "ST-006",
+      "target": "mass_kg",
+      "value": 0.0038
+    },
+    {
+      "rule_id": "GBM-001",
+      "target": "material_yield_mpa",
+      "value": 40
+    },
+    {
+      "rule_id": "GBM-002",
+      "target": "material_density_kg_m3",
+      "value": 1270
+    },
+    {
+      "rule_id": "GBM-002b",
+      "target": "density_is_water",
+      "value": 1
+    },
+    {
+      "rule_id": "GBM-002c",
+      "target": "material_density_missing",
+      "value": 1
+    },
+    {
+      "rule_id": "GBM-004",
+      "target": "max_von_mises_mpa",
+      "value": 353.91
+    },
+    {
+      "rule_id": "GBM-005",
+      "target": "material_uts_mpa",
+      "value": 50
+    },
+    {
+      "rule_id": "GBM-006",
+      "target": "material_e_mpa",
+      "value": 2000
+    }
+  ],
+  "source": "physics_bridge",
+  "_sig": "5n/elR+Gz5iBUm4pNnwIwhjHAb3YDmbK+LrL0FvPPwU=",
+  "_kid": "7ed5f828aa6f5d94",
+  "_ts": 1791177588328,
+  "_nonce": "f1a18b8f463d9459714b3d02e19bdeb1"
+}

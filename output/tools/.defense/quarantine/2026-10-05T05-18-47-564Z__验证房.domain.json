@@ -1,0 +1,56 @@
+{
+  "schema": "dsh-domain-attestation/1",
+  "room": "验证房",
+  "at": "2026-10-05 12:42:35",
+  "ts": 1791175355.1338458,
+  "domain": "structural",
+  "score": 0.667,
+  "violations": [],
+  "warnings": [
+    {
+      "rule_id": "ST-004",
+      "target": "max_displacement_mm",
+      "value": 6.723,
+      "severity": "WARNING",
+      "message": "最大位移不应超过 5mm，避免影响装配",
+      "expected": {
+        "max": 5.0
+      }
+    },
+    {
+      "rule_id": "ST-005",
+      "target": "safety_factor",
+      "value": 0.2,
+      "severity": "WARNING",
+      "message": "安全系数应在 2~5 之间，过低不安全，过高过度设计",
+      "expected": {
+        "min": 2.0,
+        "max": 5.0
+      }
+    }
+  ],
+  "passed": [
+    {
+      "rule_id": "ST-001",
+      "target": "thickness_mm",
+      "value": 5.455
+    },
+    {
+      "rule_id": "ST-002",
+      "target": "fillet_mm",
+      "value": 1.0
+    },
+    {
+      "rule_id": "ST-003",
+      "target": "max_von_mises_mpa",
+      "value": 204.95
+    },
+    {
+      "rule_id": "ST-006",
+      "target": "mass_kg",
+      "value": 0.0076
+    }
+  ],
+  "source": "physics_bridge",
+  "_unsigned_reason": "宿主未公布防线端点（runtime.json 缺失或无私端口）"
+}

@@ -1,0 +1,338 @@
+{
+ "grade": "20CrMnTi",
+ "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_20CrMnTi.SLDPRT",
+ "extrude": "<COMObject <unknown>>",
+ "set_material": {
+  "ok": false,
+  "material": "20CrMnTi",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 '20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi（渗碳钢，齿轮用）' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 'GB_20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi（渗碳钢，齿轮用）' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 'GB_20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi（渗碳钢，齿轮用）' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 'GB_20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi（渗碳钢，齿轮用）' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 'GB_20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7820.0,
+  "canonical": "20CrMnTi",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0000000000001,
+  "rejected_candidates": [
+   {
+    "name": "20CrMnTi",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi（渗碳钢，齿轮用）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "GB_20CrMnTi",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi（渗碳钢，齿轮用）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "GB_20CrMnTi",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi（渗碳钢，齿轮用）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "GB_20CrMnTi",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi（渗碳钢，齿轮用）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "GB_20CrMnTi",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   }
+  ],
+  "error": "没有找到与 '20CrMnTi' 材质相符的材料：尝试了 12 个候选，其中 12 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：20CrMnTi(1000); 20CrMnTi（渗碳钢，齿轮用）(1000); GB_20CrMnTi(1000); 20CrMnTi(1000)\n期望密度约 7820.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('20CrMnTi', density=7820.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "material_result": {
+  "ok": false,
+  "material": "20CrMnTi",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 '20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi（渗碳钢，齿轮用）' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 'GB_20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi（渗碳钢，齿轮用）' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 'GB_20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi（渗碳钢，齿轮用）' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 'GB_20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 '20CrMnTi（渗碳钢，齿轮用）' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符",
+   "候选 'GB_20CrMnTi' 被拒：实际密度 1000(plastic) 与期望 7820(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7820.0,
+  "canonical": "20CrMnTi",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0000000000001,
+  "rejected_candidates": [
+   {
+    "name": "20CrMnTi",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi（渗碳钢，齿轮用）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "GB_20CrMnTi",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi（渗碳钢，齿轮用）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "GB_20CrMnTi",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi（渗碳钢，齿轮用）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "GB_20CrMnTi",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "20CrMnTi（渗碳钢，齿轮用）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   },
+   {
+    "name": "GB_20CrMnTi",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7820.0
+   }
+  ],
+  "error": "没有找到与 '20CrMnTi' 材质相符的材料：尝试了 12 个候选，其中 12 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：20CrMnTi(1000); 20CrMnTi（渗碳钢，齿轮用）(1000); GB_20CrMnTi(1000); 20CrMnTi(1000)\n期望密度约 7820.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('20CrMnTi', density=7820.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "massprops": {
+  "ok": true,
+  "volume_mm3": 32000.000000000004,
+  "surface_area_mm2": 8800.0,
+  "mass_kg": 0.03200000000000001,
+  "density_kg_m3": 1000.0000000000001,
+  "center_of_mass_mm": [
+   40.0,
+   20.0,
+   5.0
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "save": {
+  "ok": true,
+  "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_20CrMnTi.SLDPRT",
+  "saved": true,
+  "updated": true,
+  "content_changed": true,
+  "content_same": false,
+  "md5_before": "4e266a16d7a80b5e22431f6555feb9d8",
+  "md5_after": "f9b43e1873a2b8b542b56e5b35f3f517",
+  "rc": 0,
+  "size": 60222,
+  "note": "内容已更新",
+  "applied_material": "20CrMnTi",
+  "material_source": "explicit(new_part material=)",
+  "material_attestation": {
+   "file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_20CrMnTi.SLDPRT.material.json",
+   "material": "20CrMnTi",
+   "density_kg_m3": 1000.0000000000001,
+   "family": "water",
+   "signed": true
+  }
+ },
+ "save_material_summary": {
+  "ok": false,
+  "error": "没有找到与 '20CrMnTi' 材质相符的材料：尝试了 12 个候选，其中 12 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：20CrMnTi(1000); 20CrMnTi（渗碳钢，齿轮用）(1000); GB_20CrMnTi(1000); 20CrMnTi(1000)\n期望密度约 7820.0 kg/m³（steel 族）。",
+  "density_before_kg_m3": 1000.0000000000001,
+  "expected_density_kg_m3": 7820.0
+ },
+ "part_exists": true,
+ "attestation_exists": true,
+ "attestation": {
+  "kind": "material",
+  "schema": "dsh-material-attestation/1",
+  "room": "",
+  "at": "2026-10-07T05:56:52.285Z",
+  "ts": 1791352612285,
+  "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_20CrMnTi.SLDPRT",
+  "part_name": "DSH_bugA_20CrMnTi",
+  "part_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_20CrMnTi.SLDPRT",
+  "part_sha256": "d3c962e7934a53e02a9e362221d7de85b2bca3889ce401e0b9baee61319d013e",
+  "part_size_bytes": 60222,
+  "part_md5": "f9b43e1873a2b8b542b56e5b35f3f517",
+  "applied_name": "20CrMnTi",
+  "density_kg_m3": 1000.0000000000001,
+  "source": "explicit(new_part material=)",
+  "attested_material": "20CrMnTi",
+  "attested_density_kg_m3": 1000.0000000000001,
+  "attested_family": "water",
+  "ok": false,
+  "approximate_match": false,
+  "material_mismatch_rejected": true,
+  "requested_material": "20CrMnTi",
+  "attested_material_name": "20CrMnTi",
+  "cross_standard": false,
+  "cross_standard_note": "null",
+  "expected_yield_mpa": 835,
+  "expected_density_kg_m3": 7820,
+  "applied_yield_mpa": 835,
+  "applied_density_kg_m3": 7820,
+  "yield_deviation_pct": 0,
+  "_sig": "tLxjwzauk5wSmLIosa4EEtohSvYA6XpzQamcndKvb5A=",
+  "_kid": "7633096ee4ddb3f9",
+  "_ts": 1791352612286,
+  "_nonce": "66dc0405db8fceecfb6c2aaabd460f3c"
+ }
+}

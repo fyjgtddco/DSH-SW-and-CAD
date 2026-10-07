@@ -1,0 +1,1228 @@
+{
+  "schema": "dsh-gb-materials/1",
+  "source": "《国标材料官方标准汇总》（标准身份）+ 《国标材料力学性能数据（E-ν-σy-σb-ρ）》（全 5 字段性能，最终版）",
+  "note": "本文件是国标材料的【唯一数据源】，逐字段记录来源层级：\n· GB_ORIGINAL     国标原文（openstd 全文 PDF 文本提取）\n· GB_GRADE_DEF    国标牌号定义（如 HT200 = σb≥200）\n· GB_STIPULATED   国标规定值（转引自行业资料，非官方全文提取）\n· GB_SCAN         国标扫描页无法文本提取，按手册填\n· GB_HARDNESS_ONLY 国标仅给硬度，不列 σy/σb\n· HANDBOOK        手册值（E/ν/ρ 全部属此 —— GB 产品标准不列这些常数）\n报告据此区分『可宣称国标』（仅 GB_ORIGINAL/GB_GRADE_DEF）与『手册值/转引值』（不得宣称符合国标）。\n⚠️ 手册值与转引值为工程常用参考，定型件建议与实体《机械设计手册》核对。",
+  "material_count": 18,
+  "_schema_hint": {
+    "materials": {
+      "<材料ID>": {
+        "name": "标准全名（含标准号）",
+        "name_cn": "中文牌号名",
+        "standard": "标准号与版本",
+        "standard_url": "官方标准查询地址",
+        "standard_year": "标准年份",
+        "E_mpa": "弹性模量 MPa —— FEA 必需",
+        "nu": "泊松比 —— FEA 必需",
+        "yield_mpa": "屈服强度 MPa —— 强度校核必需",
+        "uts_mpa": "抗拉强度 MPa —— 疲劳校核需要",
+        "density_kg_m3": "密度 kg/m³ —— 质量与重力必需",
+        "aliases": [
+          "图纸上可能出现的其它写法"
+        ]
+      }
+    }
+  },
+  "materials": {
+    "GB_Q235": {
+      "name": "GB/T 700-2006 碳素结构钢",
+      "name_cn": "Q235（碳素结构钢）",
+      "standard": "GB/T 700-2006 碳素结构钢（2006）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T700-2006",
+      "standard_year": 2006,
+      "E_mpa": 206000.0,
+      "nu": 0.3,
+      "yield_mpa": 235.0,
+      "uts_mpa": 375.0,
+      "density_kg_m3": 7850.0,
+      "aliases": [
+        "Q235",
+        "Q235（碳素结构钢）",
+        "AISI 1020",
+        "Plain Carbon Steel",
+        "碳钢"
+      ],
+      "equivalent_id": "ST_API_S235",
+      "equivalent_note": "Q235 属碳素结构钢，等效 EN S235JR（项目原有映射）",
+      "values_status": "可用：5 字段齐全（yield_mpa, uts_mpa 来自国标；其余为手册值）",
+      "standard_mechanics": "GB/T 700-2006",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 235.0,
+          "status": "value",
+          "source_layer": "GB_GRADE_DEF",
+          "detail": "E/ν/ρ=手册(机械设计手册·成大先, 钢206GPa/ν0.3/ρ7.85); σy=235为牌号定义屈服点(Q235); σb取牌号名义下限(375~500); GB/T 700 全文未公开(openstd 404)"
+        },
+        "uts_mpa": {
+          "value": 375.0,
+          "status": "value",
+          "source_layer": "GB_GRADE_DEF",
+          "detail": "E/ν/ρ=手册(机械设计手册·成大先, 钢206GPa/ν0.3/ρ7.85); σy=235为牌号定义屈服点(Q235); σb取牌号名义下限(375~500); GB/T 700 全文未公开(openstd 404)"
+        },
+        "E_mpa": {
+          "value": 206000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "E/ν/ρ=手册(机械设计手册·成大先, 钢206GPa/ν0.3/ρ7.85); σy=235为牌号定义屈服点(Q235); σb取牌号名义下限(375~500); GB/T 700 全文未公开(openstd 404)"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "E/ν/ρ=手册(机械设计手册·成大先, 钢206GPa/ν0.3/ρ7.85); σy=235为牌号定义屈服点(Q235); σb取牌号名义下限(375~500); GB/T 700 全文未公开(openstd 404)"
+        },
+        "table_class": "13可算",
+        "table_note": "官方全文未公开：openstd 不收录该推荐性标准全文，无法从原文提取；235 为牌号屈服名义下限，未从原文核实；建议以项目兜底为准",
+        "density_kg_m3": {
+          "value": 7850.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "E/ν/ρ=手册(机械设计手册·成大先, 钢206GPa/ν0.3/ρ7.85); σy=235为牌号定义屈服点(Q235); σb取牌号名义下限(375~500); GB/T 700 全文未公开(openstd 404)"
+        }
+      },
+      "missing_fields": [],
+      "category": "碳素结构钢",
+      "table_note": "E/ν/ρ=手册(机械设计手册·成大先, 钢206GPa/ν0.3/ρ7.85); σy=235为牌号定义屈服点(Q235); σb取牌号名义下限(375~500); GB/T 700 全文未公开(openstd 404)",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_GRADE_DEF",
+        "uts_mpa": "GB_GRADE_DEF",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_45#": {
+      "name": "GB/T 699-2015 优质碳素结构钢",
+      "name_cn": "45#（45 钢）（优质碳素结构钢）",
+      "standard": "GB/T 699-2015 优质碳素结构钢（2015）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T699-2015",
+      "standard_year": 2015,
+      "E_mpa": 206000.0,
+      "nu": 0.3,
+      "yield_mpa": 355.0,
+      "uts_mpa": 600.0,
+      "density_kg_m3": 7850.0,
+      "aliases": [
+        "45#",
+        "45#（45 钢）（优质碳素结构钢）",
+        "45",
+        "AISI 1045",
+        "1045"
+      ],
+      "equivalent_id": "ST_API_4140",
+      "equivalent_note": "45 钢调质后接近 AISI 4140（项目原有映射）",
+      "values_status": "可用：5 字段齐全（yield_mpa, uts_mpa 来自国标；其余为手册值）",
+      "standard_mechanics": "GB/T 699-2015",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 355.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 699-2015 表2, 文本提取); E/ν/ρ=手册"
+        },
+        "uts_mpa": {
+          "value": 600.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 699-2015 表2, 文本提取); E/ν/ρ=手册"
+        },
+        "E_mpa": {
+          "value": 206000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 699-2015 表2, 文本提取); E/ν/ρ=手册"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 699-2015 表2, 文本提取); E/ν/ρ=手册"
+        },
+        "table_class": "13可算",
+        "table_note": "已从官方全文提取：GB/T 699-2015 表2，牌号45行（试样25mm，正火/淬火+回火）",
+        "density_kg_m3": {
+          "value": 7850.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 699-2015 表2, 文本提取); E/ν/ρ=手册"
+        }
+      },
+      "missing_fields": [],
+      "category": "优质碳素结构钢",
+      "table_note": "σy/σb=国标原文(GB/T 699-2015 表2, 文本提取); E/ν/ρ=手册",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_ORIGINAL",
+        "uts_mpa": "GB_ORIGINAL",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_40Cr": {
+      "name": "GB/T 3077-2015 合金结构钢",
+      "name_cn": "40Cr（合金结构钢，调质）",
+      "standard": "GB/T 3077-2015 合金结构钢（2015）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T3077-2015",
+      "standard_year": 2015,
+      "E_mpa": 206000.0,
+      "nu": 0.3,
+      "yield_mpa": 785.0,
+      "uts_mpa": 980.0,
+      "density_kg_m3": 7820.0,
+      "aliases": [
+        "40Cr",
+        "40Cr（合金结构钢，调质）",
+        "AISI 5140",
+        "5140",
+        "Chromium Steel"
+      ],
+      "equivalent_id": "ST_API_4140",
+      "equivalent_note": "40Cr 调质钢等效 AISI 4140（项目原有映射）",
+      "values_status": "可用：5 字段齐全（全部为手册值/转引值）",
+      "standard_mechanics": "GB/T 3077-2015",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 785.0,
+          "status": "value",
+          "source_layer": "GB_STIPULATED",
+          "detail": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=785、σb=980 为 GB/T 3077-2015 规定值(调质态)，引自 Xometry/机电之家等转引标准规定值；E/ν/ρ=手册；项目原等效4140(655)偏保守(40Cr真值785更高)"
+        },
+        "uts_mpa": {
+          "value": 980.0,
+          "status": "value",
+          "source_layer": "GB_STIPULATED",
+          "detail": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=785、σb=980 为 GB/T 3077-2015 规定值(调质态)，引自 Xometry/机电之家等转引标准规定值；E/ν/ρ=手册；项目原等效4140(655)偏保守(40Cr真值785更高)"
+        },
+        "E_mpa": {
+          "value": 206000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=785、σb=980 为 GB/T 3077-2015 规定值(调质态)，引自 Xometry/机电之家等转引标准规定值；E/ν/ρ=手册；项目原等效4140(655)偏保守(40Cr真值785更高)"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=785、σb=980 为 GB/T 3077-2015 规定值(调质态)，引自 Xometry/机电之家等转引标准规定值；E/ν/ρ=手册；项目原等效4140(655)偏保守(40Cr真值785更高)"
+        },
+        "table_class": "13可算",
+        "table_note": "官方全文力学表页为扫描图片（无文本层），自动化无法从原文提取；需从 openstd 在线预览图片人工读取，或保持项目等效兜底",
+        "density_kg_m3": {
+          "value": 7820.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=785、σb=980 为 GB/T 3077-2015 规定值(调质态)，引自 Xometry/机电之家等转引标准规定值；E/ν/ρ=手册；项目原等效4140(655)偏保守(40Cr真值785更高)"
+        }
+      },
+      "missing_fields": [],
+      "category": "合金结构钢(调质)",
+      "table_note": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=785、σb=980 为 GB/T 3077-2015 规定值(调质态)，引自 Xometry/机电之家等转引标准规定值；E/ν/ρ=手册；项目原等效4140(655)偏保守(40Cr真值785更高)",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_STIPULATED",
+        "uts_mpa": "GB_STIPULATED",
+        "density_kg_m3": "HANDBOOK"
+      },
+      "layer_fix_note": "已按数据表自述修正层级：yield_mpa=GB_SCAN; uts_mpa=GB_SCAN"
+    },
+    "GB_6061_T6": {
+      "name": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 6061）；GB/T 6892-2023 一般工业用铝及铝合金挤压型材（T6 状态）",
+      "name_cn": "6061-T6（铝合金，变形铝）",
+      "standard": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 6061）；GB/T 6892-2023 一般工业用铝及铝合金挤压型材（T6 状态）（2020）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T3190-2020",
+      "standard_year": 2020,
+      "E_mpa": 68900.0,
+      "nu": 0.33,
+      "yield_mpa": 276.0,
+      "uts_mpa": 310.0,
+      "density_kg_m3": 2700.0,
+      "aliases": [
+        "6061-T6",
+        "6061-T6（铝合金，变形铝）",
+        "6061",
+        "Aluminum Alloy 6061",
+        "铝合金"
+      ],
+      "equivalent_id": "AL_6061_T6",
+      "equivalent_note": "6061-T6 与项目内置同名铝材一致",
+      "values_status": "可用：5 字段齐全（全部为手册值/转引值）",
+      "standard_mechanics": "GB/T 6892-2023（力学）/ GB/T 3190-2020（成分）",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 276.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 6892-2023 为扫描页; E/ν/ρ/σy/σb=手册(AZOM/机械数控人/铝合金手册, T6); 与项目原等效值一致"
+        },
+        "uts_mpa": {
+          "value": 310.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 6892-2023 为扫描页; E/ν/ρ/σy/σb=手册(AZOM/机械数控人/铝合金手册, T6); 与项目原等效值一致"
+        },
+        "E_mpa": {
+          "value": 68900.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 6892-2023 为扫描页; E/ν/ρ/σy/σb=手册(AZOM/机械数控人/铝合金手册, T6); 与项目原等效值一致"
+        },
+        "nu": {
+          "value": 0.33,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 6892-2023 为扫描页; E/ν/ρ/σy/σb=手册(AZOM/机械数控人/铝合金手册, T6); 与项目原等效值一致"
+        },
+        "table_class": "13可算",
+        "table_note": "力学数据在 GB/T 6892-2023，该官方PDF为纯图片扫描（全43页无文本层），无法文本提取；需人工读图或用项目等效",
+        "density_kg_m3": {
+          "value": 2700.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 6892-2023 为扫描页; E/ν/ρ/σy/σb=手册(AZOM/机械数控人/铝合金手册, T6); 与项目原等效值一致"
+        }
+      },
+      "missing_fields": [],
+      "category": "变形铝合金(T6)",
+      "table_note": "GB/T 6892-2023 为扫描页; E/ν/ρ/σy/σb=手册(AZOM/机械数控人/铝合金手册, T6); 与项目原等效值一致",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "HANDBOOK",
+        "uts_mpa": "HANDBOOK",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_304": {
+      "name": "GB/T 20878-2024 不锈钢 牌号及化学成分",
+      "name_cn": "304 / 06Cr19Ni10（奥氏体不锈钢）",
+      "standard": "GB/T 20878-2024 不锈钢 牌号及化学成分（2024）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T20878-2024",
+      "standard_year": 2024,
+      "E_mpa": 193000.0,
+      "nu": 0.3,
+      "yield_mpa": 205.0,
+      "uts_mpa": 515.0,
+      "density_kg_m3": 7930.0,
+      "aliases": [
+        "304 / 06Cr19Ni10",
+        "304",
+        "304 / 06Cr19Ni10（奥氏体不锈钢）",
+        "AISI 304",
+        "Stainless Steel",
+        "不锈钢",
+        "06Cr19Ni10",
+        "S30408",
+        "0Cr18Ni9"
+      ],
+      "equivalent_id": "ST_STAINLESS_304",
+      "equivalent_note": "304 与项目内置不锈钢一致",
+      "values_status": "可用：5 字段齐全（yield_mpa, uts_mpa 来自国标；其余为手册值）",
+      "standard_mechanics": "GB/T 3280-2015（力学）/ GB/T 20878-2024（成分）",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 205.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册"
+        },
+        "uts_mpa": {
+          "value": 515.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册"
+        },
+        "E_mpa": {
+          "value": 193000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册"
+        },
+        "table_class": "13可算",
+        "table_note": "已从官方全文提取：GB/T 3280-2015 表，06Cr19Ni10 固溶退火态（S30408）",
+        "density_kg_m3": {
+          "value": 7930.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册"
+        }
+      },
+      "missing_fields": [],
+      "category": "奥氏体不锈钢 06Cr19Ni10",
+      "table_note": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_ORIGINAL",
+        "uts_mpa": "GB_ORIGINAL",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_Q355": {
+      "name": "GB/T 1591-2018 低合金高强度结构钢",
+      "name_cn": "Q355（旧称 Q345）（低合金高强度结构钢）",
+      "standard": "GB/T 1591-2018 低合金高强度结构钢（2018）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T1591-2018",
+      "standard_year": 2018,
+      "E_mpa": 206000.0,
+      "nu": 0.3,
+      "yield_mpa": 355.0,
+      "uts_mpa": 470.0,
+      "density_kg_m3": 7850.0,
+      "aliases": [
+        "Q355",
+        "Q355（旧称 Q345）（低合金高强度结构钢）",
+        "Q345",
+        "Q345B",
+        "Q355B"
+      ],
+      "equivalent_id": "ST_API_S235",
+      "equivalent_note": "低合金钢暂按项目原有碳钢映射（偏低保守）",
+      "values_status": "可用：5 字段齐全（yield_mpa, uts_mpa 来自国标；其余为手册值）",
+      "standard_mechanics": "GB/T 1591-2018",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 355.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 1591-2018, 厚≤16mm σy=355, σb 470~630 取下限); E/ν/ρ=手册; 注: 项目原等效S235JR(235)偏低(真值355)"
+        },
+        "uts_mpa": {
+          "value": 470.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 1591-2018, 厚≤16mm σy=355, σb 470~630 取下限); E/ν/ρ=手册; 注: 项目原等效S235JR(235)偏低(真值355)"
+        },
+        "E_mpa": {
+          "value": 206000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 1591-2018, 厚≤16mm σy=355, σb 470~630 取下限); E/ν/ρ=手册; 注: 项目原等效S235JR(235)偏低(真值355)"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 1591-2018, 厚≤16mm σy=355, σb 470~630 取下限); E/ν/ρ=手册; 注: 项目原等效S235JR(235)偏低(真值355)"
+        },
+        "table_class": "13可算",
+        "table_note": "已从官方全文提取：GB/T 1591-2018 表，Q355 B/C 级厚度≤16mm（注：随厚度增大屈服下降）",
+        "density_kg_m3": {
+          "value": 7850.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 1591-2018, 厚≤16mm σy=355, σb 470~630 取下限); E/ν/ρ=手册; 注: 项目原等效S235JR(235)偏低(真值355)"
+        }
+      },
+      "missing_fields": [],
+      "category": "低合金高强度结构钢",
+      "table_note": "σy/σb=国标原文(GB/T 1591-2018, 厚≤16mm σy=355, σb 470~630 取下限); E/ν/ρ=手册; 注: 项目原等效S235JR(235)偏低(真值355)",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_ORIGINAL",
+        "uts_mpa": "GB_ORIGINAL",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_20CrMnTi": {
+      "name": "GB/T 3077-2015 合金结构钢",
+      "name_cn": "20CrMnTi（渗碳钢，齿轮用）",
+      "standard": "GB/T 3077-2015 合金结构钢（2015）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T3077-2015",
+      "standard_year": 2015,
+      "E_mpa": 206000.0,
+      "nu": 0.25,
+      "yield_mpa": 835.0,
+      "uts_mpa": 1080.0,
+      "density_kg_m3": 7820.0,
+      "aliases": [
+        "20CrMnTi",
+        "20CrMnTi（渗碳钢，齿轮用）"
+      ],
+      "equivalent_id": "ST_API_4140",
+      "equivalent_note": "渗碳钢按项目原有合金钢映射",
+      "values_status": "可用：5 字段齐全（全部为手册值/转引值）",
+      "standard_mechanics": "GB/T 3077-2015",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 835.0,
+          "status": "value",
+          "source_layer": "GB_STIPULATED",
+          "detail": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=835(部分资料≥850)、σb=1080 为 GB/T 3077-2015 规定值(渗碳淬火回火)，引自标准规定值；ν=0.25(机电之家转引)、E/ρ=手册；项目原等效4140(655)偏保守(真值835)"
+        },
+        "uts_mpa": {
+          "value": 1080.0,
+          "status": "value",
+          "source_layer": "GB_STIPULATED",
+          "detail": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=835(部分资料≥850)、σb=1080 为 GB/T 3077-2015 规定值(渗碳淬火回火)，引自标准规定值；ν=0.25(机电之家转引)、E/ρ=手册；项目原等效4140(655)偏保守(真值835)"
+        },
+        "E_mpa": {
+          "value": 206000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=835(部分资料≥850)、σb=1080 为 GB/T 3077-2015 规定值(渗碳淬火回火)，引自标准规定值；ν=0.25(机电之家转引)、E/ρ=手册；项目原等效4140(655)偏保守(真值835)"
+        },
+        "nu": {
+          "value": 0.25,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=835(部分资料≥850)、σb=1080 为 GB/T 3077-2015 规定值(渗碳淬火回火)，引自标准规定值；ν=0.25(机电之家转引)、E/ρ=手册；项目原等效4140(655)偏保守(真值835)"
+        },
+        "table_class": "13可算",
+        "table_note": "同 40Cr：GB/T 3077-2015 力学表页为扫描图片，官方全文无法文本提取",
+        "density_kg_m3": {
+          "value": 7820.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=835(部分资料≥850)、σb=1080 为 GB/T 3077-2015 规定值(渗碳淬火回火)，引自标准规定值；ν=0.25(机电之家转引)、E/ρ=手册；项目原等效4140(655)偏保守(真值835)"
+        }
+      },
+      "missing_fields": [],
+      "category": "渗碳齿轮钢",
+      "table_note": "GB/T 3077-2015 力学表为扫描页，无法文本提取；σy=835(部分资料≥850)、σb=1080 为 GB/T 3077-2015 规定值(渗碳淬火回火)，引自标准规定值；ν=0.25(机电之家转引)、E/ρ=手册；项目原等效4140(655)偏保守(真值835)",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_STIPULATED",
+        "uts_mpa": "GB_STIPULATED",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_GCr15": {
+      "name": "GB/T 18254-2016 高碳铬轴承钢",
+      "name_cn": "GCr15（高碳铬轴承钢）",
+      "standard": "GB/T 18254-2016 高碳铬轴承钢（2016）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T18254-2016",
+      "standard_year": 2016,
+      "E_mpa": 206000.0,
+      "nu": 0.3,
+      "yield_mpa": 1300.0,
+      "uts_mpa": 1617.0,
+      "density_kg_m3": 7810.0,
+      "aliases": [
+        "GCr15",
+        "GCr15（高碳铬轴承钢）"
+      ],
+      "equivalent_id": null,
+      "equivalent_note": "项目内无可信的等效材料 —— 请从标准原文补全数值后再校核",
+      "values_status": "可用：5 字段齐全（全部为手册值/转引值）",
+      "standard_mechanics": "GB/T 18254-2016",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 1300.0,
+          "status": "value",
+          "source_layer": "GB_HARDNESS_ONLY",
+          "detail": "GB/T 18254-2016 仅退火硬度179~207HBW，不列屈服/抗拉；σb=1617、σy=1300 均取淬火+低温回火态手册值(引自 wxjnjs 等行业资料，其明确归属 GB/T 18254 体系)；热处理强依赖，使用前需确认项目实际热处理状态；E/ν/ρ=手册"
+        },
+        "uts_mpa": {
+          "value": 1617.0,
+          "status": "value",
+          "source_layer": "GB_HARDNESS_ONLY",
+          "detail": "GB/T 18254-2016 仅退火硬度179~207HBW，不列屈服/抗拉；σb=1617、σy=1300 均取淬火+低温回火态手册值(引自 wxjnjs 等行业资料，其明确归属 GB/T 18254 体系)；热处理强依赖，使用前需确认项目实际热处理状态；E/ν/ρ=手册"
+        },
+        "E_mpa": {
+          "value": 206000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 18254-2016 仅退火硬度179~207HBW，不列屈服/抗拉；σb=1617、σy=1300 均取淬火+低温回火态手册值(引自 wxjnjs 等行业资料，其明确归属 GB/T 18254 体系)；热处理强依赖，使用前需确认项目实际热处理状态；E/ν/ρ=手册"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 18254-2016 仅退火硬度179~207HBW，不列屈服/抗拉；σb=1617、σy=1300 均取淬火+低温回火态手册值(引自 wxjnjs 等行业资料，其明确归属 GB/T 18254 体系)；热处理强依赖，使用前需确认项目实际热处理状态；E/ν/ρ=手册"
+        },
+        "table_class": "5留空",
+        "table_note": "官方仅给退火硬度 179~207 HBW，不列抗拉/屈服（轴承钢标准特性，符合测试团队留空原因）",
+        "density_kg_m3": {
+          "value": 7810.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 18254-2016 仅退火硬度179~207HBW，不列屈服/抗拉；σb=1617、σy=1300 均取淬火+低温回火态手册值(引自 wxjnjs 等行业资料，其明确归属 GB/T 18254 体系)；热处理强依赖，使用前需确认项目实际热处理状态；E/ν/ρ=手册"
+        }
+      },
+      "missing_fields": [],
+      "category": "高碳铬轴承钢",
+      "table_note": "GB/T 18254-2016 仅退火硬度179~207HBW，不列屈服/抗拉；σb=1617、σy=1300 均取淬火+低温回火态手册值(引自 wxjnjs 等行业资料，其明确归属 GB/T 18254 体系)；热处理强依赖，使用前需确认项目实际热处理状态；E/ν/ρ=手册",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_HARDNESS_ONLY",
+        "uts_mpa": "GB_HARDNESS_ONLY",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_HT200": {
+      "name": "GB/T 9439-2023 灰铸铁件",
+      "name_cn": "HT200（灰铸铁）",
+      "standard": "GB/T 9439-2023 灰铸铁件（2023）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T9439-2023",
+      "standard_year": 2023,
+      "E_mpa": 110000.0,
+      "nu": 0.25,
+      "yield_mpa": null,
+      "uts_mpa": 200.0,
+      "density_kg_m3": 7200.0,
+      "aliases": [
+        "HT200",
+        "HT200（灰铸铁）",
+        "Gray Cast Iron",
+        "灰铸铁"
+      ],
+      "equivalent_id": null,
+      "equivalent_note": "项目内无可信的等效材料 —— 请从标准原文补全数值后再校核",
+      "values_status": "待补全：缺 yield_mpa",
+      "standard_mechanics": "GB/T 9439-2023",
+      "gb_data": {
+        "yield_mpa": {
+          "value": null,
+          "status": "missing",
+          "source_layer": "MISSING",
+          "detail": "σb=200为牌号定义(GB/T 9439 ≥200); σy建议留空(灰铸铁无屈服平台, 脆性); E/ν/ρ=手册(灰铸铁E 113~157GPa取≈110, ν0.23~0.27)"
+        },
+        "uts_mpa": {
+          "value": 200.0,
+          "status": "value",
+          "source_layer": "GB_GRADE_DEF",
+          "detail": "σb=200为牌号定义(GB/T 9439 ≥200); σy建议留空(灰铸铁无屈服平台, 脆性); E/ν/ρ=手册(灰铸铁E 113~157GPa取≈110, ν0.23~0.27)"
+        },
+        "E_mpa": {
+          "value": 110000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=200为牌号定义(GB/T 9439 ≥200); σy建议留空(灰铸铁无屈服平台, 脆性); E/ν/ρ=手册(灰铸铁E 113~157GPa取≈110, ν0.23~0.27)"
+        },
+        "nu": {
+          "value": 0.25,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=200为牌号定义(GB/T 9439 ≥200); σy建议留空(灰铸铁无屈服平台, 脆性); E/ν/ρ=手册(灰铸铁E 113~157GPa取≈110, ν0.23~0.27)"
+        },
+        "table_class": "5留空",
+        "table_note": "官方全文未公开（推荐性）；灰铸铁无屈服平台，牌号'200'=最小抗拉强度；未从原文核实",
+        "density_kg_m3": {
+          "value": 7200.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=200为牌号定义(GB/T 9439 ≥200); σy建议留空(灰铸铁无屈服平台, 脆性); E/ν/ρ=手册(灰铸铁E 113~157GPa取≈110, ν0.23~0.27)"
+        }
+      },
+      "missing_fields": [
+        "yield_mpa"
+      ],
+      "category": "灰铸铁",
+      "table_note": "σb=200为牌号定义(GB/T 9439 ≥200); σy建议留空(灰铸铁无屈服平台, 脆性); E/ν/ρ=手册(灰铸铁E 113~157GPa取≈110, ν0.23~0.27)",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "MISSING",
+        "uts_mpa": "GB_GRADE_DEF",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_QT500_7": {
+      "name": "GB/T 1348-2019 球墨铸铁件",
+      "name_cn": "QT500-7（球墨铸铁）",
+      "standard": "GB/T 1348-2019 球墨铸铁件（2019）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T1348-2019",
+      "standard_year": 2019,
+      "E_mpa": 170000.0,
+      "nu": 0.3,
+      "yield_mpa": 320.0,
+      "uts_mpa": 500.0,
+      "density_kg_m3": 7300.0,
+      "aliases": [
+        "QT500-7",
+        "QT500-7（球墨铸铁）",
+        "QT500"
+      ],
+      "equivalent_id": null,
+      "equivalent_note": "项目内无可信的等效材料 —— 请从标准原文补全数值后再校核",
+      "values_status": "可用：5 字段齐全（yield_mpa, uts_mpa 来自国标；其余为手册值）",
+      "standard_mechanics": "GB/T 1348-2019",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 320.0,
+          "status": "value",
+          "source_layer": "GB_GRADE_DEF",
+          "detail": "σy/σb=牌号定义(GB/T 1348, Re≥320/σb≥500); E/ν/ρ=手册(球铁E 140~180GPa取≈170, ν0.3)"
+        },
+        "uts_mpa": {
+          "value": 500.0,
+          "status": "value",
+          "source_layer": "GB_GRADE_DEF",
+          "detail": "σy/σb=牌号定义(GB/T 1348, Re≥320/σb≥500); E/ν/ρ=手册(球铁E 140~180GPa取≈170, ν0.3)"
+        },
+        "E_mpa": {
+          "value": 170000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=牌号定义(GB/T 1348, Re≥320/σb≥500); E/ν/ρ=手册(球铁E 140~180GPa取≈170, ν0.3)"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=牌号定义(GB/T 1348, Re≥320/σb≥500); E/ν/ρ=手册(球铁E 140~180GPa取≈170, ν0.3)"
+        },
+        "table_class": "5留空",
+        "table_note": "官方全文未公开（推荐性）；球铁牌号'500/7'定义抗拉≥500、伸长率≥7%；未从原文核实",
+        "density_kg_m3": {
+          "value": 7300.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=牌号定义(GB/T 1348, Re≥320/σb≥500); E/ν/ρ=手册(球铁E 140~180GPa取≈170, ν0.3)"
+        }
+      },
+      "missing_fields": [],
+      "category": "球墨铸铁",
+      "table_note": "σy/σb=牌号定义(GB/T 1348, Re≥320/σb≥500); E/ν/ρ=手册(球铁E 140~180GPa取≈170, ν0.3)",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_GRADE_DEF",
+        "uts_mpa": "GB_GRADE_DEF",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_7075_T6": {
+      "name": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 7075）",
+      "name_cn": "7075-T6（高强铝合金）",
+      "standard": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 7075）（2020）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T3190-2020",
+      "standard_year": 2020,
+      "E_mpa": 71700.0,
+      "nu": 0.33,
+      "yield_mpa": 503.0,
+      "uts_mpa": 572.0,
+      "density_kg_m3": 2810.0,
+      "aliases": [
+        "7075-T6",
+        "7075-T6（高强铝合金）",
+        "7075"
+      ],
+      "equivalent_id": "AL_7075",
+      "equivalent_note": "7075-T6 与项目内置铝材一致",
+      "values_status": "可用：5 字段齐全（全部为手册值/转引值）",
+      "standard_mechanics": "GB/T 6892-2023（力学）/ GB/T 3190-2020（成分）",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 503.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 6892-2023 扫描页; E/ν/ρ/σy/σb=手册(机械数控人/铝合金手册, T6); 与项目原等效值一致"
+        },
+        "uts_mpa": {
+          "value": 572.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 6892-2023 扫描页; E/ν/ρ/σy/σb=手册(机械数控人/铝合金手册, T6); 与项目原等效值一致"
+        },
+        "E_mpa": {
+          "value": 71700.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 6892-2023 扫描页; E/ν/ρ/σy/σb=手册(机械数控人/铝合金手册, T6); 与项目原等效值一致"
+        },
+        "nu": {
+          "value": 0.33,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 6892-2023 扫描页; E/ν/ρ/σy/σb=手册(机械数控人/铝合金手册, T6); 与项目原等效值一致"
+        },
+        "table_class": "13可算",
+        "table_note": "同 6061-T6：GB/T 6892-2023 官方PDF为纯图片扫描，无法文本提取",
+        "density_kg_m3": {
+          "value": 2810.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 6892-2023 扫描页; E/ν/ρ/σy/σb=手册(机械数控人/铝合金手册, T6); 与项目原等效值一致"
+        }
+      },
+      "missing_fields": [],
+      "category": "高强铝合金(T6)",
+      "table_note": "GB/T 6892-2023 扫描页; E/ν/ρ/σy/σb=手册(机械数控人/铝合金手册, T6); 与项目原等效值一致",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "HANDBOOK",
+        "uts_mpa": "HANDBOOK",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_2A12": {
+      "name": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 2A12）",
+      "name_cn": "2A12（旧称 LY12）（硬铝）",
+      "standard": "GB/T 3190-2020 变形铝及铝合金化学成分（牌号 2A12）（2020）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T3190-2020",
+      "standard_year": 2020,
+      "E_mpa": 68000.0,
+      "nu": 0.33,
+      "yield_mpa": 275.0,
+      "uts_mpa": 425.0,
+      "density_kg_m3": 2780.0,
+      "aliases": [
+        "2A12",
+        "2A12（旧称 LY12）（硬铝）",
+        "LY12",
+        "2A12-T4"
+      ],
+      "equivalent_id": "AL_7075",
+      "equivalent_note": "2A12 硬铝按项目高强铝映射",
+      "values_status": "可用：5 字段齐全（全部为手册值/转引值）",
+      "standard_mechanics": "GB/T 6892-2023（力学）/ GB/T 3190-2020（成分）",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 275.0,
+          "status": "value",
+          "source_layer": "GB_SCAN",
+          "detail": "⚠️ 项目当前填的 σy=503/σb=572 实为7075的值(等效误用); 国标/T4真值 σy≈275, σb≈425(机械数控人); GB/T 6892 扫描页; E/ν/ρ=手册"
+        },
+        "uts_mpa": {
+          "value": 425.0,
+          "status": "value",
+          "source_layer": "GB_SCAN",
+          "detail": "⚠️ 项目当前填的 σy=503/σb=572 实为7075的值(等效误用); 国标/T4真值 σy≈275, σb≈425(机械数控人); GB/T 6892 扫描页; E/ν/ρ=手册"
+        },
+        "E_mpa": {
+          "value": 68000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "⚠️ 项目当前填的 σy=503/σb=572 实为7075的值(等效误用); 国标/T4真值 σy≈275, σb≈425(机械数控人); GB/T 6892 扫描页; E/ν/ρ=手册"
+        },
+        "nu": {
+          "value": 0.33,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "⚠️ 项目当前填的 σy=503/σb=572 实为7075的值(等效误用); 国标/T4真值 σy≈275, σb≈425(机械数控人); GB/T 6892 扫描页; E/ν/ρ=手册"
+        },
+        "table_class": "13可算",
+        "table_note": "同 6061-T6：GB/T 6892-2023 官方PDF为纯图片扫描，无法文本提取",
+        "density_kg_m3": {
+          "value": 2780.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "⚠️ 项目当前填的 σy=503/σb=572 实为7075的值(等效误用); 国标/T4真值 σy≈275, σb≈425(机械数控人); GB/T 6892 扫描页; E/ν/ρ=手册"
+        }
+      },
+      "missing_fields": [],
+      "category": "硬铝(旧LY12, T4)",
+      "table_note": "⚠️ 项目当前填的 σy=503/σb=572 实为7075的值(等效误用); 国标/T4真值 σy≈275, σb≈425(机械数控人); GB/T 6892 扫描页; E/ν/ρ=手册",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_SCAN",
+        "uts_mpa": "GB_SCAN",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_65Mn": {
+      "name": "GB/T 1222-2025 弹簧钢",
+      "name_cn": "65Mn（弹簧钢）",
+      "standard": "GB/T 1222-2025 弹簧钢（2025）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T1222-2025",
+      "standard_year": 2025,
+      "E_mpa": 206000.0,
+      "nu": 0.3,
+      "yield_mpa": 785.0,
+      "uts_mpa": 980.0,
+      "density_kg_m3": 7850.0,
+      "aliases": [
+        "65Mn",
+        "65Mn（弹簧钢）",
+        "65Mn弹簧钢"
+      ],
+      "equivalent_id": "ST_API_4140",
+      "equivalent_note": "弹簧钢按项目原有合金钢映射",
+      "values_status": "可用：5 字段齐全（yield_mpa, uts_mpa 来自国标；其余为手册值）",
+      "standard_mechanics": "GB/T 1222-2025",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 785.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 1222-2025 表, 文本提取); E/ν/ρ=手册"
+        },
+        "uts_mpa": {
+          "value": 980.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 1222-2025 表, 文本提取); E/ν/ρ=手册"
+        },
+        "E_mpa": {
+          "value": 206000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 1222-2025 表, 文本提取); E/ν/ρ=手册"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 1222-2025 表, 文本提取); E/ν/ρ=手册"
+        },
+        "table_class": "13可算",
+        "table_note": "已从官方全文提取：GB/T 1222-2025 表，65Mn（淬火+回火）",
+        "density_kg_m3": {
+          "value": 7850.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 1222-2025 表, 文本提取); E/ν/ρ=手册"
+        }
+      },
+      "missing_fields": [],
+      "category": "弹簧钢",
+      "table_note": "σy/σb=国标原文(GB/T 1222-2025 表, 文本提取); E/ν/ρ=手册",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_ORIGINAL",
+        "uts_mpa": "GB_ORIGINAL",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_Cr12MoV": {
+      "name": "GB/T 1299-2025 工模具钢",
+      "name_cn": "Cr12MoV（冷作模具钢）",
+      "standard": "GB/T 1299-2025 工模具钢（2025）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T1299-2025",
+      "standard_year": 2025,
+      "E_mpa": 206000.0,
+      "nu": 0.3,
+      "yield_mpa": null,
+      "uts_mpa": null,
+      "density_kg_m3": 7750.0,
+      "aliases": [
+        "Cr12MoV",
+        "Cr12MoV（冷作模具钢）",
+        "D2",
+        "Tool Steel"
+      ],
+      "equivalent_id": "ST_API_4140",
+      "equivalent_note": "模具钢按项目原有映射走 4140",
+      "values_status": "待补全：缺 yield_mpa, uts_mpa",
+      "standard_mechanics": "GB/T 1299-2025",
+      "gb_data": {
+        "yield_mpa": {
+          "value": null,
+          "status": "missing",
+          "source_layer": "MISSING",
+          "detail": "GB/T 1299-2025 仅给硬度(退火≤255HBW, 淬回火≥58HRC), 不列σy/σb; 无法用国标真值替换AISI4140; 建议保持等效或按硬度折算; E/ν/ρ=手册"
+        },
+        "uts_mpa": {
+          "value": null,
+          "status": "missing",
+          "source_layer": "MISSING",
+          "detail": "GB/T 1299-2025 仅给硬度(退火≤255HBW, 淬回火≥58HRC), 不列σy/σb; 无法用国标真值替换AISI4140; 建议保持等效或按硬度折算; E/ν/ρ=手册"
+        },
+        "E_mpa": {
+          "value": 206000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 1299-2025 仅给硬度(退火≤255HBW, 淬回火≥58HRC), 不列σy/σb; 无法用国标真值替换AISI4140; 建议保持等效或按硬度折算; E/ν/ρ=手册"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 1299-2025 仅给硬度(退火≤255HBW, 淬回火≥58HRC), 不列σy/σb; 无法用国标真值替换AISI4140; 建议保持等效或按硬度折算; E/ν/ρ=手册"
+        },
+        "table_class": "13可算",
+        "table_note": "官方仅给热处理硬度≥58 HRC（工具钢标准不列抗拉/屈服）；FEA 如需屈服请另查工具钢手册",
+        "density_kg_m3": {
+          "value": 7750.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "GB/T 1299-2025 仅给硬度(退火≤255HBW, 淬回火≥58HRC), 不列σy/σb; 无法用国标真值替换AISI4140; 建议保持等效或按硬度折算; E/ν/ρ=手册"
+        }
+      },
+      "missing_fields": [
+        "yield_mpa",
+        "uts_mpa"
+      ],
+      "category": "冷作模具钢",
+      "table_note": "GB/T 1299-2025 仅给硬度(退火≤255HBW, 淬回火≥58HRC), 不列σy/σb; 无法用国标真值替换AISI4140; 建议保持等效或按硬度折算; E/ν/ρ=手册",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "MISSING",
+        "uts_mpa": "MISSING",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_316": {
+      "name": "GB/T 20878-2024 不锈钢 牌号及化学成分",
+      "name_cn": "316 / 022Cr17Ni12Mo2（耐蚀不锈钢）",
+      "standard": "GB/T 20878-2024 不锈钢 牌号及化学成分（2024）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T20878-2024",
+      "standard_year": 2024,
+      "E_mpa": 193000.0,
+      "nu": 0.3,
+      "yield_mpa": 205.0,
+      "uts_mpa": 515.0,
+      "density_kg_m3": 7980.0,
+      "aliases": [
+        "316 / 022Cr17Ni12Mo2",
+        "316",
+        "316 / 022Cr17Ni12Mo2（耐蚀不锈钢）",
+        "AISI 316",
+        "022Cr17Ni12Mo2",
+        "S31603",
+        "00Cr17Ni14Mo2"
+      ],
+      "equivalent_id": "ST_STAINLESS_316",
+      "equivalent_note": "316 与项目内置不锈钢一致",
+      "values_status": "可用：5 字段齐全（yield_mpa, uts_mpa 来自国标；其余为手册值）",
+      "standard_mechanics": "GB/T 3280-2015（力学）/ GB/T 20878-2024（成分）",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 205.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册"
+        },
+        "uts_mpa": {
+          "value": 515.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册"
+        },
+        "E_mpa": {
+          "value": 193000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册"
+        },
+        "table_class": "13可算",
+        "table_note": "已从官方全文提取：GB/T 3280-2015 表，06Cr17Ni12Mo2 固溶退火态（S31608）",
+        "density_kg_m3": {
+          "value": 7980.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册"
+        }
+      },
+      "missing_fields": [],
+      "category": "耐蚀不锈钢 022Cr17Ni12Mo2",
+      "table_note": "σy/σb=国标原文(GB/T 3280-2015 退火态 ≥205/≥515, 文本提取); E/ν/ρ=手册",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_ORIGINAL",
+        "uts_mpa": "GB_ORIGINAL",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_ZCuSn10P1": {
+      "name": "GB/T 1176-2013 铸造铜及铜合金",
+      "name_cn": "ZCuSn10P1（锡青铜，耐磨）",
+      "standard": "GB/T 1176-2013 铸造铜及铜合金（2013）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T1176-2013",
+      "standard_year": 2013,
+      "E_mpa": 103000.0,
+      "nu": 0.3,
+      "yield_mpa": 130.0,
+      "uts_mpa": 220.0,
+      "density_kg_m3": 8800.0,
+      "aliases": [
+        "ZCuSn10P1",
+        "ZCuSn10P1（锡青铜，耐磨）",
+        "10-1锡青铜"
+      ],
+      "equivalent_id": null,
+      "equivalent_note": "项目内无可信的等效材料 —— 请从标准原文补全数值后再校核",
+      "values_status": "可用：5 字段齐全（yield_mpa, uts_mpa 来自国标；其余为手册值）",
+      "standard_mechanics": "GB/T 1176-2013",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 130.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 1176-2013 砂型S态 Rp0.2=130/σb=220, 文本提取); E/ν/ρ=手册(铸锡青铜E=103GPa)"
+        },
+        "uts_mpa": {
+          "value": 220.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σy/σb=国标原文(GB/T 1176-2013 砂型S态 Rp0.2=130/σb=220, 文本提取); E/ν/ρ=手册(铸锡青铜E=103GPa)"
+        },
+        "E_mpa": {
+          "value": 103000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 1176-2013 砂型S态 Rp0.2=130/σb=220, 文本提取); E/ν/ρ=手册(铸锡青铜E=103GPa)"
+        },
+        "nu": {
+          "value": 0.3,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 1176-2013 砂型S态 Rp0.2=130/σb=220, 文本提取); E/ν/ρ=手册(铸锡青铜E=103GPa)"
+        },
+        "table_class": "5留空",
+        "table_note": "官方可提取（GB/T 1176-2013 砂型S态）；原定留空组，但国标确有值，可作参考；金属型J态更高(Rm 310/Rp0.2 170)",
+        "density_kg_m3": {
+          "value": 8800.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σy/σb=国标原文(GB/T 1176-2013 砂型S态 Rp0.2=130/σb=220, 文本提取); E/ν/ρ=手册(铸锡青铜E=103GPa)"
+        }
+      },
+      "missing_fields": [],
+      "category": "铸造锡青铜",
+      "table_note": "σy/σb=国标原文(GB/T 1176-2013 砂型S态 Rp0.2=130/σb=220, 文本提取); E/ν/ρ=手册(铸锡青铜E=103GPa)",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "GB_ORIGINAL",
+        "uts_mpa": "GB_ORIGINAL",
+        "density_kg_m3": "HANDBOOK"
+      }
+    },
+    "GB_H62": {
+      "name": "GB/T 5231-2022 加工铜及铜合金牌号和化学成分",
+      "name_cn": "H62（黄铜）",
+      "standard": "GB/T 5231-2022 加工铜及铜合金牌号和化学成分（2022）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T5231-2022",
+      "standard_year": 2022,
+      "E_mpa": 100000.0,
+      "nu": 0.35,
+      "yield_mpa": 200.0,
+      "uts_mpa": 290.0,
+      "density_kg_m3": 8430.0,
+      "aliases": [
+        "H62",
+        "H62（黄铜）"
+      ],
+      "equivalent_id": null,
+      "equivalent_note": "项目内无可信的等效材料 —— 请从标准原文补全数值后再校核",
+      "values_status": "可用：5 字段齐全（uts_mpa 来自国标；其余为手册值）",
+      "standard_mechanics": "GB/T 5231-2022（成分）",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 200.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=国标原文(GB/T 2059-2017 按状态分档: O60≥290/H02 350~470/H04 410~630/H06≥585, 取O60下限); σy国标未列, 取手册≈200; E/ν/ρ=手册(H62 E≈100GPa, ν0.32~0.42, ρ8.43)"
+        },
+        "uts_mpa": {
+          "value": 290.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σb=国标原文(GB/T 2059-2017 按状态分档: O60≥290/H02 350~470/H04 410~630/H06≥585, 取O60下限); σy国标未列, 取手册≈200; E/ν/ρ=手册(H62 E≈100GPa, ν0.32~0.42, ρ8.43)"
+        },
+        "E_mpa": {
+          "value": 100000.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=国标原文(GB/T 2059-2017 按状态分档: O60≥290/H02 350~470/H04 410~630/H06≥585, 取O60下限); σy国标未列, 取手册≈200; E/ν/ρ=手册(H62 E≈100GPa, ν0.32~0.42, ρ8.43)"
+        },
+        "nu": {
+          "value": 0.35,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=国标原文(GB/T 2059-2017 按状态分档: O60≥290/H02 350~470/H04 410~630/H06≥585, 取O60下限); σy国标未列, 取手册≈200; E/ν/ρ=手册(H62 E≈100GPa, ν0.32~0.42, ρ8.43)"
+        },
+        "table_class": "5留空",
+        "table_note": "黄铜，原定留空（项目无铜数据）；需 FEA 请另查加工铜合金手册",
+        "density_kg_m3": {
+          "value": 8430.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=国标原文(GB/T 2059-2017 按状态分档: O60≥290/H02 350~470/H04 410~630/H06≥585, 取O60下限); σy国标未列, 取手册≈200; E/ν/ρ=手册(H62 E≈100GPa, ν0.32~0.42, ρ8.43)"
+        }
+      },
+      "missing_fields": [],
+      "category": "黄铜",
+      "table_note": "σb=国标原文(GB/T 2059-2017 按状态分档: O60≥290/H02 350~470/H04 410~630/H06≥585, 取O60下限); σy国标未列, 取手册≈200; E/ν/ρ=手册(H62 E≈100GPa, ν0.32~0.42, ρ8.43)",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "HANDBOOK",
+        "uts_mpa": "GB_ORIGINAL",
+        "density_kg_m3": "HANDBOOK"
+      },
+      "layer_fix_note": "已按数据表自述修正层级：yield_mpa=HANDBOOK"
+    },
+    "GB_ZL104": {
+      "name": "GB/T 1173-2013 铸造铝合金",
+      "name_cn": "ZL104（铸造铝合金）",
+      "standard": "GB/T 1173-2013 铸造铝合金（2013）",
+      "standard_url": "https://std.samr.gov.cn/search/std?q=GB/T1173-2013",
+      "standard_year": 2013,
+      "E_mpa": 68900.0,
+      "nu": 0.33,
+      "yield_mpa": 160.0,
+      "uts_mpa": 230.0,
+      "density_kg_m3": 2700.0,
+      "aliases": [
+        "ZL104",
+        "ZL104（铸造铝合金）"
+      ],
+      "equivalent_id": null,
+      "equivalent_note": "【已取消跨族等效】原映射到 AL_6061_T6（变形铝）—— 铸造铝合金的屈服特性与变形铝完全不同，用 6061 的 σy 去配 ZL104 的 σb 会产生 σb<σy 的物理不可能数据（已实际发生）。请从手册按【同一状态】补全 σy/σb（如全取 T6 态：σb=230、σy≈160）。",
+      "values_status": "可用：5 字段齐全（uts_mpa 来自国标；其余为手册值）",
+      "standard_mechanics": "GB/T 1173-2013",
+      "gb_data": {
+        "yield_mpa": {
+          "value": 160.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=230 为 GB/T 1173-2013 官方原文(SB/RB/KB-T6态 Rm≥230，已文本提取核对)；σy国标力学表仅列Rm/A/HB不列屈服，取T6态手册估算≈160(Rp0.2 140~180)；已按缺陷清单要求统一为同一T6状态；E/ν/ρ=手册/牌号常数"
+        },
+        "uts_mpa": {
+          "value": 230.0,
+          "status": "value",
+          "source_layer": "GB_ORIGINAL",
+          "detail": "σb=230 为 GB/T 1173-2013 官方原文(SB/RB/KB-T6态 Rm≥230，已文本提取核对)；σy国标力学表仅列Rm/A/HB不列屈服，取T6态手册估算≈160(Rp0.2 140~180)；已按缺陷清单要求统一为同一T6状态；E/ν/ρ=手册/牌号常数"
+        },
+        "E_mpa": {
+          "value": 68900.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=230 为 GB/T 1173-2013 官方原文(SB/RB/KB-T6态 Rm≥230，已文本提取核对)；σy国标力学表仅列Rm/A/HB不列屈服，取T6态手册估算≈160(Rp0.2 140~180)；已按缺陷清单要求统一为同一T6状态；E/ν/ρ=手册/牌号常数"
+        },
+        "nu": {
+          "value": 0.33,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=230 为 GB/T 1173-2013 官方原文(SB/RB/KB-T6态 Rm≥230，已文本提取核对)；σy国标力学表仅列Rm/A/HB不列屈服，取T6态手册估算≈160(Rp0.2 140~180)；已按缺陷清单要求统一为同一T6状态；E/ν/ρ=手册/牌号常数"
+        },
+        "table_class": "13可算",
+        "table_note": "已从官方全文提取：GB/T 1173-2013 表，ZL104 F态（砂/金/压/壳型）；T6态 Rm 更高(230)",
+        "density_kg_m3": {
+          "value": 2700.0,
+          "status": "value",
+          "source_layer": "HANDBOOK",
+          "detail": "σb=230 为 GB/T 1173-2013 官方原文(SB/RB/KB-T6态 Rm≥230，已文本提取核对)；σy国标力学表仅列Rm/A/HB不列屈服，取T6态手册估算≈160(Rp0.2 140~180)；已按缺陷清单要求统一为同一T6状态；E/ν/ρ=手册/牌号常数"
+        }
+      },
+      "missing_fields": [],
+      "category": "铸造铝合金",
+      "table_note": "σb=230 为 GB/T 1173-2013 官方原文(SB/RB/KB-T6态 Rm≥230，已文本提取核对)；σy国标力学表仅列Rm/A/HB不列屈服，取T6态手册估算≈160(Rp0.2 140~180)；已按缺陷清单要求统一为同一T6状态；E/ν/ρ=手册/牌号常数",
+      "source_layers": {
+        "E_mpa": "HANDBOOK",
+        "nu": "HANDBOOK",
+        "yield_mpa": "HANDBOOK",
+        "uts_mpa": "GB_ORIGINAL",
+        "density_kg_m3": "HANDBOOK"
+      },
+      "layer_fix_note": "已按数据表自述修正层级：yield_mpa=HANDBOOK",
+      "consistency_guard_resolved": "顶层 σy/σb 已撤回：二者关系 σb(150.0) < σy(160.0) 物理上不可能。常见原因是【两者材料状态不一致】（例如 σy 取 T6 态、σb 取 F 态）。请按同一状态重新取值后填入。"
+    }
+  },
+  "_equivalent_hint": "equivalent_id 指向项目原有材料表里的 id，用于【国标数值尚未补全时】临时提供一组可计算的数值。它不代表国标数值；报告会标注『国标身份 + 等效数值兜底』。补全 E_mpa/nu/yield_mpa/uts_mpa/density_kg_m3 后，系统会自动优先使用国标数值。",
+  "usable_count": 16,
+  "_count_hint": "material_count = 已收录牌号总数（不等于都可用）；usable_count = E/σy/ρ 齐全、可直接做 FEA 与强度校核的牌号数。完整口径见 material_db.gb_materials_status() 的三桶计数。"
+}

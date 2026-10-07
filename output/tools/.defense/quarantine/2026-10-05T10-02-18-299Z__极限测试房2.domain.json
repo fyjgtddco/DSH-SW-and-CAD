@@ -1,0 +1,98 @@
+{
+  "kind": "domain",
+  "schema": "dsh-domain-attestation/1",
+  "at": "2026-10-05T09:28:32.856Z",
+  "ts": 1791192512856,
+  "room": "极限测试房2",
+  "domain": "mold",
+  "rules_sha256": "29a9bf538e352509028f8d773ebd7fa45d09ea5f09f7f43302243d3deaed0c33",
+  "rule_count": 5,
+  "violations": [
+    {
+      "rule_id": "MD-004",
+      "target": "max_displacement_mm",
+      "value": 1891.6061,
+      "severity": "CRITICAL",
+      "message": "模具型腔变形 ≤ 0.05mm（保证制品精度）",
+      "expected": {
+        "max": 0.05
+      }
+    },
+    {
+      "rule_id": "GBM-003",
+      "target": "safety_factor",
+      "value": 0,
+      "severity": "CRITICAL",
+      "message": "验证目标 safety_factor 无有效数据（value=0.0）—— 该规则未被真正验证，不得判为合规（Bug12）"
+    }
+  ],
+  "score": 0.538,
+  "checked_items": [],
+  "warnings": [
+    {
+      "rule_id": "MD-003",
+      "target": "max_von_mises_mpa",
+      "value": 15257.11,
+      "severity": "WARNING",
+      "message": "模具钢（HRC 50+）允许应力 ≤ 800MPa",
+      "expected": {
+        "max": 800
+      }
+    },
+    {
+      "rule_id": "GBM-004",
+      "target": "max_von_mises_mpa",
+      "value": 15257.11,
+      "severity": "WARNING",
+      "message": "最大等效应力超过 2000MPa 已超出绝大多数国标结构钢/铸铁的屈服水平，需复核载荷施加方式与单元尺寸（小块加载额定载荷易导致应力虚高）",
+      "expected": {
+        "min": 0,
+        "max": 2000
+      }
+    }
+  ],
+  "passed": [
+    {
+      "rule_id": "MD-001",
+      "target": "cavity_depth_mm",
+      "value": 7.059
+    },
+    {
+      "rule_id": "GBM-001",
+      "target": "material_yield_mpa",
+      "value": 40
+    },
+    {
+      "rule_id": "GBM-002",
+      "target": "material_density_kg_m3",
+      "value": 1270
+    },
+    {
+      "rule_id": "GBM-002b",
+      "target": "density_is_water",
+      "value": 1
+    },
+    {
+      "rule_id": "GBM-002c",
+      "target": "material_density_missing",
+      "value": 1
+    },
+    {
+      "rule_id": "GBM-005",
+      "target": "material_uts_mpa",
+      "value": 50
+    },
+    {
+      "rule_id": "GBM-006",
+      "target": "material_e_mpa",
+      "value": 2000
+    }
+  ],
+  "source": "physics_bridge",
+  "run_id": "opt_iter_1",
+  "checked_at": "2026-10-05 17:28:32",
+  "_sig": "G1QKS2cuEoYiMYpZZR91nQa3esmHfXxMgRrC13tUU+0=",
+  "_kid": "721286b17062de69",
+  "_ts": 1791192512856,
+  "_nonce": "36b3beafb5abc35f93216a140689990d"
+}

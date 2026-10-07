@@ -1,0 +1,48 @@
+{
+  "domain_id": "housing",
+  "domain_name": "壳体",
+  "version": "1.0",
+  "description": "箱体/盖板/外壳类壳体件的设计规范",
+  "rules": [
+    {
+      "id": "HS-001",
+      "type": "parametric",
+      "target": "wall_thickness_mm",
+      "condition": {"min": 2.0, "max": 30.0},
+      "severity": "CRITICAL",
+      "message": "壳体壁厚应在 2~30mm 之间"
+    },
+    {
+      "id": "HS-002",
+      "type": "parametric",
+      "target": "rib_height_mm",
+      "condition": {"min": 0, "max": 50.0},
+      "severity": "INFO",
+      "message": "加强筋高度 ≤ 50mm，避免铸造缺陷"
+    },
+    {
+      "id": "HS-003",
+      "type": "fea",
+      "target": "max_von_mises_mpa",
+      "condition": {"max": 150.0},
+      "severity": "WARNING",
+      "message": "壳体等效应力 ≤ 150MPa（防止变形失效）"
+    },
+    {
+      "id": "HS-004",
+      "type": "fea",
+      "target": "max_displacement_mm",
+      "condition": {"max": 1.0},
+      "severity": "CRITICAL",
+      "message": "壳体最大变形 ≤ 1.0mm（保证密封/装配）"
+    },
+    {
+      "id": "HS-005",
+      "type": "fea",
+      "target": "mass_kg",
+      "condition": {"max": 100.0},
+      "severity": "INFO",
+      "message": "壳体质量建议 < 100kg（便于装配与运输）"
+    }
+  ]
+}

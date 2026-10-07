@@ -1,0 +1,88 @@
+﻿====================================================================================================
+BUG 复现：material_db 说『全兜底』，workflow_gate 却报 values_from_gb=True
+====================================================================================================
+----------------------------------------------------------------------------------------------------
+牌号 40Cr      
+  material_db : gb_sourced_fields=[]                           fallback_fields=['density_kg_m3', 'E_mpa', 'nu', 'yield_mpa', 'uts_mpa']
+  material_db : values_from_gb=False  values_pending=False
+  workflow_gate: values_from_gb=True   values_pending=False
+  report level = GB_NATIVE   claimable_as_gb = True
+  report note  = 力学数值来自 GB 标准原文（GB/T 3077-2015 合金结构钢），可用于国标口径的结论
+  >>> [BUG 确认] GB 原文来源字段为空（[]），却标记 values_from_gb=True
+      → 报告级别 = GB_NATIVE，会被下游当成『国标原文值』引用！
+----------------------------------------------------------------------------------------------------
+牌号 20CrMnTi  
+  material_db : gb_sourced_fields=[]                           fallback_fields=['E_mpa', 'nu', 'yield_mpa', 'uts_mpa', 'density_kg_m3']
+  material_db : values_from_gb=False  values_pending=False
+  workflow_gate: values_from_gb=True   values_pending=False
+  report level = GB_NATIVE   claimable_as_gb = True
+  report note  = 力学数值来自 GB 标准原文（GB/T 3077-2015 合金结构钢），可用于国标口径的结论
+  >>> [BUG 确认] GB 原文来源字段为空（[]），却标记 values_from_gb=True
+      → 报告级别 = GB_NATIVE，会被下游当成『国标原文值』引用！
+----------------------------------------------------------------------------------------------------
+牌号 Cr12MoV   
+  material_db : gb_sourced_fields=[]                           fallback_fields=['density_kg_m3', 'E_mpa', 'nu', 'yield_mpa', 'uts_mpa']
+  material_db : values_from_gb=False  values_pending=False
+  workflow_gate: values_from_gb=True   values_pending=False
+  report level = GB_NATIVE   claimable_as_gb = True
+  report note  = 力学数值来自 GB 标准原文（GB/T 1299-2025 工模具钢），可用于国标口径的结论
+  >>> [BUG 确认] GB 原文来源字段为空（[]），却标记 values_from_gb=True
+      → 报告级别 = GB_NATIVE，会被下游当成『国标原文值』引用！
+----------------------------------------------------------------------------------------------------
+牌号 6061-T6   
+  material_db : gb_sourced_fields=[]                           fallback_fields=['density_kg_m3', 'E_mpa', 'nu', 'yield_mpa', 'uts_mpa']
+  material_db : values_from_gb=False  values_pending=False
+  workflow_gate: values_from_gb=True   values_pending=False
+  report level = GB_NATIVE   claimable_as_gb = True
+  report note  = 力学数值来自 GB 标准原文（GB/T 3190-2020 变形铝及铝合金化学成分（牌号 6061）；GB/T 6892-2023 一般工业用铝及铝合金挤压型材（T6 状态）），可用于国标口径的结论
+  >>> [BUG 确认] GB 原文来源字段为空（[]），却标记 values_from_gb=True
+      → 报告级别 = GB_NATIVE，会被下游当成『国标原文值』引用！
+----------------------------------------------------------------------------------------------------
+牌号 7075      
+  material_db : gb_sourced_fields=[]                           fallback_fields=['density_kg_m3', 'E_mpa', 'nu', 'yield_mpa', 'uts_mpa']
+  material_db : values_from_gb=False  values_pending=False
+  workflow_gate: values_from_gb=True   values_pending=False
+  report level = GB_NATIVE   claimable_as_gb = True
+  report note  = 力学数值来自 GB 标准原文（GB/T 3190-2020 变形铝及铝合金化学成分（牌号 7075）），可用于国标口径的结论
+  >>> [BUG 确认] GB 原文来源字段为空（[]），却标记 values_from_gb=True
+      → 报告级别 = GB_NATIVE，会被下游当成『国标原文值』引用！
+----------------------------------------------------------------------------------------------------
+牌号 2A12      
+  material_db : gb_sourced_fields=[]                           fallback_fields=['E_mpa', 'nu', 'yield_mpa', 'uts_mpa', 'density_kg_m3']
+  material_db : values_from_gb=False  values_pending=False
+  workflow_gate: values_from_gb=True   values_pending=False
+  report level = GB_NATIVE   claimable_as_gb = True
+  report note  = 力学数值来自 GB 标准原文（GB/T 3190-2020 变形铝及铝合金化学成分（牌号 2A12）），可用于国标口径的结论
+  >>> [BUG 确认] GB 原文来源字段为空（[]），却标记 values_from_gb=True
+      → 报告级别 = GB_NATIVE，会被下游当成『国标原文值』引用！
+----------------------------------------------------------------------------------------------------
+牌号 Q235      
+  material_db : gb_sourced_fields=['yield_mpa', 'uts_mpa']     fallback_fields=['density_kg_m3', 'E_mpa', 'nu']
+  material_db : values_from_gb=True   values_pending=False
+  workflow_gate: values_from_gb=True   values_pending=False
+  report level = GB_NATIVE   claimable_as_gb = True
+  report note  = 力学数值来自 GB 标准原文（GB/T 700-2006 碳素结构钢），可用于国标口径的结论
+  >>> OK（部分字段确来自 GB 原文）
+----------------------------------------------------------------------------------------------------
+牌号 45#       
+  material_db : gb_sourced_fields=['yield_mpa', 'uts_mpa']     fallback_fields=['density_kg_m3', 'E_mpa', 'nu']
+  material_db : values_from_gb=True   values_pending=False
+  workflow_gate: values_from_gb=True   values_pending=False
+  report level = GB_NATIVE   claimable_as_gb = True
+  report note  = 力学数值来自 GB 标准原文（GB/T 699-2015 优质碳素结构钢），可用于国标口径的结论
+  >>> OK（部分字段确来自 GB 原文）
+----------------------------------------------------------------------------------------------------
+牌号 65Mn      
+  material_db : gb_sourced_fields=['yield_mpa', 'uts_mpa']     fallback_fields=['E_mpa', 'nu', 'density_kg_m3']
+  material_db : values_from_gb=True   values_pending=False
+  workflow_gate: values_from_gb=True   values_pending=False
+  report level = GB_NATIVE   claimable_as_gb = True
+  report note  = 力学数值来自 GB 标准原文（GB/T 1222-2025 弹簧钢），可用于国标口径的结论
+  >>> OK（部分字段确来自 GB 原文）
+----------------------------------------------------------------------------------------------------
+牌号 GCr15     
+  material_db : gb_sourced_fields=[]                           fallback_fields=[]
+  material_db : values_from_gb=False  values_pending=True
+  workflow_gate: values_from_gb=False  values_pending=True
+  report level = PENDING_NO_FALLBACK   claimable_as_gb = False
+  report note  = 该牌号仅确认标准身份，力学数值待补全且无等效兜底材料 —— 强度/寿命类结论不可用，请从标准原文补全数值

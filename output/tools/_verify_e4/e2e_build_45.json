@@ -1,0 +1,183 @@
+{
+ "grade": "45#",
+ "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\E4_承重支架_45.SLDPRT",
+ "new_part_title": "零件26",
+ "extrude": "<COMObject <unknown>>",
+ "vol_after_extrude": 209280.0,
+ "fillet": "<COMObject <unknown>>",
+ "vol_after_fillet": 206450.68938623194,
+ "bores": [
+  {
+   "cx": 40.0,
+   "ok": true,
+   "error": null
+  },
+  {
+   "cx": 120.0,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "vol_after_bore_40": 205093.52135988115,
+ "vol_after_bore_120": 203736.3533335304,
+ "set_material": {
+  "ok": true,
+  "material": "45#",
+  "method": "PartDoc.SetMaterialPropertyName2",
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "材料已写入(IdName=solidworks materials|AISI 1045 钢，冷拔|89)但密度与之前相同",
+   "⚠️ 材料名 '45#' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 '45#'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7850.0,
+  "canonical": "45#",
+  "configuration": "默认",
+  "density_before_kg_m3": 7850.0,
+  "material_mismatch_rejected": false,
+  "applied_name": "45#",
+  "match_level": "none",
+  "density_after_kg_m3": 7850.0,
+  "material_id_name": "solidworks materials|AISI 1045 钢，冷拔|89",
+  "density_kg_m3": 7850.0,
+  "density_changed": false,
+  "approximate_match": true,
+  "warning": "⚠️ 材料名 '45#' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 '45#'（匹配级别=none）。如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。",
+  "density_error_pct": 0.0
+ },
+ "material_result": {
+  "ok": true,
+  "material": "45#",
+  "method": "PartDoc.SetMaterialPropertyName2",
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "⚠️ 材料名 '45' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'AISI 1045 钢，冷拔'（匹配级别=loose）。【跨标准替代】请求 45（GB 体系），实际生效 AISI 1045 钢，冷拔（ASTM 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。 如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7850.0,
+  "canonical": "45#",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0,
+  "rejected_candidates": [],
+  "rejected_candidates_before_success": [
+   {
+    "name": "45#",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "45#（45 钢）（优质碳素结构钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   }
+  ],
+  "material_mismatch_rejected": false,
+  "applied_name": "AISI 1045 钢，冷拔",
+  "match_level": "loose",
+  "density_after_kg_m3": 7850.0,
+  "material_id_name": "solidworks materials|AISI 1045 钢，冷拔|89",
+  "density_kg_m3": 7850.0,
+  "density_changed": true,
+  "approximate_match": true,
+  "cross_standard": true,
+  "cross_standard_note": "【跨标准替代】请求 45（GB 体系），实际生效 AISI 1045 钢，冷拔（ASTM 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。",
+  "warning": "⚠️ 材料名 '45' 在库 'SolidWorks Materials' 中没有精确匹配，已选用最接近的 'AISI 1045 钢，冷拔'（匹配级别=loose）。【跨标准替代】请求 45（GB 体系），实际生效 AISI 1045 钢，冷拔（ASTM 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。 如果这不是你要的材料，请用 swapi.list_materials('SolidWorks Materials') 查看库中可用名称后重新指定。",
+  "density_error_pct": 0.0
+ },
+ "massprops": {
+  "ok": true,
+  "volume_mm3": 203736.3533335304,
+  "surface_area_mm2": 41777.06168867493,
+  "mass_kg": 1.5993303736682136,
+  "density_kg_m3": 7850.0,
+  "center_of_mass_mm": [
+   46.60720781681814,
+   22.26604756110762,
+   -0.0488664799171052
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "body_box_mm": [
+  0.0,
+  140.0,
+  0.0,
+  90.0,
+  -40.0,
+  40.0
+ ],
+ "get_material": {
+  "ok": true,
+  "name": "solidworks materials|AISI 1045 钢，冷拔|89",
+  "density_kg_m3": 7850.0,
+  "mass_kg": 1.5993303736682136,
+  "volume_mm3": 203736.3533335304
+ },
+ "save_ok": true,
+ "save": {
+  "ok": true,
+  "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\E4_承重支架_45.SLDPRT",
+  "saved": true,
+  "updated": true,
+  "content_changed": true,
+  "content_same": false,
+  "md5_before": null,
+  "md5_after": "bda2997dd5baec7e4d405345f0490590",
+  "rc": 0,
+  "size": 87670,
+  "note": "内容已更新",
+  "applied_material": "AISI 1045 钢，冷拔",
+  "material_source": "explicit(new_part material=)",
+  "material_attestation": {
+   "file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\E4_承重支架_45.SLDPRT.material.json",
+   "material": "AISI 1045 钢，冷拔",
+   "density_kg_m3": 7850,
+   "family": "steel",
+   "signed": true
+  }
+ },
+ "part_exists": true,
+ "attestation": {
+  "kind": "material",
+  "schema": "dsh-material-attestation/1",
+  "room": "",
+  "at": "2026-10-07T05:34:12.829Z",
+  "ts": 1791351252829,
+  "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\E4_承重支架_45.SLDPRT",
+  "part_name": "E4_承重支架_45",
+  "part_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\E4_承重支架_45.SLDPRT",
+  "part_sha256": "4774b809739637f1ece1c2faa7d1349624fea80600235beb7d88d18f434baf0d",
+  "part_size_bytes": 87670,
+  "part_md5": "bda2997dd5baec7e4d405345f0490590",
+  "applied_name": "AISI 1045 钢，冷拔",
+  "density_kg_m3": 7850,
+  "source": "explicit(new_part material=)",
+  "attested_material": "AISI 1045 钢，冷拔",
+  "attested_density_kg_m3": 7850,
+  "attested_family": "steel",
+  "ok": true,
+  "approximate_match": true,
+  "material_mismatch_rejected": false,
+  "requested_material": "45#",
+  "attested_material_name": "45#",
+  "cross_standard": true,
+  "cross_standard_note": "【跨标准替代】请求 45#（GB 体系），实际生效 AISI 1045 钢，冷拔（ASTM 体系）—— 两者属不同标准体系，必须人工确认后方可采用（材料防线会据此拦截）。",
+  "expected_yield_mpa": 355,
+  "expected_density_kg_m3": 7850,
+  "applied_yield_mpa": null,
+  "applied_density_kg_m3": null,
+  "yield_deviation_pct": null,
+  "_sig": "v8+OJXa7TQPpVT/iMsz+HyjELQNpl5ph3Q1+P+6Bh8M=",
+  "_kid": "7633096ee4ddb3f9",
+  "_ts": 1791351252830,
+  "_nonce": "8ba4c47daa1c1e0144db0502d7d8d5da"
+ }
+}

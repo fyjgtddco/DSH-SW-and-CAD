@@ -1,0 +1,254 @@
+﻿python.exe :   [iter 1] status=UNKNOWN SF=N/A stress=N/AMPa
+所在位置 行:1 字符: 506
++ ... terial $m"; & $py $pb optimize "$g\case_45.json" --part "$g\DSH_承重支架_ ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (  [iter 1] stat...A stress=N/AMPa:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+{
+  "ok": true,
+  "command": "optimize",
+  "converged": false,
+  "iterations": 1,
+  "reason": "no valid refinement actions; design space exhausted",
+  "final_report": {
+    "schema_version": "1.1",
+    "run_id": "opt_iter_1",
+    "iteration": 1,
+    "timestamp": "2026-10-07 12:20:36",
+    "parent_run_id": null,
+    "load_case_summary": {
+      "problem_id": "E2E_BRACKET_45",
+      "title": "承重支架（L 型，GB 45#）",
+      "material": "ZL104",
+      "material_id": "ZL104",
+      "yield_strength_mpa": null,
+      "E_mpa": 68900,
+      "material_resolved": true,
+      "density_kg_m3": 2700
+    },
+    "material": {
+      "id": "ZL104",
+      "name": "ZL104",
+      "youngs_modulus_mpa": 68900,
+      "poissons_ratio": 0.33,
+      "yield_strength_mpa": null,
+      "uts_mpa": 150.0,
+      "density_kg_m3": 2700,
+      "standard": "GB/T 1173-2013 铸造铝合金",
+      "source": "swapi.is_valid_material(零件材料)",
+      "values_source": "混合来源：uts_mpa 来自 GB 原文；E_mpa, nu, density_kg_m3 为等效兜底（Aluminum 6061-T6）；仍缺 yield_mpa",
+      "values_from_gb": false,
+      "values_pending": true,
+      "identity_source": null,
+      "equivalent_name": "Aluminum 6061-T6",
+      "equivalent_id": "AL_6061_T6",
+      "gb_sourced_fields": [
+        "uts_mpa"
+      ],
+      "field_provenance": {
+        "E_mpa": {
+          "value": 68900,
+          "source": "EQUIVALENT_FALLBACK",
+          "equivalent": "Aluminum 6061-T6"
+        },
+        "nu": {
+          "value": 0.33,
+          "source": "EQUIVALENT_FALLBACK",
+          "equivalent": "Aluminum 6061-T6"
+        },
+        "yield_mpa": {
+          "value": null,
+          "source": "MISSING"
+        },
+        "uts_mpa": {
+          "value": 150.0,
+          "source": "GB_STANDARD"
+        },
+        "density_kg_m3": {
+          "value": 2700,
+          "source": "EQUIVALENT_FALLBACK",
+          "equivalent": "Aluminum 6061-T6"
+        }
+      },
+      "fallback_fields": null,
+      "native_fields": null,
+      "consistency_guard": "已撤回等效兜底的屈服强度：国标 σb=150 MPa 低于兜底 σy=276 MPa，物理上不可能（跨材料族兜底不成立）。屈服强度请从标准原文补全。",
+      "resolution": {
+        "source": "explicit",
+        "overridden": true,
+        "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+        "part_material": "ZL104",
+        "notes": [
+          "按调用方显式指定的材料校核"
+        ]
+      }
+    },
+    "material_resolution": {
+      "source": "explicit",
+      "overridden": true,
+      "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+      "part_material": "ZL104",
+      "notes": [
+        "按调用方显式指定的材料校核"
+      ]
+    },
+    "material_provenance": {
+      "level": "EQUIVALENT_FALLBACK",
+      "claimable_as_gb": false,
+      "equivalent_material": "Aluminum 6061-T6",
+      "gb_sourced_fields": [
+        "uts_mpa"
+      ],
+      "note": "力学数值【不是】全部来自 GB 原文：uts_mpa 来自 GB 原文，其余为等效材料「Aluminum 6061-T6」的数值兜底；结论可用于工程判断，但不得整体宣称为 GB/T 标准值。"
+    },
+    "design_params": {
+      "thickness_mm": {
+        "id": "thickness_mm",
+        "value": 9.754,
+        "source": "real-geometry(V/A)"
+      },
+      "min_wall_thickness": {
+        "id": "min_wall_thickness",
+        "value": 6.0,
+        "source": "acceptance.min_wall_thickness_mm(默认 FDM 2.0mm)"
+      }
+    },
+    "real_geometry": {
+      "volume_mm3": 203736.35333353045,
+      "surface_area_mm2": 41777.06168867493,
+      "mass_kg": 1.599330373668214,
+      "density_kg_m3": 7850.0,
+      "bbox_mm": [
+        0.0,
+        140.0,
+        0.0,
+        90.0,
+        -40.0,
+        40.0
+      ],
+      "source": "swapi.massprops(真实实体体积)"
+    },
+    "geometry_gate": {
+      "status": "PASS",
+      "design_space": {
+        "ok": true,
+        "body_bbox_mm": [
+          0.0,
+          140.0,
+          0.0,
+          90.0,
+          -40.0,
+          40.0
+        ],
+        "design_bounds": {
+          "x_min": 0.0,
+          "x_max": 140.0,
+          "y_min": 0.0,
+          "y_max": 90.0,
+          "z_min": -40.0,
+          "z_max": 40.0
+        },
+        "per_axis": {
+          "x": {
+            "violated": false
+          },
+          "y": {
+            "violated": false
+          },
+          "z": {
+            "violated": false
+          }
+        },
+        "violation_vol_mm3": 0.0,
+        "violation_pct": 0.0
+      },
+      "connectivity": {
+        "ok": true,
+        "num_bodies": 1,
+        "num_volumes": 1,
+        "single_body": true,
+        "status": "PASS",
+        "note": ""
+      },
+      "wall_thickness_estimate": {
+        "ok": true,
+        "estimated_min_thickness_mm": 9.7535,
+        "volume_mm3": 203736.353,
+        "total_area_mm2": 41777.062,
+        "method": "2V/A_ratio_approximation",
+        "note": "近似估计（2V/A）；精确壁厚需 STEP 网格分析。用于识别明显过薄件。"
+      },
+      "interface_compliance": {
+        "ok": true,
+        "violations": [],
+        "locked_param_changes": []
+      },
+      "gates": [
+        {
+          "id": "DESIGN_SPACE",
+          "status": "PASS"
+        },
+        {
+          "id": "CONNECTIVITY",
+          "status": "PASS"
+        },
+        {
+          "id": "WALL_THICKNESS",
+          "status": "PASS",
+          "estimated_mm": 9.7535,
+          "required_mm": 6.0
+        }
+      ],
+      "geometry_source": "swapi.massprops(真实实体体积)"
+    },
+    "fea_result": {
+      "ok": false,
+      "error": "unsupported operand type(s) for /: 'NoneType' and 'float'",
+      "traceback": "Traceback (most recent call last):\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\fea_solver.py\", line 633, in solve_feapy\n    safety_factor = sigma_y / max_stress if max_stress > 0 else float(\"inf\")\n                    ~~~~~~~~^~~~~~~~~~~~\nTypeError: unsupported operand type(s) for /: 'NoneType' and 'float'\n"
+    },
+    "fatigue": {},
+    "acceptance_criteria": {
+      "analysis_type": "linear_static",
+      "min_safety_factor": 2.0,
+      "target_safety_factor_max": 4.0,
+      "anisotropy_factor": 1.0,
+      "process": "机加工",
+      "max_displacement_mm": 1.0,
+      "min_wall_thickness_mm": 6.0,
+      "max_mass_kg": null,
+      "must_remain_in_design_domain": true,
+      "mesh_quality_min": 0.1,
+      "design_life_years": 5.0,
+      "operating_cycles_per_year": 100000.0,
+      "load_type": "impact",
+      "impact_factor": 1.5,
+      "fatigue_check_required": true,
+      "required_load_cases": [
+        "rated",
+        "lateral"
+      ],
+      "max_safety_factor": 4.0
+    },
+    "actual_safety_factor": null,
+    "required_min_safety_factor": 2.0,
+    "required_max_safety_factor": 4.0,
+    "overall_status": "UNKNOWN",
+    "passed_gates": [
+      "DESIGN_SPACE",
+      "CONNECTIVITY",
+      "WALL_THICKNESS"
+    ],
+    "failed_gates": [],
+    "not_evaluated": [],
+    "release_readiness": {
+      "status": "PENDING",
+      "human_review_required": true,
+      "limitations": [],
+      "fatigue_verified": false,
+      "fatigue_verdict": null
+    },
+    "report_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\..\\..\\output\\physics_runs\\opt_E2E_BRACKET_45_1791346834\\iteration_1\\opt_iter_1_report.json"
+  },
+  "run_dir": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\..\\..\\output\\physics_runs\\opt_E2E_BRACKET_45_1791346834"
+}

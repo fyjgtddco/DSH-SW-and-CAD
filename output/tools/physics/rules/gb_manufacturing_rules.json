@@ -1,0 +1,25 @@
+{
+  "ruleset_id": "DSVA-GB_MANUFACTURING",
+  "revision": "A",
+  "category": "gb_manufacturing",
+  "generated_from": "DSVA国标对照表.xlsx",
+  "total": 1,
+  "rules": [
+    {
+      "rule_id": "GB_MANUFACTURING-001",
+      "standard_id": "GB/T 42124.3-2025",
+      "title": "产品几何技术规范(GPS) 模制件的尺寸和几何公差 第3部分:铸件尺寸公差、几何公差与机械加工余量",
+      "topic": "铸件尺寸公差、几何公差与加工余量",
+      "scope": "本标准规定了铸件的尺寸公差、几何公差与机械加工余量的术语和定义,尺寸标注方法,铸件尺寸公差等级,几何公差等级,机械加工余量等级及其在图样上的标注。本标准适用于由各种铸造方法生产的铸件。",
+      "status": "现行(GB/T 6414-2017已于2025-12-01废止,被其全部代替)",
+      "dsva_requirement": "铸件尺寸公差、加工余量、铸造工艺约束",
+      "severity": "BLOCKER",
+      "validation_method": "manual_review",
+      "requires_manual_review": true,
+      "is_deprecated": true,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=751A28CF58CFE964324E6495A22A93FA",
+      "note": "重大版本变更：GB/T 6414-2017并入GB/T 42124系列并改号；新标准修改采用ISO 8062-3:2023；下表范围为旧版6414-2017原文，新版范围官方未公开"
+    }
+  ]
+}

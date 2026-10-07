@@ -1,0 +1,4 @@
+C:\Users\j1877\Desktop\DSH-SW-and-CAD-main
+C:\Users\j1877\Desktop\DSH-SW-and-CAD-main\engineering
+C:\Users\j1877\.dsh\.agent-presets
+C:\Users\j1877\.dsh\.agent-presets\engineering

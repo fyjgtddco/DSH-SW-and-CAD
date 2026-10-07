@@ -293,6 +293,32 @@ export class DefenseSigner {
       if (this.signedNonces && !this.signedNonces.has(nonce)) {
         return { ok: false, reason: 'nonce not issued by this host (forged or foreign credential)' };
       }
+      // ── 【P2 修复】重放防护（仅对外部 verify 调用生效）──────────────────
+      // 实测（子代理3）：对 /defense/verify 原样重放 3 次全部 verified=true。
+      //   根因：verify() 只核对"nonce 是不是本宿主签发的"，从不记录
+      //   "这个 nonce 已经被外部消费过"，于是抓到一份合法凭据就能无限重放。
+      //
+      // 为什么不能一刀切拒绝重复：门禁自身要对同一凭据做多次判定
+      //   （room-end → confirm-assembly → 收尾），那是【受信任的内部调用】。
+      //   因此用调用上下文区分：
+      //     · consume=true（外部 /defense/verify 请求）→ 首次通过，
+      //       同一 nonce 再次出现即判重放并拒绝；
+      //     · consume=false（门禁/守卫的内部判定）→ 只核对台账，允许重复。
+      //   这样既堵住外部重放，又不破坏门禁的多阶段校验。
+      if (consume) {
+        if (!this.consumedNonces) this.consumedNonces = new Map();
+        if (this.consumedNonces.has(nonce)) {
+          return { ok: false, reason: 'nonce already consumed (replay detected)' };
+        }
+        this.consumedNonces.set(nonce, Date.now());
+        // 按年龄裁剪，防止无界增长
+        try {
+          const _now = Date.now();
+          for (const [n, t] of this.consumedNonces) {
+            if (_now - t > SIG_TTL_MS) this.consumedNonces.delete(n);
+          }
+        } catch (e) {}
+      }
       const body = DefenseSigner.stripMeta(cred);
       const expect = crypto.createHmac('sha256', this.key)
         .update(canonicalJson(body), 'utf8').digest('base64');
@@ -418,17 +444,71 @@ export class DefenseSigner {
       // 环境变量缺失不影响主候选
     }
     try {
-      const _wsFile = pathSync.join(this.dir, "workspace.txt");
-      if (fsSync.existsSync(_wsFile)) {
-        // workspace.txt 可含【多行】根目录（Python 侧会写入仓库根与
-        //   engineering 两处，见 defense_gate._publish_workspace_root）。
-        const _wsRoots = String(fsSync.readFileSync(_wsFile, "utf8"))
-          .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-        for (const _wsRoot of _wsRoots) {
-          cands.push(pathSync.join(_wsRoot, "output", "physics_runs"));
-          cands.push(pathSync.join(_wsRoot, "engineering", "output", "physics_runs"));
-          cands.push(pathSync.join(_wsRoot, "engineering", "tools", "output", "physics_runs"));
+      // ── 【Bug-02 修复】workspace.txt 必须【跨所有部署副本】合并读取 ──────
+      // 实测缺陷：本文件原先只读 `this.dir`（宿主自己那份 toolsDir 的
+      //   .defense/workspace.txt）。但工程模式有工作区/安装目录两份副本，
+      //   Python 侧从【工作区】跑 physics 时把报告写在
+      //   工作区\output\physics_runs，而宿主读的是【安装副本】的声明 ——
+      //   工作区路径不在受管根集合里 → /defense/sign 一律拒签
+      //   "report path outside managed physics_runs root"，防线②凭据永远
+      //   签不出来（实测 5 次签发失败，全部 fail-closed）。
+      // 现在：把所有已知 .defense 目录（含另一份副本、环境变量声明的、
+      //   DSH_HOME 下的）里的 workspace.txt 全部读入求并集。
+      const _wsRoots = [];
+      const _seenWs = new Set();
+      const _pushWs = (s) => {
+        const _v = String(s || '').trim();
+        if (!_v) return;
+        let _a = _v;
+        try { _a = pathSync.resolve(_v); } catch (e) { _a = _v; }
+        const _k = process.platform === 'win32' ? _a.toLowerCase() : _a;
+        if (_seenWs.has(_k)) return;
+        _seenWs.add(_k);
+        _wsRoots.push(_a);
+      };
+      const _wsFiles = [pathSync.join(this.dir, "workspace.txt")];
+      try {
+        const _home = process.env.USERPROFILE || process.env.HOME || "";
+        const _dshHome = process.env.DSH_HOME || (_home ? pathSync.join(_home, ".dsh") : "");
+        if (_dshHome) {
+          _wsFiles.push(pathSync.join(_dshHome, ".agent-presets", "engineering",
+                                      "tools", ".defense", "workspace.txt"));
+          _wsFiles.push(pathSync.join(_dshHome, "engineering", "tools",
+                                      ".defense", "workspace.txt"));
         }
+      } catch (e) {}
+      try {
+        const _eng = process.env.DSH_ENGINEERING_ROOT;
+        if (_eng) {
+          _wsFiles.push(pathSync.join(_eng, "tools", ".defense", "workspace.txt"));
+          _wsFiles.push(pathSync.join(_eng, ".defense", "workspace.txt"));
+        }
+      } catch (e) {}
+      // 宿主 toolsDir 的两级父目录下也可能有 engineering 副本
+      try {
+        const _p1 = pathSync.join(this.toolsDir, "..");
+        const _p2 = pathSync.join(this.toolsDir, "..", "..");
+        _wsFiles.push(pathSync.join(_p1, ".defense", "workspace.txt"));
+        _wsFiles.push(pathSync.join(_p2, "engineering", "tools", ".defense", "workspace.txt"));
+      } catch (e) {}
+      for (const _f of _wsFiles) {
+        try {
+          if (!fsSync.existsSync(_f)) continue;
+          // workspace.txt 可含【多行】根目录（Python 侧会写入仓库根与
+          //   engineering 两处，见 defense_gate._publish_workspace_root）。
+          String(fsSync.readFileSync(_f, "utf8"))
+            .split(/\r?\n/).forEach((s) => _pushWs(s));
+        } catch (e) {
+          // 单个声明文件缺失/损坏不影响其余
+        }
+      }
+      for (const _wsRoot of _wsRoots) {
+        cands.push(pathSync.join(_wsRoot, "output", "physics_runs"));
+        cands.push(pathSync.join(_wsRoot, "engineering", "output", "physics_runs"));
+        cands.push(pathSync.join(_wsRoot, "engineering", "tools", "output", "physics_runs"));
+        // 声明若直接指向 tools 目录，也覆盖其两级父目录
+        cands.push(pathSync.join(_wsRoot, "..", "output", "physics_runs"));
+        cands.push(pathSync.join(_wsRoot, "..", "..", "output", "physics_runs"));
       }
     } catch (e) {
       // 声明文件缺失不影响主候选
@@ -491,7 +571,56 @@ export class DefenseSigner {
    * 这是"补丁"：不产生信任，只保证校验读取的是签名认可的版本。
    */
   guardTick() {
-    const reportsDir = pathSync.join(this.toolsDir, 'reports');
+    // ── 【Bug-06 修复】巡检必须覆盖【所有部署副本】的 reports 目录 ────────
+    // 原实现只看 this.toolsDir/reports。但工程模式有两份副本，凭据可能写在
+    //   工作区副本（Desktop\...\engineering\tools\reports）里，宿主这份
+    //   完全看不到 → 守卫"漏检"，且宿主 /defense/judge 也会因找不到凭据
+    //   而判 fail-closed。这里把候选 reports 目录全部纳入巡检。
+    const _reportsDirs = [];
+    const _pushDir = (d) => { try { if (d && _reportsDirs.indexOf(d) < 0) _reportsDirs.push(d); } catch (e) {} };
+    _pushDir(pathSync.join(this.toolsDir, 'reports'));
+    try {
+      const _home = process.env.USERPROFILE || process.env.HOME || "";
+      const _dshHome = process.env.DSH_HOME || (_home ? pathSync.join(_home, ".dsh") : "");
+      if (_dshHome) {
+        _pushDir(pathSync.join(_dshHome, ".agent-presets", "engineering", "tools", "reports"));
+        _pushDir(pathSync.join(_dshHome, "engineering", "tools", "reports"));
+      }
+    } catch (e) {}
+    try {
+      const _eng = process.env.DSH_ENGINEERING_ROOT;
+      if (_eng) {
+        _pushDir(pathSync.join(_eng, "tools", "reports"));
+        _pushDir(pathSync.join(_eng, "reports"));
+      }
+    } catch (e) {}
+    // workspace.txt 声明的每个根也纳入（其 reports 与 tools/reports 两种布局）
+    try {
+      const _wsFile = pathSync.join(this.dir, "workspace.txt");
+      if (fsSync.existsSync(_wsFile)) {
+        String(fsSync.readFileSync(_wsFile, "utf8")).split(/\r?\n/)
+          .map((s) => s.trim()).filter(Boolean)
+          .forEach((_r) => {
+            _pushDir(pathSync.join(_r, "tools", "reports"));
+            _pushDir(pathSync.join(_r, "reports"));
+            _pushDir(pathSync.join(_r, "engineering", "tools", "reports"));
+          });
+      }
+    } catch (e) {}
+    for (const _rd of _reportsDirs) {
+      try { this.guardScanDir(_rd); } catch (e) {
+        this.log('guard scan error @' + _rd + ': ' + String((e && e.message) || e));
+      }
+    }
+    // 落盘守卫报告（含全部副本的观察结果）
+    try {
+      fsSync.writeFileSync(pathSync.join(this.dir, 'guard.json'),
+        JSON.stringify({ items: this.anomalies.slice(-200) }, null, 2), 'utf8');
+    } catch (e) {}
+  }
+
+  /** 巡检单个 reports 目录（供 guardTick 对所有副本调用）。 */
+  guardScanDir(reportsDir) {
     let names = [];
     try {
       names = fsSync.readdirSync(reportsDir);
@@ -513,9 +642,35 @@ export class DefenseSigner {
       }
       // 【缺口4 修复】baseline 真正启用：巡检发现凭据相对基线被改写时留痕。
       //   原实现 snapshotBaseline() 存了快照却从不读，宣称的"篡改检测"未实现。
+      //
+      // ── 【Bug-06 修复】区分"合法重签"与"外部篡改" ─────────────────────
+      // 实测现象：guard.json 记录 传动机构.domain.json
+      //   kind=credential-modified「凭据在签名之后被改写」，但该凭据的
+      //   _sig/_kid 与宿主一致 —— 校验端因此无法判断签名是否仍然有效。
+      // 根因：原实现【任何字节变化】都记 credential-modified。而工程模式里
+      //   凭据被"合法重写"是常态：同一房间重跑校核（physics-optimize /
+      //   physics-validate-domain）会签发【新 nonce 的新凭据】覆盖旧文件。
+      //   把这种正常重签报成"篡改"是假阳性，会削弱守卫告警的可信度。
+      // 现在按【nonce 是否为本宿主新签发】区分：
+      //   · 文件变化 + 新 nonce 且在本宿主台账中 → 合法重签（记 note，
+      //     用 credential-resigned，不隔离、不报警）；
+      //   · 文件变化 + nonce 未变（或不在台账）→ 真·签名后被改写
+      //     （记 credential-modified，并由后续验签决定是否隔离）。
       const base = this.baseline.get(p);
       if (base && base !== h) {
-        this.note('credential-modified', p, '凭据在基线之后被改写（可能是签发者重写，也可能是外部篡改）');
+        let _nonceNow = '';
+        try { _nonceNow = String((cred && cred._nonce) || ''); } catch (e) {}
+        const _knownNonce = !!(_nonceNow && this.signedNonces
+                               && this.signedNonces.has(_nonceNow));
+        if (_knownNonce) {
+          this.note('credential-resigned', p,
+                    '凭据被本宿主重新签发（新 nonce ' + _nonceNow.slice(0, 12)
+                    + '…）—— 属合法重写，非篡改');
+        } else {
+          this.note('credential-modified', p,
+                    '凭据在基线之后被改写，且 nonce 非本宿主新签发'
+                    + '（疑似外部篡改；若确为手工改 verdict 字段，验签将失败）');
+        }
       }
       this.baseline.set(p, h);
       if (!cred || !cred._sig) {
@@ -637,28 +792,68 @@ export class DefenseSigner {
       const requirePhysics = opts.requirePhysics !== false;
       // ── 物理凭据 ──
       if (requirePhysics) {
-        const ph = this.readCredential(reportsDir, room, '.physics.json');
-        if (!ph) {
-          out.blockers.push('【防线②物理】缺少物理校核凭据或验签失败（reports/' + room + '.physics.json）');
+        // ── 【新 Bug 修复】阻断原因必须【按具体原因区分】────────────────
+        // 原实现把 readCredential 返回 null 一律写成"缺少凭据或验签失败"。
+        //   但 null 有三种完全不同的成因：凭据不存在 / 无签名 / 验签失败；
+        //   而当凭据【完全正常】、只是 overall=FAIL（强度不足）时，
+        //   文案同样会误导成"凭据层故障"（实测报告 §四）。
+        // 现在：先判"凭据层"（用 reason_code 精确措辞），
+        //   凭据层通过后再判"结论层"（FAIL / 无法识别 / REVIEW）。
+        const phD = this.readCredentialDetailed(reportsDir, room, '.physics.json');
+        if (!phD.ok) {
+          out.blockers.push('【防线②物理】' + this._credFailText(phD, '物理'));
+          out.details.physics = { verified: false, failure: phD.reason_code,
+                                  reason: phD.reason };
         } else {
+          const ph = phD.cred;
           const overall = String(ph.overall_status || ph.overall || '').toUpperCase();
           if (overall === 'FAIL') {
-            out.blockers.push('【防线②物理】物理校核判定为 FAIL');
+            // 凭据有效，结论不合格 —— 措辞必须点明"结论 FAIL"，
+            //   并带上实测值，避免被误读为"凭据/验签出问题"。
+            const _sf = (ph.safety_factor === undefined ? null : ph.safety_factor);
+            const _fat = String(ph.fatigue_verdict || '');
+            out.blockers.push(
+              '【防线②物理】凭据有效（已验签），但物理校核结论为 FAIL'
+              + (_sf !== null ? '（安全系数 ' + _sf : '')
+              + (_sf !== null ? '，要求≥' + (opts.minSafetyFactor || '见工况') + '）' : '')
+              + (_fat ? '；疲劳判定 ' + _fat : '')
+              + ' —— 属【强度/寿命不达标】，不是凭据问题，须改进设计后重跑校核');
           } else if (overall !== 'PASS' && overall !== 'REVIEW') {
-            out.blockers.push('【防线②物理】物理校核结论缺失或无法识别（' + overall + '）');
+            out.blockers.push('【防线②物理】凭据有效（已验签），但校核结论缺失或无法识别（overall='
+                              + (overall || '空') + '）');
           } else if (overall === 'REVIEW') {
             out.warnings.push('【防线②物理】物理校核为 REVIEW，已放行但留痕');
           }
           out.details.physics = { overall, run_id: ph.run_id, verified: true };
         }
-        const dm = this.readCredential(reportsDir, room, '.domain.json');
-        if (!dm) {
-          out.blockers.push('【防线③领域】缺少领域校验凭据或验签失败（reports/' + room + '.domain.json）');
+        const dmD = this.readCredentialDetailed(reportsDir, room, '.domain.json');
+        if (!dmD.ok) {
+          out.blockers.push('【防线③领域】' + this._credFailText(dmD, '领域'));
+          out.details.domain = { verified: false, failure: dmD.reason_code,
+                                 reason: dmD.reason };
         } else {
+          const dm = dmD.cred;
           const v = Array.isArray(dm.violations) ? dm.violations : null;
-          if (v === null) out.blockers.push('【防线③领域】violations 不是数组');
-          else if (v.length) out.blockers.push('【防线③领域】存在 ' + v.length + ' 条 CRITICAL 违规');
-          out.details.domain = { domain: dm.domain, violations: v ? v.length : null, verified: true };
+          // ── 【新 Bug 修复】领域凭据的可追溯标识 ──────────────────────
+          // 校验端要求 run_id 或 checked_at 之一存在，否则判"疑似伪造"。
+          //   原实现只报"CRITICAL 违规"或"结构异常"，对"缺可追溯标识"
+          //   这一独立成因完全不提，导致实测报告里"缺 run_id"成了隐藏项。
+          const _trace = String(dm.run_id || '').trim() || String(dm.checked_at || '').trim();
+          if (!_trace) {
+            out.blockers.push('【防线③领域】凭据有效（已验签），但缺少 run_id/checked_at '
+                              + '可追溯标识（防伪造检查要求）—— 请重新执行 '
+                              + 'physics-validate-domain 以签发带追溯标识的凭据');
+          }
+          if (v === null) out.blockers.push('【防线③领域】violations 不是数组（凭据结构异常）');
+          else if (v.length) {
+            const _ids = v.map((x) => (x && x.rule_id) ? x.rule_id : '?')
+                          .filter((x, i, a) => a.indexOf(x) === i).slice(0, 8);
+            out.blockers.push('【防线③领域】凭据有效（已验签），但检出 ' + v.length
+                              + ' 条 CRITICAL 违规: ' + _ids.join(', ')
+                              + ' —— 属【规则不达标】，请按规则修正设计参数');
+          }
+          out.details.domain = { domain: dm.domain, violations: v ? v.length : null,
+                                 verified: true, has_trace_id: !!_trace };
         }
       }
       // ── 材料凭据（本房间登记零件）──
@@ -676,30 +871,95 @@ export class DefenseSigner {
   }
 
   /**
+   * 【新 Bug 修复】把"凭据层故障"翻译成**精确的**阻断文案。
+   *
+   * 目的：不再把"凭据不存在 / 无签名 / 验签失败"三种成因混成一句
+   *   "缺少凭据或验签失败"，让排查方向一目了然。
+   * @param det - readCredentialDetailed() 的返回值。
+   * @param label - '物理' / '领域'。
+   * @returns 人类可读的阻断原因。
+   */
+  _credFailText(det, label) {
+    const _which = 'reports/' + (det && det.rel ? det.rel : '') ;
+    switch (det && det.reason_code) {
+      case 'missing':
+        return '未做' + label + '校核：凭据文件不存在（' + (det.reason || '') + '）'
+             + ' —— 请先跑对应的 physics 校核命令生成凭据';
+      case 'unreadable':
+        return label + '凭据无法解析（' + (det.reason || '') + '）—— 文件损坏或非 JSON';
+      case 'unsigned':
+        return label + '凭据缺少宿主签名（' + (det.reason || '') + '）'
+             + ' —— 宿主签发失败或凭据被手写伪造';
+      case 'invalid_signature':
+        return label + '凭据验签失败（' + (det.reason || '') + '）'
+             + ' —— 凭据被篡改，或宿主重启后密钥已更换（需重新签发）';
+      default:
+        return label + '凭据不可用（' + ((det && det.reason) || '未知原因') + '）';
+    }
+  }
+
+  /**
+   * 读取并验签一份凭据，返回【带原因】的结果。
+   *
+   * ── 【新 Bug 修复】区分"凭据缺失"与"验签失败" ──────────────────────────
+   * 原实现只返回 null，调用方无法区分两种完全不同的故障：
+   *   · 凭据根本不存在        → 该房间没跑过校核（要补跑校核）；
+   *   · 凭据存在但验签失败    → 凭据被篡改/宿主重启换了密钥（要重签）。
+   * 实测后果：room-end 把"物理校核判定为 FAIL（强度不足）"这类
+   *   【凭据完全正常】的情形也笼统报成"缺少凭据或验签失败"，
+   *   让人误以为防线信任根又坏了，白白排查方向错误。
+   *
+   * @param reportsDir - reports 目录。
+   * @param room - 房间名。
+   * @param suffix - '.physics.json' / '.domain.json'。
+   * @returns {{ok: boolean, cred: object|null, reason: string, reason_code: string}}
+   *   reason_code ∈ 'ok' | 'missing' | 'unreadable' | 'unsigned' | 'invalid_signature'
+   */
+  readCredentialDetailed(reportsDir, room, suffix) {
+    // 房间名安全过滤（与 Python 侧 _safe_room_name 同口径）：
+    //   防路径穿越，同时保留中文/空格/连字符以匹配真实房间名。
+    const safe = String(room).replace(/[^A-Za-z0-9_\u4e00-\u9fa5 -]/g, '_');
+    const rel = 'reports/' + safe + suffix;
+    const p = pathSync.join(reportsDir, safe + suffix);
+    if (!fsSync.existsSync(p)) {
+      return { ok: false, cred: null, reason_code: 'missing',
+               reason: '凭据文件不存在（' + rel + '）' };
+    }
+    let cred = null;
+    try {
+      cred = JSON.parse(fsSync.readFileSync(p, 'utf8'));
+    } catch (e) {
+      return { ok: false, cred: null, reason_code: 'unreadable',
+               reason: '凭据文件无法解析为 JSON（' + rel + '）' };
+    }
+    if (!cred || typeof cred !== 'object') {
+      return { ok: false, cred: null, reason_code: 'unreadable',
+               reason: '凭据内容不是对象（' + rel + '）' };
+    }
+    if (!cred._sig) {
+      return { ok: false, cred: cred, reason_code: 'unsigned',
+               reason: '凭据缺少宿主签名 —— 疑似手写伪造或宿主签发失败' };
+    }
+    const v = this.verify(cred, false);
+    if (!v.ok) {
+      return { ok: false, cred: cred, reason_code: 'invalid_signature',
+               reason: '凭据签名校验未通过：' + String(v.reason || '未知') };
+    }
+    return { ok: true, cred: cred, reason_code: 'ok', reason: '' };
+  }
+
+  /**
    * 读取并验签一份凭据；验签失败或缺失返回 null。
+   *
+   * 兼容旧调用点：需要区分原因时请用 readCredentialDetailed()。
    * @param reportsDir - reports 目录。
    * @param room - 房间名。
    * @param suffix - '.physics.json' / '.domain.json'。
    * @returns 验签通过的凭据体，或 null。
    */
   readCredential(reportsDir, room, suffix) {
-    try {
-      const safe = String(room).replace(/[^A-Za-z0-9_\u4e00-\u9fa5 -]/g, '_');
-      const fp = pathSync.join(reportsDir, safe + suffix);
-      if (!fsSync.existsSync(fp)) return null;
-      let cred = null;
-      try {
-        cred = JSON.parse(fsSync.readFileSync(fp, 'utf8'));
-      } catch (e) {
-        return null;
-      }
-      // 巡检模式验签：不消费 nonce（判定可能被重复调用）
-      const v = this.verify(cred, false);
-      if (!v.ok) return null;
-      return cred;
-    } catch (e) {
-      return null;
-    }
+    const r = this.readCredentialDetailed(reportsDir, room, suffix);
+    return r.ok ? r.cred : null;
   }
 
   /**

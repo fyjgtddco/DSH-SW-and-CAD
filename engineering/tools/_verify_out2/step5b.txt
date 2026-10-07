@@ -1,0 +1,34 @@
+﻿====================================================================================================
+Step5b  ZL104 查询顺序敏感性
+====================================================================================================
+[A 初始状态（未调 swapi）]
+   get_material('ZL104')    σy=None     σb=150.0    E=68900    fallback_filled=['E_mpa', 'nu', 'density_kg_m3']
+   get_material('GB_ZL104') σy=None     σb=150.0    E=68900    fallback_filled=['E_mpa', 'nu', 'density_kg_m3']
+   GB_MATERIALS['GB_ZL104']  σy=None     σb=150.0    E=None      (原始表)
+
+--- 现在 import swapi 并触发 GB 合并 ---
+   err: AttributeError("module 'swapi' has no attribute '_ensure_gb_merged'")
+[B swapi 合并之后]
+   get_material('ZL104')    σy=None     σb=150.0    E=68900    fallback_filled=['E_mpa', 'nu', 'density_kg_m3']
+   get_material('GB_ZL104') σy=None     σb=150.0    E=68900    fallback_filled=['E_mpa', 'nu', 'density_kg_m3']
+   GB_MATERIALS['GB_ZL104']  σy=None     σb=150.0    E=None      (原始表)
+
+--- 再调 material_db.reload_gb_materials() ---
+   reload -> {'ok': True, 'count': 18, 'file': 'C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\gb_materials.json'}
+[C reload 之后]
+   get_material('ZL104')    σy=None     σb=150.0    E=68900    fallback_filled=['E_mpa', 'nu', 'density_kg_m3']
+   get_material('GB_ZL104') σy=None     σb=150.0    E=68900    fallback_filled=['E_mpa', 'nu', 'density_kg_m3']
+   GB_MATERIALS['GB_ZL104']  σy=None     σb=150.0    E=None      (原始表)
+
+====================================================================================================
+Step5b-2  根因：swapi 合并是否【就地改写】了 material_db.GB_MATERIALS 的条目？
+====================================================================================================
+  GB_MATERIALS['GB_ZL104'] 的键: ['E_mpa', 'aliases', 'data_status', 'density_kg_m3', 'equivalent_id', 'equivalent_note', 'gb_data', 'missing_fields', 'name', 'name_cn', 'nu', 'standard', 'standard_mechanics', 'standard_url', 'standard_year', 'uts_mpa', 'values_status', 'yield_mpa']
+  含 swapi 风格键 e_mpa/density ?  False False
+  equivalent_id = AL_6061_T6
+  values_source = None
+
+====================================================================================================
+Step5b-3  其它牌号是否也有同样问题（顺序敏感性全扫描）
+====================================================================================================
+  （无输出 = 未发现就地污染）

@@ -1,0 +1,57 @@
+{
+  "ruleset_id": "DSVA-GB_DRAFTING",
+  "revision": "A",
+  "category": "gb_drafting",
+  "generated_from": "DSVA国标对照表.xlsx",
+  "total": 3,
+  "rules": [
+    {
+      "rule_id": "GB_DRAFTING-001",
+      "standard_id": "GB/T 14690-1993",
+      "title": "技术制图 比例",
+      "topic": "比例",
+      "scope": "本标准规定了绘图比例及其标注方法。本标准适用于技术图样及有关技术文件。",
+      "status": "现行(2023-12-28复审继续有效)",
+      "dsva_requirement": "比例选择与标注",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=C111329A862219BCCCAAF32E14FF4CD0",
+      "note": ""
+    },
+    {
+      "rule_id": "GB_DRAFTING-002",
+      "standard_id": "GB/T 4458.4-2003",
+      "title": "机械制图 尺寸注法",
+      "topic": "尺寸标注",
+      "scope": "本部分规定了在图样中标注尺寸的基本方法。本部分适用于机械图样的绘制。",
+      "status": "现行(2023-12-28复审继续有效)",
+      "dsva_requirement": "基准、封闭尺寸链、重复标注、加工尺寸",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=08588A5F3FE19F16B9EE8D5D87E064D5",
+      "note": ""
+    },
+    {
+      "rule_id": "GB_DRAFTING-003",
+      "standard_id": "GB/T 324-2008",
+      "title": "焊缝符号表示法",
+      "topic": "焊缝标注",
+      "scope": "本标准规定了焊缝符号的表示规则。本标准适用于焊接接头的符号标注。",
+      "status": "现行(2021-12-23复审修订)",
+      "dsva_requirement": "焊缝符号和工艺要求",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=708B4123AC470E5A50E60EE89D898A92",
+      "note": "修改采用ISO 2553:1992(MOD)；2021-12-23复审结论“修订”，新版尚未发布"
+    }
+  ]
+}

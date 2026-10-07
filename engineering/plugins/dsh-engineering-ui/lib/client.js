@@ -430,6 +430,67 @@ window.__ModuleLoader__.load({
       '.eng-settings-ico{font-size:20px;line-height:1}',
       '.eng-settings-title{font-size:15px;font-weight:600}',
       '.eng-settings-sub{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:12px;margin-top:2px}',
+      // ── 【需求1】头部右侧「模式说明 / 如何使用」按钮（同官方卡片脚部样式）──
+      '.eng-settings-hd-txt{flex:1 1 auto;min-width:0}',
+      '.eng-settings-hd-help{display:flex;gap:6px;flex:0 0 auto}',
+      '.eng-help-btn{background:transparent;border:1px solid transparent;border-radius:6px;'
+        + 'color:var(--dsw-alias-label-secondary,#5b6472);cursor:pointer;'
+        + 'font-family:inherit;font-size:12px;line-height:1;padding:5px 8px;transition:background .12s}',
+      '.eng-help-btn:hover{background:var(--dsw-alias-bg-hover,rgba(127,127,127,.12));'
+        + 'color:var(--dsw-alias-label-primary,#1f2328)}',
+      '.eng-help-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}',
+      // ── 【需求1】说明弹窗（两 Tab，外观照抄官方 PresetGuideDialog）────────
+      '.eng-guide-mask{background:rgba(0,0,0,.45);bottom:0;left:0;position:fixed;right:0;top:0;'
+        + 'z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:24px}',
+      '.eng-guide-dlg{background:var(--dsw-alias-bg-base,#fff);border-radius:12px;'
+        + 'box-shadow:0 12px 48px rgba(0,0,0,.28);display:flex;flex-direction:column;'
+        + 'max-height:min(78vh,720px);max-width:640px;width:100%;overflow:hidden}',
+      '.eng-guide-hd{align-items:flex-start;display:flex;gap:12px;padding:20px 22px 12px}',
+      '.eng-guide-title{font-size:17px;font-weight:600}',
+      '.eng-guide-intro{color:var(--dsw-alias-label-secondary,#5b6472);font-size:12.5px;'
+        + 'line-height:1.6;margin-top:6px}',
+      '.eng-guide-x{background:transparent;border:0;border-radius:6px;color:#8b95a3;cursor:pointer;'
+        + 'flex:0 0 auto;font-size:20px;line-height:1;padding:2px 8px}',
+      '.eng-guide-x:hover{background:var(--dsw-alias-bg-hover,rgba(127,127,127,.12));color:#1f2328}',
+      '.eng-guide-tabs{display:flex;gap:6px;margin:0 22px 4px;'
+        + 'background:var(--dsw-alias-bg-sunken,#f2f4f7);border-radius:8px;padding:3px}',
+      '.eng-guide-tab{background:transparent;border:0;border-radius:6px;color:#5b6472;cursor:pointer;'
+        + 'flex:1 1 0;font-family:inherit;font-size:13px;padding:7px 10px;transition:background .12s}',
+      '.eng-guide-tab.on{background:var(--dsw-alias-bg-base,#fff);color:#1f2328;font-weight:600;'
+        + 'box-shadow:0 1px 3px rgba(0,0,0,.08)}',
+      '.eng-guide-body{overflow-y:auto;padding:14px 22px 22px;font-size:13px;line-height:1.7}',
+      '.eng-guide-h{font-size:14px;font-weight:600;margin:14px 0 8px}',
+      '.eng-guide-h:first-child{margin-top:2px}',
+      '.eng-guide-p{color:var(--dsw-alias-label-primary,#1f2328);margin:0 0 10px}',
+      '.eng-guide-tag{background:var(--dsw-alias-bg-sunken,#f2f4f7);border-radius:5px;color:#5b6472;'
+        + 'display:inline-block;font-size:11px;margin:0 0 8px;padding:2px 7px}',
+      '.eng-guide-quote{background:var(--dsw-alias-bg-sunken,#f7f8fa);'
+        + 'border-left:3px solid var(--dsw-alias-brand-primary,#3b82f6);border-radius:6px;'
+        + 'color:var(--dsw-alias-label-primary,#1f2328);margin:0 0 10px;padding:10px 12px}',
+      // 深色模式适配（宿主用 .dark 类切换）
+      '.dark .eng-guide-dlg{background:#1c1f24}',
+      '.dark .eng-guide-title,.dark .eng-guide-h,.dark .eng-guide-p,.dark .eng-guide-quote{color:#e6e8eb}',
+      '.dark .eng-guide-intro{color:#9aa4b2}',
+      '.dark .eng-guide-tabs{background:#24282e}',
+      '.dark .eng-guide-tag{background:#24282e;color:#9aa4b2}',
+      '.dark .eng-guide-quote{background:#24282e}',
+      '.dark .eng-guide-tab.on{background:#31363d}',
+      '.dark .eng-help-btn:hover{color:#e6e8eb}',
+      // ── 【需求1】注入到【预设卡片】上的按钮（对齐官方 cardHelp/helpButton）──
+      // 官方：.cardFoot 用 flex 两端对齐，左侧 cardHelp（两个 ghost 按钮），
+      //   右侧 iconButton（查看图标）。工程模式卡片因无 help，左侧是空的 ——
+      //   这里把同款按钮填进去，视觉位置与内置模式完全一致。
+      '.eng-preset-help{display:flex;gap:2px;align-items:center;flex:1 1 auto;min-width:0}',
+      '.eng-preset-help-btn{background:transparent;border:0;border-radius:6px;'
+        + 'color:var(--dsw-alias-label-secondary,#5b6472);cursor:pointer;'
+        + 'font-family:inherit;font-size:12px;line-height:1;padding:4px 8px;'
+        + 'transition:background .12s,color .12s;white-space:nowrap}',
+      '.eng-preset-help-btn:hover{background:var(--dsw-alias-bg-hover,rgba(127,127,127,.12));'
+        + 'color:var(--dsw-alias-label-primary,#1f2328)}',
+      '.eng-preset-help-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);'
+        + 'outline-offset:1px}',
+      '.dark .eng-preset-help-btn{color:#9aa4b2}',
+      '.dark .eng-preset-help-btn:hover{color:#e6e8eb}',
       // ── 【滚动区】设置正文自成滚动容器（用户要求：能上下滑的滑块）──────
       // 背景：宿主设置面板的 .options 本身就有 overflow-y:auto，但内容不足时
       //   不会出现滑块（实测本分区约 690px < 可用约 720px），用户看不到滚动条。
@@ -498,9 +559,26 @@ window.__ModuleLoader__.load({
       '.eng-sw-txt{flex:1;min-width:0}',
       '.eng-sw-label{font-size:13px;font-weight:600}',
       '.eng-sw-hint{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;line-height:1.65;margin-top:3px}',
-      '.eng-sw{background:var(--dsw-alias-bg-layer-3,#cbd5e1);border:0;border-radius:999px;cursor:pointer;flex:none;height:22px;padding:0;position:relative;transition:background .18s ease;width:40px}',
-      '.eng-sw.on{background:var(--dsw-alias-button-primary-fill,#2563eb)}',
-      '.eng-sw-knob{background:#fff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.25);height:18px;left:2px;position:absolute;top:2px;transition:transform .18s ease;width:18px}',
+      // ── 开关：颜色【自带 + !important】，不依赖皮肤变量 ────────────────
+      // 用户反馈：「换了一个皮肤后，按键就不一样了」，并希望"颜色相反的自适配"。
+      // 根因：原来 on 态用 var(--dsw-alias-button-primary-fill,#2563eb)。
+      //   皮肤可以把这个名字定义成浅色，于是 **开/关两态看起来一模一样**
+      //   （都是一个白胶囊），完全分不出状态 —— 正是截图里的样子。
+      // 修法：
+      //   ① 轨道/滑块改用【固定字面色】—— 中灰在浅底与深底上都可见，
+      //      蓝色是饱和强调色；滑块加描边+阴影，落在浅轨道上也不"融进去"。
+      //   ② 加 !important：本控件是第三方插件自有 class，皮肤样式表
+      //      无法预料它，却可能通过宽泛选择器把颜色改掉。这是本文件里
+      //      唯一使用 !important 的地方，范围严格限定在这个开关上。
+      //   ③ 不再需要深色模式单独覆盖（中灰在两种底色上都成立）。
+      '.eng-sw{background:rgba(118,128,144,.62)!important;border:0;border-radius:999px;' +
+        'box-shadow:inset 0 0 0 1px rgba(15,23,42,.18);cursor:pointer;flex:none;' +
+        'height:22px;padding:0;position:relative;transition:background .18s ease;width:40px}' +
+      '.eng-sw.on{background:#2563eb!important;box-shadow:inset 0 0 0 1px rgba(37,99,235,.6)}' +
+      '.eng-sw-knob{background:#fff!important;border-radius:50%;' +
+        'box-shadow:0 1px 3px rgba(0,0,0,.35),0 0 0 1px rgba(15,23,42,.10);' +
+        'height:18px;left:2px;position:absolute;top:2px;' +
+        'transition:transform .18s ease;width:18px}' +
       '.eng-sw.on .eng-sw-knob{transform:translateX(18px)}',
       '.eng-settings-empty-t{font-size:13px;font-weight:600;margin-bottom:6px}',
       '.eng-settings-empty-d{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:12px;line-height:1.7}',
@@ -839,6 +917,27 @@ window.__ModuleLoader__.load({
         'color:var(--dsw-alias-label-primary)' +
       '}' +
       '.eng-sugg-ico{color:var(--dsw-alias-label-tertiary,#94a3b8);flex:none}' +
+      // ── 【一键发送给Agent建模】操作行按钮 ────────────────────────────
+      // 与官方那排图标按钮并排，所以尺寸克制、样式贴近同排控件；
+      //   但用文字而非纯图标 —— 用户要求它必须看得见。
+      '.eng-msg-act-wrap{align-items:center;display:inline-flex;gap:6px}' +
+      '.eng-msg-act{' +
+        'background:transparent;border:1px solid var(--dsw-alias-border-l2,#d0d5dd);' +
+        'border-radius:6px;color:var(--dsw-alias-label-secondary,#475569);' +
+        'cursor:pointer;font-family:inherit;font-size:11.5px;line-height:1;' +
+        'padding:4px 8px;white-space:nowrap' +
+      '}' +
+      '.eng-msg-act:hover:not(:disabled){' +
+        'background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.05));' +
+        'border-color:var(--dsw-alias-state-business-primary,#2563eb);' +
+        'color:var(--dsw-alias-state-business-primary,#2563eb)' +
+      '}' +
+      '.eng-msg-act:disabled{color:var(--dsw-alias-label-tertiary,#94a3b8);cursor:default}' +
+      '.eng-msg-act.done{' +
+        'border-color:var(--dsw-alias-state-success-primary,#16a34a);' +
+        'color:var(--dsw-alias-state-success-primary,#16a34a)' +
+      '}' +
+      '.eng-msg-act-err{color:var(--dsw-alias-state-error-primary,#dc2626);font-size:11px}' +
       // 深色模式下的切换器底色
       '@media(prefers-color-scheme:dark){' +
         '.eng-vs{background:rgba(255,255,255,.08)}' +
@@ -895,6 +994,20 @@ window.__ModuleLoader__.load({
         'touch-action:none;user-select:none;width:22px;z-index:2' +
       '}' +
       '.eng-side-grip:hover{color:var(--dsw-alias-state-business-primary,#2563eb)}' +
+      // ── 【一键发送给工作模式建模】按钮 ──────────────────────────────
+      // ⚠️ flex:none 是【必需】的，不是可选优化：
+      //   面板是固定高度 + overflow:hidden 的 flex 列。此块若保持默认
+      //   flex-shrink:1，在内容变多时会被压缩到 0 高并被裁掉 —— 表现正是
+      //   "按钮不见了"。同理列表要能滚动必须 min-height:0（见 .eng-side-list）。
+      '.eng-side-work{flex:none;padding:0 10px 8px}' +
+      '.eng-side-workbtn{' +
+        'background:var(--dsw-alias-state-business-primary,#2563eb);border:0;' +
+        'border-radius:9px;color:#fff;cursor:pointer;font-family:inherit;' +
+        'font-size:13px;font-weight:600;padding:9px 12px;width:100%' +
+      '}' +
+      '.eng-side-workbtn:hover:not(:disabled){filter:brightness(1.08)}' +
+      '.eng-side-workbtn:disabled{background:var(--dsw-alias-bg-layer-2,#e5e7eb);color:var(--dsw-alias-label-tertiary,#94a3b8);cursor:default}' +
+      '.eng-side-ok{color:var(--dsw-alias-state-success-primary,#16a34a);font-size:12px;padding-top:6px;text-align:center}' +
       '.eng-side-hd{' +
         'align-items:center;background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.03));' +
         'border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
@@ -920,8 +1033,12 @@ window.__ModuleLoader__.load({
         'display:-webkit-box;flex:none;font-size:11.5px;line-height:1.5;' +
         'overflow:hidden;padding:7px 11px;-webkit-box-orient:vertical;-webkit-line-clamp:2' +
       '}' +
+      // min-height:0（而非 80px）是可滚动 flex 子项的正确写法：
+      //   flex 子项默认 min-height:auto，会被内容撑开、把下面的按钮和输入框
+      //   挤出固定高度的面板（配合 overflow:hidden 就是"看不见了"）。
+      //   设成 0 才允许它收缩并在自身内部滚动。
       '.eng-side-list{display:flex;flex:1 1 auto;flex-direction:column;gap:8px;' +
-        'min-height:80px;overflow-y:auto;padding:10px 11px}' +
+        'min-height:0;overflow-y:auto;padding:10px 11px}' +
       '.eng-side-row{display:flex;flex-direction:column;gap:3px;max-width:100%}' +
       '.eng-side-row.me{align-items:flex-end}' +
       '.eng-side-row.bot{align-items:flex-start}' +
@@ -1039,7 +1156,8 @@ window.__ModuleLoader__.load({
         '.eng-chip.off{background:rgba(148,163,184,.18);color:#94a3b8}' +
         '.eng-chip.idle{background:rgba(148,163,184,.12);color:#8b95a3}' +
         '.eng-set-note.dim{color:#8b95a3}' +
-        '.eng-sw{background:#3a3f4a}' +
+        // 开关不再按深色模式覆盖：基础色是中灰，浅底/深底都成立；
+        //   而且它带 !important，这里的覆盖也不会生效（留着只会误导）。
         '.eng-settings-empty-d,.eng-settings-sub{color:#8b95a3}' +
       '}',
     ].join('');
@@ -1051,6 +1169,284 @@ window.__ModuleLoader__.load({
       el.id = STYLE_ID;
       el.textContent = STYLE;
       document.head.appendChild(el);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 【需求1 · 落点修正】把「模式说明 / 如何使用」注入【预设卡片】本身
+    // ──────────────────────────────────────────────────────────────────────
+    // 用户明确要求：这两个入口要在【Agent 预设列表里工程模式那张卡片】上
+    //   （与内置 mode 的卡片同一位置），而不是藏在设置页里。
+    //
+    // 为什么必须用 DOM 注入而不是 React 组件替换：
+    //   预设卡片由宿主包 @deepseek-ai/dsh-client-ui-agent-preset 渲染，
+    //   整包打进 app.asar，第三方插件【无法注册/包裹它的 React 组件】。
+    //   它的 guides 是硬编码白名单（只含 standard/ptc/minimal/cordis），
+    //   且 presetGuide() 只在"内置分组"时才查表 —— 工程模式属自定义分组，
+    //   宿主【永远不会】给它渲染这两个按钮。
+    //   因此只能：在自己的插件里往那张卡片的空位（cardFoot）注入同款按钮。
+    //
+    // 定位策略（不依赖哈希类名，抗宿主升级）：
+    //   ① 找到工程模式卡片的「查看/浏览」按钮（aria-label 以"查看"开头，
+    //      且 data-tip/key 含 view）—— 它是 cardFoot 里的稳定锚点；
+    //   ② 从其父节点（= cardFoot）里找到【空的】那个子容器
+    //      （宿主的 cardHelp 在无 help 时根本不渲染 → cardFoot 只剩一个
+    //        iconButton，其"左侧空位"就是我们要占的位置）；
+    //   ③ 把我们的按钮插到 iconButton 之前，视觉位置与内置卡片完全一致。
+    //   ④ 用 MutationObserver 监听列表重渲染（切分组/切页会重建 DOM），
+    //      幂等补注入（已注入则跳过）。
+    // ══════════════════════════════════════════════════════════════════════
+    var ENG_PRESET_ID = 'engineering';
+    var INJECT_FLAG = 'data-eng-guide-injected';
+
+    /** 在预设列表里找到【工程模式】那张卡片的 cardFoot。 */
+    function findEngineeringCardFoot() {
+      if (typeof document === 'undefined') return null;
+
+      /** 从卡片主体元素推出 cardFoot（含按钮的那个兄弟 div）。 */
+      function footOf(mainEl) {
+        var root = mainEl ? mainEl.parentNode : null;
+        if (!root || !root.children) return null;
+        var kids = root.children;
+        // ① 优先：含 <button> 的兄弟 div（= 宿主 cardFoot，里面是 iconButton）
+        for (var i = 0; i < kids.length; i++) {
+          var el = kids[i];
+          if (el === mainEl) continue;
+          if (el.tagName === 'DIV' && el.querySelector && el.querySelector('button')) {
+            // 该 div 内的「查看」按钮作为插入锚点（把我们的按钮插到它之前）
+            var ib = el.querySelector('button[data-tip]')
+                  || el.querySelector('button');
+            return { foot: el, anchor: ib };
+          }
+        }
+        // ② 退化：最后一个 div（结构变化时仍尽量兜住）
+        for (var j = kids.length - 1; j >= 0; j--) {
+          if (kids[j].tagName === 'DIV') return { foot: kids[j], anchor: null };
+        }
+        return null;
+      }
+
+      // ── 锚点①【最稳】卡片 ID 元素 ────────────────────────────────────
+      // 宿主把 preset id 渲染成 <code class="…cardId">engineering</code>。
+      //   id 不随界面语言变化，比 aria-label / 文案都可靠。
+      //   ⚠️ 曾经的 bug：用 aria-label 搜 "engineering"，而宿主填的是
+      //   【显示名】"工程模式"（`${t("view")}: ${display.name}`），
+      //   于是永远匹配不上 → 按钮从未注入（截图里那一栏始终是空的）。
+      try {
+        var codes = document.querySelectorAll('code');
+        for (var i = 0; i < codes.length; i++) {
+          var c = codes[i];
+          if (String(c.textContent || '').trim() !== ENG_PRESET_ID) continue;
+          // 向上找到卡片主体按钮（button.cardMain）
+          var node = c, main = null;
+          for (var d = 0; d < 8 && node; d++) {
+            if (node.tagName === 'BUTTON') { main = node; break; }
+            node = node.parentNode;
+          }
+          if (!main) continue;
+          var f = footOf(main);
+          if (f) return f;
+        }
+      } catch (e) {}
+
+      // ── 锚点②兜底：aria-label 含【显示名】的卡片按钮 ─────────────────
+      // 万一宿主改了 cardId 的渲染方式，用显示名再试一次。
+      try {
+        var btns = document.querySelectorAll('button[aria-label]');
+        for (var j2 = 0; j2 < btns.length; j2++) {
+          var b = btns[j2];
+          var al = String(b.getAttribute('aria-label') || '');
+          if (al.indexOf(ENG_GUIDE.name) < 0 && al.indexOf(ENG_PRESET_ID) < 0) continue;
+          // 必须是卡片脚部的「查看」按钮（有 data-tip），而不是卡片主体按钮
+          if (!b.hasAttribute('data-tip')) continue;
+          var foot = b.parentNode;
+          if (!foot || foot.nodeType !== 1) continue;
+          return { foot: foot, anchor: b };
+        }
+      } catch (e) {}
+
+      return null;
+    }
+
+    /** 注入「模式说明 / 如何使用」两个按钮（幂等）。 */
+    function injectPresetGuideButtons(onOpen) {
+      if (typeof document === 'undefined') return false;
+      var hit = findEngineeringCardFoot();
+      if (!hit) return false;
+      var foot = hit.foot;
+
+      // ── 幂等判据：直接看【按钮是否真的在这个 foot 里】──────────────────
+      // 为什么不用 data-* 标记：宿主整体重渲染时会【重建 cardFoot 元素】，
+      //   标记随之丢失；也可能复用元素但清掉我们的子节点。两种情况都会让
+      //   标记与实际状态不一致。因此以"DOM 里确实有我们的按钮"为准。
+      var exist = foot.querySelectorAll('.eng-preset-help-btn');
+      if (exist && exist.length >= 2) return true;
+
+      // 清理可能残留的不完整注入
+      try {
+        var olds = foot.querySelectorAll('.eng-preset-help');
+        for (var q = 0; q < olds.length; q++) {
+          if (olds[q].parentNode) olds[q].parentNode.removeChild(olds[q]);
+        }
+      } catch (e) {}
+
+      // 造一个容器插到「查看」按钮之前（视觉位置与内置卡片一致）；
+      //   没有 anchor 时直接追加到 foot 末尾。
+      var host = document.createElement('div');
+      host.className = 'eng-preset-help';
+      try {
+        if (hit.anchor && hit.anchor.parentNode === foot) {
+          foot.insertBefore(host, hit.anchor);
+        } else {
+          foot.appendChild(host);
+        }
+      } catch (e) {
+        try { foot.appendChild(host); } catch (e2) { return false; }
+      }
+
+      var mk = function (label, page) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'eng-preset-help-btn';
+        b.textContent = label;
+        b.setAttribute('aria-label', label + ': ' + ENG_GUIDE.name);
+        b.addEventListener('click', function (ev) {
+          try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+          onOpen(page);
+        });
+        return b;
+      };
+      host.appendChild(mk(ENG_GUIDE.modeExplanation, 'explanation'));
+      host.appendChild(mk(ENG_GUIDE.howToUse, 'usage'));
+      // 标记仅作辅助（真正判据是按钮是否在 DOM 里）
+      try { foot.setAttribute(INJECT_FLAG, '1'); } catch (e) {}
+      return true;
+    }
+
+    /**
+     * 【需求1】预设卡片按钮注入 + 弹窗承载。
+     *
+     * 打开流程（不依赖 ReactDOM 硬造 root）：
+     *   DOM 注入的按钮 → 写一个"待打开"状态 → 通过自定义事件唤醒
+     *   shell.overlay 里常驻的 EngPresetGuideHost 组件渲染弹窗。
+     * 这样弹窗始终活在插件自己的 React 树里，与官方插槽机制一致。
+     */
+    var _presetGuideState = { mounted: false, observer: null };
+    var ENG_GUIDE_EVT = 'eng-guide-open';
+
+    function openPresetGuide(page) {
+      if (typeof document === 'undefined') return;
+      try {
+        document.dispatchEvent(new CustomEvent(ENG_GUIDE_EVT, {
+          detail: { page: page || 'explanation' }
+        }));
+      } catch (e) {
+        try {
+          var ev = document.createEvent('CustomEvent');
+          ev.initCustomEvent(ENG_GUIDE_EVT, true, true, { page: page || 'explanation' });
+          document.dispatchEvent(ev);
+        } catch (e2) {}
+      }
+    }
+
+    /** 常驻在 shell.overlay 的弹窗宿主：监听事件并按需渲染弹窗。 */
+    function EngPresetGuideHost() {
+      var _s = useState(null);
+      var guide = _s[0], setGuide = _s[1];
+      useEffect(function () {
+        function onOpen(e) {
+          var p = (e && e.detail && e.detail.page) || 'explanation';
+          setGuide({ page: p });
+        }
+        try { document.addEventListener(ENG_GUIDE_EVT, onOpen); } catch (e) {}
+        return function () {
+          try { document.removeEventListener(ENG_GUIDE_EVT, onOpen); } catch (e) {}
+        };
+      }, []);
+      if (!guide) return null;
+      return h(EngGuideDialog, {
+        initialPage: guide.page,
+        onClose: function () { setGuide(null); }
+      });
+    }
+
+    function startPresetGuideInjector() {
+      if (typeof document === 'undefined') return;
+      if (_presetGuideState.mounted) return;
+      _presetGuideState.mounted = true;
+
+      // ── 注入策略：定时轮询 + DOM 变化监听【双保险】─────────────────────
+      // 踩过的坑：
+      //   ① 只用 requestAnimationFrame 抖动：rAF 在【后台标签页/窗口最小化】
+      //      时会被浏览器暂停，于是 20 次抖动可能一次都不跑 → 从不注入；
+      //   ② 只监听一次：用户"先开 DSH、之后才打开设置页"时，预设列表是
+      //      后续才挂载的，早期尝试必然落空。
+      // 现在：setInterval 每 800ms 检查一次（rAF 暂停也不影响），
+      //   配合 MutationObserver 即时响应；注入成功后自动降频为 5s 兜底。
+      var _done = false;
+      var _timer = null;
+
+      function attempt(reason) {
+        var ok = false;
+        try { ok = injectPresetGuideButtons(openPresetGuide); } catch (e) { ok = false; }
+        if (ok && !_done) {
+          _done = true;
+          _presetGuideState.injected = true;
+          // 注入成功后降频：仍保留兜底轮询（宿主可能整体重渲染把按钮冲掉）
+          if (_timer) { clearInterval(_timer); }
+          _timer = setInterval(function () {
+            try { injectPresetGuideButtons(openPresetGuide); } catch (e) {}
+          }, 5000);
+          try {
+            if (window.console && console.log) {
+              console.log('[dsh-engineering-ui] 预设卡片「模式说明/如何使用」已注入'
+                          + (reason ? '（' + reason + '）' : ''));
+            }
+          } catch (e) {}
+        }
+        return ok;
+      }
+
+      // ① 立即试一次
+      attempt('init');
+      // ② 快速轮询（覆盖"设置页稍后才打开"的场景）
+      _timer = setInterval(function () {
+        if (_done) return;
+        attempt('poll');
+      }, 800);
+      // ③ DOM 变化即时响应（切分组 / 列表重建）
+      try {
+        if (typeof MutationObserver !== 'undefined') {
+          _presetGuideState.observer = new MutationObserver(function () {
+            try { injectPresetGuideButtons(openPresetGuide); } catch (e) {}
+          });
+          _presetGuideState.observer.observe(document.body, {
+            childList: true, subtree: true
+          });
+        }
+      } catch (e) {}
+      // ④ 页面可见性变化时补一次（切回标签页）
+      try {
+        document.addEventListener('visibilitychange', function () {
+          if (!document.hidden) attempt('visible');
+        });
+      } catch (e) {}
+    }
+
+    /** 【诊断】报告注入器的当前状态（供排障；可 console 调用）。 */
+    function presetGuideInjectorStatus() {
+      var hit = null;
+      try { hit = findEngineeringCardFoot(); } catch (e) {}
+      return {
+        mounted: !!_presetGuideState.mounted,
+        injected: !!_presetGuideState.injected,
+        card_found: !!hit,
+        foot_children: hit && hit.foot ? hit.foot.children.length : null,
+        has_anchor: !!(hit && hit.anchor),
+        buttons_in_dom: (typeof document !== 'undefined')
+          ? document.querySelectorAll('.eng-preset-help-btn').length : 0,
+        preset_id: ENG_PRESET_ID,
+        preset_name: ENG_GUIDE.name,
+      };
     }
     // ══ 【布局 v5 · 关键机制】驱动宿主第三列开合 ═══════════════════════
     // 经实测确认的宿主真实结构（DSH Web）：
@@ -2513,6 +2909,153 @@ window.__ModuleLoader__.load({
     //
     // 其余行暂用示意图里的占位文案「子栏目选项设置N」，后续按需替换 ——
     //   占位行只渲染视觉，不带点击行为（不可点，避免"点了没反应"的错觉）。
+    // ══════════════════════════════════════════════════════════════════════
+    // 【需求1】工程模式「模式说明 / 如何使用」弹窗
+    // ──────────────────────────────────────────────────────────────────────
+    // 为什么在插件里自建，而不是像内置模式那样由宿主渲染：
+    //   宿主 @deepseek-ai/dsh-client-ui-agent-preset 的说明弹窗是【硬编码
+    //   白名单】—— guides Map 只含 standard / ptc / minimal / cordis 四项，
+    //   且 presetGuide() 只在 trust === "system"（内置分组）时才查表；
+    //   工程模式自己发布了 name → 属"自定义"分组 → 直接返回 undefined →
+    //   两个按钮根本不渲染。宿主 schema 也没有 guide/docs 一类字段可填。
+    //   因此只能在插件内自建同款弹窗（外观与官方保持一致）。
+    // 结构照抄官方：
+    //   Tab1「模式说明」= "### 工作方式" + 一段；"### 什么时候选" + 一段
+    //   Tab2「如何使用」= 若干 "### 标题" 段，每段含 "> 提示词" 与"预期产出："
+    // ══════════════════════════════════════════════════════════════════════
+    var ENG_GUIDE = {
+      name: '工程模式',
+      intro: '新建任务时选择「工程模式」，说明要设计什么零件或装配体，'
+           + '并给出关键尺寸、材料与工况；不确定的参数会被逐一确认。',
+      explanation: [
+        '### 工作方式',
+        'Agent 通过 Python win32com 直接驱动 SolidWorks 建模、用 AutoCAD 出图，'
+        + '并在本地做有限元与疲劳校核（纯 Python + numpy，无需外部 FEA 软件）。'
+        + '整个流程围绕「完成工图」推进：分析 → 设计 → 验证，'
+        + '由 Python 门禁脚本在关键节点强制校验，不合格不放行。'
+        + '大型装配体会拆成若干"房间"，由子 Agent 串行或并行建模，'
+        + '再统一总装与出图。',
+        '### 什么时候选',
+        '需要真正产出三维模型与工程图（.sldprt / .slddrw / DWG / DXF）时选它；'
+        + '需要三维建模、二维制图或强度校核时选它。'
+        + '如果只是写代码、处理文件或整理资料，用「标准模式」即可。'
+      ].join('\n\n'),
+      usage: [
+        '### 画一个零件并出图',
+        '> 帮我画一个长 11mm 的正方形，材料 Q235，然后转成 CAD 图纸。',
+        '预期产出：DSH_正方形.sldprt 零件文件、三视图工程图（.slddrw）、'
+        + '可直接用 AutoCAD 打开的 DWG，以及一张截图供验收。',
+        '### 设计一个多零件机构',
+        '> 帮我设计一个三自由度机械臂，负载 5kg，臂展 400mm。',
+        '预期产出：拆分为结构件 / 传动机构 / 壳体机架等房间，逐房间建模并做'
+        + '干涉检查与强度校核，最后总装并输出全套工程图与校核报告。',
+        '### 校核一个已有设计的强度',
+        '> 校核这个大臂的强度，材料 6061-T6，末端载荷 10kg。',
+        '预期产出：静力 FEA 结果（应力 / 位移 / 安全系数）、疲劳寿命校核，'
+        + '以及是否满足目标安全系数的判定结论。'
+      ].join('\n\n'),
+      modeExplanation: '模式说明',
+      howToUse: '如何使用',
+      guideExampleTask: '示例任务'
+    };
+
+    /** 把一段 Markdown 子集渲染成 React 节点（标题 / 引用 / 正文）。
+
+    只支持本插件实际用到的三种形态（与官方 guide 文案结构一致）：
+      · "### X"   → 小标题
+      · "> X"     → 提示词气泡（示例任务的输入）
+      · 其余       → 普通段落
+    不引入 Markdown 依赖：插件只 require('react')，保持零新增依赖。
+    */
+    function engRenderMd(md, keyPrefix) {
+      var blocks = String(md || '').split(/\n\n+/);
+      var out = [];
+      for (var i = 0; i < blocks.length; i++) {
+        var b = blocks[i].trim();
+        if (!b) continue;
+        var k = keyPrefix + '-' + i;
+        if (b.indexOf('### ') === 0) {
+          out.push(h('div', { className: 'eng-guide-h', key: k },
+            b.slice(4).trim()));
+        } else if (b.charAt(0) === '>') {
+          out.push(h('div', { className: 'eng-guide-quote', key: k },
+            b.replace(/^>\s?/gm, '').trim()));
+        } else {
+          out.push(h('div', { className: 'eng-guide-p', key: k }, b));
+        }
+      }
+      return out;
+    }
+
+    /** 「如何使用」页：按 "### 标题" 切段，每段 = 标题 + 示例任务标签 + 正文。 */
+    function engRenderUsage(md) {
+      var parts = String(md || '').split(/^### /m).filter(function (s) {
+        return s.trim();
+      });
+      var out = [];
+      for (var i = 0; i < parts.length; i++) {
+        var seg = parts[i];
+        var nl = seg.indexOf('\n');
+        var title = (nl >= 0 ? seg.slice(0, nl) : seg).trim();
+        var body = (nl >= 0 ? seg.slice(nl + 1) : '').trim();
+        out.push(h('div', { className: 'eng-guide-sec', key: 'u-' + i },
+          h('div', { className: 'eng-guide-h' }, title),
+          h('div', { className: 'eng-guide-tag' }, ENG_GUIDE.guideExampleTask),
+          engRenderMd(body, 'ub-' + i)));
+      }
+      return out;
+    }
+
+    /** 【需求1】模式说明 / 如何使用弹窗（两 Tab，外观照抄官方）。 */
+    function EngGuideDialog(props) {
+      var _st = useState(props.initialPage || 'explanation');
+      var page = _st[0], setPage = _st[1];
+      var onClose = props.onClose;
+      // Esc 关闭（与宿主弹窗一致的键盘习惯）
+      useEffect(function () {
+        function onKey(e) {
+          if (e && e.key === 'Escape' && typeof onClose === 'function') onClose();
+        }
+        try { document.addEventListener('keydown', onKey); } catch (e) {}
+        return function () {
+          try { document.removeEventListener('keydown', onKey); } catch (e) {}
+        };
+      }, [onClose]);
+      return h('div', {
+        className: 'eng-guide-mask',
+        onClick: function (e) {
+          // 点遮罩关闭；点弹窗内部不关
+          if (e && e.target === e.currentTarget && typeof onClose === 'function') {
+            onClose();
+          }
+        }
+      },
+        h('div', { className: 'eng-guide-dlg', role: 'dialog', 'aria-modal': 'true' },
+          h('div', { className: 'eng-guide-hd' },
+            h('div', null,
+              h('div', { className: 'eng-guide-title' }, ENG_GUIDE.name),
+              h('div', { className: 'eng-guide-intro' }, ENG_GUIDE.intro)),
+            h('button', {
+              className: 'eng-guide-x', type: 'button',
+              'aria-label': '关闭', onClick: onClose
+            }, '×')),
+          h('div', { className: 'eng-guide-tabs' },
+            h('button', {
+              className: 'eng-guide-tab' + (page === 'explanation' ? ' on' : ''),
+              type: 'button',
+              onClick: function () { setPage('explanation'); }
+            }, ENG_GUIDE.modeExplanation),
+            h('button', {
+              className: 'eng-guide-tab' + (page === 'usage' ? ' on' : ''),
+              type: 'button',
+              onClick: function () { setPage('usage'); }
+            }, ENG_GUIDE.howToUse)),
+          h('div', { className: 'eng-guide-body' },
+            page === 'usage'
+              ? engRenderUsage(ENG_GUIDE.usage)
+              : engRenderMd(ENG_GUIDE.explanation, 'ex'))));
+    }
+
     /** 一个主栏目：大标题 + 卡片容器。 */
     function EngGroup(props) {
       return h('div', { className: 'eng-grp' },
@@ -2632,8 +3175,23 @@ window.__ModuleLoader__.load({
      * 轮询：进入设置页读一次，之后每 15s 刷新（外部改了状态也能反映）。
      */
     function EngConnRow(props) {
-      var target = props.target || 'sw';       // 'sw' | 'cad'
-      var label = props.label || (target === 'sw' ? 'SW 连接' : 'CAD连接');
+      // target: 'sw' | 'cad'（真实连接）；'abaqus' | 'nx' 当前为占位
+      var target = props.target || 'sw';
+      // ── 【占位模式】外观与 SW/CAD 完全一致，但不触发任何探测/启动 ────────
+      // 用户要求："先给 abaqus/nx 做占位符，先不需要做实际连接"。
+      //   因此按钮样式（.eng-conn-btn / .alt / 徽标 / 提示文案）全部复用，
+      //   仅把 onClick 换成"未接入"的说明，避免误触发。
+      var isPlaceholder = props.placeholder === true
+        || target === 'abaqus' || target === 'nx';
+      // 各目标的显示名（用于默认 label 与状态文案，避免"SolidWorks/CAD"二选一写死）
+      var TARGET_DISPLAY = {
+        sw: { label: 'SOLIDWORKS连接', name: 'SolidWorks' },
+        cad: { label: 'AutoCAD 连接', name: 'AutoCAD' },
+        abaqus: { label: 'Abaqus连接', name: 'Abaqus' },
+        nx: { label: 'NX连接', name: 'NX' }
+      };
+      var _td = TARGET_DISPLAY[target] || TARGET_DISPLAY.sw;
+      var label = props.label || _td.label;
       var sessionId = props.sessionId || '';
       var _st0 = useState({
         phase: 'idle', data: null, note: null,
@@ -2653,6 +3211,16 @@ window.__ModuleLoader__.load({
 
       function apply(state) {
         if (!mounted.current) return;
+        // 占位项不走状态机（没有后端 target），保持"预留"文案
+        if (isPlaceholder) {
+          patch({
+            phase: 'idle',
+            data: { state: 'idle', title: _td.name + ' 连接（预留，暂未接入）' },
+            note: '预留项：按钮与 SOLIDWORKS / AutoCAD 一致，'
+                  + '连接能力尚未接入（后续版本开放）。'
+          });
+          return;
+        }
         var entry = state && state[target] ? state[target] : null;
         var connected = !!(entry && entry.connected);
         var running = entry ? entry.running : null;
@@ -2663,14 +3231,17 @@ window.__ModuleLoader__.load({
           n = '已连接' + (entry && entry.revision ? '（' + entry.revision + '）' : '')
               + (entry && entry.pid ? ' PID ' + entry.pid : '');
         } else if (running === false) {
-          n = (target === 'sw' ? 'SolidWorks' : 'AutoCAD')
-              + ' 未运行 —— 点「启动」自动拉起';
+          n = _td.name + ' 未运行 —— 点「启动」自动拉起';
         } else if (running === true) {
           n = '进程在运行，但 COM 未连上';
         } else if (entry && entry.checked_at) {
           n = '未连接（检测于 ' + entry.checked_at + '）';
         } else {
           n = '尚未检测过 —— 点「连接」探测，或点「启动」直接拉起';
+        }
+        // Abaqus 无 COM：把"未连上 COM"的措辞换成符合其能力边界的说明
+        if (target === 'abaqus' && running === true && !connected) {
+          n = 'Abaqus 进程在运行（无 COM 接口，集成走 `abaqus python` 脚本）';
         }
         if (state && state.stale && connected) {
           n = (n || '') + '（状态可能已过期）';
@@ -2686,6 +3257,17 @@ window.__ModuleLoader__.load({
       }
 
       function refresh() {
+        // ── 【占位模式】不发任何请求：占位项没有后端 target，
+        //   轮询只会拿到 undefined 并显示误导性的"无法读取连接状态"。
+        if (isPlaceholder) {
+          patch({
+            phase: 'idle',
+            data: { state: 'idle', title: _td.name + ' 连接（预留，暂未接入）' },
+            note: '预留项：按钮与 SOLIDWORKS / AutoCAD 一致，'
+                  + '连接能力尚未接入（后续版本开放）。'
+          });
+          return;
+        }
         fetchConnState(function (s) {
           if (!mounted.current) return;
           if (!s) { patch({ phase: 'idle', data: null, note: '无法读取连接状态（宿主端点不可用）' }); return; }
@@ -2696,10 +3278,11 @@ window.__ModuleLoader__.load({
       useEffect(function () {
         mounted.current = true;
         refresh();
-        var t = setInterval(refresh, 15000);
+        // 占位项无需轮询：状态不会变，且没有后端可查
+        var t = isPlaceholder ? null : setInterval(refresh, 15000);
         return function () {
           mounted.current = false;
-          clearInterval(t);
+          if (t) clearInterval(t);
         };
       }, [target]);
 
@@ -2720,8 +3303,20 @@ window.__ModuleLoader__.load({
             type: 'button',
             disabled: busy || busyLaunch,
             'aria-label': '连接' + label,
+            title: isPlaceholder
+              ? (_td.name + ' 连接为预留项，暂未接入实际探测') : undefined,
             onClick: function () {
               if (busy || busyLaunch) return;
+              // 占位项：只更新说明文字，绝不发探测请求
+              if (isPlaceholder) {
+                patch({
+                  phase: 'idle',
+                  data: { state: 'idle', title: _td.name + ' 连接（预留）' },
+                  note: _td.name + ' 连接为预留项，暂未接入实际探测；'
+                        + '需要时可先用其命令行完成分析。'
+                });
+                return;
+              }
               patch({ phase: 'busy', note: '正在探测…', sent: null });
               probeConn(target, function (r) {
                 if (!mounted.current) return;
@@ -2742,12 +3337,24 @@ window.__ModuleLoader__.load({
             type: 'button',
             disabled: busy || busyLaunch,
             'aria-label': '启动' + label,
-            title: '启动软件（会自动隐藏欢迎页并最大化主窗口）',
+            title: isPlaceholder
+              ? (_td.name + ' 启动为预留项，暂未接入') 
+              : '启动软件（会自动隐藏欢迎页并最大化主窗口）',
             onClick: function () {
               if (busy || busyLaunch) return;
+              // 占位项：不拉起任何进程，只给出说明
+              if (isPlaceholder) {
+                patch({
+                  phase: 'idle',
+                  data: { state: 'idle', title: _td.name + ' 启动（预留）' },
+                  note: _td.name + ' 启动为预留项，暂未接入；'
+                        + '当前请手动启动该软件，或在命令行下调用。'
+                });
+                return;
+              }
               patch({
                 phase: 'launching', sent: null, logOpen: true,
-                note: '正在启动 ' + (target === 'sw' ? 'SolidWorks' : 'AutoCAD')
+                note: '正在启动 ' + _td.name
                       + '（首次启动可能要几十秒）…'
               });
               launchConn(target, function (r) {
@@ -2836,7 +3443,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'eng-settings', 'data-eng-section': 'engineering' },
         h('div', { className: 'eng-settings-hd' },
           h('span', { className: 'eng-settings-ico' }, '🛠️'),
-          h('div', null,
+          h('div', { className: 'eng-settings-hd-txt' },
             h('div', { className: 'eng-settings-title' }, '工程模式'),
             h('div', { className: 'eng-settings-sub' },
               'SolidWorks / CAD 机械设计工作流的专用设置'))),
@@ -2852,8 +3459,14 @@ window.__ModuleLoader__.load({
           //   作为消息投给当前会话，由 DSH 模型判断根因。
           // 结果统一落盘 connection_state.json（UI 与 AI 流程共读）。
           h(EngGroup, { title: '连接区' },
-            h(EngConnRow, { target: 'sw', label: 'SW 连接' }),
-            h(EngConnRow, { target: 'cad', label: 'CAD连接' }),
+            h(EngConnRow, { target: 'sw', label: 'SOLIDWORKS连接' }),
+            h(EngConnRow, { target: 'cad', label: 'AutoCAD 连接' }),
+            // ── 【连接区扩展】Abaqus / NX 连接（与 SW/CAD 完全同款按钮）──
+            // 说明：两者都没有 COM 自动化接口，探测只覆盖"进程 + 安装路径"，
+            //   按钮外观与交互（连接/启动/诊断）与 SW/CAD 一致；
+            //   未安装时如实报错，不伪装成功。
+            h(EngConnRow, { target: 'abaqus', label: 'Abaqus连接' }),
+            h(EngConnRow, { target: 'nx', label: 'NX连接' }),
             h(EngRow, { label: '子栏目选项设置3' })),
 
           // ── 主栏目2：设计过程优化（用户指定名称）───────────────────────
@@ -3034,6 +3647,298 @@ window.__ModuleLoader__.load({
     //     所以 DOM 只能当兜底。
     // 这里把官方服务存成模块级引用，供组件内的探测器使用。
     var _hostRightbar = null;
+    // ── 【一键发送给工作模式建模】所需服务的模块级引用 ──────────────────
+    // 为什么不用插槽的 inject：shell.overlay 的声明是
+    //   { kind:'list'; scope:'root' }，【没有 inject 面】
+    //   （ui-layout/src/client/index.ts:98）。
+    //   往这种槽注册时传 inject 属于超出声明的用法，风险不值得冒。
+    // 本文件既有的同类需求（_hostRightbar）就是用模块级引用的方式解决的，
+    //   这里沿用同一套做法，行为确定、不依赖未承诺的插槽能力。
+    var _engCtx = null;
+    // ── 【能力获取】remote.agentPresets.select（给新会话设预设）────────────
+    // 为什么不能直接写 ctx.remote.agentPresets：
+    //   Cordis 对【未在 inject 里声明】的服务属性会抛
+    //   "cannot get property ... without inject"。官方 ui-agent-preset 的
+    //   inject 里就明确列了 'remote.agentPresets'
+    //   （ui-agent-preset/src/client/index.ts:62-63）。这正是之前点击报
+    //   "cannot get property remote.agentPresets" 的原因。
+    //
+    // 为什么【不能】把它加进本插件顶层的 inject：
+    //   inject 是【硬依赖】：一旦该命名空间在某个部署/版本下不存在，
+    //   本插件会永久停在 PENDING —— 守卫、三大防线、整个工程模式 UI 全失效。
+    //   这与"别人 clone 下来就能用"的要求直接冲突。
+    //
+    // 因此用【嵌套 inject】获取能力（官方同款写法，见同一文件 :153 的
+    //   ctx.inject([...], scope => ...)）：父子 fiber 独立，依赖缺失时
+    //   只有这个子 fiber 不激活，插件本体照常加载。
+    var _agentPresetSelect = null;
+    /** 设置某会话的预设；能力不可用时返回 null（由调用方决定降级方式）。 */
+    function engSelectPreset(sessionId, presetId) {
+      if (typeof _agentPresetSelect !== 'function') return null;
+      try { return _agentPresetSelect(sessionId, presetId); } catch (e) { return null; }
+    }
+    /** 惰性读取一个客户端服务；缺失时返回 null 而不是抛错。 */
+    function engService(name) {
+      try {
+        if (_engCtx && typeof _engCtx.get === 'function') {
+          var s = _engCtx.get(name);
+          if (s) return s;
+        }
+      } catch (e) { /* 落到下面的属性兜底 */ }
+      try { return (_engCtx && _engCtx[name]) || null; } catch (e) { return null; }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 【一键发送给 Agent 建模】—— 共用实现
+    // ══════════════════════════════════════════════════════════════════════
+    // 用户需求：「新开一个『工程模式的工作』的 Agent，那个 Agent 就可以根据
+    //   聊天分析的数据去指导和分析开始建模了」。
+    //
+    // 全部走官方 API，不碰官方存储：
+    //   ① sessions.create({ cwd })     新建空会话（尚未发过消息）
+    //   ② remote.agentPresets.select(newId, 'engineering')
+    //      —— 必须在【第一条消息之前】：官方在会话开始后锁定预设
+    //         （agent-registry 检查 turnBoundary 后抛
+    //          'This session has already started'）
+    //   ③ sessions.using(newId, ...) → binding.session.prompt([...], 'queue')
+    //      —— 走官方 prompt 通道，这条消息【就是】该会话的首轮，
+    //         与手动输入完全同链路（同模型、同持久化、同工具面）
+    //   ④ uiWorkspace.openSession(newId)  跳过去，立刻看到工作区在干活
+    //
+    // @param text 首轮任务内容（调用方组装）
+    // @returns Promise<void>；失败时 reject，由调用方展示
+    function engSendToWorkSession(text) {
+      var body = String(text || '').trim();
+      if (!body) return Promise.reject(new Error('没有可发送的内容'));
+
+      var sessionsSvc = engService('sessions');
+      var wsNav = engService('uiWorkspace');
+      // 注：预设选择不在这里读 remote —— 见 engSelectPreset（嵌套 inject 获取）
+
+      // ── 必须落在【同一个工作区】里 ──────────────────────────────────
+      // ⚠️ 这里踩过一个坑，务必不要改回 sessions.create({cwd})：
+      //   用 cwd 建出来的会话【没有工作区归属】，UI 会显示"选择工作区"、
+      //   输入框被禁用 —— 用户看到的就是"跳过去了却发不出去"。
+      //   官方建会话用的是 workspaceId（ui-workspace/src/client/navigation.ts:188
+      //     this.sessions.create({ workspaceId: workspace.workspaceId })），
+      //   并且有现成的 connectWorkspace() 会在该工作区里复用/新建空会话。
+      var wsId = engCurrentWorkspaceId();
+      if (!wsId) {
+        return Promise.reject(new Error(
+          '当前会话不在任何工作区里：请先在上方选择一个工作区，再使用该功能'));
+      }
+
+      var created;
+      if (wsNav && typeof wsNav.connectWorkspace === 'function') {
+        // 官方路径：复用该工作区的空会话，没有就新建 —— 天然带工作区归属
+        created = Promise.resolve().then(function () { return wsNav.connectWorkspace(wsId); });
+      } else if (sessionsSvc && typeof sessionsSvc.create === 'function') {
+        created = sessionsSvc.create({ workspaceId: wsId });
+      } else {
+        return Promise.reject(new Error('无法新建会话：sessions / uiWorkspace 服务均不可用'));
+      }
+
+      return created.then(function (newId) {
+        if (!newId) throw new Error('新建会话未返回会话 id');
+
+        // ── 顺序很重要：先设预设，再跳转，最后发首轮 ────────────────────
+        // 预设必须在【任何可能让会话开始的动作】之前设好：
+        //   官方在会话开始后锁定预设（turnBoundary 检查），一旦开始就设不进去。
+        //   导航本身不发消息，但把它放在最前面没有好处、只有风险。
+        var sel = engSelectPreset(newId, 'engineering');
+        if (sel === null && typeof _agentPresetSelect !== 'function') {
+          // 能力不可用（本机 DSH 没有该 remote 命名空间）
+          throw new Error('本机 DSH 未提供预设选择能力，无法把新会话设为工程模式');
+        }
+        var afterPreset = (sel && typeof sel.then === 'function')
+          ? sel : Promise.resolve({ ok: true });
+        return afterPreset.then(function (res) {
+          if (res && res.ok === false) {
+            var why = (res.error && (res.error.message || res.error.code)) || '未知原因';
+            throw new Error('设置工程模式预设失败：' + String(why));
+          }
+          // 预设已定 → 跳过去（用户立刻看到新会话；也是"填入输入框"退化的前提）
+          try {
+            if (wsNav && typeof wsNav.openSession === 'function') wsNav.openSession(newId);
+          } catch (e0b) { /* 跳转失败不阻断发送 */ }
+          return sessionsSvc.using(newId, { source: 'gateway' }, function (reference) {
+            return reference.binding.session.prompt([{ type: 'text', text: body }], 'queue');
+          });
+        }).then(function (pres) {
+          if (pres && pres.ok === false) {
+            var why2 = (pres.error && (pres.error.message || pres.error.code)) || '未知原因';
+            throw new Error(String(why2));
+          }
+          return { sessionId: newId, sent: true };
+        }).catch(function (err) {
+          // ── 退化路径：自动发送失败 → 把任务【填进新会话的输入框】 ──────
+          // 为什么要有这条路：自动发送依赖会话创建/预设选择/首轮提交三跳，
+          //   任何一跳在具体环境里被拒（预设被锁、准入被拒、服务未就绪），
+          //   功能就整个不可用 —— 用户白点一次。而"新会话 + 输入框里已备好
+          //   任务"仍然完整达成目的，用户只需按一次回车。
+          return engDraftIntoComposer(body).then(function (ok) {
+            if (ok) return { sessionId: newId, sent: false, drafted: true };
+            throw err;   // 连输入框都够不到 → 如实上报
+          });
+        });
+      });
+    }
+
+    /**
+     * 把文本填进当前会话的输入框（退化路径）。
+     *
+     * 会话切换后 composer 需要一帧才挂载，因此这里轮询重试而不是只试一次。
+     * 用 execCommand('insertText') 走原生输入路径，React/Lexical 才能收到。
+     * @param text - 要填入的文本
+     * @returns 是否填入成功
+     */
+    function engDraftIntoComposer(text) {
+      var body = String(text || '');
+      if (!body) return Promise.resolve(false);
+      var tries = 0;
+      return new Promise(function (resolve) {
+        var attempt = function () {
+          tries += 1;
+          try {
+            var el = document.querySelector(
+              '[data-conversation-region="composer"] [contenteditable="true"]');
+            if (el) {
+              el.focus();
+              // 已有草稿时先换行，避免粘连
+              var pre = String(el.textContent || '').trim() ? '\n\n' : '';
+              document.execCommand('insertText', false, pre + body);
+              resolve(true);
+              return;
+            }
+          } catch (e) { /* 继续重试 */ }
+          if (tries >= 20) { resolve(false); return; }
+          setTimeout(attempt, 150);
+        };
+        attempt();
+      });
+    }
+
+    /** 组装交给工作会话的首轮任务文本（面板按钮与操作行按钮共用格式）。 */
+    function engComposeWorkPrompt(parts) {
+      var lines = [];
+      lines.push('以下内容来自「纯聊天」模式的分析，请在工作模式下继续推进。');
+      lines.push('');
+      if (parts.source) {
+        lines.push('【引用的原文】');
+        lines.push(String(parts.source).slice(0, 8000));
+        lines.push('');
+      }
+      if (parts.transcript) {
+        lines.push('【聊天分析记录】');
+        lines.push(String(parts.transcript).slice(0, 20000));
+        lines.push('');
+      }
+      if (parts.analysis) {
+        lines.push('【已有的分析结论】');
+        lines.push(String(parts.analysis).slice(0, 12000));
+        lines.push('');
+      }
+      lines.push('请基于以上内容开始建模工作：');
+      lines.push('1. 先提炼出关键设计参数与约束（尺寸、材料、载荷、接口条件）；');
+      lines.push('2. 列出仍需我确认的信息，一次问清，不要反复追问；');
+      lines.push('3. 然后调用相应工具（SolidWorks / CAD / 物理仿真）开始建模与验证；');
+      lines.push('4. 每一步给出可核对的中间结果。');
+      return lines.join('\n');
+    }
+
+    /**
+     * 找当前主会话所在的【工作区 id】。
+     *
+     * 为什么需要它：新建工作会话必须带 workspaceId，否则新会话不属于任何
+     *   工作区，UI 显示"选择工作区"、输入框禁用，任务发不出去。
+     *
+     * 数据来源：workspaces 服务（@deepseek-ai/dsh-api-workspace-controller/client，
+     *   服务名 'workspaces'，见其 service.ts:126 `super(ctx, 'workspaces')`）——
+     *   其 list 快照的 items 是 WorkspaceView[]，含 workspaceId / path / sessionIds。
+     *   ui-workspace 的 connectWorkspace 内部也正是用 sessionIds.includes 归属。
+     * @returns 工作区 id，找不到时 null
+     */
+    function engCurrentWorkspaceId() {
+      try {
+        var wsSvc = engService('workspaces');
+        var snap = wsSvc && wsSvc.list && typeof wsSvc.list.getSnapshot === 'function'
+          ? wsSvc.list.getSnapshot() : null;
+        var items = (snap && snap.items) || [];
+        if (!items.length) return null;
+        var cur = engCurrentSessionId(null);
+        if (cur) {
+          for (var i = 0; i < items.length; i++) {
+            var it = items[i];
+            if (it && it.sessionIds && it.sessionIds.indexOf(cur) >= 0) {
+              return it.workspaceId;
+            }
+          }
+        }
+        // 当前会话还没归属（例如刚新建）→ 只有一个工作区时直接用它
+        if (items.length === 1) return items[0].workspaceId;
+      } catch (e) { /* 落空 → null */ }
+      return null;
+    }
+
+    /** 从会话日志取「聊天分析记录」纯文本（供操作行按钮使用）。 */
+    function engFetchTranscript(sessionId) {
+      if (!sessionId) return Promise.resolve('');
+      return fetch('/dsh-engineering-ui/log?sessionId=' + encodeURIComponent(sessionId) + '&limit=200')
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (!j || j.ok !== true) return '';
+          var out = [];
+          var evs = j.events || [];
+          for (var i = 0; i < evs.length; i++) {
+            var arr = toDisplayEvents(evs[i]);
+            for (var k = 0; k < arr.length; k++) {
+              var d = arr[k];
+              if (!d) continue;
+              if (d.kind === 'message' || d.kind === 'text') {
+                var t1 = String(d.text || '').trim();
+                if (t1) out.push('助手：' + t1);
+              } else if (d.kind === 'user-message') {
+                var t2 = String(d.text || '').trim();
+                if (t2) out.push('我：' + t2);
+              }
+            }
+          }
+          return out.join('\n\n');
+        })
+        .catch(function () { return ''; });
+    }
+
+    /**
+     * 解析"当前主会话"的 id，props 缺失时逐级兜底。
+     *
+     * 为什么需要兜底：操作行按钮点击失败最常见的原因就是拿不到 sessionId
+     *   （随后 /log 查空 → 报"没有可用的对话内容"）。三种来源依次尝试：
+     *     ① 插槽标准 prop（session 作用域正常都有）
+     *     ② DOM 上对话区标记的会话 id（官方 ConversationContent 会写）
+     *     ③ 会话列表中 mainView 保留者（官方 root 侧取法）
+     * @param preferred - 插槽传入的 sessionId，优先使用
+     * @returns 会话 id，或 null
+     */
+    function engCurrentSessionId(preferred) {
+      if (preferred) return String(preferred);
+      try {
+        var el = document.querySelector('[data-conversation-session]');
+        if (el) {
+          var v = el.getAttribute('data-conversation-session');
+          if (v) return String(v);
+        }
+      } catch (e) { /* 落到列表兜底 */ }
+      try {
+        var s = engService('sessions');
+        var snap = s && s.list && s.list.getSnapshot ? s.list.getSnapshot() : null;
+        var ids = (snap && snap.ids) || [];
+        for (var i = 0; i < ids.length; i++) {
+          var r = snap.byId[ids[i]];
+          if (r && r.retainedBy && r.retainedBy.mainView > 0) return String(ids[i]);
+        }
+      } catch (e2) { /* 全部失败 → null */ }
+      return null;
+    }
     // ── 【问题4】"当前上下文是否工程模式"（供官方 tab 接管的 canOpen 用）────
     // canOpen 是同步谓词、且在 React 之外执行，所以不能读 hook。
     // 这里用一个模块级布尔：由 SubagentConsole 每次渲染时更新
@@ -3239,6 +4144,56 @@ window.__ModuleLoader__.load({
       // 记录上一轮的 running，用于检测"一轮刚结束"
       var prevRunningRef = useRef(false);
 
+      // ── 推荐追问【持久化】────────────────────────────────────────────
+      // 用户要求：「不管做啥，关了又开了也好，咋做都能像文字一样，一直不消失」。
+      // 之前只放在 useState 里，于是：
+      //   · 刷新页面 → 组件重挂 → 推荐没了
+      //   · 换皮肤 → 客户端模块重新加载 → 组件重挂 → 推荐没了
+      //   · 动设置开关 → 同样的重挂路径 → 推荐没了
+      // 现在按会话存进 localStorage，挂载时恢复。
+      //   与工程模式其它设置同一套做法（官方 shortcuts/store 也这么持久化）。
+      var SUGG_KEY = 'dsh-engineering-ui/sugg/v1';
+      var loadSugg = function (sid) {
+        try {
+          if (typeof localStorage === 'undefined' || !sid) return null;
+          var raw = localStorage.getItem(SUGG_KEY);
+          if (!raw) return null;
+          var all = JSON.parse(raw);
+          var one = all && all[sid];
+          if (!one || !Array.isArray(one.items) || !one.items.length) return null;
+          return { items: one.items.map(String), forSeq: String(one.forSeq || '') };
+        } catch (e) { return null; }
+      };
+      var saveSugg = function (sid, items, forSeq) {
+        try {
+          if (typeof localStorage === 'undefined' || !sid) return;
+          var raw = localStorage.getItem(SUGG_KEY);
+          var all = raw ? JSON.parse(raw) : {};
+          if (!all || typeof all !== 'object') all = {};
+          if (items && items.length) all[sid] = { items: items.map(String), forSeq: String(forSeq || ''), at: Date.now() };
+          else delete all[sid];
+          // 只保留最近 40 个会话，避免无限增长
+          var keys = Object.keys(all);
+          if (keys.length > 40) {
+            keys.sort(function (a, b) { return (all[b].at || 0) - (all[a].at || 0); });
+            for (var i = 40; i < keys.length; i++) delete all[keys[i]];
+          }
+          localStorage.setItem(SUGG_KEY, JSON.stringify(all));
+        } catch (e) { /* 写不了就只在内存里 */ }
+      };
+
+      // 挂载/切会话时：立刻恢复上次的推荐（刷新、换皮肤、动设置都能活下来）
+      useEffect(function () {
+        if (!sessionId) return;
+        var saved = loadSugg(sessionId);
+        st[1](function (p) {
+          var n = {};
+          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+          if (saved) { n.sugg = saved.items; n.suggFor = saved.forSeq; }
+          return n;
+        });
+      }, [sessionId]);
+
       // ① 进会话/切会话时向 Host 查询聊天模式（运行期状态，前端不缓存）
       useEffect(function () {
         if (!sessionId) return;
@@ -3266,6 +4221,25 @@ window.__ModuleLoader__.load({
         var was = prevRunningRef.current;
         prevRunningRef.current = running;
         if (!sessionId) return;
+
+        // ── 新一轮【开始】时立刻收起上一轮的推荐 ──────────────────────────
+        // 用户指出：「发送消息之后，模型开始思考的时候它不会自己消失」。
+        //   上一轮的推荐是"接着上一轮往下聊"的建议，新一轮已经开始，
+        //   它们就是过期内容，必须马上下线（否则误导用户以为还能点）。
+        // 内存与本地缓存【一起清】：只清内存的话，此刻刷新页面又会从
+        //   localStorage 里把过期推荐读回来。
+        if (running) {
+          if (was !== true) saveSugg(sessionId, [], '');
+          st[1](function (p) {
+            if (!p.sugg.length) return p;
+            var n = {};
+            for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+            n.sugg = [];
+            return n;
+          });
+          return;
+        }
+
         if (!(was && !running)) return;          // 只在 true→false 的瞬间触发
         if (!isChat) return;                     // 只在纯聊天模式下给推荐
         var alive = true;
@@ -3317,9 +4291,13 @@ window.__ModuleLoader__.load({
               if (res && res.j2 && res.j2.ok && res.j2.items && res.j2.items.length) {
                 n.sugg = res.j2.items;
                 n.suggFor = res.marker;
-              } else {
+                // 持久化：刷新/换皮肤/动设置后仍能恢复
+                saveSugg(sessionId, res.j2.items, res.marker);
+              } else if (!loadSugg(sessionId)) {
+                // 本次没生成出来，且本地也没有旧值 → 保持空
                 n.sugg = [];
               }
+              // 若本地有旧值：保留它，不要因为一次失败就清空用户看到的东西
               return n;
             });
           })
@@ -3339,6 +4317,22 @@ window.__ModuleLoader__.load({
       var inEngineering = (preset === ENG_PRESET_ID);
       if (!inEngineering) return null;
       if (!_engSettings.useStandaloneChat) return null;
+
+      // ── 显示位置（用户明确要求）──────────────────────────────────────
+      // 用户指出：在【已有对话内容】的会话里，这个切换器悬在正文与输入框
+      //   之间很碍眼，要求删掉；但【新建对话】时它必须还在
+      //   （那是用户选择「工作 / 聊天」的唯一入口）。
+      //
+      // 因此只在两种情况下渲染：
+      //   ① blank        —— 空会话（新建对话的欢迎屏）。用户截图要保留的就是这里。
+      //   ② isChat       —— 已处于聊天模式。
+      //      ⚠️ 这一条是必要的安全出口，不是"其他地方的残留"：
+      //         纯聊天模式下模型没有任何工具，若把切换器一并藏掉，
+      //         用户发出第一条消息后就【再也无法切回工作模式】，
+      //         只能新建会话重来 —— 那会是一个真正的死锁。
+      //   其余情况（工作模式 + 已有内容）→ return null，正文与输入框之间
+      //   不再有任何本插件元素，正是用户要的"删掉"。
+      if (!blank && !isChat) return null;
 
       /** 把一段文字填进官方输入框（推荐追问、起步建议共用）。 */
       var fillDraft = function (txt) {
@@ -3409,9 +4403,18 @@ window.__ModuleLoader__.load({
           onClick: function () { if (!busy) switchTo(chat); }
         }, label);
       };
-      var vs = h('div', { className: 'eng-vs', role: 'group', 'aria-label': '聊天 / 工作' },
-        seg(!isChat, '工作', false),
-        seg(isChat, busy ? '聊天…' : '聊天', true));
+      // ── 「工作 / 聊天」切换器：【只在空会话（新建对话）显示】──────────
+      // 用户要求：「帮我画红框的那个给删了，就在那里删了，其他地方不要删」
+      //   + 「在正常用户选择模式新建对话的时候…这个切换器一定不能丢了」。
+      // 合起来 = 对话进行中不显示，新建对话时必须显示。
+      //   这也与 DSH 自身的预设选择器一致（预设同样只在空会话选）。
+      // 非空会话仍会走到下面渲染【推荐追问】——那是聊天模式的产物，
+      //   不能因为隐藏切换器而一起消失，所以这里是 vs=null 而不是 return null。
+      var vs = blank
+        ? h('div', { className: 'eng-vs', role: 'group', 'aria-label': '聊天 / 工作' },
+            seg(!isChat, '工作', false),
+            seg(isChat, busy ? '聊天…' : '聊天', true))
+        : null;
       // 失败必须看得见，否则用户只看到"点了没反应"
       var errLine = st[0].err
         ? h('div', { className: 'eng-vs-err' }, String(st[0].err)) : null;
@@ -3493,6 +4496,10 @@ window.__ModuleLoader__.load({
         busy: false,
         err: null,
         route: null,          // {provider, model}：从当前会话读，用于辅助调用
+        // 【一键发送给工作模式建模】：sending=发送中；sentTo=已发送到的会话 id
+        sending: false,
+        sentTo: null,
+        sentDrafted: false,
         // 面板尺寸：用户可以拖左上角手柄自由放大放小（用户明确要求）
         size: { w: 420, h: 520 },
       });
@@ -3577,11 +4584,11 @@ window.__ModuleLoader__.load({
         };
       }, []);
 
-      // 面板打开时滚动到底
+      // 面板打开时滚动到底（流式输出时也跟着滚）
       useEffect(function () {
         var box = listRef.current;
         if (box) box.scrollTop = box.scrollHeight;
-      }, [S.open, S.messages.length]);
+      }, [S.open, S.messages.length, S.messages.length ? S.messages[S.messages.length - 1].text : '']);
 
       // ── ② 发起一次分析（首轮或追问都走这里）────────────────────────────
       var ask = function (questionText) {
@@ -3594,27 +4601,99 @@ window.__ModuleLoader__.load({
         // 面板内历史 + 本次提问
         var nextMsgs = S.messages.slice();
         if (q) nextMsgs.push({ role: 'user', text: q });
-        patch({ busy: true, err: null, messages: nextMsgs, input: '' });
+        // 先放一条空的助手消息占位，流式增量会不断更新它的 text
+        //   → 面板立刻有内容，不再长时间空白（修「一直出不来分析」）
+        var withPlaceholder = nextMsgs.concat([{ role: 'assistant', text: '', streaming: true }]);
+        var botIdx = withPlaceholder.length - 1;
+        patch({ busy: true, err: null, messages: withPlaceholder, input: '' });
+
+        /** 把最后一条助手消息的文本替换成 latest（流式更新）。 */
+        var setBotText = function (latest, done) {
+          st[1](function (p) {
+            var n = {};
+            for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+            var msgs = p.messages.slice();
+            if (msgs[botIdx]) {
+              msgs[botIdx] = { role: 'assistant', text: String(latest || ''), streaming: !done };
+            }
+            n.messages = msgs;
+            if (done) { n.busy = false; }
+            return n;
+          });
+        };
+        var setErr = function (m) {
+          st[1](function (p) {
+            var n = {};
+            for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+            // 失败时去掉占位气泡，避免留一条空消息
+            var msgs = p.messages.slice();
+            if (msgs[botIdx] && !msgs[botIdx].text) msgs.splice(botIdx, 1);
+            n.messages = msgs;
+            n.busy = false;
+            n.err = String(m || '分析失败');
+            return n;
+          });
+        };
+
+        // 用 SSE 流式读取；不支持时自动回退到一次性 JSON。
         fetch('/dsh-engineering-ui/side-chat', {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', 'accept': 'text/event-stream' },
           body: JSON.stringify({
             selection: S.selection,
             messages: nextMsgs,
             provider: S.route.provider,
             model: S.route.model,
+            stream: '1',
           }),
         })
-          .then(function (r) { return r.json(); })
-          .then(function (j) {
-            if (j && j.ok && j.reply) {
-              patch({ busy: false, messages: nextMsgs.concat([{ role: 'assistant', text: String(j.reply) }]) });
-            } else {
-              patch({ busy: false, err: String((j && j.error) || '分析失败') });
+          .then(function (r) {
+            var ct = String((r.headers && r.headers.get && r.headers.get('content-type')) || '');
+            if (ct.indexOf('text/event-stream') < 0) {
+              // 服务端没走流式（例如出错早返回 JSON）→ 按 JSON 处理
+              return r.json().then(function (j) {
+                if (j && j.ok && j.reply) setBotText(j.reply, true);
+                else setErr((j && j.error) || '分析失败');
+              });
             }
+            // 手动读流并解析 SSE 帧
+            var reader = r.body && r.body.getReader ? r.body.getReader() : null;
+            if (!reader) {
+              return r.text().then(function (txt) {
+                var m = /"reply"\s*:\s*"([\s\S]*?)"\s*\}/.exec(txt);
+                if (m) setBotText(m[1], true); else setErr('无法读取响应');
+              });
+            }
+            var dec = new TextDecoder();
+            var buf = '';
+            var finished = false;
+            var pump = function () {
+              return reader.read().then(function (res) {
+                if (res.done) {
+                  if (!finished) setBotText('', true);
+                  return;
+                }
+                buf += dec.decode(res.value, { stream: true });
+                // SSE 帧以空行分隔
+                var parts = buf.split('\n\n');
+                buf = parts.pop();
+                for (var i = 0; i < parts.length; i++) {
+                  var line = parts[i].trim();
+                  if (line.indexOf('data:') !== 0) continue;
+                  var obj = null;
+                  try { obj = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
+                  if (!obj) continue;
+                  if (obj.type === 'delta') setBotText(obj.text, false);
+                  else if (obj.type === 'done') { finished = true; setBotText(obj.reply, true); }
+                  else if (obj.type === 'error') { finished = true; setErr(obj.error); }
+                }
+                return pump();
+              });
+            };
+            return pump();
           })
           .catch(function (e) {
-            patch({ busy: false, err: String((e && e.message) || e) });
+            setErr(String((e && e.message) || e));
           });
       };
 
@@ -3633,6 +4712,33 @@ window.__ModuleLoader__.load({
           document.execCommand('insertText', false, pre + body);
           return true;
         } catch (e) { return false; }
+      };
+
+      // ── ④【一键发送给工作模式建模】（面板内版本）───────────────────────
+      // 发送内容 = 选中原文 + 面板里已有的分析结论。
+      // 真正的会话创建/预设设置/发送/跳转都在 engSendToWorkSession 里，
+      //   与操作行按钮（conversation.chat.assistant-actions）共用同一条链路。
+      var sendToWorkMode = function () {
+        if (S.sending) return;
+        var analysis = S.messages.filter(function (m) { return m.role === 'assistant' && m.text; })
+          .map(function (m) { return String(m.text).trim(); }).filter(Boolean).join('\n\n---\n\n');
+        var sel = String(S.selection || '').trim();
+        if (!sel && !analysis) {
+          patch({ err: '没有可发送的内容' });
+          return;
+        }
+        patch({ sending: true, err: null });
+        engSendToWorkSession(engComposeWorkPrompt({ source: sel, analysis: analysis }))
+          .then(function (res) {
+            patch({
+              sending: false, err: null,
+              sentTo: (res && res.sessionId) || null,
+              sentDrafted: !!(res && res.drafted),
+            });
+          })
+          .catch(function (e3) {
+            patch({ sending: false, err: '发送到工作模式失败：' + String((e3 && e3.message) || e3) });
+          });
       };
 
       // ══ 设置门禁（所有 hook 之后）══════════════════════════════════════
@@ -3740,6 +4846,24 @@ window.__ModuleLoader__.load({
           h('div', { className: 'eng-side-list', ref: listRef },
             rows.length ? rows : h('div', { className: 'eng-side-note' }, S.busy ? '正在分析…' : '正在等待分析…'),
             S.err ? h('div', { className: 'eng-side-err' }, S.err) : null),
+          // ── 【一键发送给工作模式建模】────────────────────────────────
+          // 新建一个工程模式会话，把「引用原文 + 已有分析」作为首轮任务发过去，
+          //   然后跳到那个会话 —— 由工作模式的工作区真正干活（建模/仿真）。
+          // 放在输入框上方，与「继续追问」区分开：一个是继续聊，
+          //   一个是"带着结论去开工"。
+          h('div', { className: 'eng-side-work' },
+            h('button', {
+              className: 'eng-side-workbtn',
+              type: 'button',
+              disabled: S.sending || S.busy || (!S.selection && !S.messages.length),
+              title: '新建一个工程模式会话，把本次分析交给它去建模',
+              onClick: function () { sendToWorkMode(); },
+            }, S.sending ? '正在交给工作模式…' : '⚙ 一键发送给工作模式建模'),
+            S.sentTo
+              ? h('div', { className: 'eng-side-ok' }, S.sentDrafted
+                  ? '已新建工作会话并把任务填入输入框，请按回车开始'
+                  : '已发送，正在跳转到新的工作会话…')
+              : null),
           h('div', { className: 'eng-side-ft' },
             h('input', {
               className: 'eng-side-in',
@@ -3768,8 +4892,116 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'eng-sel-host', style: { display: 'contents' } }, btn, panel);
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // 【一键发送给Agent建模】—— 每条助手回复的操作行按钮
+    // ══════════════════════════════════════════════════════════════════════
+    // 落点：官方插槽 conversation.chat.assistant-actions
+    //   （ui-chat/src/client/contract/slots.ts:321，kind:'list' scope:'session'，
+    //     ownerProps = { messageId }；由 ui-chat 的 register-node-renderers.ts:71
+    //     声明，TurnTailNodeView 用 renderSlot 渲染到
+    //     MessageIconActions 那一排 —— 也就是复制/点赞/分享/时间戳所在的行）。
+    //
+    // 行为：读当前会话的完整对话 → 组装任务 → 新开一个工程模式工作会话 →
+    //   把任务作为该会话首轮发出去 → 跳转过去开始建模。
+    function EngSendToAgentAction(props) {
+      // ⚠️ hooks 必须在任何 return 之前（本文件已有前车之鉴）
+      var st = useState({ busy: false, done: false, drafted: false, err: null });
+      var sessionId = props.sessionId;
+      var useSessions = props.useSessions;
+
+      // ── 作用域门禁：只在【工程模式】会话里出现 ──────────────────────
+      // 用户反馈：「蔓延到非工程模式里面去了」。
+      //   这个按钮会把整段对话交给一个新的工程模式工作 Agent，
+      //   它是工程模式的入口，不该出现在标准模式/其它预设的会话里。
+      // 必须在所有 hook 之后判断（否则 hook 数量变化 → entry 永久失效）。
+      var preset = (typeof useSessions === 'function')
+        ? useSessions(function (s) {
+            if (!sessionId) return null;
+            var row = s && s.byId ? s.byId[sessionId] : null;
+            return row
+              ? ((row.projectionValues && row.projectionValues.agentPreset) || row.agentPreset || null)
+              : null;
+          })
+        : null;
+
+      var run = function () {
+        if (st[0].busy) return;
+        st[1](function (p) {
+          var n = {};
+          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+          n.busy = true; n.err = null; n.done = false;
+          return n;
+        });
+        engFetchTranscript(engCurrentSessionId(sessionId)).then(function (tr) {
+          if (!String(tr || '').trim()) {
+            throw new Error('读不到当前会话的对话内容（请确认该会话已开始过）');
+          }
+          return engSendToWorkSession(engComposeWorkPrompt({ transcript: tr }));
+        }).then(function (res) {
+          st[1](function (p) {
+            var n = {};
+            for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+            n.busy = false;
+            n.done = !!(res && res.sent);
+            n.drafted = !!(res && res.drafted);
+            return n;
+          });
+        }).catch(function (e) {
+          var msg = String((e && e.message) || e);
+          try { console.warn('[dsh-engineering-ui] 一键发送给Agent建模失败:', msg); } catch (e2) {}
+          st[1](function (p) {
+            var n = {};
+            for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+            n.busy = false; n.err = msg;
+            return n;
+          });
+        });
+      };
+
+      // ── 门禁（所有 hook 之后）────────────────────────────────────────
+      // 只在工程模式会话显示。非工程模式 → return null（零 DOM、零副作用），
+      //   修「蔓延到非工程模式里面去了」。
+      if (preset !== ENG_PRESET_ID) return null;
+      // 该按钮独立于「右键引用调出AI解释」开关：
+      //   那个开关管的是划词浮层，与"把分析交给工作 Agent"是两件事，
+      //   共用一个开关会让用户关掉一个却连带失去另一个。
+      return h('span', { className: 'eng-msg-act-wrap' },
+        h('button', {
+          className: 'eng-msg-act' + (st[0].busy ? ' busy' : '') + (st[0].done ? ' done' : ''),
+          type: 'button',
+          disabled: st[0].busy,
+          title: st[0].err
+            ? ('发送失败：' + st[0].err)
+            : '新开一个「工程模式的工作」Agent，按这段聊天的分析数据开始建模',
+          onClick: function (ev) { ev.preventDefault(); ev.stopPropagation(); run(); },
+        }, st[0].busy ? '正在新建…'
+          : (st[0].done ? '✓ 已交给工作Agent'
+            : (st[0].drafted ? '✓ 已填入新会话，按回车发送' : '⚙ 一键发送给Agent建模'))),
+        // 失败必须【看得见原因】，只写"失败"等于让用户无从下手
+        st[0].err ? h('span', { className: 'eng-msg-act-err', title: st[0].err }, st[0].err.slice(0, 40)) : null);
+    }
+
     function apply(ctx) {
       installStyle();
+      // 供「一键发送给工作模式建模」读取 sessions / remote / uiWorkspace
+      _engCtx = ctx;
+      // ── 用嵌套 inject 拿 remote.agentPresets（不阻塞本插件加载）──────────
+      // 依赖缺失时这个子 fiber 不激活，_agentPresetSelect 保持 null，
+      //   点击时走"无预设"降级路径，而不是让整个插件挂掉。
+      try {
+        if (typeof ctx.inject === 'function') {
+          ctx.inject(['remote', 'remote.agentPresets'], function (scope) {
+            try {
+              var ns = scope.remote.agentPresets;
+              if (ns && typeof ns.select === 'function') {
+                _agentPresetSelect = function (sessionId, presetId) {
+                  return ns.select(sessionId, presetId);
+                };
+              }
+            } catch (e) { _agentPresetSelect = null; }
+          });
+        }
+      } catch (e) { /* 不支持嵌套 inject：保持 null，功能降级 */ }
       // ── 【问题3】抓取官方右列服务（可选，缺失不影响加载）────────────────
       // ctx.get 是可选服务读取法：服务不在时返回 undefined，不会让插件失败。
       try {
@@ -3820,6 +5052,39 @@ window.__ModuleLoader__.load({
           );
         });
       } catch (e) { console.error('[dsh-engineering-ui] selection detail slot', e); }
+
+      // ══ 【需求1】模式说明 / 如何使用弹窗（预设卡片上的入口）═════════════
+      // 落点：shell.overlay（root 作用域全帧覆盖层），常驻但默认渲染 null，
+      //   只有卡片按钮派发事件时才显示 —— 因此不影响任何既有布局。
+      // 卡片按钮本身由 injectPresetGuideButtons() 用 DOM 注入（宿主卡片由
+      //   asar 内的包渲染，第三方无法注册其 React 组件；详见该函数注释）。
+      try {
+        ctx.slots.inject('shell.overlay', function () {
+          return ctx.slots.register(
+            { name: 'shell.overlay', id: 'eng-preset-guide', order: 45,
+              label: '模式说明' },
+            EngPresetGuideHost,
+          );
+        });
+      } catch (e) { console.error('[dsh-engineering-ui] preset guide slot', e); }
+      // 启动卡片按钮注入器（幂等；不依赖任何插槽是否已声明）
+      try { startPresetGuideInjector(); } catch (e) {
+        console.error('[dsh-engineering-ui] preset guide injector', e);
+      }
+
+      // ══ 【一键发送给Agent建模】每条助手回复的操作行按钮 ═════════════════
+      // 落点 = 官方 conversation.chat.assistant-actions（复制/点赞/分享那一排）。
+      // 用 slots.inject 等官方声明出现（由 ui-chat 的 register-node-renderers.ts
+      //   声明），声明消失/重建时自动注销与重装。
+      try {
+        ctx.slots.inject('conversation.chat.assistant-actions', function () {
+          return ctx.slots.register({
+            name: 'conversation.chat.assistant-actions',
+            id: 'dsh-engineering-ui/send-to-agent',
+            order: 50,
+          }, EngSendToAgentAction);
+        });
+      } catch (e) { console.error('[dsh-engineering-ui] assistant-actions slot', e); }
       // ── 【问题4】设置页「工程模式」分区 ──────────────────────────────
       // order=25：紧跟「Agent 预设」(order=20) 之后。
       // label 用中文字面量（注册方自带文案，shell 不订阅 locale）。
@@ -3864,6 +5129,18 @@ window.__ModuleLoader__.load({
       //     同款信息（三栏工作区），只是被挂进了官方的右列 tab。
       var ENG_SUBAGENT_TAB_ID = 'dsh-engineering-ui/subagentchat';
       var disposers = [];
+      // ══ 三条独立的 disposer 列表（互不干扰，这是 bug 的根治点）══════════
+      // 教训（踩过两次）：
+      //   · disposers     —— 插件【卸载】时统一回收，设置变化绝不碰它
+      //   · tabDisposers  —— 【tab 接管】专用，设置变化时清空并重装
+      //   · dockDisposers —— 【聊天切换器】专用，注册一次常驻，设置变化绝不碰
+      //
+      // 之前的错误：把切换器的清理函数 push 进 disposers，而设置回调会
+      //   遍历并执行 disposers 全部条目 → 切换器被销毁且从不重建
+      //   → 表现就是"开关关了又开，除非重启 DSH，UI 再也不出来"。
+      //   根因不是"列表没分开"，而是【清理函数本身仍在被清空的列表里】。
+      var tabDisposers = [];
+
       function installOfficialTabTakeover() {
         // 关闭开关时：不注册 → 官方 builtin 生效
         if (!_engSettings.useOwnSubagentPane) return;
@@ -3889,29 +5166,39 @@ window.__ModuleLoader__.load({
             canOpen: function () { return _isEngineeringContext(); },
             title: function () { return '子代理工作区'; },
           });
-          disposers.push(disposeType);
+          tabDisposers.push(disposeType);
           // ② 注册正文：key 必须是上面那个 id（tab-registry 用 definition.id 派发）
-          ctx.slots.inject('sidebar.right.pane.tab', function () {
+          //    ⚠️ 这个 inject 的 disposer 也要收进 tabDisposers：
+          //    否则每次设置变化都新增一条 inject，累积后同 key 重复注册会抛错。
+          var disposePane = ctx.slots.inject('sidebar.right.pane.tab', function () {
             return ctx.slots.register({
               name: 'sidebar.right.pane.tab',
               key: ENG_SUBAGENT_TAB_ID,
             }, EngSubagentTabBody);
           });
+          if (typeof disposePane === 'function') tabDisposers.push(disposePane);
         } catch (e) {
           console.error('[dsh-engineering-ui] official subagent tab takeover', e);
         }
       }
+      // 设置变化时【只重建 tab 接管】，绝不触碰切换器
       try {
         installOfficialTabTakeover();
-        // 设置变化时重装 tab 接管（开关切换即时生效，无需刷新）
         subscribeEngSettings(function () {
-          for (var i = disposers.length - 1; i >= 0; i--) {
-            try { disposers[i](); } catch (e) {}
+          for (var i = tabDisposers.length - 1; i >= 0; i--) {
+            try { tabDisposers[i](); } catch (e) {}
           }
-          disposers.length = 0;
+          tabDisposers.length = 0;
           installOfficialTabTakeover();
         });
       } catch (e) { console.error('[dsh-engineering-ui] tab takeover setup', e); }
+      // 插件卸载时回收 tab 接管
+      disposers.push(function () {
+        for (var i = tabDisposers.length - 1; i >= 0; i--) {
+          try { tabDisposers[i](); } catch (e) {}
+        }
+        tabDisposers.length = 0;
+      });
 
       // ══ 【聊天 / 工作】切换器注册 ═══════════════════════════════════════
       // 架构（重要）：
@@ -3973,6 +5260,16 @@ window.__ModuleLoader__.load({
     exports.EngRow = EngRow;
     exports.EngConnRow = EngConnRow;
     exports.EngStatusChip = EngStatusChip;
+    // 【需求1】模式说明 / 如何使用弹窗（供回归测试与外部复用）
+    exports.EngGuideDialog = EngGuideDialog;
+    exports.ENG_GUIDE = ENG_GUIDE;
+    // 【需求1】预设卡片入口：弹窗宿主 + DOM 注入器（测试可单独调用）
+    exports.EngPresetGuideHost = EngPresetGuideHost;
+    // 【诊断】注入器状态（可在浏览器 console 里调：
+    //   window.__dshEngPresetGuide() 查看锚点是否找到、按钮是否注入）
+    exports.presetGuideInjectorStatus = presetGuideInjectorStatus;
+    exports.injectPresetGuideButtons = injectPresetGuideButtons;
+    exports.startPresetGuideInjector = startPresetGuideInjector;
     exports.EngSwitch = EngSwitch;
     exports.SubagentDock = SubagentConsole;
     exports.formatMessage = formatMessage;

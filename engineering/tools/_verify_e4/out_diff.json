@@ -1,0 +1,258 @@
+[
+ {
+  "grade": "45#",
+  "material_id": "45#",
+  "sigma_y": 355.0,
+  "sigma_max": 8.75,
+  "sf": null,
+  "resolution": {
+   "source": "explicit",
+   "overridden": true,
+   "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+   "part_material": "45#",
+   "notes": [
+    "按调用方显式指定的材料校核"
+   ]
+  },
+  "provenance": {
+   "E_mpa": {
+    "value": 206000.0,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   },
+   "nu": {
+    "value": 0.3,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   },
+   "yield_mpa": {
+    "value": 355.0,
+    "source": "GB_STANDARD",
+    "layer": "GB_ORIGINAL"
+   },
+   "uts_mpa": {
+    "value": 600.0,
+    "source": "GB_STANDARD",
+    "layer": "GB_ORIGINAL"
+   },
+   "density_kg_m3": {
+    "value": 7850.0,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   }
+  },
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+  "raw_file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\diff_45.json"
+ },
+ {
+  "grade": "ST_API_4140",
+  "material_id": "ST_API_4140",
+  "sigma_y": 655,
+  "sigma_max": 8.73,
+  "sf": null,
+  "resolution": {
+   "source": "explicit",
+   "overridden": true,
+   "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+   "part_material": "Steel AISI 4140 (quenched & tempered)",
+   "notes": [
+    "按调用方显式指定的材料校核"
+   ]
+  },
+  "provenance": null,
+  "values_source": null,
+  "raw_file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\diff_ST_API_4140.json"
+ },
+ {
+  "grade": "40Cr",
+  "material_id": "40Cr",
+  "sigma_y": 785.0,
+  "sigma_max": 8.75,
+  "sf": null,
+  "resolution": {
+   "source": "explicit",
+   "overridden": true,
+   "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+   "part_material": "40Cr",
+   "notes": [
+    "按调用方显式指定的材料校核"
+   ]
+  },
+  "provenance": {
+   "E_mpa": {
+    "value": 206000.0,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   },
+   "nu": {
+    "value": 0.3,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   },
+   "yield_mpa": {
+    "value": 785.0,
+    "source": "GB_SCAN",
+    "layer": "GB_SCAN"
+   },
+   "uts_mpa": {
+    "value": 980.0,
+    "source": "GB_SCAN",
+    "layer": "GB_SCAN"
+   },
+   "density_kg_m3": {
+    "value": 7820.0,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   }
+  },
+  "values_source": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+  "raw_file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\diff_40Cr.json"
+ },
+ {
+  "grade": "ST_API_4140",
+  "material_id": "ST_API_4140",
+  "sigma_y": 655,
+  "sigma_max": 8.73,
+  "sf": null,
+  "resolution": {
+   "source": "explicit",
+   "overridden": true,
+   "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+   "part_material": "Steel AISI 4140 (quenched & tempered)",
+   "notes": [
+    "按调用方显式指定的材料校核"
+   ]
+  },
+  "provenance": null,
+  "values_source": null,
+  "raw_file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\diff_ST_API_4140.json"
+ },
+ {
+  "grade": "2A12",
+  "material_id": "2A12",
+  "sigma_y": 275.0,
+  "sigma_max": 8.81,
+  "sf": null,
+  "resolution": {
+   "source": "explicit",
+   "overridden": true,
+   "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+   "part_material": "2A12",
+   "notes": [
+    "按调用方显式指定的材料校核"
+   ]
+  },
+  "provenance": {
+   "E_mpa": {
+    "value": 68000.0,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   },
+   "nu": {
+    "value": 0.33,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   },
+   "yield_mpa": {
+    "value": 275.0,
+    "source": "GB_SCAN",
+    "layer": "GB_SCAN"
+   },
+   "uts_mpa": {
+    "value": 425.0,
+    "source": "GB_SCAN",
+    "layer": "GB_SCAN"
+   },
+   "density_kg_m3": {
+    "value": 2780.0,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   }
+  },
+  "values_source": "混合来源：E_mpa, nu, yield_mpa, uts_mpa, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+  "raw_file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\diff_2A12.json"
+ },
+ {
+  "grade": "AL_7075",
+  "material_id": "AL_7075",
+  "sigma_y": 503,
+  "sigma_max": 8.81,
+  "sf": null,
+  "resolution": {
+   "source": "explicit",
+   "overridden": true,
+   "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+   "part_material": "Aluminum 7075-T6",
+   "notes": [
+    "按调用方显式指定的材料校核"
+   ]
+  },
+  "provenance": null,
+  "values_source": null,
+  "raw_file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\diff_AL_7075.json"
+ },
+ {
+  "grade": "Q235",
+  "material_id": "Q235",
+  "sigma_y": 235.0,
+  "sigma_max": 8.75,
+  "sf": null,
+  "resolution": {
+   "source": "explicit",
+   "overridden": true,
+   "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+   "part_material": "Q235",
+   "notes": [
+    "按调用方显式指定的材料校核"
+   ]
+  },
+  "provenance": {
+   "E_mpa": {
+    "value": 206000.0,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   },
+   "nu": {
+    "value": 0.3,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   },
+   "yield_mpa": {
+    "value": 235.0,
+    "source": "GB_STANDARD",
+    "layer": "GB_GRADE_DEF"
+   },
+   "uts_mpa": {
+    "value": 375.0,
+    "source": "GB_STANDARD",
+    "layer": "GB_GRADE_DEF"
+   },
+   "density_kg_m3": {
+    "value": 7850.0,
+    "source": "HANDBOOK",
+    "layer": "HANDBOOK"
+   }
+  },
+  "values_source": "混合来源：yield_mpa, uts_mpa 来自国标（原文/牌号定义）；E_mpa, nu, density_kg_m3 为手册值（GB 产品标准不列这些常数）",
+  "raw_file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\diff_Q235.json"
+ },
+ {
+  "grade": "ST_API_S235",
+  "material_id": "ST_API_S235",
+  "sigma_y": 235,
+  "sigma_max": 8.75,
+  "sf": null,
+  "resolution": {
+   "source": "explicit",
+   "overridden": true,
+   "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+   "part_material": "Steel S235JR (EN 10025)",
+   "notes": [
+    "按调用方显式指定的材料校核"
+   ]
+  },
+  "provenance": null,
+  "values_source": null,
+  "raw_file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\diff_ST_API_S235.json"
+ }
+]

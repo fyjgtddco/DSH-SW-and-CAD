@@ -1,0 +1,25 @@
+{
+  "ruleset_id": "DSVA-GB_SURFACE",
+  "revision": "A",
+  "category": "gb_surface",
+  "generated_from": "DSVA国标对照表.xlsx",
+  "total": 1,
+  "rules": [
+    {
+      "rule_id": "GB_SURFACE-001",
+      "standard_id": "GB/T 10125-2021",
+      "title": "人造气氛腐蚀试验 盐雾试验",
+      "topic": "中性盐雾试验/盐雾试验体系",
+      "scope": "本文件规定了中性盐雾(NSS)、乙酸盐雾(AASS)和铜加速乙酸盐雾(CASS)试验使用的设备、试剂和方法。本文件也规定了评估试验箱环境腐蚀性的方法。本文件适用于评价金属材料及覆盖层的耐蚀性,被测试对象可以是具有永久性或暂时性防蚀性能的,也可以是不具有永久性或暂时性防蚀性能的。本文件未规定试验试样尺寸和类型,特殊产品的试验周期和结果解释,这些内容参见相应的产品规范。本文件适用于检测金属及其合金、金属覆盖层、有机覆盖层、阳极氧化膜和转化膜的不连续性,如孔隙及其他缺陷。中性盐雾试验适用于:金属及其合金;金属覆盖层(阳极性或阴极性);转化膜;阳极氧化膜;金属基体上的有机覆盖层。乙酸盐雾试验适用于铜+镍+铬或镍+铬装饰性镀层,也适用于铝的阳极氧化膜和有机覆盖层。铜加速乙酸盐雾试验适用于铜+镍+铬或镍+铬装饰性镀层,也适用于铝的阳极氧化膜和有机覆盖层。这些方法都适用于金属材料具有或不具有腐蚀保护时的质量检查,不适用于对不同材料进行有耐蚀性的排序或预测试验材料的长期耐蚀性。",
+      "status": "现行(代替GB/T 10125-2012)",
+      "dsva_requirement": "盐雾试验时间或对应防腐等级",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=4C8B2824D589D76F0CFE7812D7434D22",
+      "note": "修改采用ISO 9227:2017(MOD)"
+    }
+  ]
+}

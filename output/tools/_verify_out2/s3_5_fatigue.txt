@@ -1,0 +1,127 @@
+﻿{
+  "ok": true,
+  "method": "fatigue_sn_miner",
+  "backend": "basquin_sn_marin_miner",
+  "verdict": "PASS",
+  "reason": "疲劳安全系数 94.16 ≥ 1.5 且 1 年累积损伤 D=0 < 1",
+  "design_life_years": 1.0,
+  "cycles_per_year": 200000.0,
+  "total_cycles_design_life": 200000.0,
+  "endurance_limit_mpa": 120.45,
+  "fatigue_sf": 94.164,
+  "min_required_fatigue_sf": 1.5,
+  "damage_design_life": 0.0,
+  "life_years_allowable": null,
+  "stress_amplitude_mpa": 0.965,
+  "mean_stress_mpa": 0.965,
+  "peak_stress_mpa": 1.93,
+  "criterion": "goodman",
+  "endurance_detail": {
+    "Se_prime_mpa": 185.0,
+    "Se_mpa": 120.45,
+    "uts_mpa": 370.0,
+    "yield_mpa": 235.0,
+    "is_aluminum": false,
+    "factors": {
+      "ka": 0.941,
+      "kb": 0.85,
+      "kc": 1.0,
+      "kd": 1.0,
+      "ke": 0.814
+    },
+    "notes": {
+      "basis": "钢材：Se'=0.5·Su（Su<=1400MPa）",
+      "ka": "machined",
+      "kb": "default(未给特征尺寸，取 0.85)",
+      "kc": "冲击/弯曲 → 1.0",
+      "kd": "常温 → kd=1.0",
+      "ke": "可靠度 0.99 → ke=0.814"
+    },
+    "capped_by_yield": false,
+    "default_used": []
+  },
+  "load_spectrum": [
+    {
+      "amplitude_mpa": 0.965,
+      "mean_mpa": 0.965,
+      "equivalent_amplitude_mpa": 0.968,
+      "cycles_per_year": 10000.0,
+      "allowable_cycles": null,
+      "infinite_life": true,
+      "damage_per_year": 0.0
+    },
+    {
+      "amplitude_mpa": 0.772,
+      "mean_mpa": 0.772,
+      "equivalent_amplitude_mpa": 0.774,
+      "cycles_per_year": 30000.0,
+      "allowable_cycles": null,
+      "infinite_life": true,
+      "damage_per_year": 0.0
+    },
+    {
+      "amplitude_mpa": 0.579,
+      "mean_mpa": 0.579,
+      "equivalent_amplitude_mpa": 0.58,
+      "cycles_per_year": 60000.0,
+      "allowable_cycles": null,
+      "infinite_life": true,
+      "damage_per_year": 0.0
+    },
+    {
+      "amplitude_mpa": 0.386,
+      "mean_mpa": 0.386,
+      "equivalent_amplitude_mpa": 0.386,
+      "cycles_per_year": 60000.0,
+      "allowable_cycles": null,
+      "infinite_life": true,
+      "damage_per_year": 0.0
+    },
+    {
+      "amplitude_mpa": 0.193,
+      "mean_mpa": 0.193,
+      "equivalent_amplitude_mpa": 0.193,
+      "cycles_per_year": 40000.0,
+      "allowable_cycles": null,
+      "infinite_life": true,
+      "damage_per_year": 0.0
+    }
+  ],
+  "assumption": "脉动循环假设: σa=σm=σ_peak/2（0→峰值往复，工程保守取法）",
+  "gates": {
+    "FATIGUE_STRENGTH": {
+      "status": "PASS",
+      "actual_sf": 94.164,
+      "required_min": 1.5,
+      "endurance_limit_mpa": 120.45,
+      "criterion": "Goodman",
+      "below_unity": false
+    },
+    "FATIGUE_LIFE": {
+      "status": "PASS",
+      "required_years": 1.0,
+      "damage_at_required_life": 0.0,
+      "damage_limit": 1.0,
+      "allowable_life_years": null
+    },
+    "STATIC_STRENGTH": {
+      "status": "PASS",
+      "peak_stress_mpa": 1.93,
+      "yield_mpa": 235.0
+    }
+  },
+  "limitations": [
+    "S-N 曲线由 UTS 经验估算（非实测材料数据）",
+    "Miner 线性累积损伤忽略载荷顺序与过载迟滞效应",
+    "未计入焊接接头/缺口应力集中系数 Kt（保守起见请另乘 Kt）",
+    "脉动循环假设（σa=σm=σpeak/2）；对称循环工况偏保守",
+    "尺寸/表面/可靠度系数取自 Shigley 经验表"
+  ],
+  "static": {
+    "safety_factor": 122.02,
+    "max_von_mises_mpa": 1.93
+  },
+  "source": "fea",
+  "command": "fatigue",
+  "stress_used_mpa": 1.93
+}

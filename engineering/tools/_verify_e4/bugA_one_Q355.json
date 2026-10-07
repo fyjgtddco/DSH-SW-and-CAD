@@ -1,0 +1,554 @@
+{
+ "grade": "Q355",
+ "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_Q355.SLDPRT",
+ "extrude": "<COMObject <unknown>>",
+ "set_material": {
+  "ok": false,
+  "material": "Q355",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 'Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355（旧称 Q345）（低合金高强度结构钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355（旧称 Q345）（低合金高强度结构钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355（旧称 Q345）（低合金高强度结构钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355（旧称 Q345）（低合金高强度结构钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7850.0,
+  "canonical": "Q355",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0000000000001,
+  "rejected_candidates": [
+   {
+    "name": "Q355",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355（旧称 Q345）（低合金高强度结构钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345B",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355B",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_Q355",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355（旧称 Q345）（低合金高强度结构钢）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345B",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355B",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_Q355",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355（旧称 Q345）（低合金高强度结构钢）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345B",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355B",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_Q355",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355（旧称 Q345）（低合金高强度结构钢）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345B",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355B",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_Q355",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   }
+  ],
+  "error": "没有找到与 'Q355' 材质相符的材料：尝试了 24 个候选，其中 24 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：Q355(1000); Q355（旧称 Q345）（低合金高强度结构钢）(1000); Q345(1000); Q345B(1000)\n期望密度约 7850.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('Q355', density=7850.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "material_result": {
+  "ok": false,
+  "material": "Q355",
+  "method": null,
+  "database": null,
+  "database_name": "SolidWorks Materials",
+  "warnings": [
+   "候选 'Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355（旧称 Q345）（低合金高强度结构钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355（旧称 Q345）（低合金高强度结构钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355（旧称 Q345）（低合金高强度结构钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355（旧称 Q345）（低合金高强度结构钢）' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q345B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'Q355B' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符",
+   "候选 'GB_Q355' 被拒：实际密度 1000(plastic) 与期望 7850(steel) 不符"
+  ],
+  "error_code": null,
+  "expected_density_kg_m3": 7850.0,
+  "canonical": "Q355",
+  "configuration": "默认",
+  "density_before_kg_m3": 1000.0000000000001,
+  "rejected_candidates": [
+   {
+    "name": "Q355",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355（旧称 Q345）（低合金高强度结构钢）",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345B",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355B",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_Q355",
+    "database": "SolidWorks Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355（旧称 Q345）（低合金高强度结构钢）",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345B",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355B",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_Q355",
+    "database": "自定义材料",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355（旧称 Q345）（低合金高强度结构钢）",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345B",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355B",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_Q355",
+    "database": "SolidWorks DIN Materials",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355（旧称 Q345）（低合金高强度结构钢）",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q345B",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "Q355B",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   },
+   {
+    "name": "GB_Q355",
+    "database": "Sustainability Extras",
+    "density_kg_m3": 1000.0000000000001,
+    "family": "plastic",
+    "expected_family": "steel",
+    "expected_density_kg_m3": 7850.0
+   }
+  ],
+  "error": "没有找到与 'Q355' 材质相符的材料：尝试了 24 个候选，其中 24 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：Q355(1000); Q355（旧称 Q345）（低合金高强度结构钢）(1000); Q345(1000); Q345B(1000)\n期望密度约 7850.0 kg/m³（steel 族）。",
+  "hint": "请在 SolidWorks 材质库中确认是否存在该材料，或用 swapi.list_materials('SolidWorks Materials') 查看准确名称后传入；也可显式指定密度兜底: set_material('Q355', density=7850.0)  【Bug15】该材料在 SW 库中不存在，且自定义写入也失败；可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。",
+  "material_mismatch_rejected": true
+ },
+ "massprops": {
+  "ok": true,
+  "volume_mm3": 32000.000000000004,
+  "surface_area_mm2": 8800.0,
+  "mass_kg": 0.03200000000000001,
+  "density_kg_m3": 1000.0000000000001,
+  "center_of_mass_mm": [
+   40.0,
+   20.0,
+   5.0
+  ],
+  "volume_source": "GetMassProperties",
+  "mass_source": "GetMassProperties"
+ },
+ "save": {
+  "ok": true,
+  "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_Q355.SLDPRT",
+  "saved": true,
+  "updated": true,
+  "content_changed": true,
+  "content_same": false,
+  "md5_before": "1276a131940923769e85ec107294a8e5",
+  "md5_after": "9f0a5caa946e971f95d5e547e340a321",
+  "rc": 0,
+  "size": 59803,
+  "note": "内容已更新",
+  "applied_material": "Q355",
+  "material_source": "explicit(new_part material=)",
+  "material_attestation": {
+   "file": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_Q355.SLDPRT.material.json",
+   "material": "Q355",
+   "density_kg_m3": 1000.0000000000001,
+   "family": "water",
+   "signed": true
+  }
+ },
+ "save_material_summary": {
+  "ok": false,
+  "error": "没有找到与 'Q355' 材质相符的材料：尝试了 24 个候选，其中 24 个因【密度/材质家族不符】被主动拒绝（避免静默换材）。\n被拒候选：Q355(1000); Q355（旧称 Q345）（低合金高强度结构钢）(1000); Q345(1000); Q345B(1000)\n期望密度约 7850.0 kg/m³（steel 族）。",
+  "density_before_kg_m3": 1000.0000000000001,
+  "expected_density_kg_m3": 7850.0
+ },
+ "part_exists": true,
+ "attestation_exists": true,
+ "attestation": {
+  "kind": "material",
+  "schema": "dsh-material-attestation/1",
+  "room": "",
+  "at": "2026-10-07T05:52:57.389Z",
+  "ts": 1791352377389,
+  "part": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_Q355.SLDPRT",
+  "part_name": "DSH_bugA_Q355",
+  "part_path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\_verify_e4\\bugA_parts\\DSH_bugA_Q355.SLDPRT",
+  "part_sha256": "374313253590a959237a645f5b15bc7fb549a06f0f9418e007879db07ee45619",
+  "part_size_bytes": 59803,
+  "part_md5": "9f0a5caa946e971f95d5e547e340a321",
+  "applied_name": "Q355",
+  "density_kg_m3": 1000.0000000000001,
+  "source": "explicit(new_part material=)",
+  "attested_material": "Q355",
+  "attested_density_kg_m3": 1000.0000000000001,
+  "attested_family": "water",
+  "ok": false,
+  "approximate_match": false,
+  "material_mismatch_rejected": true,
+  "requested_material": "Q355",
+  "attested_material_name": "Q355",
+  "cross_standard": false,
+  "cross_standard_note": "null",
+  "expected_yield_mpa": 355,
+  "expected_density_kg_m3": 7850,
+  "applied_yield_mpa": 355,
+  "applied_density_kg_m3": 7850,
+  "yield_deviation_pct": 0,
+  "_sig": "d7dYqeaGg3EzpaM24SkCbKD3lcmsaX4JHLuJW3BpOVk=",
+  "_kid": "7633096ee4ddb3f9",
+  "_ts": 1791352377389,
+  "_nonce": "115c57752b5d24bec80f1dcd7c999621"
+ }
+}

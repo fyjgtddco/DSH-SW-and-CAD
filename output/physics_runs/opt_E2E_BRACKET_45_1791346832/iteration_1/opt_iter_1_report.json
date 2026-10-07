@@ -1,0 +1,215 @@
+{
+  "schema_version": "1.1",
+  "run_id": "opt_iter_1",
+  "iteration": 1,
+  "timestamp": "2026-10-07 12:20:34",
+  "parent_run_id": null,
+  "load_case_summary": {
+    "problem_id": "E2E_BRACKET_45",
+    "title": "承重支架（L 型，GB 45#）",
+    "material": "H62",
+    "material_id": "H62",
+    "yield_strength_mpa": null,
+    "E_mpa": null,
+    "material_resolved": true,
+    "density_kg_m3": null
+  },
+  "material": {
+    "id": "H62",
+    "name": "H62",
+    "youngs_modulus_mpa": null,
+    "poissons_ratio": null,
+    "yield_strength_mpa": null,
+    "uts_mpa": null,
+    "density_kg_m3": null,
+    "standard": "GB/T 5231-2022 加工铜及铜合金牌号和化学成分",
+    "source": "swapi.is_valid_material(零件材料)",
+    "values_source": "待补全（无兜底材料）",
+    "values_from_gb": false,
+    "values_pending": true,
+    "identity_source": null,
+    "equivalent_name": null,
+    "equivalent_id": null,
+    "gb_sourced_fields": null,
+    "field_provenance": null,
+    "fallback_fields": null,
+    "native_fields": null,
+    "consistency_guard": null,
+    "resolution": {
+      "source": "explicit",
+      "overridden": true,
+      "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+      "part_material": "H62",
+      "notes": [
+        "按调用方显式指定的材料校核"
+      ]
+    }
+  },
+  "material_resolution": {
+    "source": "explicit",
+    "overridden": true,
+    "load_case_material": "GB/T 699-2015 优质碳素结构钢",
+    "part_material": "H62",
+    "notes": [
+      "按调用方显式指定的材料校核"
+    ]
+  },
+  "material_provenance": {
+    "level": "PENDING_NO_FALLBACK",
+    "claimable_as_gb": false,
+    "missing_fields": [
+      "E_mpa",
+      "nu",
+      "yield_mpa",
+      "uts_mpa",
+      "density_kg_m3"
+    ],
+    "note": "该牌号仅确认标准身份，力学数值待补全且无等效兜底材料 —— 强度/寿命类结论不可用，请从标准原文补全数值"
+  },
+  "design_params": {
+    "thickness_mm": {
+      "id": "thickness_mm",
+      "value": 9.754,
+      "source": "real-geometry(V/A)"
+    },
+    "min_wall_thickness": {
+      "id": "min_wall_thickness",
+      "value": 6.0,
+      "source": "acceptance.min_wall_thickness_mm(默认 FDM 2.0mm)"
+    }
+  },
+  "real_geometry": {
+    "volume_mm3": 203736.35333353045,
+    "surface_area_mm2": 41777.06168867493,
+    "mass_kg": 1.599330373668214,
+    "density_kg_m3": 7850.0,
+    "bbox_mm": [
+      0.0,
+      140.0,
+      0.0,
+      90.0,
+      -40.0,
+      40.0
+    ],
+    "source": "swapi.massprops(真实实体体积)"
+  },
+  "geometry_gate": {
+    "status": "PASS",
+    "design_space": {
+      "ok": true,
+      "body_bbox_mm": [
+        0.0,
+        140.0,
+        0.0,
+        90.0,
+        -40.0,
+        40.0
+      ],
+      "design_bounds": {
+        "x_min": 0.0,
+        "x_max": 140.0,
+        "y_min": 0.0,
+        "y_max": 90.0,
+        "z_min": -40.0,
+        "z_max": 40.0
+      },
+      "per_axis": {
+        "x": {
+          "violated": false
+        },
+        "y": {
+          "violated": false
+        },
+        "z": {
+          "violated": false
+        }
+      },
+      "violation_vol_mm3": 0.0,
+      "violation_pct": 0.0
+    },
+    "connectivity": {
+      "ok": true,
+      "num_bodies": 1,
+      "num_volumes": 1,
+      "single_body": true,
+      "status": "PASS",
+      "note": ""
+    },
+    "wall_thickness_estimate": {
+      "ok": true,
+      "estimated_min_thickness_mm": 9.7535,
+      "volume_mm3": 203736.353,
+      "total_area_mm2": 41777.062,
+      "method": "2V/A_ratio_approximation",
+      "note": "近似估计（2V/A）；精确壁厚需 STEP 网格分析。用于识别明显过薄件。"
+    },
+    "interface_compliance": {
+      "ok": true,
+      "violations": [],
+      "locked_param_changes": []
+    },
+    "gates": [
+      {
+        "id": "DESIGN_SPACE",
+        "status": "PASS"
+      },
+      {
+        "id": "CONNECTIVITY",
+        "status": "PASS"
+      },
+      {
+        "id": "WALL_THICKNESS",
+        "status": "PASS",
+        "estimated_mm": 9.7535,
+        "required_mm": 6.0
+      }
+    ],
+    "geometry_source": "swapi.massprops(真实实体体积)"
+  },
+  "fea_result": {
+    "ok": false,
+    "error": "材料参数 E 缺失（None）—— 无法计算；请检查材料是否真正赋到零件上（密度=1000/属性缺省都属未赋材）",
+    "traceback": "Traceback (most recent call last):\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\fea_solver.py\", line 629, in solve_feapy\n    r = solve_cantilever(L, H, W, total_force, E, nu, nx=nx, ny=ny)\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\feapy_solver.py\", line 283, in solve_cantilever\n    return solve_cantilever_2d(L, H, W_or_T, F_load, E, nu, nx=nx, ny=ny)\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\feapy_solver.py\", line 249, in solve_cantilever_2d\n    r=s.solve(E,nu,fixed=fixed,loads=loads)\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\feapy_solver.py\", line 163, in solve\n    D=_D_3d(E,nu) if self.model==\"3d\" else _D_2d(E,nu,self.model)\n                                           ~~~~~^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\feapy_solver.py\", line 65, in _D_2d\n    E = _require_positive(E, \"E\")\n  File \"C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\tools\\physics\\feapy_solver.py\", line 23, in _require_positive\n    raise MaterialPropertyError(\n        \"材料参数 %s 缺失（None）—— 无法计算；\"\n        \"请检查材料是否真正赋到零件上（密度=1000/属性缺省都属未赋材）\" % name)\nfeapy_solver.MaterialPropertyError: 材料参数 E 缺失（None）—— 无法计算；请检查材料是否真正赋到零件上（密度=1000/属性缺省都属未赋材）\n"
+  },
+  "fatigue": {},
+  "acceptance_criteria": {
+    "analysis_type": "linear_static",
+    "min_safety_factor": 2.0,
+    "target_safety_factor_max": 4.0,
+    "anisotropy_factor": 1.0,
+    "process": "机加工",
+    "max_displacement_mm": 1.0,
+    "min_wall_thickness_mm": 6.0,
+    "max_mass_kg": null,
+    "must_remain_in_design_domain": true,
+    "mesh_quality_min": 0.1,
+    "design_life_years": 5.0,
+    "operating_cycles_per_year": 100000.0,
+    "load_type": "impact",
+    "impact_factor": 1.5,
+    "fatigue_check_required": true,
+    "required_load_cases": [
+      "rated",
+      "lateral"
+    ],
+    "max_safety_factor": 4.0
+  },
+  "actual_safety_factor": null,
+  "required_min_safety_factor": 2.0,
+  "required_max_safety_factor": 4.0,
+  "overall_status": "UNKNOWN",
+  "passed_gates": [
+    "DESIGN_SPACE",
+    "CONNECTIVITY",
+    "WALL_THICKNESS"
+  ],
+  "failed_gates": [],
+  "not_evaluated": [],
+  "release_readiness": {
+    "status": "PENDING",
+    "human_review_required": true,
+    "limitations": [],
+    "fatigue_verified": false,
+    "fatigue_verdict": null
+  }
+}

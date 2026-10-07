@@ -1,0 +1,112 @@
+{
+  "kind": "domain",
+  "schema": "dsh-domain-attestation/1",
+  "at": "2026-10-05T08:29:34.171Z",
+  "ts": 1791188974171,
+  "room": "极限测试房",
+  "domain": "structural",
+  "rules_sha256": "44a147e12a663e6ff3e51dc645fad1ea38e6c43f62ca08d627b934e7135ca846",
+  "rule_count": 6,
+  "violations": [
+    {
+      "rule_id": "GBM-003",
+      "target": "safety_factor",
+      "value": 0.2,
+      "severity": "CRITICAL",
+      "message": "安全系数必须 ≥1.0（σ ≤ σy），否则材料已进入屈服/破坏。注意：本规则只守【材料不失效】的绝对下限；任务要求的 min_safety_factor（如冲击工况 4.0）由物理层的 SAFETY_FACTOR 闸口负责，两者口径不同、不可互相替代",
+      "expected": {
+        "min": 1,
+        "max": 100
+      }
+    }
+  ],
+  "score": 0.786,
+  "checked_items": [],
+  "warnings": [
+    {
+      "rule_id": "ST-004",
+      "target": "max_displacement_mm",
+      "value": 6.723,
+      "severity": "WARNING",
+      "message": "最大位移不应超过 5mm，避免影响装配",
+      "expected": {
+        "max": 5
+      }
+    },
+    {
+      "rule_id": "ST-005",
+      "target": "safety_factor",
+      "value": 0.2,
+      "severity": "WARNING",
+      "message": "安全系数应在 2~5 之间，过低不安全，过高过度设计",
+      "expected": {
+        "min": 2,
+        "max": 5
+      }
+    }
+  ],
+  "passed": [
+    {
+      "rule_id": "ST-001",
+      "target": "thickness_mm",
+      "value": 5.455
+    },
+    {
+      "rule_id": "ST-002",
+      "target": "fillet_mm",
+      "value": 1
+    },
+    {
+      "rule_id": "ST-003",
+      "target": "max_von_mises_mpa",
+      "value": 204.95
+    },
+    {
+      "rule_id": "ST-006",
+      "target": "mass_kg",
+      "value": 0.0076
+    },
+    {
+      "rule_id": "GBM-001",
+      "target": "material_yield_mpa",
+      "value": 40
+    },
+    {
+      "rule_id": "GBM-002",
+      "target": "material_density_kg_m3",
+      "value": 1270
+    },
+    {
+      "rule_id": "GBM-002b",
+      "target": "density_is_water",
+      "value": 1
+    },
+    {
+      "rule_id": "GBM-002c",
+      "target": "material_density_missing",
+      "value": 1
+    },
+    {
+      "rule_id": "GBM-004",
+      "target": "max_von_mises_mpa",
+      "value": 204.95
+    },
+    {
+      "rule_id": "GBM-005",
+      "target": "material_uts_mpa",
+      "value": 50
+    },
+    {
+      "rule_id": "GBM-006",
+      "target": "material_e_mpa",
+      "value": 2000
+    }
+  ],
+  "source": "physics_bridge",
+  "run_id": "opt_iter_1",
+  "checked_at": "2026-10-05 16:29:34",
+  "_sig": "pZP2IjdSWNiWPHllvFOCpJl0zsZzAK4t1O6neBy3VnA=",
+  "_kid": "6effb9bcef4b2181",
+  "_ts": 1791188974172,
+  "_nonce": "66dcdefa7b86e04a56cb9a214ae56feb"
+}

@@ -1,0 +1,73 @@
+{
+  "ruleset_id": "DSVA-GB_FASTENERS",
+  "revision": "A",
+  "category": "gb_fasteners",
+  "generated_from": "DSVA国标对照表.xlsx",
+  "total": 4,
+  "rules": [
+    {
+      "rule_id": "GB_FASTENERS-001",
+      "standard_id": "GB/T 5783-2025",
+      "title": "紧固件 六角头螺栓 全螺纹",
+      "topic": "六角头螺栓(全螺纹)",
+      "scope": "本文件规定了A和B级全螺纹六角头螺栓的型式尺寸、技术要求、标志和标签及标记。本文件适用于螺纹规格为M1.6~M64,粗牙螺纹,性能等级为4.8、5.6、8.8、10.9、12.9/12.9、A2-50、A2-70、A4-50、A4-70、A4-80、D4-70、D4-80、D6-70、D6-80,产品等级为A级和B级,钢和不锈钢制全螺纹六角头螺栓(以下简称\"螺栓\")。",
+      "status": "现行(代替GB/T 5783-2016)",
+      "dsva_requirement": "螺栓规格、强度等级、预紧力",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/gb/newGbInfo?hcno=01F5A0044F83A172F91B138098BEEBA0",
+      "note": "修改采用ISO 4017:2022"
+    },
+    {
+      "rule_id": "GB_FASTENERS-002",
+      "standard_id": "GB/T 70.1-2008",
+      "title": "内六角圆柱头螺钉",
+      "topic": "内六角圆柱头螺钉",
+      "scope": "本部分规定了螺纹规格为M1.6~M64,性能等级为8.8、10.9、12.9、A2-50、A2-70、A3-50、A3-70、A4-50、A4-70、A5-50、A5-70、CU2和CU3,产品等级为A级的内六角圆柱头螺钉。螺钉的参考质量见附录A。如需其他技术要求,应从现行标准(如GB/T 196、GB/T 3106、GB/T 3098.1、GB/T 3098.6、GB/T 3098.10和GB/T 3103.1)中选择。",
+      "status": "现行(代替GB/T 70.1-2000)",
+      "dsva_requirement": "内六角螺钉沉孔、扳手空间",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D7F825D3A7E05397BE0A0AB82A",
+      "note": "修改采用ISO 4762:2004"
+    },
+    {
+      "rule_id": "GB_FASTENERS-003",
+      "standard_id": "GB/T 93-2025",
+      "title": "紧固件 弹簧垫圈 标准型",
+      "topic": "弹簧垫圈",
+      "scope": "本文件规定了标准型弹簧垫圈的型式尺寸、技术要求、标志、标签和标记。本文件适用于规格为1.6mm~48mm的标准型弹簧垫圈(以下简称\"垫圈\")。",
+      "status": "现行(代替GB/T 93-1987)",
+      "dsva_requirement": "防松适用性",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=1695AAD378704E588819B9F77D874992",
+      "note": "2025新发布,2026-02-01实施"
+    },
+    {
+      "rule_id": "GB_FASTENERS-004",
+      "standard_id": "GB/T 3098.1-2010",
+      "title": "紧固件机械性能 螺栓、螺钉和螺柱",
+      "topic": "螺纹紧固件机械性能",
+      "scope": "GB/T 3098的本部分规定了由碳钢或合金钢制造的、在环境温度为10 ℃~35 ℃条件下进行测试时,螺栓、螺钉和螺柱的机械和物理性能。在该环境温度范围内,符合本部分技术要求的紧固件(含螺栓、螺钉和螺柱,下同)在较高(见附录B)和/或较低温度下,也可能达不到规定的机械和物理性能。注1: 按本部分生产的紧固件适用的使用温度为-50 ℃~+150 ℃。当使用温度超过-50 ℃~+150 ℃,甚至高达+300 ℃时,使用者应向有关方面咨询。注2: 对低温和高温用钢的选择与应用,可参考EN 10269、ASTM F2281和ASTM A 320/A 320M。某些紧固件因头部几何尺寸造成头部剪切面积较小,可能达不到本部分的抗拉或扭矩要求。这些紧固件如,头部高度低的、带或不带外扳拧部分的、带内扳拧部分的扁圆头或低圆柱头或沉头紧固件(见8.2)。本部分适用的紧固件:a)由碳钢或合金钢制造的;b)符合GB/T 192规定的普通螺纹;c)粗牙螺纹M1.6~M39;细牙螺纹M8×1~M39×3;d)符合GB/T 193规定的直径与螺距组合;e)符合GB/T 197、GB/T 9145和GB/T 22029规定的公差。本部分不适用于紧定螺钉及类似的不受拉力的螺纹紧固件(见GB/T 3098.3)。本部分未规定以下性能要求:——可焊接性;——耐腐蚀性;——耐剪切应力;——扭矩夹紧力性能;——耐疲劳性。",
+      "status": "现行(代替GB/T 3098.1-2000)",
+      "dsva_requirement": "螺栓强度等级、机械性能",
+      "severity": "INFO",
+      "validation_method": "drawing_check",
+      "requires_manual_review": false,
+      "is_deprecated": false,
+      "deprecated_reason": "",
+      "source_url": "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=BB6DB5A98B95CF4CEA43BAB678EB52F1",
+      "note": "修改采用ISO 898-1:2009(MOD)；无2025新版(2025-10-31批次仅发布3098.2-2025、3098.5-2025)"
+    }
+  ]
+}

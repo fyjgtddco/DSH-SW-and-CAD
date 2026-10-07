@@ -1,0 +1,75 @@
+[
+ {
+  "label": "赋材成功（density_kg_m3=7850）",
+  "in": {
+   "ok": true,
+   "density_kg_m3": 7850.0
+  },
+  "density": 7850.0,
+  "expected": 7850.0,
+  "suspect": false,
+  "expect_density": 7850.0,
+  "ok": true
+ },
+ {
+  "label": "赋材失败（仅有 density_before=1000，无 density_kg_m3）",
+  "in": {
+   "ok": false,
+   "density_before_kg_m3": 1000.0,
+   "expected_density_kg_m3": 7850.0
+  },
+  "density": 1000.0,
+  "expected": 7850.0,
+  "suspect": true,
+  "expect_density": 1000.0,
+  "ok": true
+ },
+ {
+  "label": "赋材失败（density_kg_m3 显式为 1000）",
+  "in": {
+   "ok": false,
+   "density_kg_m3": 1000.0
+  },
+  "density": 1000.0,
+  "expected": 7850.0,
+  "suspect": true,
+  "expect_density": 1000.0,
+  "ok": true
+ },
+ {
+  "label": "赋材失败（density_after_kg_m3=1000）",
+  "in": {
+   "ok": false,
+   "density_after_kg_m3": 1000.0
+  },
+  "density": 1000.0,
+  "expected": 7850.0,
+  "suspect": true,
+  "expect_density": 1000.0,
+  "ok": true
+ },
+ {
+  "label": "赋材失败（无任何密度字段）",
+  "in": {
+   "ok": false
+  },
+  "density": null,
+  "expected": 7850.0,
+  "suspect": true,
+  "expect_density": null,
+  "ok": true
+ },
+ {
+  "label": "赋材失败（density_before=1000 + density_after=1000）",
+  "in": {
+   "ok": false,
+   "density_before_kg_m3": 1000.0,
+   "density_after_kg_m3": 1000.0
+  },
+  "density": 1000.0,
+  "expected": 7850.0,
+  "suspect": true,
+  "expect_density": 1000.0,
+  "ok": true
+ }
+]

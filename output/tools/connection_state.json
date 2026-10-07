@@ -1,0 +1,87 @@
+{
+  "schema": "dsh-connection-state/1",
+  "updated_at": 1791194766.9229152,
+  "updated_at_str": "2026-10-05 18:06:06",
+  "sw": {
+    "running": true,
+    "pid": 33416,
+    "processes": [
+      {
+        "pid": 33416,
+        "name": "SLDWORKS.exe",
+        "mem": "745,288 K"
+      }
+    ],
+    "connected": true,
+    "error": null,
+    "revision": "33.5.0",
+    "binding": "static",
+    "checked_at": "2026-10-05 18:06:05"
+  },
+  "cad": {
+    "connected": false,
+    "running": null,
+    "pid": null,
+    "processes": [],
+    "checked_at": null,
+    "error": null
+  },
+  "paths": {
+    "sldworks_exe": "Z:\\Program Files\\SOLIDWORKS Corp2025\\SOLIDWORKS\\SLDWORKS.exe",
+    "acad_exe": "Z:\\7-Zip\\AutoCAD 2020\\acad.exe",
+    "scanned_drives": [
+      "C:",
+      "D:",
+      "E:",
+      "Z:"
+    ],
+    "resolved_at": 1791188755.5783865,
+    "resolved_at_str": "2026-10-05 16:25:55"
+  },
+  "launch": {
+    "sw": {
+      "ok": true,
+      "at": 1791194766.9226787,
+      "at_str": "2026-10-05 18:06:06",
+      "error": null,
+      "steps": [
+        {
+          "step": "resolve_path",
+          "ok": true,
+          "exe": "Z:\\Program Files\\SOLIDWORKS Corp2025\\SOLIDWORKS\\SLDWORKS.exe",
+          "detail": "已定位可执行文件"
+        },
+        {
+          "step": "check_running",
+          "ok": true,
+          "already_running": true,
+          "detail": "已在运行，跳过启动"
+        },
+        {
+          "step": "show_window",
+          "ok": true,
+          "detail": "主窗口已置前并最大化，欢迎页已隐藏"
+        },
+        {
+          "step": "connect",
+          "ok": true,
+          "detail": "COM 连接成功",
+          "pid": 33416,
+          "error": null,
+          "revision": "33.5.0",
+          "binding": "static"
+        }
+      ]
+    },
+    "cad": null
+  },
+  "abaqus": {
+    "connected": false,
+    "running": null,
+    "pid": null,
+    "processes": [],
+    "checked_at": null,
+    "error": null,
+    "interface": "process-only（Abaqus 无 COM 自动化接口）"
+  }
+}
