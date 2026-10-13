@@ -239,17 +239,32 @@ check('★ 第二个主栏目名为「设计过程优化」', src.includes('设�
 check('★ 其首行为「右键引用调出AI解释」', src.includes('右键引用调出AI解释'));
 check('★ 连接区含「SOLIDWORKS连接」「AutoCAD 连接」',
   src.includes("'SOLIDWORKS连接'") && src.includes("'AutoCAD 连接'"));
-// ── 【连接区扩展】Abaqus / NX 为【同款样式的占位按钮】────────────────────
-//   用户要求："先给 abaqus/ansys 做占位符，先不需要做实际连接"
-//            → 后改为 "把 Ansys连接 改为 NX连接"
-//   因此：外观（EngConnRow + eng-conn-btn）与 SW/CAD 完全一致，
-//         但不触发实际探测/启动（placeholder 模式）。
+// ── 【连接区扩展 + NX → Webots 改造】Abaqus 占位 / Webots 真实连接 ────────
+//   演进过程：
+//     v1 "先给 abaqus/ansys 做占位符，先不需要做实际连接"
+//     v2 "把 Ansys连接 改为 NX连接"（仍是占位）
+//     v3 【本次】"把 NX 改为 Webots 而且做实际连接，我已经下载了"；
+//        "另外一个 A 开头的先不管它了"
+//   ⇒ Abaqus 保持占位；Webots 升级为【真实目标】（有后端 target，
+//     能探测/启动/诊断，与 SW/CAD 同款按钮同款行为）。
 check('★ 连接区含「Abaqus连接」占位按钮',
   src.includes("'Abaqus连接'") && src.includes("target: 'abaqus'"));
-check('★ 连接区含「NX连接」占位按钮',
-  src.includes("'NX连接'") && src.includes("target: 'nx'"));
-check('★ Abaqus/NX 为占位模式（不触发实际探测）',
-  src.includes('isPlaceholder') && src.includes('placeholder === true'));
+check('★ 连接区含「Webots连接」真实按钮（已取代 NX）',
+  src.includes("'Webots连接'") && src.includes("target: 'webots'"));
+check('★ NX 已从连接区移除（不得再渲染 NX 行）',
+  !src.includes("target: 'nx'"));
+check('★ Abaqus 保持占位模式（不触发实际探测）',
+  src.includes('isPlaceholder') && src.includes('placeholder === true')
+  && /isPlaceholder\s*=\s*props\.placeholder === true \|\| target === 'abaqus'/.test(src));
+// ── 【10 分钟自动刷新】用户要求：只检测进程在不在，没了就把灯熄灭 ────────
+//   "10 分钟自动探测就是看是不是在运行的，没有的话那个 UI 就熄灭，
+//    让用户到时候自己选择去设置连接啥的，就是只做检测就行了"
+//   关键约束：自动刷新【绝不能】发 COM（那会把软件拉起来），
+//     必须走纯进程端点 /conn-probe-process-only。
+check('★ 有 10 分钟自动检测进程的定时器',
+  src.includes('10 * 60 * 1000') && src.includes('probeConnProcessOnly'));
+check('★ 自动检测走【纯进程】端点（不发 COM、不拉起软件）',
+  src.includes('/dsh-engineering-ui/conn-probe-process-only'));
 // ── 【连接区·已接真实探测 + 启动 + 日志诊断】用户要求：
 //   "设置那边『连接区』里的 SW/CAD 连接要能真的连上，
 //    并且流程中要能根据连接结果做代码判断。"
@@ -356,9 +371,9 @@ check('★ 设置分区可渲染且含四个主栏目标题',
   settingsHtml.includes('连接区') && settingsHtml.includes('设计过程优化') &&
   settingsHtml.includes('美化工程模式') && settingsHtml.includes('工程人设'),
   settingsHtml.slice(0, 120));
-check('★ 渲染结果含新连接区文案（SOLIDWORKS / AutoCAD / Abaqus / NX）',
+check('★ 渲染结果含新连接区文案（SOLIDWORKS / AutoCAD / Abaqus / Webots）',
   settingsHtml.includes('SOLIDWORKS连接') && settingsHtml.includes('AutoCAD 连接')
-  && settingsHtml.includes('Abaqus连接') && settingsHtml.includes('NX连接'));
+  && settingsHtml.includes('Abaqus连接') && settingsHtml.includes('Webots连接'));
 check('★ 设置分区含开关文案',
   settingsHtml.includes('使用工程模式自带的子代理显示页'));
 check('★ 设置分区含子项行与右箭头',

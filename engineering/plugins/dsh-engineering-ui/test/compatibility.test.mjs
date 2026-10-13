@@ -110,26 +110,36 @@ function harness(handles = {}) {
   return { ctx, root, routes, hooks, asks, dispose, request };
 }
 
-test('全部 21 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
+test('全部 24 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
   const h = harness();
   try {
-    // 9 条基础/提问/通知路由 + 4 条【三大防线】签名路由
-    //   + 4 条【连接区】路由（conn-state / conn-probe
-    //     / conn-launch / conn-diagnose）
+    // 9 条基础/提问/通知路由
+    //   + 5 条【三大防线】签名路由（sign / verify / verify-gate / info / judge）
+    //   + 5 条【连接区】路由（conn-state / conn-probe
+    //     / conn-probe-process-only / conn-launch / conn-diagnose）
+    //     ※ 第 5 条是【10 分钟自动刷新】新增的纯进程端点：
+    //       用户要求"只做检测就行"，它【绝不发 COM】，因此必须与
+    //       conn-probe 分开（后者可能把 SW 拉起来）。
     //   + 1 条【独立聊天页】推荐追问路由（/suggest）
     //   + 1 条【划词详情】侧边分析路由（/side-chat）
     //   + 1 条【工程人设】读写路由（/persona）
-    //   + 1 条【聊天模式】同会话能力切换路由（/chat-mode）= 21
-    assert.equal(h.routes.size, 21, '路由数量应为 21（含 /suggest、/side-chat、/persona、/chat-mode）');
+    //   + 1 条【聊天模式】同会话能力切换路由（/chat-mode）
+    //   + 1 条【第4项·SW 健康看护】ctx.jobs 版路由（/sw-guard-job）= 24
+    // 注：/defense/verify-gate 是宿主侧"不消费 nonce"的只读验签入口
+    //   （门禁 verify-gate 用），原先漏计，已补入清单。
+    assert.equal(h.routes.size, 24, '路由数量应为 24（新增 /sw-guard-job）');
     for (const p of [
       '/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
       '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
       '/dsh-engineering-ui/pending-child', '/dsh-engineering-ui/result-child',
       '/dsh-engineering-ui/answer', '/dsh-engineering-ui/verify-subagent',
       '/dsh-engineering-ui/notify-room',
+      '/dsh-engineering-ui/sw-guard-job',
       '/dsh-engineering-ui/defense/sign', '/dsh-engineering-ui/defense/verify',
+      '/dsh-engineering-ui/defense/verify-gate',
       '/dsh-engineering-ui/defense/info', '/dsh-engineering-ui/defense/judge',
       '/dsh-engineering-ui/conn-state', '/dsh-engineering-ui/conn-probe',
+      '/dsh-engineering-ui/conn-probe-process-only',
       '/dsh-engineering-ui/conn-launch', '/dsh-engineering-ui/conn-diagnose',
       '/dsh-engineering-ui/suggest', '/dsh-engineering-ui/side-chat',
       '/dsh-engineering-ui/persona', '/dsh-engineering-ui/chat-mode',

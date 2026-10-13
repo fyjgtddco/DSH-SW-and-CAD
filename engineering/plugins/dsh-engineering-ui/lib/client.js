@@ -3133,6 +3133,32 @@ window.__ModuleLoader__.load({
       } catch (e) { cb({ ok: false, error: String(e && e.message || e) }); }
     }
 
+    /** 【10 分钟自动刷新】只做【进程层】检测（POST，绝不发 COM）。
+     *
+     * ── 用户诉求原文 ──────────────────────────────────────────────────
+     *   "10 分钟自动探测就是看是不是在运行的，没有的话那个 UI 就熄灭，
+     *    让用户到时候自己选择去设置连接啥的，就是只做检测就行了，
+     *    关了 UI 就更新就行了，其他不用搞。"
+     *
+     * ── 为什么不能复用 probeConn ──────────────────────────────────────
+     *   probeConn → /conn-probe 会发 COM Dispatch：SW 没开时可能把它
+     *   【拉起来】，还会把窗口置前/最大化 —— 每 10 分钟打断用户一次。
+     *   本函数走 /conn-probe-process-only（纯 tasklist），
+     *   进程没了就把状态置为未连接（灯熄灭），用户想重连时自己点「连接」。
+     */
+    function probeConnProcessOnly(cb) {
+      try {
+        fetch('/dsh-engineering-ui/conn-probe-process-only', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({})
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (j) { cb(j || null); })
+          .catch(function (e) { cb({ ok: false, error: String(e && e.message || e) }); });
+      } catch (e) { cb({ ok: false, error: String(e && e.message || e) }); }
+    }
+
     /** 【启动按钮】显式启动 SW / CAD（用户主动点击才走这里）。 */
     function launchConn(target, cb) {
       try {
@@ -3177,19 +3203,24 @@ window.__ModuleLoader__.load({
     function EngConnRow(props) {
       // target: 'sw' | 'cad'（真实连接）；'abaqus' | 'nx' 当前为占位
       var target = props.target || 'sw';
-      // ── 【占位模式】外观与 SW/CAD 完全一致，但不触发任何探测/启动 ────────
-      // 用户要求："先给 abaqus/nx 做占位符，先不需要做实际连接"。
-      //   因此按钮样式（.eng-conn-btn / .alt / 徽标 / 提示文案）全部复用，
-      //   仅把 onClick 换成"未接入"的说明，避免误触发。
-      var isPlaceholder = props.placeholder === true
-        || target === 'abaqus' || target === 'nx';
+      // ── 【占位模式】外观与真实行完全一致，但不触发任何探测/启动 ──────────
+      // 现状（【NX → Webots 改造】后）：
+      //   · Abaqus —— 用户明确说"另外一个 A 开头的先不管它了"，保持占位；
+      //   · Webots —— 用户要求"做实际连接"，已从占位【升级为真实目标】
+      //     （有后端 target，能探测、能启动、能诊断）。
+      // 占位行仅把 onClick 换成"未接入"的说明，避免误触发。
+      var isPlaceholder = props.placeholder === true || target === 'abaqus';
       // 各目标的显示名（用于默认 label 与状态文案，避免"SolidWorks/CAD"二选一写死）
       var TARGET_DISPLAY = {
         sw: { label: 'SOLIDWORKS连接', name: 'SolidWorks' },
         cad: { label: 'AutoCAD 连接', name: 'AutoCAD' },
         abaqus: { label: 'Abaqus连接', name: 'Abaqus' },
-        nx: { label: 'NX连接', name: 'NX' }
+        webots: { label: 'Webots连接', name: 'Webots' },
+        // 旧名兼容：旧配置里若还写着 nx，按 Webots 渲染（Python 侧同样映射）
+        nx: { label: 'Webots连接', name: 'Webots' }
       };
+      // 归一化：旧 target 'nx' → 'webots'（与后端 _norm_target 一致）
+      var reqTarget = (target === 'nx') ? 'webots' : target;
       var _td = TARGET_DISPLAY[target] || TARGET_DISPLAY.sw;
       var label = props.label || _td.label;
       var sessionId = props.sessionId || '';
@@ -3221,7 +3252,7 @@ window.__ModuleLoader__.load({
           });
           return;
         }
-        var entry = state && state[target] ? state[target] : null;
+        var entry = state && state[reqTarget] ? state[reqTarget] : null;
         var connected = !!(entry && entry.connected);
         var running = entry ? entry.running : null;
         var n = null;
@@ -3242,6 +3273,20 @@ window.__ModuleLoader__.load({
         // Abaqus 无 COM：把"未连上 COM"的措辞换成符合其能力边界的说明
         if (target === 'abaqus' && running === true && !connected) {
           n = 'Abaqus 进程在运行（无 COM 接口，集成走 `abaqus python` 脚本）';
+        }
+        // ── 【NX → Webots 改造】Webots 也没有 COM，措辞必须如实 ──────────
+        //   connected 的语义是"进程在跑 或 安装可验证"，不是"COM 会话已建立"；
+        //   若沿用 SW/CAD 的"COM 未连上"文案会误导用户以为连接失败。
+        if (reqTarget === 'webots' && !connected) {
+          if (running === true) {
+            n = 'Webots 进程在运行（无 COM 接口，外部控制走 webots-controller）';
+          } else if (entry && entry.checked_at) {
+            n = '未检测到 Webots 进程或安装（检测于 ' + entry.checked_at + '）';
+          }
+        }
+        // 自动检测写入的说明（例如"进程已重启，请点连接重建会话"）优先透出
+        if (entry && entry.auto_note && !connected) {
+          n = String(entry.auto_note);
         }
         if (state && state.stale && connected) {
           n = (n || '') + '（状态可能已过期）';
@@ -3278,11 +3323,29 @@ window.__ModuleLoader__.load({
       useEffect(function () {
         mounted.current = true;
         refresh();
-        // 占位项无需轮询：状态不会变，且没有后端可查
-        var t = isPlaceholder ? null : setInterval(refresh, 15000);
+        // ── 【10 分钟自动刷新】只检测"进程在不在"，不发 COM、不弹窗 ────────
+        // 用户诉求原文："10 分钟自动探测就是看是不是在运行的，没有的话那个
+        //   UI 就熄灭，让用户到时候自己选择去设置连接啥的，就是只做检测就行
+        //   了，关了 UI 就更新就行了，其他不用搞。"
+        //
+        // 两条定时器，职责严格分开：
+        //   ① 15s / 读文件（refresh）—— 纯读 connection_state.json，零副作用，
+        //      让"点了连接/启动"的结果尽快反映到所有行；
+        //   ② 10min / 重探进程（probeConnProcessOnly）—— 真正去查进程是否还在，
+        //      进程没了或换了实例就把状态置为未连接，灯随之熄灭。
+        //      刻意【不】用 /conn-probe（那会发 COM，可能把软件拉起来）。
+        var tFile = isPlaceholder ? null : setInterval(refresh, 15000);
+        var tProc = isPlaceholder ? null : setInterval(function () {
+          probeConnProcessOnly(function (r) {
+            if (!mounted.current) return;
+            // 检测失败不打扰用户（自动检测是后台行为，不该弹错误）
+            if (r && r.ok && r.state) apply(r.state);
+          });
+        }, 10 * 60 * 1000);
         return function () {
           mounted.current = false;
-          if (t) clearInterval(t);
+          if (tFile) clearInterval(tFile);
+          if (tProc) clearInterval(tProc);
         };
       }, [target]);
 
@@ -3318,7 +3381,7 @@ window.__ModuleLoader__.load({
                 return;
               }
               patch({ phase: 'busy', note: '正在探测…', sent: null });
-              probeConn(target, function (r) {
+              probeConn(reqTarget, function (r) {
                 if (!mounted.current) return;
                 if (r && r.ok && r.state) {
                   apply(r.state);
@@ -3337,9 +3400,14 @@ window.__ModuleLoader__.load({
             type: 'button',
             disabled: busy || busyLaunch,
             'aria-label': '启动' + label,
+            // ── 【NX → Webots 改造】提示文案不能只提 SW 的窗口行为 ────────
+            //   原文案对所有目标都说"会自动隐藏欢迎页并最大化主窗口"，
+            //   那只对 SolidWorks 成立；CAD/Webots 没有这套窗口处理。
             title: isPlaceholder
-              ? (_td.name + ' 启动为预留项，暂未接入') 
-              : '启动软件（会自动隐藏欢迎页并最大化主窗口）',
+              ? (_td.name + ' 启动为预留项，暂未接入')
+              : (reqTarget === 'sw'
+                  ? '启动软件（会自动隐藏欢迎页并最大化主窗口）'
+                  : '启动 ' + _td.name + '（定位可执行文件后拉起进程）'),
             onClick: function () {
               if (busy || busyLaunch) return;
               // 占位项：不拉起任何进程，只给出说明
@@ -3357,7 +3425,7 @@ window.__ModuleLoader__.load({
                 note: '正在启动 ' + _td.name
                       + '（首次启动可能要几十秒）…'
               });
-              launchConn(target, function (r) {
+              launchConn(reqTarget, function (r) {
                 if (!mounted.current) return;
                 var txt = (r && r.log_text) || null;
                 if (r && r.ok) {
@@ -3394,7 +3462,7 @@ window.__ModuleLoader__.load({
               onClick: function () {
                 if (S.sent === 'sending') return;
                 patch({ sent: 'sending' });
-                sendLogToModel(target, S.logText, sessionId, function (r2) {
+                sendLogToModel(reqTarget, S.logText, sessionId, function (r2) {
                   if (!mounted.current) return;
                   if (r2 && r2.ok) patch({ sent: 'ok' });
                   else patch({ sent: 'err:' + ((r2 && r2.error) || '未知错误') });
@@ -3461,12 +3529,14 @@ window.__ModuleLoader__.load({
           h(EngGroup, { title: '连接区' },
             h(EngConnRow, { target: 'sw', label: 'SOLIDWORKS连接' }),
             h(EngConnRow, { target: 'cad', label: 'AutoCAD 连接' }),
-            // ── 【连接区扩展】Abaqus / NX 连接（与 SW/CAD 完全同款按钮）──
-            // 说明：两者都没有 COM 自动化接口，探测只覆盖"进程 + 安装路径"，
-            //   按钮外观与交互（连接/启动/诊断）与 SW/CAD 一致；
-            //   未安装时如实报错，不伪装成功。
+            // ── 【连接区扩展】Abaqus 占位 / Webots 真实连接 ────────────────
+            //   · Abaqus：用户明确"另外一个 A 开头的先不管它了" → 保持占位；
+            //   · Webots：用户要求"做实际连接，我已经下载了" → 真实目标，
+            //     探测走 WEBOTS_HOME + msys64 布局定位，启动走 webots.exe。
+            //     两者都没有 COM；Webots 的外部控制走 webots-controller
+            //     （TCP 控制器协议），后续 MCP 会话就接在这一层之上。
             h(EngConnRow, { target: 'abaqus', label: 'Abaqus连接' }),
-            h(EngConnRow, { target: 'nx', label: 'NX连接' }),
+            h(EngConnRow, { target: 'webots', label: 'Webots连接' }),
             h(EngRow, { label: '子栏目选项设置3' })),
 
           // ── 主栏目2：设计过程优化（用户指定名称）───────────────────────
@@ -5251,9 +5321,580 @@ window.__ModuleLoader__.load({
           console.warn('[dsh-engineering-ui] sessions.list 不可用，聊天切换器将不显示');
         }
       } catch (e) { console.error('[dsh-engineering-ui] chat switch registration', e); }
+
+      // ══ 【第5项】进入工程模式时的强制设置提醒弹窗 ═══════════════════════
+      // 注册一个 command contribution（走官方弹窗外壳，不自绘 UI）。
+      // 常驻注册：触发与否完全由 available 里的工程模式变量决定，
+      //   **不绑定设置页**（用户明确要求"必须是强制触发的"）。
+      try {
+        var disposeLimit = installEngLimitPopup();
+        if (typeof disposeLimit === 'function') disposers.push(disposeLimit);
+      } catch (e) { console.error('[dsh-engineering-ui] eng limit popup registration', e); }
+      // ★【缺陷1 修复】把【自动弹出的触发源】接上。
+      //   原先只调了 installEngLimitPopup()（仅注册），
+      //   tryAutoOpenEngLimitPopup 全文零调用点 → 弹窗永不自动出现。
+      //   这里订阅会话列表，会话变化即尝试弹出（内部有按会话的防轰炸）。
+      try {
+        var disposeAuto = startEngLimitAutoTrigger();
+        if (typeof disposeAuto === 'function') disposers.push(disposeAuto);
+      } catch (e) { console.error('[dsh-engineering-ui] eng limit auto trigger', e); }
     }
+    // ══════════════════════════════════════════════════════════════════════
+    // 【第5项】进入工程模式时的【强制】设置提醒弹窗
+    // ══════════════════════════════════════════════════════════════════════
+    // 用户需求原文：
+    //   「搞一个弹窗，当用户点击"工程模式"的时候，自动跳出这个弹窗，弹窗的文字是
+    //     '注意：请在使用工程模式的时候，将左边的"插件"页面中的"子智能体"，
+    //      将最大递进深度和子智能体并行上限均设置为999，否则，
+    //      **预设模式将无法正常生效**！！！！'
+    //     然后设置弹窗的俩个按键为：'稍后提醒'和'不再提醒'。
+    //     稍后提醒就是不注销那个弹窗，只要选择那个工程模式，就会弹出那个弹窗。
+    //     '不再提醒'就是按了一次之后，再弹出一个小弹窗：'请一定要修改，否则预设
+    //      模式将根本无法发挥正常作用'，第一个选项是'好的，我回去修改'，然后就
+    //      跳转到上一个弹窗。第二个是'我确认'。按下了，我确认就直接注销这个弹窗，
+    //      不再跳出
+    //     方法是：通过 ctx.commandUi 注册一个 command contribution，带上
+    //     popupSelect spec。……在 contribution 的 available 钩子里判断你的预设变量。
+    //     变量为真时返回可用，弹窗就可以被触发；变量为假时不可用，弹窗不会出现。
+    //     不能将这个弹窗绑定在设置中，必须是强制触发的」
+    //
+    // ── 与官方 API 的差距（实据见 NOTES-commandUi-api.md）──────────────────
+    //   ① popupSelect 是【严格单选列表】，没有"多按钮"这回事（402159 单飞、
+    //      402237 成功后无条件关闭）。因此"两个按键"实现为**两个选项行**。
+    //   ② 二级小弹窗用 `option.confirmation`（官方唯一的嵌套确认框 402991）。
+    //      注意它的语义：cancelLabel → 回到仍打开的上一层选择器
+    //      （正是用户要的"跳转到上一个弹窗"）；confirmLabel 才真正选中。
+    //      它强制带一个 acknowledge 勾选框（452918），无法去掉。
+    //   ③ **官方没有公开的命令式 open()**（NOTES §5）。文档认可的打开方式
+    //      只有"用户输入 /命令"或从 / 菜单选。这里尝试内部通道
+    //      popupFor(actx).open(...)，失败则优雅降级为引导提示。
+    var ENG_LIMIT_CMD = 'eng-subagent-limits';
+    var ENG_LIMIT_DISMISS_KEY = 'dsh-engineering-ui/limit-popup/v1';
+    var _engLimitTried = {};        // sessionId → 已尝试过自动弹出（防轰炸）
+
+    /** 读取"不再提醒"的持久标记。与设置页【无关】（用户要求不得绑设置）。 */
+    function _engLimitState() {
+      try {
+        if (typeof localStorage === 'undefined') return {};
+        var raw = localStorage.getItem(ENG_LIMIT_DISMISS_KEY);
+        var j = raw ? JSON.parse(raw) : null;
+        return (j && typeof j === 'object') ? j : {};
+      } catch (e) { return {}; }
+    }
+    function _engLimitNeverShow() {
+      return _engLimitState().never === true;
+    }
+    function _engLimitSetNever(v) {
+      try {
+        if (typeof localStorage === 'undefined') return;
+        var j = _engLimitState();
+        j.never = !!v;
+        j.at = new Date().toISOString();
+        localStorage.setItem(ENG_LIMIT_DISMISS_KEY, JSON.stringify(j));
+      } catch (e) { /* 写入失败只影响持久性，不影响本次 */ }
+    }
+
+    /** 弹窗正文（用户给的原话，一字不改）。 */
+    var ENG_LIMIT_TITLE = '注意：请在使用工程模式的时候，将左边的「插件」页面中的'
+      + '「子智能体」，将最大递进深度和子智能体并行上限均设置为 999，'
+      + '否则，预设模式将无法正常生效！！！！';
+
+    /**
+     * ★【缺陷2 修复】工程模式判据 —— 用【官方会话身份投影】，而不是 _engContextActive。
+     *
+     * 为什么必须换掉 _isEngineeringContext()（vm 实测暴露的真实缺陷）：
+     *   它的唯一置位点在 SubagentConsole 内（L2731），而前面 L2722 有一道闸门
+     *   `if (entries.length === 0) { _engContextActive = false; return null; }`
+     *   —— 即**只有该会话已经存在子代理时它才为真**。
+     *   而"刚点进工程模式、还没建任何子代理"恰恰是本提醒【最该出现】的时刻，
+     *   此时它恒为 false → available() 为假 → 弹窗永不出现。
+     *
+     * 改用会话身份的原因是它更贴合用户原话：
+     *   「这个触发点是和切换工程模式时出现的『聊天』和『工作』这两个特殊UI的
+     *     变量是一样的」—— EngInputDock 用的正是 `preset === ENG_PRESET_ID`，
+     *   而 preset 来自会话行的 agentPreset（见 L4197-4205），不是 _engContextActive。
+     *
+     * 取值方式与官方 /permission 一致（projections.faceOf(...).getSnapshot()，
+     * 见 NOTES-commandUi-api.md §3）。
+     * 注意：传给 available 的是【触发管线会话】，projection 在【已物化 binding
+     *   会话】上，因此两级都尝试（与官方 sessionFor 的间接取法同理）。
+     */
+    function _sessionIsEngineering(session) {
+      try {
+        if (!session) return false;
+        // ① 直接读会话身份投影（不同版本键名可能是 agentPreset / preset）
+        var proj = session.projections;
+        if (proj && typeof proj.faceOf === 'function') {
+          var keys = ['agentPreset', 'preset', 'agentPresetId'];
+          for (var i = 0; i < keys.length; i++) {
+            try {
+              var face = proj.faceOf(keys[i]);
+              var v = face && typeof face.getSnapshot === 'function'
+                ? face.getSnapshot() : null;
+              if (v === ENG_PRESET_ID) return true;
+              if (v && v.id === ENG_PRESET_ID) return true;
+            } catch (e) { /* 该键不存在 → 试下一个 */ }
+          }
+        }
+        // ② 退回会话行（EngInputDock 的取法：projectionValues.agentPreset）
+        if (session.sessionId) {
+          var pv = session.projectionValues;
+          if (pv && pv.agentPreset === ENG_PRESET_ID) return true;
+          if (session.agentPreset === ENG_PRESET_ID) return true;
+          // ③ 再退回会话列表（权威来源，与 presetOfSession 同源）
+          var listSrc = engService('sessions');
+          var row = _engSessionRow(listSrc && listSrc.list, session.sessionId);
+          var p = row
+            ? ((row.projectionValues && row.projectionValues.agentPreset)
+               || row.agentPreset || null)
+            : null;
+          if (p === ENG_PRESET_ID) return true;
+        }
+        // ④ 最后退回旧的模块级判据（作为兜底，不放弃已生效的路径）
+        return _isEngineeringContext();
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /** 从会话列表快照里取某会话行（与 EngInputDock 的 presetOfSession 同口径）。 */
+    function _engSessionRow(listSvc, sessionId) {
+      try {
+        if (!listSvc || !sessionId) return null;
+        var snap = typeof listSvc.getSnapshot === 'function' ? listSvc.getSnapshot() : null;
+        if (!snap) return null;
+        if (snap.byId && snap.byId[sessionId]) return snap.byId[sessionId];
+        var items = snap.items || snap.rows || [];
+        for (var i = 0; i < items.length; i++) {
+          if (items[i] && items[i].sessionId === sessionId) return items[i];
+        }
+        return null;
+      } catch (e) { return null; }
+    }
+
+    /** 选项行（= 用户说的"两个按键"）。 */
+    function _engLimitOptions() {
+      return [
+        {
+          id: 'later',
+          label: '稍后提醒',
+          // ★【缺陷3 修复】官方 popupSelect 没有自由正文区（渲染词汇表只有
+          //   label / badge / detail / active，见 NOTES §10-5），`detail` 是唯一
+          //   能承载整段文字的渲染位（asar 402924：常驻渲染，不依赖高亮）。
+          //   原先这里是短句，导致用户【看不到】那段完整警告 —— 等于提醒没生效。
+          detail: ENG_LIMIT_TITLE + '（本次先不修改；下次进入工程模式时仍会提醒。）',
+        },
+        {
+          id: 'never',
+          label: '不再提醒',
+          detail: ENG_LIMIT_TITLE + '（确认后不再弹出。）',
+          // ── 二级小弹窗：官方唯一的嵌套确认框 ──────────────────────────
+          // cancelLabel（"好的，我回去修改"）→ 回到上面那个选择器（= 上一层弹窗）
+          // confirmLabel（"我确认"）        → 真正选中 never，写入永久标记
+          confirmation: {
+            title: '请一定要修改，否则预设模式将根本无法发挥正常作用',
+            description: '在左侧「插件」页面找到「子智能体」，把「最大递进深度」'
+              + '与「子智能体并行上限」都改成 999。改完再回来即可，不影响当前会话。',
+            acknowledgeLabel: '我已了解需要修改这两项设置',
+            cancelLabel: '好的，我回去修改',
+            confirmLabel: '我确认',
+          },
+        },
+      ];
+    }
+
+    /**
+     * 注册"设置提醒"命令。
+     *
+     * available 是【纯同步、不可抛】的判定（NOTES §3：每次候选求值都会调用）：
+     *   · 非工程模式        → false（不出现）
+     *   · 已选"不再提醒"    → false（永久消失）
+     *   · 其余（工程模式）  → true
+     */
+    function installEngLimitPopup() {
+      var cmdUi = null;
+      // ★【BUG 修复】本函数定义在 apply(ctx) 之外，**没有 ctx 在作用域里**。
+      //   原先写 `ctx.get('commandUi')` 会抛 ReferenceError，被下面的
+      //   try/catch 吞掉 → cmdUi=null → 直接 return null →
+      //   commandUi.register **从未被调用**，弹窗永远不出现
+      //   （用 vm 真加载实测：registered 数 = 0）。
+      //   正确做法：走文件里本就为此准备的 engService()（读模块级 _engCtx）。
+      try { cmdUi = engService('commandUi'); } catch (e) { cmdUi = null; }
+      if (!cmdUi || typeof cmdUi.register !== 'function') {
+        // 该 profile 没有命令服务 → 静默跳过，绝不影响其他功能
+        return null;
+      }
+      var dispose = cmdUi.register({
+        name: ENG_LIMIT_CMD,
+        label: function () { return '工程模式设置提醒'; },
+        description: function () { return '提醒把子智能体上限设为 999'; },
+        // ★ 触发变量：改用【会话身份】判据 _sessionIsEngineering（缺陷2 修复）。
+        //   原先用 _isEngineeringContext()，它在"还没建任何子代理"时恒为 false
+        //   —— 而那正是本提醒最该出现的时刻，导致弹窗永不出现。
+        //   官方签名是 available(session)（不是 projection，见 NOTES §3）。
+        available: function (session) {
+          try {
+            if (_engLimitNeverShow()) return false;
+            return _sessionIsEngineering(session);
+          } catch (e) {
+            // available 不可抛（抛了会打断整个候选求值）→ 保守返回 false
+            return false;
+          }
+        },
+        ui: {
+          kind: 'popupSelect',
+          searchMode: 'substring',
+          searchLabels: function () {
+            return {
+              placeholder: '选择：稍后提醒 / 不再提醒',
+              empty: '没有可选项',
+              noResults: '没有匹配的选项',
+            };
+          },
+          options: function () {
+            // 每次打开只取一次（官方语义）；本弹窗是静态两行
+            return Promise.resolve(_engLimitOptions());
+          },
+          onSelect: function (option) {
+            var id = option && option.id;
+            if (id === 'never') {
+              // 走到这里说明用户在二级弹窗点了"我确认"（cancel 不会触发 onSelect）
+              _engLimitSetNever(true);
+            }
+            // 'later'：不写任何持久标记 → 下次进工程模式仍会提醒（用户要求）
+            return Promise.resolve();
+          },
+        },
+      });
+      return dispose;
+    }
+
+    /**
+     * 尝试【自动】弹出（用户要求"当用户点击工程模式的时候自动跳出"）。
+     *
+     * ⚠️ 官方没有公开的命令式 open()（NOTES §5 已确证）。这里走内部通道
+     *    `commandUi.popupFor(actx).open(...)`：
+     *      · 需要"已保留的 Session scope"，拿不到就抛
+     *        `command.popupFor requires a retained Session scope`；
+     *      · 属内部机制，官方文档只承诺"输入 /命令"。
+     *    因此全程 try/catch，失败则**优雅降级**：不抛到插件外、不白屏，
+     *    改为在控制台留一条可操作提示（用户可手动输入 /命令 打开）。
+     *
+     * 防轰炸：每个 sessionId 只自动尝试一次（available 每次求值都会调用，
+     *   若不设闸门会在关掉后被立刻重新弹出）。
+     */
+    /**
+     * 自绘降级卡片 —— 自动弹出失败时，用户仍能【看得见】提醒。
+     *
+     * 为什么必须有它（子代理指出的缺口）：
+     *   官方没有公开的命令式 open()，自动弹出可能失败。若只写 console.info，
+     *   **用户什么都看不到** —— 等于这个强制提醒压根没生效。
+     *   因此这里用自有 DOM 渲染一张最小卡片（不走官方弹窗外壳），
+     *   提供与 popupSelect 相同的两个动作。
+     *
+     * ⚠️ 不能 import @deepseek-ai/dsh-client-ui-primitives（授权规则禁止），
+     *    所以自带标记与 CSS，类名统一用 eng-limits-* 前缀，样式只用
+     *    --dsw-alias-* 设计 token，避免与官方样式冲突。
+     */
+    /**
+     * 自绘降级卡片 —— 自动弹出失败时，用户仍能【看得见】提醒。
+     *
+     * @param session 会话对象（可选）
+     * @param preChecked 调用方【已经】确认过"当前是工程模式"（可选）。
+     *   ★ 为什么需要它：`tryAutoOpenEngLimitPopup` 在入口就已经用
+     *     `_sessionIsEngineering()` 把过关（非工程模式会直接 return false），
+     *     因此它走到任何一个降级分支时，"是不是工程模式"已经有了结论。
+     *     此时若在卡片里【再查一次】，而那次查询因会话列表查不到该 id 而失败，
+     *     就会返回 false → 卡片被自己挡掉 → 用户什么都看不到
+     *     （这正是缺陷4 的完整形态：判据换了，但"二次自检"把结论又推翻）。
+     *     传 preChecked=true 表示"结论已成立，别再自检"。
+     */
+    function showEngLimitFallbackCard(session, preChecked) {
+      try {
+        if (typeof document === 'undefined' || !document.body) return false;
+        // ★【缺陷4 修复】原先这里仍用旧的 _isEngineeringContext() ——
+        //   它的置位点在 SubagentConsole 内，且要求 entries.length > 0，
+        //   即"只有该会话已有子代理时才为真"。
+        //   后果正是缺陷2 的翻版：**刚进工程模式、还没建子代理**时它 = false，
+        //   而此时恰恰是最容易需要降级的时刻（新会话 scope 往往还没保留 →
+        //   popupFor 抛 → 走降级）→ 降级卡片自己也被挡住 → 用户什么都看不到。
+        if (!preChecked) {
+          var _sess = session && typeof session === 'object'
+            ? session : { sessionId: _engLimitCurrentSessionId() };
+          if (!_sessionIsEngineering(_sess)) return false;
+        }
+        if (_engLimitNeverShow()) return false;
+        // 已存在就不重复插入
+        if (document.getElementById('eng-limits-mask')) return true;
+
+        var mask = document.createElement('div');
+        mask.id = 'eng-limits-mask';
+        mask.setAttribute('data-eng-limits', '1');
+        mask.style.cssText = [
+          'position:fixed', 'inset:0', 'z-index:2147483000',
+          'background:rgba(15,23,42,.45)',
+          'display:flex', 'align-items:center', 'justify-content:center',
+          'padding:24px',
+        ].join(';');
+
+        var card = document.createElement('div');
+        card.style.cssText = [
+          'max-width:560px', 'width:100%',
+          'background:var(--dsw-alias-bg-layer-2,#fff)',
+          'color:var(--dsw-alias-label-primary,#0f172a)',
+          'border-radius:12px', 'padding:20px 22px',
+          'box-shadow:0 12px 40px rgba(0,0,0,.28)',
+          'font-size:14px', 'line-height:1.7',
+        ].join(';');
+
+        var title = document.createElement('div');
+        title.style.cssText = 'font-weight:600;font-size:15px;margin-bottom:10px;';
+        title.textContent = ENG_LIMIT_TITLE;
+
+        var tip = document.createElement('div');
+        tip.style.cssText = 'opacity:.75;margin-bottom:16px;';
+        tip.textContent = '（自动弹窗不可用，已改用本提示。'
+          + '也可在输入框输入 /' + ENG_LIMIT_CMD + ' 再次打开。）';
+
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;';
+
+        var btnLater = document.createElement('button');
+        btnLater.textContent = '稍后提醒';
+        btnLater.style.cssText = 'padding:6px 14px;border-radius:8px;cursor:pointer;'
+          + 'border:1px solid var(--dsw-alias-border-secondary,#cbd5e1);'
+          + 'background:transparent;color:inherit;';
+        btnLater.onclick = function () {
+          // 不写永久标记 → 下次进工程模式仍会提醒（与 popupSelect 的 later 一致）
+          try { mask.remove(); } catch (e) {}
+        };
+
+        var btnNever = document.createElement('button');
+        btnNever.textContent = '不再提醒';
+        btnNever.style.cssText = 'padding:6px 14px;border-radius:8px;cursor:pointer;'
+          + 'border:none;background:var(--dsw-alias-interactive-bg-primary,#2563eb);'
+          + 'color:#fff;';
+        btnNever.onclick = function () {
+          // 二级确认：与 popupSelect 的 confirmation 等价（两个动作）
+          if (!window.confirm('请一定要修改，否则预设模式将根本无法发挥正常作用\n\n'
+            + '点「确定」= 我确认（不再提醒）\n点「取消」= 好的，我回去修改')) {
+            try { mask.remove(); } catch (e) {}
+            return;
+          }
+          _engLimitSetNever(true);
+          try { mask.remove(); } catch (e) {}
+        };
+
+        row.appendChild(btnLater);
+        row.appendChild(btnNever);
+        card.appendChild(title);
+        card.appendChild(tip);
+        card.appendChild(row);
+        mask.appendChild(card);
+        document.body.appendChild(mask);
+        return true;
+      } catch (e) {
+        // 连降级 UI 都失败：不再抛，保持控制台提示即可
+        console.info('[dsh-engineering-ui] 降级提示渲染失败：%s', (e && e.message) || e);
+        return false;
+      }
+    }
+
+    function tryAutoOpenEngLimitPopup(sessionId, session) {
+      try {
+        if (!sessionId) return false;
+        if (_engLimitTried[sessionId]) return false;
+        // ★【缺陷2 修复】判据改用会话身份（原先 _isEngineeringContext() 在
+        //   "还没建任何子代理"时恒为 false，而那正是最该提醒的时刻）。
+        if (!_sessionIsEngineering(session || { sessionId: sessionId })) return false;
+        if (_engLimitNeverShow()) return false;
+        // ⚠️【记账点后移】_engLimitTried 必须等到"确实即将 open"时才置位。
+        //   原先在函数开头就置位，导致首次因 scope 未保留而失败时
+        //   **一次性机会被白白烧掉**，此后再不重试（vm 实测踩到）。
+        var cmdUi = null;
+        // ★【BUG 修复】同样不能用 ctx.get —— 本函数在 apply 之外。
+        try { cmdUi = engService('commandUi'); } catch (e) { cmdUi = null; }
+        if (!cmdUi || typeof cmdUi.popupFor !== 'function') {
+          _engLimitTried[sessionId] = true;
+          return showEngLimitFallbackCard(session || { sessionId: sessionId }, true);
+        }
+        // 取会话 scope：不同版本服务名不同，逐个尝试，全失败就放弃（降级）
+        var sessionsSvc = null;
+        try { sessionsSvc = engService('sessions'); } catch (e) { sessionsSvc = null; }
+        var scope = null;
+        try {
+          if (sessionsSvc && typeof sessionsSvc.scope === 'function') {
+            scope = sessionsSvc.scope(sessionId);
+          }
+        } catch (e) { scope = null; }
+        if (!scope) {
+          // ★【缺陷4 附带修复】此处原先【没有】置位 _engLimitTried，
+          //   与另外两处降级分支语义不一致：scope 一时拿不到时，
+          //   每个 tick（会话列表每次变更）都会重跑一遍并反复尝试插卡片。
+          //   卡片内部虽有 getElementById 幂等保护不会重复弹，
+          //   但仍应与其他分支一致地记账，避免无谓重试。
+          _engLimitTried[sessionId] = true;
+          console.info('[dsh-engineering-ui] 自动弹出不可用（拿不到会话 scope），改用降级提示。');
+          return showEngLimitFallbackCard(session || { sessionId: sessionId }, true);
+        }
+        var ctl = cmdUi.popupFor(scope);
+        if (!ctl || typeof ctl.open !== 'function') {
+          _engLimitTried[sessionId] = true;
+          console.info('[dsh-engineering-ui] 自动弹出不可用（无 popupFor 控制器），改用降级提示。');
+          return showEngLimitFallbackCard(session || { sessionId: sessionId }, true);
+        }
+        // ★ 到这里才记账：确实拿到了控制器、马上要 open（机会没被浪费）
+        _engLimitTried[sessionId] = true;
+        ctl.open(ENG_LIMIT_CMD, {
+          kind: 'popupSelect',
+          searchMode: 'substring',
+          searchLabels: function () {
+            return { placeholder: '选择：稍后提醒 / 不再提醒',
+                     empty: '没有可选项', noResults: '没有匹配的选项' };
+          },
+          options: function () { return Promise.resolve(_engLimitOptions()); },
+          onSelect: function (option) {
+            if (option && option.id === 'never') _engLimitSetNever(true);
+            return Promise.resolve();
+          },
+        }, { sessionId: sessionId }, { via: 'enter', token: '/' + ENG_LIMIT_CMD });
+        return true;
+      } catch (e) {
+        // ★ 降级：官方弹窗通道整体不可用 → 至少让用户看得见提醒
+        console.info('[dsh-engineering-ui] 自动弹出设置提醒失败（%s），改用降级提示。',
+          (e && e.message) || e);
+        try { _engLimitTried[sessionId] = true; } catch (e2) {}
+        return showEngLimitFallbackCard(session ? { sessionId: sessionId } : undefined, true);
+      }
+    }
+    exports._engLimitCurrentSessionId = _engLimitCurrentSessionId;
+
+    /**
+     * ★【缺陷1 修复】自动弹出的【触发源】—— 原先整条链是死的。
+     *
+     * 实测（子代理与我都确认）：`tryAutoOpenEngLimitPopup` 全文只有"定义"和
+     * "导出"两处，**零调用点**。于是即便 register 成功，用户不手动输入
+     * `/eng-subagent-limits` 就永远看不到弹窗 —— "点击工程模式自动跳出"
+     * 这条核心需求当时是 0% 实现。
+     *
+     * 这里的做法：由 apply() 订阅会话列表，每当"当前会话"变化就 tick 一次；
+     * tick 里按会话身份判定，命中则尝试自动弹出（内部自带防轰炸）。
+     */
+    var _engLimitLastSession = null;
+    var _engLimitTickCount = 0;
+
+    /**
+     * 【缺陷4 修复】取"当前工程模式会话 id"。
+     *
+     * 降级卡片没有现成的 session 对象（它是从 catch 分支直接调用的），
+     * 因此需要一个能从模块态回查当前会话的入口：
+     *   ① 优先用 tick 记录的最后一次会话（会话列表订阅时写入）；
+     *   ② 退回宿主右栏/mainView 的当前会话；
+     *   ③ 都取不到则返回 null（_sessionIsEngineering 会安全返回 false）。
+     *
+     * 为什么不让降级卡片直接读 _isEngineeringContext()：
+     *   那个判据要求"该会话已有子代理"，而"刚进工程模式还没建子代理"
+     *   恰恰是最需要降级的时刻 —— 用它会把降级卡片一起挡掉。
+     */
+    function _engLimitCurrentSessionId() {
+      try {
+        if (_engLimitLastSession) return _engLimitLastSession;
+      } catch (e) { /* ignore */ }
+      // ② 从会话列表快照里找 active 会话（与 startEngLimitAutoTrigger 同口径）
+      try {
+        var listSvc = engService('sessions');
+        var list = listSvc && listSvc.list ? listSvc.list : null;
+        var snap = list && typeof list.getSnapshot === 'function'
+          ? list.getSnapshot() : null;
+        if (snap) {
+          if (snap.activeId) return snap.activeId;
+          if (snap.activeSessionId) return snap.activeSessionId;
+          if (snap.byId) {
+            var ids = Object.keys(snap.byId);
+            for (var i = 0; i < ids.length; i++) {
+              var r = snap.byId[ids[i]];
+              if (r && (r.active || r.isActive)) return ids[i];
+            }
+          }
+        }
+      } catch (e) { /* ignore */ }
+      return null;
+    }
+
+    function engLimitAutoTick(sessionId) {
+      try {
+        _engLimitTickCount++;
+        if (!sessionId) return false;
+        if (_engLimitNeverShow()) return false;
+        // 同一会话只 tick 一次（避免会话列表每次刷新都重试）
+        if (_engLimitLastSession === sessionId) return false;
+        _engLimitLastSession = sessionId;
+        return tryAutoOpenEngLimitPopup(sessionId);
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /**
+     * 订阅会话列表，把触发源接上。返回 disposer。
+     * 用 subscribe（若可用）+ 立即取一次快照，兼容两种服务形态。
+     */
+    function startEngLimitAutoTrigger() {
+      var listSvc = null;
+      try { listSvc = engService('sessions'); } catch (e) { listSvc = null; }
+      var list = listSvc && listSvc.list ? listSvc.list : null;
+      if (!list) return null;
+
+      var pickActive = function () {
+        try {
+          var snap = typeof list.getSnapshot === 'function' ? list.getSnapshot() : null;
+          if (!snap) return null;
+          // 优先官方 active 标记；否则退回"最后一个会话"
+          if (snap.activeId) return snap.activeId;
+          if (snap.activeSessionId) return snap.activeSessionId;
+          if (snap.byId) {
+            var ids = Object.keys(snap.byId);
+            for (var i = 0; i < ids.length; i++) {
+              var r = snap.byId[ids[i]];
+              if (r && (r.active || r.isActive)) return ids[i];
+            }
+            return ids.length ? ids[ids.length - 1] : null;
+          }
+          return null;
+        } catch (e) { return null; }
+      };
+
+      var fire = function () { engLimitAutoTick(pickActive()); };
+
+      var dispose = null;
+      try {
+        if (typeof list.subscribe === 'function') {
+          dispose = list.subscribe(fire);
+        } else if (typeof list.watch === 'function') {
+          dispose = list.watch(fire);
+        }
+      } catch (e) { dispose = null; }
+      // 无论如何先跑一次（会话已经打开的情况下也要能触发）
+      fire();
+      return function () { try { if (typeof dispose === 'function') dispose(); } catch (e) {} };
+    }
+    exports.engLimitAutoTick = engLimitAutoTick;
+    exports.startEngLimitAutoTrigger = startEngLimitAutoTrigger;
+    exports._sessionIsEngineering = _sessionIsEngineering;
+    exports.showEngLimitFallbackCard = showEngLimitFallbackCard;
+    exports.installEngLimitPopup = installEngLimitPopup;
+    exports.tryAutoOpenEngLimitPopup = tryAutoOpenEngLimitPopup;
+    exports.ENG_LIMIT_CMD = ENG_LIMIT_CMD;
+    exports.ENG_LIMIT_TITLE = ENG_LIMIT_TITLE;
+    exports.ENG_LIMIT_DISMISS_KEY = ENG_LIMIT_DISMISS_KEY;
+    exports._engLimitOptions = _engLimitOptions;
+    exports._engLimitNeverShow = _engLimitNeverShow;
+    exports._engLimitSetNever = _engLimitSetNever;
+
     exports.apply = apply;
-    exports.inject = ['sessions', 'slots'];
+    // ⚠️ 'commandUi' 必须列进 inject：没有该服务的 profile 里插件保持不激活，
+    //    而不是在注册时抛错（官方插件授权规则；见 NOTES-commandUi-api.md §9）。
+    exports.inject = ['sessions', 'slots', 'commandUi'];
     exports.SubagentConsole = SubagentConsole;
     exports.EngineeringSettingsSection = EngineeringSettingsSection;
     exports.EngGroup = EngGroup;

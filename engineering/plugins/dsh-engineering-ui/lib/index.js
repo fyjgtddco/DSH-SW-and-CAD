@@ -95,6 +95,166 @@ const GUARD_PRESET = 'engineering';
 // 高频低值事件：不入前端流（流式 chunk 每token一条，会挤满窗口）
 const RAW_DROP = new Set(['assistant/chunk', 'step/start', 'step/end', 'request/header']);
 
+// ══════════════════════════════════════════════════════════════════════
+//  【P0 修复·路由无鉴权】请求来源与来源站校验（单点包装，覆盖全部路由）
+// ══════════════════════════════════════════════════════════════════════
+// 缺陷：原先 [23 条 HTTP 路由] 全部无鉴权，且与 Harness Web 同源同端口。
+//   任何以同用户身份运行的本地进程都能直接调用，后果最重的三条：
+//     · POST /persona      —— 写入内容会进入【每个】工程模式会话的 system prompt
+//                             （持久化提示词注入）；
+//     · POST /chat-mode    —— 可剥夺任意运行中会话的全部工具；
+//     · POST /conn-launch  —— 让宿主 spawn 本地可执行文件。
+//   另有 /suggest、/side-chat 可无限流调用 LLM（资源滥用），
+//   /defense/verify-gate 不消费 nonce 可作免费验签预言机。
+//
+// 能做与不能做（如实说明，不假装做到了密码学隔离）：
+//   · 同用户下的本地进程【无法】用密码学手段彻底隔离 —— 它们同样能读到
+//     进程文件与端口。真正的隔离边界是操作系统账户。
+//   · 因此这里采取【纵深防御】，逐层抬高成本：
+//       ① 仅接受 loopback 来源（远程连接直接 403）；
+//       ② 校验 Origin / Referer：浏览器的跨站请求（CSRF）一律 403；
+//       ③ 对本机非浏览器调用（Python 助手）保持放行 —— 否则
+//          defense_gate.py / ask_user.py 会全部失效；
+//       ④ 对【高副作用】端点额外要求本地令牌（见 env 与 runtime 文件），
+//          未配置令牌时退化为"仅 loopback + Origin 校验"并如实记日志；
+//       ⑤ 敏感端点限流（原有 rateLimited 复用）。
+//   这些措施挡得住"被诱导的浏览器页面"与"远程误连"，
+//   挡不住"同用户下的恶意本地程序"——这一点必须明确，不能给使用者错觉。
+
+/** 请求是否来自 loopback（无 socket 信息时按【测试/同进程调用】放行）。 */
+function isLoopbackRequest(req) {
+  try {
+    const sock = req && (req.socket || req.connection);
+    const ra = sock && (sock.remoteAddress || (sock.address && sock.address()));
+    // 测试 harness 用 Readable 伪造 req，没有 socket → 视为受信任的同进程调用
+    if (!ra) return true;
+    return ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
+  } catch (e) {
+    return true;
+  }
+}
+
+/** 取请求头（大小写不敏感；无 headers 的伪造请求返回空）。 */
+function headerOf(req, name) {
+  try {
+    const h = req && req.headers;
+    if (!h) return '';
+    const v = h[name] !== undefined ? h[name] : h[name.toLowerCase()];
+    if (Array.isArray(v)) return String(v[0] || '');
+    return v === undefined || v === null ? '' : String(v);
+  } catch (e) {
+    return '';
+  }
+}
+
+/** 浏览器跨站（CSRF）判定：带 Origin/Referer 且不是本机时拒绝。 */
+function isCrossSiteRequest(req) {
+  const origin = headerOf(req, 'origin');
+  const referer = headerOf(req, 'referer');
+  const check = (u) => {
+    if (!u) return false;
+    try {
+      const h = new URL(u).hostname;
+      return !(h === '127.0.0.1' || h === 'localhost' || h === '::1' ||
+               h === '[::1]');
+    } catch (e) {
+      return true;      // 解析不了的来源一律视为跨站
+    }
+  };
+  if (origin && check(origin)) return true;
+  if (referer && check(referer)) return true;
+  return false;
+}
+
+/**
+ * 高副作用端点：需要额外的本地令牌（若已配置）。
+ * 令牌来源（按序）：env DSH_ENGINEERING_TOKEN → .defense/local.token。
+ * 未配置时【不阻断】（否则会打断现网 Python 助手），但在响应里带
+ * degraded_auth=true 并在日志中记录，便于使用者察觉"加固未生效"。
+ */
+const SENSITIVE_ROUTES = new Set([
+  PREFIX + '/persona',
+  PREFIX + '/chat-mode',
+  PREFIX + '/conn-launch',
+  PREFIX + '/conn-diagnose',
+  PREFIX + '/defense/sign',
+  PREFIX + '/suggest',
+  PREFIX + '/side-chat',
+]);
+
+function localTokenOf() {
+  try {
+    if (process.env.DSH_ENGINEERING_TOKEN) {
+      return String(process.env.DSH_ENGINEERING_TOKEN);
+    }
+    const dir = findToolsDir();
+    if (!dir) return '';
+    const p = path.join(dir, '.defense', 'local.token');
+    if (!fs.existsSync(p)) return '';
+    return String(fs.readFileSync(p, 'utf8')).trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * 统一请求守卫。返回 {ok:true, degraded?} 或 {ok:false, status, error}。
+ * @param {string} routePath - 已注册的路由路径（用于敏感端点判定）
+ */
+function guardRequest(req, routePath) {
+  // ① 仅 loopback
+  if (!isLoopbackRequest(req)) {
+    return { ok: false, status: 403,
+             error: '仅接受本机（loopback）请求：远程访问被拒绝' };
+  }
+  // ② 浏览器跨站（CSRF）
+  if (isCrossSiteRequest(req)) {
+    return { ok: false, status: 403,
+             error: '拒绝跨站来源请求（Origin/Referer 非本机）' };
+  }
+  // ③ 高副作用端点：若配置了本地令牌则强制携带
+  if (routePath && SENSITIVE_ROUTES.has(routePath)) {
+    const want = localTokenOf();
+    if (want) {
+      const got = headerOf(req, 'x-dsh-engineering-token');
+      if (got !== want) {
+        return { ok: false, status: 403,
+                 error: '该端点需要本机令牌（x-dsh-engineering-token）' };
+      }
+      return { ok: true };
+    }
+    // 未配置令牌：放行但如实标注降级
+    return { ok: true, degraded: true };
+  }
+  return { ok: true };
+}
+
+/** 包装一个 route 定义，注入统一守卫。 */
+function guardRoute(route) {
+  const orig = route && route.handler;
+  if (typeof orig !== 'function') return route;
+  return Object.assign({}, route, {
+    handler: async (req, res) => {
+      const g = guardRequest(req, route.path);
+      if (!g.ok) {
+        try { console.warn('[dsh-engineering-ui] 拒绝请求 ' + route.path + '：' + g.error); } catch (e) {}
+        return send(res, g.status, { ok: false, error: g.error, path: route.path });
+      }
+      // ── 【P0 修复】全路由限流 ────────────────────────────────────────
+      // 原先只有 4 条 /defense/* 走 rateLimited，而 /suggest、/side-chat
+      //   会触发真实 LLM 调用、/conn-launch 会 spawn 本地进程，却完全无限流
+      //   → 任何本地进程可反复触发（资源滥用 / 可用性 DoS）。
+      //   这里在守卫层统一加桶，按路径分桶；rateLimited 定义在文件后段，
+      //   故用 typeof 惰性判定，避免依赖声明顺序。
+      if (typeof rateLimited === 'function' &&
+          rateLimited('route:' + (route.path || 'unknown'))) {
+        return send(res, 429, { ok: false, error: '请求过于频繁（限流）', path: route.path });
+      }
+      return orig(req, res);
+    },
+  });
+}
+
 // 【问题3】阻止对话提前结束
 // 【Bug3 修复】原文案过于刚性：只声明"禁止结束"，却没说清"什么情况算完成"。
 // 导致 AI 明明已经交付工件（图纸已导出、验证已通过），仍被反复拉回来，
@@ -114,13 +274,14 @@ const GUARD_TEXT = [
   '【系统提示 · 工程模式守卫】',
   '你正准备结束本轮，但系统尚未检测到【代码级终止态】，因此本轮不予结束。',
   '',
-  '⚠️ 注意：本守卫【不看你说了什么】——"已完成/已生成/已导出"这类措辞一律无效，',
-  '   必须让门禁状态文件真正进入终态，系统才会放行。',
+  '⚠️ 注意：散文式的完成声明【一律无效】——"已完成/已生成/已导出"这类措辞不算数，',
+  '   必须让门禁状态文件真正进入终态。唯一的文本级开关是下面第 3 条。',
   '',
   '放行的唯一途径（任一即可）：',
   '  1) 走完 workflow_gate 收尾流程，使 workflow_state.json 的 step 变为 finished；',
   '  2) 让所有房间都 room-end / room-fail，使 mode_state.json 中无 active 房间；',
-  '  3) 若任务确实全部结束且无需再操作，在正文【单独一行】写出 [TASK_DONE]。',
+  '  3) 若任务确实全部结束且无需再操作，在正文【独占一行】写出 [TASK_DONE]',
+  '     （该标记必须单独成行且无其它文字；写作"[TASK_DONE]"嵌在句子里无效）。',
   '',
   '若任务尚未完成，请继续调用工具推进下一步（room-start / sw_bridge 建模 /',
   '  room-report 上报等），而不是仅用文字描述进展。',
@@ -357,8 +518,50 @@ export function apply(ctx) {
   // 若打包环境导致导入失败，下面所有读取都会走 catch 分支，
   // 自动降级为"仅关键词兜底"，不影响主流程。
 
-  const STOP_WORDS = ['停止', '停下', '不用了', '别做了', '够了', '结束吧', '到此为止',
-                      '不用继续', '可以了', '就这样', 'stop', 'enough', 'cancel'];
+  // ── 【P0 修复·STOP_WORDS 子串误匹配】─────────────────────────────────
+  // 原缺陷：对用户消息做【任意位置子串】匹配，且表里含 '可以了' / '就这样' /
+  //   'stop' / 'enough' / 'cancel'。实测后果：用户在讨论里说
+  //   "这样可以了吗？"、代码/参数名里出现 "cancel"、英文句子含 "enough"，
+  //   都会被判成"用户要求停止"而放行守卫 —— 人的意志被误读。
+  // 修复：① 去掉过泛的短词（stop/enough/cancel/可以了/就这样 改由
+  //         下方"整句匹配"承接）；② 匹配前先归一化（去空白与标点），
+  //          且要求【整条消息就是停止指令】（长度受限），不做句中子串。
+  const STOP_WORDS = ['停', '停止', '停下', '停下来', '不用了', '别做了',
+                      '够了', '结束吧', '到此为止', '不用继续', '不用再',
+                      '收工', '就这样', '可以了'];
+  const STOP_WORDS_EN = ['stop', 'enough', 'cancel', 'quit', 'abort'];
+  // 否定前缀：出现这些词说明用户在【拒绝】停止，不能判为停止指令
+  const STOP_NEGATIONS = ['不要', '不用', '别', '先不', '不能', '没有', 'don\'t', 'dont', 'not', 'no '];
+
+  /** 判断一条用户消息是否【本身就是】停止指令（而非恰好含某个词）。 */
+  function isStopInstruction(raw) {
+    const txt = String(raw || '').trim();
+    if (!txt) return false;
+    const lower = txt.toLowerCase();
+    // 中文优先：去标点后"整句就是停止词"即放行（"不用了"本身是停止指令，
+    //   不能因为含"不用"就被否定词规则误杀，故中文判定放在否定检查之前）
+    const zh = txt.replace(/[\s，。！？、,.!?；;：:"'""''～~]/g, '');
+    if (zh.length <= 6) {
+      for (const w of STOP_WORDS) {
+        if (zh === w || zh.endsWith(w)) return true;
+      }
+    }
+    // ── 英文路径：仅当整条消息【不含中文】时才启用 ─────────────────────
+    //   否则中文句子里夹带英文参数名（"参数里的 cancel 字段"、
+    //   "这个 cancel 参数怎么用"）会被误判成用户要求停止。
+    if (/[\u4e00-\u9fff]/.test(txt)) return false;
+    for (const n of STOP_NEGATIONS) {
+      if (lower.indexOf(n) >= 0) return false;
+    }
+    const words = lower.replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!words) return false;
+    // 整句恰好是停止词（"stop" / "please stop"）
+    if (words.length <= 24 && STOP_WORDS_EN.indexOf(words) >= 0) return true;
+    // 或：短句（≤2 词）且含停止词（"stop please"）
+    const toks = words.split(' ');
+    if (toks.length <= 2 && toks.some((t) => STOP_WORDS_EN.indexOf(t) >= 0)) return true;
+    return false;
+  }
   // ── 【PhaseA 修复·守卫失灵根因】关键词放行表已整体废弃 ─────────────────
   // 原实现用一张"交付性关键词"表判定任务完成（'已生成'/'已导出'/'DWG'/'PDF'
   //   /'已保存' …），命中即放行。这在工程对话里等于【永远放行】：
@@ -518,21 +721,32 @@ export function apply(ctx) {
    * 判断任务是否已真正完成（用于放行）。
    * 返回 {done: bool, reason: string}
    */
+  // ── 【P0 修复·[TASK_DONE] 匹配过宽 + 文案自相矛盾】────────────────────
+  // 原缺陷①：用 `_textEarly.indexOf('[TASK_DONE]') >= 0` 做【任意位置】子串匹配。
+  //   文档（GUARD_TEXT 与注释 374-375）承诺的是"在正文【单独一行】写出"，
+  //   实现却把任何提及都当成完成声明 —— 例如守卫自己的提示文本
+  //   （GUARD_TEXT 第 3 条就含 '[TASK_DONE]' 字样）被回灌进上下文后即可触发放行。
+  // 原缺陷②：GUARD_TEXT 写"本守卫【不看你说了什么】"，而本分支恰恰只扫文本，
+  //   自相矛盾，使用者无法判断到底以什么为准。
+  // 修复：① 只认【独占一行】的标记（前后仅允许空白），与文档契约一致；
+  //       ② 文案改为如实说明：散文式声明无效，唯一的文本级开关是
+  //          独占一行的 [TASK_DONE]（其余一律以状态文件为准）。
+  // 注意：不移除该开关 —— 注释 523-532 说明子代理被禁止调用 room-end，
+  //   若没有这个显式开关，子代理会陷入"既不能标完成、又不能自己清房间"的死锁。
+  function hasStandaloneTaskDone(text) {
+    if (!text) return false;
+    const lines = String(text).split(/\r?\n/);
+    for (const line of lines) {
+      if (line.trim() === '[TASK_DONE]') return true;
+    }
+    return false;
+  }
+
   function detectTaskFinished(agent) {
     try {
-      // ── 【BUG-B 修复】[TASK_DONE] 必须是【零条件】的放行开关 ────────────
-      // 测试反馈：守卫提示写明三条放行途径"任一即可"，但原实现把
-      //   "有 active 房间 → 拦截" 的早返回放在 [TASK_DONE] 判断【之前】，
-      //   于是三者变成了 AND 关系 —— 只要还有活动房间，[TASK_DONE] 永远无效。
-      // 更糟的是：清空房间需要 room-end，而 room-end 是【编排命令】，
-      //   子代理被明令禁止调用 → 子代理陷入彻底死锁（既不能用标记放行、
-      //   又不能自己清房间）。
-      //
-      // 修复：把 [TASK_DONE] 提到所有房间/门禁检查【之前】，作为最高优先级
-      //   的显式开关。它本就是模型主动声明的"我做完了"，必须无条件生效。
       const _textEarly = collectRecentAssistantText(agent, 60);
-      if (_textEarly && _textEarly.indexOf('[TASK_DONE]') >= 0) {
-        return { done: true, reason: '检测到显式完成标记 [TASK_DONE]（最高优先级，无条件放行）' };
+      if (hasStandaloneTaskDone(_textEarly)) {
+        return { done: true, reason: '检测到显式完成标记 [TASK_DONE]（独占一行，最高优先级）' };
       }
 
       const toolsDir = findToolsDir();
@@ -681,9 +895,8 @@ export function apply(ctx) {
         const txt = Array.isArray(content)
           ? content.filter((part) => part.type === 'text').map((part) => part.text).join('\n')
           : String(content || '');
-        for (const w of STOP_WORDS) {
-          if (txt.indexOf(w) >= 0) return true;
-        }
+        // 【P0 修复】只认"整条消息就是停止指令"，不再做句中子串匹配
+        if (isStopInstruction(txt)) return true;
       }
     } catch (e) {}
     return false;
@@ -768,7 +981,7 @@ export function apply(ctx) {
 
 
   // ── 子代理树 ──────────────────────────────────────────────────────────────
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/agents',
     handler: async (req, res) => {
@@ -782,7 +995,233 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
     }
-  }));
+  })));
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 【第4项 · ctx.jobs 版】SW 健康看护 —— 走 DSH 官方后台任务运行时
+  // ══════════════════════════════════════════════════════════════════════════
+  // 用户原话：
+  //   「在子代理的SW锁解锁之后，利用SW建模之前，利用 DSH 的后台任务运行时
+  //     （ctx.jobs），让父代理启动一个耗时命令，专门做轻量级的定期检查。
+  //     比如每 10 秒统计一次系统关键指标，一旦内存、CPU超85％阈值就输出一行
+  //     警报。这个 job 会立即返回一个 job id，在后台持续跑着。一旦，相关指数
+  //     超标立马关闭SW」
+  //
+  // ── 与已实现的 mode_gate.ensure_sw_guard 的关系（两条路都用，互补）────────
+  //   · mode_gate.ensure_sw_guard()：由 sw_bridge 在**取锁那一刻**自动拉起
+  //     一个 OS 子进程。优点是"任何取锁路径必然触发"，不依赖 DSH 运行时；
+  //     缺点是不产生 DSH job id（用户明确要求"立即返回一个 job id"）。
+  //   · 本端点：用 ctx.jobs.start() 把同一件事注册为 **DSH 后台任务**，
+  //     因而有 job id、能被 job_list / job_output / job_kill 看到与管理。
+  //
+  //   ctx.jobs 契约（asar 1036381-1036400 实测）：
+  //     const jobs = ctx.get('jobs');
+  //     jobs.start({ kind, label, owner, run: () => ({ cancel, done }) })
+  //   注意 run 必须**立即**返回 {cancel, done}（done 是 Promise），
+  //   不能在 run 里 await 长任务 —— 否则 start 不会立即返回 job id。
+  //
+  //   缺少 @deepseek-ai/dsh-jobs / dsh-tool-jobs 时 ctx.get('jobs') 为 undefined，
+  //   官方原话（asar 1036382）会抛 "background jobs unavailable"。
+  //   本端点对此**显式降级**：返回 job_id=null + 说明，并指出 OS 子进程那条路
+  //   仍在工作（不假装成功，也不阻断建模）。
+  const SW_GUARD_INTERVAL_MS = 10000;   // 用户要求：每 10 秒采一次
+  const SW_GUARD_CPU_LIMIT = 85;
+  const SW_GUARD_MEM_LIMIT = 85;
+  //: 同一进程内只保留一个看护 job（避免每次取锁都堆一个）
+  let swGuardJobId = null;
+  let swGuardState = { ticks: 0, alerts: [], killed: false, startedAt: null, last: null };
+
+  /** 读一次系统 CPU/内存。 */
+  // ⚠️ index.js 是 ESM（顶部用 import），**没有 require**。
+  //    原先这里写 require('node:os') 会在 ESM 下抛 ReferenceError。
+  //    因此改用文件已 import 的 os / spawn（见顶部 import）。
+  function sampleSystem() {
+    try {
+      const total = os.totalmem();
+      const free = os.freemem();
+      const memPct = total > 0 ? ((total - free) / total) * 100 : null;
+      let cpuPct = null;
+      try {
+        const cpus = os.cpus() || [];
+        let idle = 0, totalT = 0;
+        for (const c of cpus) {
+          const t = c.times || {};
+          idle += (t.idle || 0);
+          totalT += (t.user || 0) + (t.nice || 0) + (t.sys || 0) + (t.irq || 0) + (t.idle || 0);
+        }
+        if (globalThis.__engCpuPrev) {
+          const dIdle = idle - globalThis.__engCpuPrev.idle;
+          const dTotal = totalT - globalThis.__engCpuPrev.total;
+          if (dTotal > 0) cpuPct = Math.max(0, Math.min(100, (1 - dIdle / dTotal) * 100));
+        }
+        globalThis.__engCpuPrev = { idle, total: totalT };
+      } catch (e) { cpuPct = null; }
+      return { ok: true, cpu_pct: cpuPct, mem_pct: memPct,
+               total_mb: total / 1048576, free_mb: free / 1048576 };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  /** 超阈值判定（阈值来自代码常量，不来自调用方）。 */
+  function judgeSystem(s) {
+    const reasons = [];
+    if (typeof s.cpu_pct === 'number' && s.cpu_pct > SW_GUARD_CPU_LIMIT) {
+      reasons.push('CPU 占用 ' + s.cpu_pct.toFixed(1) + '% 超过阈值 ' + SW_GUARD_CPU_LIMIT + '%');
+    }
+    if (typeof s.mem_pct === 'number' && s.mem_pct > SW_GUARD_MEM_LIMIT) {
+      reasons.push('内存占用 ' + s.mem_pct.toFixed(1) + '% 超过阈值 ' + SW_GUARD_MEM_LIMIT + '%');
+    }
+    return { breach: reasons.length > 0, reasons };
+  }
+
+  /** 立即关闭 SolidWorks（taskkill）。进程本来不在 → 视为成功（非错误）。 */
+  async function killSolidWorks() {
+    try {
+      return await new Promise((resolve) => {
+        let out = '';
+        // 用顶部已 import 的 spawnSync（ESM 无 require）
+        try {
+          const r = spawnSync('taskkill', ['/F', '/IM', 'SLDWORKS.exe'],
+                              { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+          out = String((r && r.stdout) || '') + String((r && r.stderr) || '');
+          const code = r && typeof r.status === 'number' ? r.status : -1;
+          const notFound = /not found|没有找到|No tasks|INFO:/i.test(out);
+          if (code === 0) return resolve({ ok: true, method: 'taskkill', code });
+          if (notFound || code === 128) {
+            return resolve({ ok: true, method: 'not_running', code,
+                             note: 'SolidWorks 未在运行' });
+          }
+          return resolve({ ok: false, method: 'taskkill_failed', code,
+                           output: out.slice(0, 400) });
+        } catch (e) {
+          return resolve({ ok: false, method: 'exception',
+                           error: String((e && e.message) || e) });
+        }
+      });
+    } catch (e) {
+      return { ok: false, method: 'exception', error: String((e && e.message) || e) };
+    }
+  }
+
+  /** 启动（或复用）看护 job。返回 job id 与当前状态。 */
+  function ensureSwGuardJob() {
+    const jobs = (() => { try { return ctx.get ? ctx.get('jobs') : undefined; } catch (e) { return undefined; } })();
+    if (!jobs || typeof jobs.start !== 'function') {
+      // ★ 官方契约：缺 jobs 服务时无法启动后台任务（asar 1036382 同款判定）。
+      //   这里**显式降级**，不假装成功；OS 子进程那条路（mode_gate）仍在工作。
+      return {
+        ok: false, job_id: null, degraded: true,
+        error: 'background jobs unavailable: 需要加载 @deepseek-ai/dsh-jobs 与 '
+             + '@deepseek-ai/dsh-tool-jobs（ctx.get("jobs") 为空）。',
+        fallback: ('已自动降级：sw_bridge 取锁时拉起的 OS 子进程看护 '
+                   + '（mode_gate.py sw-guard-status）仍在工作，'
+                   + 'CPU/内存超 85% 同样会告警并关闭 SolidWorks。'),
+        interval_ms: SW_GUARD_INTERVAL_MS,
+        cpu_limit: SW_GUARD_CPU_LIMIT, mem_limit: SW_GUARD_MEM_LIMIT,
+      };
+    }
+    if (swGuardJobId) {
+      return { ok: true, job_id: swGuardJobId, already_running: true,
+               interval_ms: SW_GUARD_INTERVAL_MS,
+               cpu_limit: SW_GUARD_CPU_LIMIT, mem_limit: SW_GUARD_MEM_LIMIT,
+               state: swGuardState };
+    }
+    swGuardState = { ticks: 0, alerts: [], killed: false,
+                     startedAt: new Date().toISOString(), last: null };
+    let timer = null;
+    let stopped = false;
+    const jobId = jobs.start({
+      kind: 'command',
+      label: 'SW 健康看护（每 10 秒采 CPU/内存，超 85% 关闭 SolidWorks）',
+      // owner 用本插件名：它是"拥有这个后台任务"的实体标识
+      owner: 'dsh-engineering-ui',
+      run: () => {
+        // ★ 契约要求：run 必须【立即】返回 {cancel, done}，
+        //   长任务放进 done 的 Promise 里，这样 jobs.start 才能马上给出 job id。
+        const done = (async () => {
+          const tick = async () => {
+            if (stopped) return;
+            const s = sampleSystem();
+            const v = judgeSystem(s);
+            swGuardState.ticks++;
+            swGuardState.last = { at: new Date().toISOString(), ...s,
+                                  breach: v.breach, reasons: v.reasons };
+            if (v.breach) {
+              const line = '[sw-guard][ALERT] ' + new Date().toISOString() + ' '
+                + v.reasons.join('；') + ' → 立即关闭 SolidWorks';
+              // 用户要求："一旦内存、CPU超85％阈值就输出一行警报"
+              try { console.warn(line); } catch (e) {}
+              let kill = { ok: true, method: 'skipped' };
+              kill = await killSolidWorks();
+              if (kill.ok && kill.method === 'taskkill') swGuardState.killed = true;
+              const rec = { at: new Date().toISOString(), message: line, reasons: v.reasons, kill };
+              swGuardState.alerts.push(rec);
+              if (swGuardState.alerts.length > 50) {
+                swGuardState.alerts = swGuardState.alerts.slice(-50);
+              }
+              // SW 真的被杀掉 → 看护目的已达成，结束任务
+              if (swGuardState.killed) { stopped = true; return 'killed'; }
+            }
+          };
+          await tick();
+          if (stopped) return 'killed';
+          return await new Promise((resolve) => {
+            timer = setInterval(async () => {
+              try {
+                const r = await tick();
+                if (r === 'killed' || stopped) {
+                  clearInterval(timer); timer = null;
+                  resolve('killed');
+                }
+              } catch (e) { /* 单次失败不终止看护 */ }
+            }, SW_GUARD_INTERVAL_MS);
+            // 定时器不应阻止进程退出
+            if (timer && typeof timer.unref === 'function') timer.unref();
+          });
+        })();
+        return {
+          cancel: (reason) => {
+            stopped = true;
+            if (timer) { try { clearInterval(timer); } catch (e) {} timer = null; }
+            swGuardState.stoppedReason = String(reason || 'cancelled');
+          },
+          done,
+        };
+      },
+    });
+    swGuardJobId = jobId;
+    return { ok: true, job_id: jobId, started: true,
+             interval_ms: SW_GUARD_INTERVAL_MS,
+             cpu_limit: SW_GUARD_CPU_LIMIT, mem_limit: SW_GUARD_MEM_LIMIT,
+             note: ('SW 健康看护已作为 DSH 后台任务启动（job id=' + jobId + '）：'
+                    + '每 ' + (SW_GUARD_INTERVAL_MS / 1000) + ' 秒采样，'
+                    + 'CPU/内存超 ' + SW_GUARD_CPU_LIMIT + '% 即告警并立即关闭 SolidWorks。') };
+  }
+
+  // ══ 【第4项】SW 健康看护（ctx.jobs 版）路由 ═══════════════════════════════
+  // POST /dsh-engineering-ui/sw-guard-job  启动（幂等）
+  // GET  /dsh-engineering-ui/sw-guard-job  查状态（不含 job id 时只读状态）
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/sw-guard-job',
+    handler: async (req, res) => {
+      try {
+        const method = String((req && req.method) || 'GET').toUpperCase();
+        if (method === 'GET') {
+          return send(res, 200, { ok: true, job_id: swGuardJobId,
+                                  interval_ms: SW_GUARD_INTERVAL_MS,
+                                  cpu_limit: SW_GUARD_CPU_LIMIT,
+                                  mem_limit: SW_GUARD_MEM_LIMIT,
+                                  state: swGuardState });
+        }
+        const r = ensureSwGuardJob();
+        return send(res, 200, r);
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  })));
 
   // ══ 【Bug-32 修复】子代理启动校验（subagent_fork 后确认它真的起来了）══════
   // 原缺陷（实测 22:36）：主对话 subagent_fork(description="工程图输出房间")
@@ -794,7 +1233,7 @@ export function apply(ctx) {
   //   · expected：主对话期望出现的房间名/标签
   //   · 在子代理树里查找匹配项，返回 found / id / status / activity
   //   · 未找到时给出"重试 subagent_fork"的明确指引
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/verify-subagent',
     handler: async (req, res) => {
@@ -840,7 +1279,7 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
     }
-  }));
+  })));
 
   // ══ 【Bug-21 修复】房间通知通道（只记录，不打断正在建模的小屋）══════════
   // 原缺陷：主对话用 send_message 给 4 个正在 SW 建模的小屋发通知
@@ -850,7 +1289,7 @@ export function apply(ctx) {
   // 修复：提供 /notify-room 只读端点，把通知写入房间的 reports/ 目录下的
   //   notify 文件（与 mode_gate 的 reports 同构），小屋在【自愿的检查点】
   //   读取即可，不强制打断。纯通知类消息不再走对话通道。
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/notify-room',
     handler: async (req, res) => {
@@ -931,10 +1370,10 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
     }
-  }));
+  })));
 
   // ── 原始事件流（不做字段映射，client 半负责解析）──────────────────────────
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/log',
     handler: async (req, res) => {
@@ -1020,7 +1459,7 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
     }
-  }));
+  })));
 
   // ── 【Bug1 核心修复】阻塞式代问（Blocking Wait）────────────────────────────
   // 问题本质：子代理调 ask_user_question 必然抛 DELEGATED_CALLER ——
@@ -1066,7 +1505,7 @@ export function apply(ctx) {
   // DSH 的 userQuestions.ask 会校验 agent 是否为运行时根代理：
   //   子代理 → DELEGATED_CALLER（平台设计如此，无法绕过）
   //   主代理 → 通过，且 ask() 返回的 Promise 直到用户作答才 resolve
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/ask',
     handler: async (req, res) => {
@@ -1159,7 +1598,7 @@ export function apply(ctx) {
         note: '已发起原生阻塞式提问；答案将以 tool_result 形式回到提问方。'
       });
     }
-  }));
+  })));
 
   // ══ 【问题4 修复】子代理提问必须落到【真人所在的 root 会话】 ═════════════
   //
@@ -1240,7 +1679,7 @@ export function apply(ctx) {
     return qs.map((q) => ({ id: q.id, selected: [] }));
   }
 
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/ask-child',
     handler: async (req, res) => {
@@ -1504,10 +1943,10 @@ export function apply(ctx) {
             + '答案将经 /result-child 返回给提问的子代理。'
       });
     }
-  }));
+  })));
 
   // 子代理面板查询：当前有哪些属于该子代理的待答问题
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/pending-child',
     handler: async (req, res) => {
@@ -1543,7 +1982,7 @@ export function apply(ctx) {
         rootSessionId: rootSessionId || undefined, pending: out
       });
     }
-  }));
+  })));
 
   // 【问题4 修复】已作答题目的结果留存表 —— 声明提前到 childAsks 旁，
   // 避免"使用在前、声明在后"的跨作用域引用（虽然闭包延迟执行不会报错，
@@ -1551,7 +1990,7 @@ export function apply(ctx) {
   // 子代理 CLI（ask_user.py）靠它把答案读回来当作"工具返回值"。
   // 保留 10 分钟，够一次阻塞等待读取；过期自动清理。
 
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/result-child',
     handler: async (req, res) => {
@@ -1564,7 +2003,7 @@ export function apply(ctx) {
       }
       return send(res, 200, { ok: true, answers: hit.answers });
     }
-  }));
+  })));
 
   // 定期清理过期结果（10 分钟）
   const _resultSweeper = setInterval(() => {
@@ -1576,7 +2015,7 @@ export function apply(ctx) {
   if (_resultSweeper && typeof _resultSweeper.unref === 'function') _resultSweeper.unref();
   disposers.push(() => clearInterval(_resultSweeper));
 
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/answer',
     handler: async (req, res) => {
@@ -1679,7 +2118,7 @@ export function apply(ctx) {
              + '（旧版 followup 投递会导致子代理把确认当新任务，已废弃）'
       });
     }
-  }));
+  })));
 
   // ══ 【三大防线 · 签名式信任根】══════════════════════════════════════════
   // 定位：签名是主防线，守卫是围绕签名服务的补丁。
@@ -1775,7 +2214,7 @@ export function apply(ctx) {
     } catch (e) { return false; }
   }
 
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: "exact",
     path: PREFIX + "/defense/sign",
     handler: async (req, res) => {
@@ -1981,9 +2420,9 @@ export function apply(ctx) {
       if (!signed) return send(res, 200, { ok: false, error: "签名失败（密钥未就绪）" });
       return send(res, 200, { ok: true, credential: { ...payload, ...signed } });
     }
-  }));
+  })));
 
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: "exact",
     path: PREFIX + "/defense/verify",
     handler: async (req, res) => {
@@ -2012,10 +2451,10 @@ export function apply(ctx) {
       return send(res, 200, { ok: !!v.ok, verified: !!v.ok, reason: v.reason || null,
                               kid: defenseSigner.kid, replay_protected: true });
     }
-  }));
+  })));
 
   // ── 门禁内部验签端点（不消费 nonce，允许同一凭据多阶段重复校验）────────
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: "exact",
     path: PREFIX + "/defense/verify-gate",
     handler: async (req, res) => {
@@ -2036,23 +2475,23 @@ export function apply(ctx) {
                               kid: defenseSigner.kid, replay_protected: false,
                               scope: "gate-internal（供门禁多阶段校验，不消费 nonce）" });
     }
-  }));
+  })));
 
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: "exact",
     path: PREFIX + "/defense/info",
     handler: async (req, res) => {
       if (!defenseSigner) return send(res, 200, { ok: false, error: "防线签名服务未装配（仅工程模式）" });
       return send(res, 200, defenseSigner.status());
     }
-  }));
+  })));
 
   // ── /defense/judge：宿主侧执行完整防线判定（C 方案核心） ────────────
   // 判定权收回宿主：Python 侧不再自行组合"验签 + 规则"，而是把房间上报，
   //   由宿主读凭据、验签、判定并返回结论。这样 AI 在 Python 侧没有可冒充
   //   的判定点（它若伪造判定结果，等于篡改 defense_gate 本身，属另一类攻击，
   //   且守约会记录凭据异常）。
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: "exact",
     path: PREFIX + "/defense/judge",
     handler: async (req, res) => {
@@ -2076,7 +2515,7 @@ export function apply(ctx) {
       });
       return send(res, 200, result);
     }
-  }));
+  })));
 
   /** 计算文件 sha256（读失败返回 null）。 */
   function fileSha256(p2) {
@@ -2114,7 +2553,7 @@ export function apply(ctx) {
         sw: { connected: false, running: null, checked_at: null },
         cad: { connected: false, running: null, checked_at: null },
         abaqus: { connected: false, running: null, checked_at: null },
-        nx: { connected: false, running: null, checked_at: null },
+        webots: { connected: false, running: null, checked_at: null },
         paths: {},
       };
     }
@@ -2128,11 +2567,14 @@ export function apply(ctx) {
       stale: age == null || age > 900,
       sw: j.sw || { connected: false, running: null, checked_at: null },
       cad: j.cad || { connected: false, running: null, checked_at: null },
-      // ── 【连接区扩展】把 Abaqus / NX 也透给前端 ─────────────────────
+      // ── 【连接区扩展】把 Abaqus / Webots 也透给前端 ───────────────────
       //   EngConnRow 按 state[target] 读状态；缺了这两项，新增的两行按钮
       //   会永远停在"尚未检测过"。
+      //   【NX → Webots 改造】原 nx 字段已被 webots 取代；为兼容【旧状态文件】
+      //   （里面可能还写着 nx），这里做一次只读回退映射：读不到 webots
+      //   就试着读 nx，让升级瞬间不至于显示成"从未检测"。
       abaqus: j.abaqus || { connected: false, running: null, checked_at: null },
-      nx: j.nx || { connected: false, running: null, checked_at: null },
+      webots: j.webots || j.nx || { connected: false, running: null, checked_at: null },
       paths: j.paths || {},
     };
   }
@@ -2193,7 +2635,7 @@ export function apply(ctx) {
   }
 
   // GET：只读状态（零副作用）—— 设置页打开时轮询用
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/conn-state',
     handler: async (req, res) => {
@@ -2203,25 +2645,26 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
     }
-  }));
+  })));
 
   // POST：触发探测（点「连接」按钮时才走这里）
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/conn-probe',
     handler: async (req, res) => {
       if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
       const body = await readJsonBody(req);
       const target = String((body && body.target) || '').trim().toLowerCase();
-      // ── 【连接区扩展】白名单加入 abaqus / nx ──────────────────────────
-      // 连接区新增了「Abaqus连接」「NX连接」两个同款按钮，它们的
+      // ── 【连接区扩展】白名单加入 abaqus / webots ───────────────────────
+      // 连接区有「Abaqus连接」「Webots连接」两个同款按钮，它们的
       //   target 必须被放行，否则点「连接」会拿到 HTTP 400。
       //   （Python 侧 probe_target 亦已支持这两个目标。）
+      // 【NX → Webots 改造】旧名 'nx' 也放行（Python 侧映射到 webots）。
       if (target !== 'sw' && target !== 'cad' && target !== 'all'
-          && target !== 'abaqus' && target !== 'nx') {
+          && target !== 'abaqus' && target !== 'webots' && target !== 'nx') {
         return send(res, 400, {
           ok: false,
-          error: "target 必须是 'sw' | 'cad' | 'abaqus' | 'nx' | 'all'" });
+          error: "target 必须是 'sw' | 'cad' | 'abaqus' | 'webots' | 'all'" });
       }
       try {
         const r = runConnProbe(target === 'all' ? null : target);
@@ -2230,7 +2673,60 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
     }
-  }));
+  })));
+
+  // ── POST /conn-probe-process-only：【10 分钟自动刷新】纯进程层检测 ─────────
+  // 用户诉求原文："10 分钟自动探测就是看是不是在运行的，没有的话那个 UI
+  //   就熄灭，让用户到时候自己选择去设置连接啥的，就是只做检测就行了，
+  //   关了 UI 就更新就行了，其他不用搞。"
+  //
+  // 与 /conn-probe 的【关键区别】：这条【绝不发 COM】。
+  //   · conn-probe 会 Dispatch：SW 没开时可能把它【拉起来】，还可能把
+  //     窗口置前/最大化，10 分钟一次会周期性打断用户；
+  //   · 本路由只跑 Python 的 probe_process_only（纯 tasklist），
+  //     进程没了 → connected=False（灯熄灭），进程换实例（PID 变化）→
+  //     旧会话已死也置 False。用户想重连时自己点「连接」。
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/conn-probe-process-only',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
+      const dir = findToolsDir();
+      if (!dir) return send(res, 200, { ok: false, error: '未定位到 tools 目录' });
+      const bridge = path.join(dir, 'sw_bridge.py');
+      if (!fs.existsSync(bridge)) {
+        return send(res, 200, { ok: false, error: '未找到 sw_bridge.py: ' + bridge });
+      }
+      const py = resolvePython();
+      if (!py) return send(res, 200, { ok: false, error: '未找到可用的 Python 解释器' });
+      try {
+        // 超时给得比 conn-probe 短得多：纯 tasklist 检测是秒级的，
+        //   卡住就说明环境有问题，不该拖住设置页。
+        const r = spawnSync(py, [bridge, 'conn-probe-process-only'], {
+          encoding: 'utf8', timeout: 30000, cwd: dir, windowsHide: true,
+        });
+        const out = String((r && r.stdout) || '');
+        const errOut = String((r && r.stderr) || '');
+        let parsed = null;
+        const start = out.indexOf('{');
+        if (start >= 0) {
+          try { parsed = JSON.parse(out.slice(start)); } catch (e) { parsed = null; }
+        }
+        if (!parsed) {
+          return send(res, 200, {
+            ok: false,
+            error: '自动检测未返回可解析 JSON',
+            stdout_tail: out.slice(-800),
+            stderr_tail: errOut.slice(-800),
+          });
+        }
+        // 检测完成后回读文件，保证 UI 拿到的是落盘后的真相
+        return send(res, 200, { ok: true, probe: parsed, state: readConnState() });
+      } catch (error) {
+        return send(res, 200, { ok: false, error: '自动检测异常: ' + String((error && error.message) || error) });
+      }
+    }
+  })));
 
   // ── POST /conn-launch：显式启动 SW / CAD（「启动」按钮）──────────────────
   // 用户诉求："给俩个都搞一个按键，自动启动吧，不然一直点连接启动不了的，
@@ -2238,21 +2734,22 @@ export function apply(ctx) {
   // 与 /conn-probe 的区别：这个真的会拉起进程。因此【只由用户点击触发】，
   //   不做任何自动调用；且耗时较长（SW 冷启动可达数十秒），
   //   故给足超时（默认 120s + 余量）。
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/conn-launch',
     handler: async (req, res) => {
       if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
       const body = await readJsonBody(req);
       const target = String((body && body.target) || '').trim().toLowerCase();
-      // ── 【连接区扩展】Abaqus / NX 也允许「启动」───────────────────────
+      // ── 【连接区扩展】Abaqus / Webots 也允许「启动」───────────────────
       // 两者无 COM 接口，Python 侧 conn-launch 走"定位 exe → 拉起进程"，
       //   未安装时如实报错（不伪装成功）。
+      // 【NX → Webots 改造】旧名 'nx' 一并放行（Python 侧映射到 webots）。
       if (target !== 'sw' && target !== 'cad'
-          && target !== 'abaqus' && target !== 'nx') {
+          && target !== 'abaqus' && target !== 'webots' && target !== 'nx') {
         return send(res, 400, {
           ok: false,
-          error: "target 必须是 'sw' | 'cad' | 'abaqus' | 'nx'" });
+          error: "target 必须是 'sw' | 'cad' | 'abaqus' | 'webots'" });
       }
       const dir = findToolsDir();
       if (!dir) return send(res, 200, { ok: false, error: '未定位到 tools 目录' });
@@ -2287,14 +2784,14 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: '启动执行异常: ' + String((error && error.message) || error) });
       }
     }
-  }));
+  })));
 
   // ── POST /conn-diagnose：把启动日志【当作消息发给当前会话的模型】────────
   // 用户诉求："加上一个按键，按了就可以将错误日志直接发给 DSH 内部模型的，
   //   然后 DSH 就可以根据错误日志去找到底是啥情况。"
   // 实现：包装成一条 user 消息并用 agent.steer() 投递（与收尾守卫同一机制），
   //   模型收到后会带着日志内容与工具能力去排查根因。
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/conn-diagnose',
     handler: async (req, res) => {
@@ -2395,7 +2892,7 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: '投递失败: ' + String((error && error.message) || error) });
       }
     }
-  }));
+  })));
 
   // ══ 【独立聊天页】推荐追问生成（POST /suggest）═════════════════════════
   // 用户需求（对照 ChatGPT 的"相关追问"）：模型每次生成结果后，给出几条
@@ -2537,7 +3034,7 @@ export function apply(ctx) {
       .slice(0, 3);
   }
 
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/suggest',
     handler: async (req, res) => {
@@ -2624,7 +3121,7 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: msg });
       }
     }
-  }));
+  })));
 
   // ══ 【划词详情】侧边分析对话（POST /side-chat）══════════════════════════
   // 用户需求（对照三张截图）：
@@ -2653,7 +3150,7 @@ export function apply(ctx) {
     '- You have no tools; if something needs execution, say what should be run instead of pretending.',
   ].join('\n');
 
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/side-chat',
     handler: async (req, res) => {
@@ -2790,7 +3287,7 @@ export function apply(ctx) {
         });
       }
     }
-  }));
+  })));
 
   // ══ 【纯聊天开关】同一个会话内切换「聊天 / 工作」════════════════════════
   // 用户要求：在【工程模式里面直接选择聊天】就能纯聊天，不要另开一个预设。
@@ -2910,7 +3407,7 @@ export function apply(ctx) {
     try { if (h.section) h.section(); } catch (e) {}
   }
 
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/chat-mode',
     handler: async (req, res) => {
@@ -2955,7 +3452,7 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
     }
-  }));
+  })));
 
   // agent 释放时清掉聊天模式状态，避免 Map 泄漏
   disposers.push(ctx.on('agent/disposed', (payload) => {
@@ -2996,7 +3493,7 @@ export function apply(ctx) {
     return (j && typeof j.text === 'string') ? j.text : '';
   }
 
-  disposers.push(ctx.webServer.register({
+  disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/persona',
     handler: async (req, res) => {
@@ -3023,7 +3520,7 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
     }
-  }));
+  })));
 
   // ── 【工程人设】把自定义文本注入【工程模式会话】的系统提示词 ──────────────
   // 官方契约（dsh-system-prompt/src/index.ts:454-463、:53-76）：

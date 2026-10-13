@@ -367,6 +367,377 @@ def cmd_ping():
     return out
 
 
+def cmd_selftest():
+    """【BUG-观察-17 / BUG-观察-1 修复】纯 Python 离线自检（不依赖 SolidWorks）。
+
+    本机当前【没有运行中的 SLDWORKS 进程】，无法实机验证自动标注是否真的
+    插入了尺寸。因此用【假对象(mock)】把两处修复的【可离线判定部分】
+    钉死，防止回归：
+
+      A. annotate（BUG-观察-17）
+         A1. 自动标注 API 必须调在【doc(IDrawingDoc)】上，【绝不能】调在 view；
+         A2. 参数个数必须与 sldworks.tlb 签名一致
+             （InsertModelDimensions=1、...Annotations3/2=6、...=4、
+               AutoDimension=5）；
+         A3. 回退顺序必须是 InsertModelDimensions → ...3 → ...2 → ... →
+             AutoDimension，且【一条失败才走下一跳】；
+         A4. 全失败时必须如实返回 ok=False + "插入了 0 个标注"，不得假装成功。
+
+      B. save 路径（BUG-观察-1）
+         B1. 相对路径 → `<work_dir>\\parts\\<name>` 且 parts 目录被创建；
+         B2. 绝对路径 → 原样保留（不擅自搬移）；
+         B3. 拿不到 work_dir → 回退 cwd 且 path_note 如实说明"未能归位"。
+
+    Returns: {ok, checks:[{id, name, pass, detail}], failed:[], note}
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    checks = []
+
+    def _ck(cid, name, passed, detail=""):
+        checks.append({"id": cid, "name": name,
+                       "pass": bool(passed), "detail": str(detail)})
+
+    # ══════════ A. annotate 修复的自检 ══════════
+    # ── mock 保真要点（据本仓库既有约定）──────────────────────────────────
+    # `_prop()` 的注释明确："无参 COM 成员在 dynamic dispatch 下按属性访问"，
+    # 因此假对象里【无参成员必须是 property】（doc.GetFirstView / v.GetNextView
+    # / v.GetName2）—— 若写成普通方法，代码拿到的是 bound method，遍历会
+    # 立刻崩（这本身就是自检抓到的第一个 mock 保真问题）。
+    # 而「计数」在 _count_annotations 里是被【调用】的（_fn()），
+    # 故用 int 子类同时支持「取值」与「调用」两种绑定约定。
+    class _Count(int):
+        """既能当整数用、又能当无参方法调用的计数（兼容静态/动态绑定）。"""
+
+        def __call__(self):
+            return int(self)
+
+    class _FakeDim(object):
+        @property
+        def GetNext3(self):
+            return None
+
+    class _FakeView(object):
+        """假视图：只提供 IView 上【真实存在】的成员。
+
+        刻意【不】提供 InsertModelAnnotations*/AutoDimension —— 类型库实证
+        IView 上确实没有这些成员（IView 段 435 个方法逐行扫描确认）。
+        这样一旦代码再去 getattr(view, ...)，就会像真机一样恒为 None，
+        从而复现原 BUG-观察-17 的故障面。
+        """
+
+        def __init__(self, name, n=0):
+            self._name = name
+            self._n = n
+            self._next = None
+            self.activated = 0
+
+        @property
+        def GetName2(self):
+            return self._name
+
+        @property
+        def GetAnnotationCount(self):
+            return _Count(self._n)
+
+        @property
+        def GetFirstDisplayDimension(self):
+            # 返回假 IDisplayDimension；计数为 0 时返回 None（与真机一致）
+            return _FakeDim() if self._n > 0 else None
+
+        @property
+        def GetNextView(self):
+            return self._next
+
+        def Activate(self):
+            self.activated += 1
+            return True
+
+    class _FakeDrawing(object):
+        """假工程图(IDrawingDoc)：记录每次自动标注 API 的【参数个数】。
+
+        只暴露 IDrawingDoc 上【真实存在】的 5 个自动标注 API（见类型库），
+        IView / IModelDocExtension 上都没有它们 —— 这正是原缺陷所在。
+        """
+
+        _SIGS = {"InsertModelDimensions": 1,
+                 "InsertModelAnnotations3": 6,
+                 "InsertModelAnnotations2": 6,
+                 "InsertModelAnnotations": 4,
+                 "AutoDimension": 5}
+
+        def __init__(self, view_counts=(0, 0, 0, 0), succeed_at=None,
+                     fail_all=False):
+            self.calls = []          # [{api, args, nargs, on_doc}]
+            self.activated_views = []
+            self._succeed_at = succeed_at   # None = 首选即成功
+            self._fail_all = fail_all
+            self._dims = list(view_counts)
+            self._nodes = []
+
+        # ── 视图遍历：IDrawingDoc.GetFirstView → IView.GetNextView ──
+        # 均为【无参成员】→ 按本仓库约定暴露为 property
+        @property
+        def GetFirstView(self):
+            sheet = _FakeView("Sheet1", 0)
+            nodes = [_FakeView("View%d" % (i + 1), c)
+                     for i, c in enumerate(self._dims)]
+            for _a, _b in zip(nodes, nodes[1:]):
+                _a._next = _b
+            sheet._next = nodes[0] if nodes else None
+            self._nodes = nodes
+            return sheet
+
+        def ClearSelection2(self, *a):
+            return True
+
+        def EditRebuild3(self):
+            return True
+
+        def SaveAs3(self, *a):
+            return 0
+
+        def ActivateView(self, name):
+            self.activated_views.append(name)
+            return True
+
+        # ── 被修复的 5 个 API（模拟为真的会增加标注计数）──
+        def _make(self, api):
+            def _fn(*args):
+                # on_doc 恒 True：因为本函数只可能由 doc 的 __getattr__ 产出；
+                # 若代码误调 view，_FakeView 上没有这些名字 → getattr 得 None
+                # → 根本不会产生调用记录（即"分支 0 次执行"的原故障）。
+                self.calls.append({"api": api, "args": list(args),
+                                   "nargs": len(args), "on_doc": True})
+                if self._fail_all:
+                    raise RuntimeError("mock失败:%s" % api)
+                if self._succeed_at is not None and api != self._succeed_at:
+                    raise RuntimeError("mock不支持:%s" % api)
+                for _n in self._nodes:
+                    _n._n += 2
+                return True
+            return _fn
+
+        def __getattr__(self, item):
+            if item in _FakeDrawing._SIGS:
+                return self._make(item)
+            raise AttributeError(item)
+
+    # ── A1/A2/A3：首选 InsertModelDimensions、调在 doc、参数个数正确 ──
+    try:
+        _doc = _FakeDrawing(view_counts=(1, 1, 1, 1))
+        _views, _verr = _collect_drawing_views(_doc)
+        if _verr:
+            raise RuntimeError("遍历视图失败(自检装置问题): %s" % _verr)
+        _api, _att, _after = _insert_model_annotations(_doc, _views, None)
+        _ck("A1", "自动标注 API 调在 IDrawingDoc(doc) 上（非 IView）",
+            bool(_doc.calls) and all(c["on_doc"] for c in _doc.calls)
+            and len(_views) == 4,
+            "视图数=%d, 首次调用=%r" % (
+                len(_views), _doc.calls[0]["api"] if _doc.calls else None))
+        _ck("A1b", "首选的 InsertModelDimensions 参数个数=1（对齐 tlb）",
+            bool(_doc.calls) and _doc.calls[0]["api"] == "InsertModelDimensions"
+            and _doc.calls[0]["nargs"] == 1,
+            "首个调用=%r" % (_doc.calls[0] if _doc.calls else None))
+        _ck("A1c", "生效 API 被如实回传且标注数真的增加",
+            _api == "InsertModelDimensions" and bool(_after)
+            and all(_a > _b for _a, _b in zip(_after, [1, 1, 1, 1])),
+            "used_api=%r, 计数=%s" % (_api, _after))
+        # 参数个数总表核对（逐 API 对照 sldworks.tlb）
+        _sig_exp = {"InsertModelDimensions": (1,),
+                    "InsertModelAnnotations3": (6,),
+                    "InsertModelAnnotations2": (6,),
+                    "InsertModelAnnotations": (4,),
+                    "AutoDimension": (5,)}
+        _bad = []
+        for _a, _args in _annotation_api_candidates(None):
+            if len(_args) not in _sig_exp.get(_a, ()):
+                _bad.append((_a, len(_args)))
+        _ck("A2", "全部候选 API 的参数个数与 sldworks.tlb 签名一致",
+            not _bad, "不符=%s" % (_bad or "无"))
+        # 回退顺序（按首次出现的 API 去重）
+        _seen = []
+        for _a, _args in _annotation_api_candidates(None):
+            if _a not in _seen:
+                _seen.append(_a)
+        _ck("A3a", "首选顺序 = InsertModelDimensions → ...3 → ...2 → ... → AutoDimension",
+            _seen == ["InsertModelDimensions", "InsertModelAnnotations3",
+                      "InsertModelAnnotations2", "InsertModelAnnotations",
+                      "AutoDimension"],
+            "实际=%s" % (_seen,))
+    except Exception as _e:
+        _ck("A1", "annotate 首选路径自检", False, "异常: %r" % (_e,))
+
+    # ── A3b：一条失败必须【继续下一跳】（回退链真的在走）──
+    try:
+        _doc2 = _FakeDrawing(view_counts=(1, 1),
+                             succeed_at="InsertModelAnnotations2")
+        _views2, _ = _collect_drawing_views(_doc2)
+        _api2, _att2, _after2 = _insert_model_annotations(_doc2, _views2, None)
+        _order2 = []
+        for _c in _doc2.calls:
+            if _c["api"] not in _order2:
+                _order2.append(_c["api"])
+        _ck("A3b", "前一跳失败后继续回退到下一跳并命中",
+            _api2 == "InsertModelAnnotations2"
+            and _order2[:3] == ["InsertModelDimensions",
+                                "InsertModelAnnotations3",
+                                "InsertModelAnnotations2"]
+            and bool(_after2) and all(x > 1 for x in _after2),
+            "命中=%r, 去重尝试序列=%s" % (_api2, _order2))
+    except Exception as _e:
+        _ck("A3b", "annotate 回退链自检", False, "异常: %r" % (_e,))
+
+    # ── A4：全失败必须如实报 0，不假装成功 ──
+    try:
+        _doc3 = _FakeDrawing(view_counts=(2, 2), fail_all=True)
+        _views3, _ = _collect_drawing_views(_doc3)
+        _api3, _att3, _before3 = _insert_model_annotations(_doc3, _views3, None)
+        _ck("A4a", "全部 API 失败 → used_api=None（不假装成功）",
+            _api3 is None, "used_api=%r" % (_api3,))
+        # 端到端走 _annotate_views_in_doc，检查 ok/err 文案
+        class _DocWrap(object):
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, k):
+                return getattr(self._inner, k)
+
+        _res = _annotate_views_in_doc(_DocWrap(_doc3), dim_types=None)
+        _ck("A4b", "全失败时 ok=False 且如实报告「插入了 0 个标注」",
+            _res.get("ok") is False
+            and "0 个标注" in str(_res.get("error", "")),
+            "ok=%r error=%r" % (_res.get("ok"), _res.get("error")))
+        _ck("A4c", "失败结果里带上尝试过的 API 与错误（可排查）",
+            bool(_res.get("attempts"))
+            and any(a.get("error") for a in _res["attempts"]),
+            "attempts=%d 条" % len(_res.get("attempts") or []))
+    except Exception as _e:
+        _ck("A4", "annotate 失败如实报告自检", False, "异常: %r" % (_e,))
+
+    # ══════════ B. save 路径归位的自检 ══════════
+    _tmp = _tempfile.mkdtemp(prefix="sw_selftest_")
+    try:
+        _work = os.path.join(_tmp, "20260101-120000-task")
+        os.makedirs(_work, exist_ok=True)
+        # 构造假的 workflow_state.json，并让 _store.state_path 指向它
+        _state = os.path.join(_tmp, "workflow_state.json")
+        with open(_state, "w", encoding="utf-8") as _f:
+            json.dump({"work_dir": _work}, _f, ensure_ascii=False)
+
+        import _store as _st
+        _orig_state_path = _st.state_path
+        _orig_wd_env = {k: os.environ.get(k) for k in
+                        ("DSH_TASK_WORK_DIR", "DSH_WORK_DIR")}
+        _st.state_path = lambda name: (  # type: ignore[assignment]
+            _state if name == "workflow_state.json"
+            else os.path.join(_tmp, name))
+        # 清掉环境变量，确保走 workflow_state.json 这条路
+        for _k in ("DSH_TASK_WORK_DIR", "DSH_WORK_DIR"):
+            os.environ.pop(_k, None)
+        try:
+            _st.reset_cache()
+        except Exception:
+            pass
+
+        # B1：相对路径 → <work_dir>\parts\<name>，且目录被创建
+        _rel = "DSH_正方形.sldprt"
+        _final, _meta = resolve_save_path(_rel)
+        _exp = os.path.join(_work, "parts", _rel)
+        _ck("B1a", "相对路径归位到 <work_dir>\\parts\\<name>",
+            os.path.normcase(_final) == os.path.normcase(_exp),
+            "得到=%r, 期望=%r" % (_final, _exp))
+        _ck("B1b", "parts\\ 目录被自动创建",
+            os.path.isdir(os.path.join(_work, "parts")),
+            os.path.join(_work, "parts"))
+        _ck("B1c", "返回值标明来源为 task_work_dir",
+            _meta.get("path_resolved_from") == "task_work_dir",
+            "meta=%r" % (_meta,))
+        # B1d：已带 parts\ 前缀的相对路径不得重复拼成 parts\parts\
+        _final_p, _meta_p = resolve_save_path(os.path.join("parts", "DSH_子件.sldprt"))
+        _ck("B1d", "已带 parts\\ 前缀时不重复拼接（防 parts\\parts\\）",
+            os.path.normcase(_final_p)
+            == os.path.normcase(os.path.join(_work, "parts", "DSH_子件.sldprt")),
+            "得到=%r, from=%r" % (_final_p, _meta_p.get("path_resolved_from")))
+
+        # B2：绝对路径原样保留
+        _abs = os.path.join(_tmp, "elsewhere", "DSH_底板.sldprt")
+        _final2, _meta2 = resolve_save_path(_abs)
+        _ck("B2", "绝对路径原样保留（不擅自搬移）",
+            _final2 == _abs
+            and _meta2.get("path_resolved_from") == "absolute",
+            "得到=%r" % (_final2,))
+
+        # B2b：cmd_save 回传最终实际保存路径（用假 doc/sw）
+        class _FakeDoc(object):
+            def __init__(self):
+                self.saved_as = None
+
+            def SaveAs3(self, p, *a):
+                self.saved_as = p
+                open(p, "w").close()
+                return 0
+
+            # 无参 COM 成员按属性访问（同 _prop 的约定）
+            @property
+            def GetPathName(self):
+                return self.saved_as or ""
+
+        class _FakeSw(object):
+            def __init__(self, d):
+                self.ActiveDoc = d
+
+        _fd = _FakeDoc()
+        _r = cmd_save(_FakeSw(_fd), _rel)
+        _ck("B2b", "cmd_save 回传最终实际保存的绝对路径",
+            _r.get("ok") is True
+            and os.path.normcase(_r.get("saved_path") or "")
+            == os.path.normcase(_exp),
+            "saved_path=%r" % (_r.get("saved_path"),))
+
+        # B3：拿不到 work_dir → 回退 cwd，且如实说明"未能归位"
+        _st.state_path = lambda name: os.path.join(_tmp, "nonexistent_dir", name)
+        try:
+            _st.reset_cache()
+        except Exception:
+            pass
+        _final3, _meta3 = resolve_save_path("DSH_未归位.sldprt")
+        _ck("B3", "拿不到 work_dir → 回退原行为且如实提示未归位",
+            _final3 == "DSH_未归位.sldprt"
+            and _meta3.get("path_resolved_from") == "cwd_fallback"
+            and "未能归位" in str(_meta3.get("path_note", "")),
+            "final=%r meta=%r" % (_final3, _meta3))
+
+        _st.state_path = _orig_state_path
+        for _k, _v in _orig_wd_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+        try:
+            _st.reset_cache()
+        except Exception:
+            pass
+    except Exception as _e:
+        _ck("B", "save 路径归位自检", False, "异常: %r" % (_e,))
+    finally:
+        _shutil.rmtree(_tmp, ignore_errors=True)
+
+    _failed = [c for c in checks if not c["pass"]]
+    return {
+        "ok": not _failed,
+        "command": "selftest",
+        "checks": checks,
+        "passed": len(checks) - len(_failed),
+        "failed": [c["id"] for c in _failed],
+        "note": ("纯 Python 离线自检（mock 假对象，不依赖 SolidWorks）。"
+                 "⚠️ 自动标注是否【真的插入尺寸】仍需实机验证 —— "
+                 "本自检只钉死「API 归属/参数个数/回退顺序/失败如实报告」"
+                 "与「相对路径归位」这些可离线判定的部分。"),
+    }
+
+
 def cmd_version():
     """【连接自检修复】返回桥接与依赖版本（零副作用）。"""
     out = {
@@ -426,6 +797,39 @@ def cmd_conn_probe(target=None, with_com=True, resolve_paths=False):
         return {"ok": False, "error": "连接探测失败: %r" % (e,)}
 
 
+def cmd_conn_probe_process_only(targets=None):
+    """【10 分钟自动刷新】只做【进程层】检测 —— 绝不发 COM、绝不弹窗。
+
+    ── 与 conn-probe 的区别（这是本次刻意分开的原因）─────────────────────
+    用户诉求原文：
+      "10 分钟自动探测就是看是不是在运行的，没有的话那个 UI 就熄灭，
+       让用户到时候自己选择去设置连接啥的，就是只做检测就行了，
+       关了 UI 就更新就行了，其他不用搞。"
+
+    conn-probe 会发 COM Dispatch：SW 未开时可能【把它拉起来】，
+      还可能把窗口置前/最大化，10 分钟一次会周期性打断用户。
+    自动刷新必须走这条纯 tasklist 路径：
+      · 进程在  → 保持上次完整探测的结论；
+      · 进程没了 → connected=False（灯熄灭）；
+      · 进程换了实例（PID 变化）→ 旧 COM 会话已死，也置 False。
+    用户想恢复连接时，自己点「连接」——那才是发 COM 的唯一入口。
+    """
+    try:
+        _cs = _import_sibling("conn_state")
+    except Exception as e:
+        return {"ok": False, "error": "conn_state.py 不可用: %r" % (e,)}
+    try:
+        st = _cs.probe_process_only(targets)
+        out = _cs.summary()
+        out["command"] = "conn-probe-process-only"
+        out["probe_kind"] = "process-only"
+        out["note"] = ("仅进程层检测（零 COM / 零弹窗）—— "
+                       "连接状态若需重建，请点设置页的「连接」。")
+        return out
+    except Exception as e:
+        return {"ok": False, "error": "纯进程探测失败: %r" % (e,)}
+
+
 def cmd_conn_status():
     """读取（不重新探测）连接区当前状态摘要。"""
     try:
@@ -471,8 +875,15 @@ def cmd_conn_launch(target, exe=None, connect=True, wait_window=120):
     except Exception as e:
         return {"ok": False, "error": "conn_state.py 不可用: %r" % (e,)}
     t = str(target or "").strip().lower()
-    # ── 【连接区扩展】支持 abaqus / nx（无 COM，走"定位 exe → 拉起进程"）──
-    _ok_targets = ("sw", "cad") + tuple(getattr(_cs, "CAE_TARGETS", ("abaqus", "nx")))
+    # ── 【NX → Webots 改造】白名单以 conn_state 的【公开目标表】为准 ────────
+    #   原实现读 `getattr(_cs, "CAE_TARGETS", ("abaqus", "nx"))`，而 conn_state
+    #   当时只有私有名 `_CAE_TARGETS` → getattr 永远取不到 → 静默回落到硬编码
+    #   ("abaqus", "nx")。现在 conn_state 已补公开别名，两边读同一张表；
+    #   旧名 'nx' 由 _norm_target 映射到 'webots'，因此这里显式放行 'nx'。
+    _ok_targets = tuple(getattr(_cs, "KNOWN_TARGETS",
+                                ("sw", "cad", "abaqus", "webots")))
+    if t == "nx":
+        t = "webots"
     if t not in _ok_targets:
         return {"ok": False, "error": "target 必须是 %s 之一"
                                        % " / ".join(repr(x) for x in _ok_targets)}
@@ -495,7 +906,11 @@ def cmd_conn_log(target):
     except Exception as e:
         return {"ok": False, "error": "conn_state.py 不可用: %r" % (e,)}
     t = str(target or "").strip().lower()
-    _ok_targets = ("sw", "cad") + tuple(getattr(_cs, "CAE_TARGETS", ("abaqus", "nx")))
+    # 与 cmd_conn_launch 同一套白名单（含 'nx' → 'webots' 兼容映射）
+    _ok_targets = tuple(getattr(_cs, "KNOWN_TARGETS",
+                                ("sw", "cad", "abaqus", "webots")))
+    if t == "nx":
+        t = "webots"
     if t not in _ok_targets:
         return {"ok": False, "error": "target 必须是 %s 之一"
                                        % " / ".join(repr(x) for x in _ok_targets)}
@@ -1025,12 +1440,189 @@ def _check_part_before_save(part_path, room, force=False):
         return None
 
 
+def _parts_dir():
+    """任务根的 `parts\\` 子目录（不存在则创建）。拿不到任务根返回 None。
+
+    与 _default_drawing_path() 的 `<任务根>\\drawings\\` 对称。
+    """
+    _wd = _task_work_dir()
+    if not _wd:
+        return None
+    _pd = os.path.join(_wd, "parts")
+    try:
+        os.makedirs(_pd, exist_ok=True)
+        return _pd
+    except Exception:
+        return None
+
+
+def resolve_save_path(path):
+    """把【相对】保存路径归位到任务目录 —— `<任务根>\\parts\\<name>`。
+
+    ──【BUG-观察-1 修复】──────────────────────────────────────────────────
+    原缺陷（竞速小车任务现场实测）：门禁 `workflow_gate.py init` 返回
+    work_dir = ...\\Desktop\\test\\<时间戳任务ID>，但零件实际落到了
+    ...\\Desktop\\test（父目录），于是总装/出图按 work_dir 找零件找不到。
+    根因之一：本文件的 save 侧对路径【零决策】—— 收到相对路径就直接交给
+    SaveAs3，而 SaveAs3 相对进程 cwd 解析 → 直落 cwd（不是任务目录）。
+
+    修法（对齐已存在的 _default_drawing_path 的 `drawings\\` 口径）：
+      · 绝对路径 → 【原样返回】（尊重调用方显式指定的位置，不擅自搬移）；
+      · 相对路径 → 解析到 `<任务根>\\parts\\<name>` 并自动建目录；
+      · 拿不到任务根 → 回退旧行为（按 cwd 处理），但回填 path_note/
+        path_resolved_from 说明"未能归位到任务目录"，便于排查。
+
+    边界处理：若相对路径【已带 parts\\ 前缀】（调用方按任务口径书写），
+    则挂到任务根下而不再套一层，避免出现 `parts\\parts\\x.sldprt`；
+    多层子目录原样保留。
+
+    Returns: (final_path, meta)
+      meta = {path_resolved_from, path_note?, input_path, work_dir?}
+    """
+    _in = str(path or "")
+    meta = {"input_path": _in, "path_resolved_from": "as_given"}
+    if not _in:
+        return _in, meta
+    # 绝对路径（含盘符 / UNC）→ 原样，不擅自搬移
+    if os.path.isabs(_in):
+        meta["path_resolved_from"] = "absolute"
+        return _in, meta
+
+    _wd = _task_work_dir()
+    if not _wd:
+        # 回退旧行为：相对路径按 cwd 处理，但如实标注"未能归位"
+        meta["path_resolved_from"] = "cwd_fallback"
+        meta["path_note"] = ("未能归位到任务目录：读不到 work_dir"
+                            "（workflow_state.json 缺失且未设 "
+                            "DSH_TASK_WORK_DIR / DSH_WORK_DIR）"
+                            "→ 相对路径按进程 cwd 解析，可能与任务目录不一致。")
+        return _in, meta
+
+    _pd = _parts_dir()
+    if not _pd:
+        meta["path_resolved_from"] = "cwd_fallback"
+        meta["path_note"] = ("未能归位到任务目录：无法创建 %s\\parts 目录"
+                            " → 相对路径按进程 cwd 解析。" % _wd)
+        meta["work_dir"] = _wd
+        return _in, meta
+
+    # ──【BUG-观察-1 修复】防重复前缀：调用方若已写 `parts\x.sldprt`，
+    #   则挂到任务根下（得到 <work_dir>\parts\x.sldprt），不再套一层 parts。
+    _norm = _in.replace("/", os.sep).lstrip("." + os.sep)
+    _parts_prefix = "parts" + os.sep
+    if _norm.lower().startswith(_parts_prefix.lower()):
+        _final = os.path.join(_wd, _norm)
+        meta["path_resolved_from"] = "task_work_dir_parts_prefix"
+    else:
+        _final = os.path.join(_pd, _in)
+        meta["path_resolved_from"] = "task_work_dir"
+    meta["work_dir"] = _wd
+    meta["parts_dir"] = _pd
+    meta["path_note"] = ("相对路径已归位到任务目录: %s（原输入 %r）"
+                         % (_final, _in))
+    return _final, meta
+
+
 def cmd_save(sw, path):
+    """另存为当前活动文档。
+
+    ──【BUG-观察-1 修复】──────────────────────────────────────────────────
+    原实现：`rc = d.SaveAs3(path, 0, 2)` —— 对 path 零决策，相对路径直落
+    进程 cwd，导致零件跑到任务目录【之外】（总装按 work_dir 找不到）。
+    现在：相对路径先经 resolve_save_path() 归位到 `<任务根>\\parts\\<name>`；
+    返回值回传【最终实际保存的绝对路径】（下游材料凭据/总装查找的关键）。
+
+    ⚠️ 注意：建模脚本里真正的落盘入口通常是 `swapi.SWModel.save()`
+    （脚本经 `sw_bridge.py run` 在独立进程里 import swapi 执行），
+    【不经过本函数】。swapi.py 侧的归位由父 agent 另行修改；本文件在
+    cmd_run 里注入 DSH_TASK_WORK_DIR / DSH_TASK_PARTS_DIR 作为兜底依据
+    （详见 cmd_run 里的【BUG-观察-1 修复】注释）。
+    """
     d = sw.ActiveDoc
     if d is None:
         return {"ok": False, "error": "no active document"}
-    rc = d.SaveAs3(path, 0, 2)  # returns 0 on success
-    return {"ok": rc == 0, "path": path, "saved": os.path.exists(path), "rc": rc}
+    _final, _meta = resolve_save_path(path)
+    rc = d.SaveAs3(_final, 0, 2)  # returns 0 on success
+    # 以 API 自报路径为准（SaveAs3 可能规范化路径/扩展名）
+    _actual = _prop(d, "GetPathName") or _final
+    out = {"ok": rc == 0, "path": _final, "requested_path": path,
+           "saved": os.path.exists(_actual) or os.path.exists(_final),
+           "rc": rc, "saved_path": _actual}
+    out.update(_meta)
+    return out
+
+
+def _cmd_bore(sw, _args, raw_args):
+    """【P1-BUG-bore 无 dispatch 分支】专用孔命令的 CLI 适配层。
+
+    用法（与 help 承诺一致）：
+      python sw_bridge.py bore <孔径mm> [深度mm] [--axis X|Y|Z] [--through]
+      · 不给深度 → 默认完全贯穿（through=True）
+      · 给了深度 → 盲孔（through=False）
+      · --axis 缺省 Z
+    实现委托 swapi.SWModel.bore()（swapi.py:7120）。
+    """
+    import swapi as _swapi
+    try:
+        _vals = []
+        _axis = "Z"
+        _through = None
+        _cx = 0.0
+        _cy = 0.0
+        _i = 1
+        while _i < len(_args):
+            _a = str(_args[_i])
+            if _a == "--axis":
+                _axis = str(_args[_i + 1]).upper() if _i + 1 < len(_args) else "Z"
+                _i += 2
+                continue
+            if _a.startswith("--axis="):
+                _axis = _a.split("=", 1)[1].upper()
+                _i += 1
+                continue
+            if _a == "--through":
+                _through = True
+                _i += 1
+                continue
+            if _a == "--cx":
+                _cx = float(_args[_i + 1]); _i += 2; continue
+            if _a == "--cy":
+                _cy = float(_args[_i + 1]); _i += 2; continue
+            if _a.startswith("--"):
+                _i += 1
+                continue
+            _vals.append(_a)
+            _i += 1
+        if not _vals:
+            return {"ok": False,
+                    "error": "缺少孔径参数",
+                    "usage": "bore <孔径mm> [深度mm] [--axis X|Y|Z] [--through]"}
+        _dia = float(_vals[0])
+        _depth = float(_vals[1]) if len(_vals) > 1 else None
+        # 语义：显式 --through → 贯穿；给了深度 → 盲孔；两者都没给 → 贯穿（默认）
+        _is_through = bool(_through) if _through is not None else (_depth is None)
+        m = _swapi.from_active(sw)
+        if m is None:
+            return {"ok": False, "error": "no active document; run 'new' first"}
+        out = m.bore(_dia, depth_mm=_depth, axis=_axis,
+                     through=_is_through, cx=_cx, cy=_cy)
+        out["command"] = "bore"
+        out["depth_mm"] = _depth
+        # ── 【P1 修复·实机发现】COM 对象不可 JSON 序列化 ──────────────────
+        # 实机跑 `bore 8 10 --room <房间>` 时 SW 真的建了孔，但 swapi.bore
+        #   把 Feature 对象（win32com CDispatch）直接放进 out["feature"]，
+        #   主进程 json.dumps 立刻抛
+        #     TypeError: Object of type CDispatch is not JSON serializable
+        #   → 命令以 traceback 收场（exit 1），成功建的孔无法被调用方确认。
+        # 修复：把 feature 换成"是否创建成功"的布尔 + 类型名，
+        #   保留可判定性、丢掉不可序列化的 COM 句柄。
+        _feat = out.pop("feature", None)
+        out["feature_created"] = _feat is not None
+        if _feat is not None:
+            out["feature_type"] = type(_feat).__name__
+        return out
+    except Exception as e:
+        return {"ok": False, "command": "bore", "error": "bore 执行失败: %r" % (e,)}
 
 
 def cmd_sketch_rect(sw, w, h, depth):
@@ -1173,6 +1765,15 @@ def cmd_run(sw, script_path, extra_args, room=None):
 
     room: 【Bug#4 修复】本命令所属房间名，用于建模期间后台刷新心跳。
     """
+    # ── 【P1-BUG-退出码 3 语义重载】wrapper 专用退出码 ────────────────────
+    # 原缺陷：wrapper 用 SystemExit(3) 表示"脚本路径不存在"、SystemExit(4)
+    #   表示"脚本内容被改变"，而 CLI 契约里 **3 = SW 忙需重试**
+    #   （见 main() 的 `sw_busy` 分支）。同一个 3 有两套完全不同的含义，
+    #   调用方拿到 exit=3 无法区分"该等 90 秒重试"还是"脚本被人换了"。
+    # 修复：wrapper 改用 11/12 这两个 CLI 契约外的专用码，
+    #   与 0/1/2/3 彻底隔离；父进程侧同步按新码判定。
+    _WRAPPER_EXIT_PATH_MISSING = 11
+    _WRAPPER_EXIT_SHA_MISMATCH = 12
     if not os.path.exists(script_path):
         return {"ok": False, "error": f"script not found: {script_path}"}
     bridge_dir = _HERE
@@ -1230,7 +1831,7 @@ def cmd_run(sw, script_path, extra_args, room=None):
             f"_EXPECT_SHA = {_script_sha!r}\n"
             "if os.path.abspath(__file__) != _EXPECT_PATH and not os.path.exists(_EXPECT_PATH):\n"
             "    print(json.dumps({'ok': False, 'error': '脚本路径不存在: ' + _EXPECT_PATH}))\n"
-            "    raise SystemExit(3)\n"
+            f"    raise SystemExit({_WRAPPER_EXIT_PATH_MISSING})\n"
             "_actual_sha = hashlib.sha1(open(_EXPECT_PATH, 'rb').read()).hexdigest()\n"
             "if _actual_sha != _EXPECT_SHA:\n"
             "    print(json.dumps({'ok': False,\n"
@@ -1238,7 +1839,7 @@ def cmd_run(sw, script_path, extra_args, room=None):
             "                  '—— 拒绝执行以免跑错脚本'),\n"
             "        'expect_sha': _EXPECT_SHA, 'actual_sha': _actual_sha,\n"
             "        'script': _EXPECT_PATH}, ensure_ascii=False))\n"
-            "    raise SystemExit(4)\n"
+            f"    raise SystemExit({_WRAPPER_EXIT_SHA_MISMATCH})\n"
             "sw = sw_bridge.get_sw()\n"
             f"__file__ = {script_abs!r}\n"
             "_cap_out, _cap_err = io.StringIO(), io.StringIO()\n"
@@ -1269,6 +1870,29 @@ def cmd_run(sw, script_path, extra_args, room=None):
         # Bug 1 修复: 设置 PYTHONIOENCODING 绕过 Windows GBK 终端编码问题
         run_env = dict(os.environ)
         run_env["PYTHONIOENCODING"] = "utf-8"
+        # ══ 【BUG-观察-1 修复】把任务目录【显式注入子进程环境】═════════════
+        # 原因（父 agent 补充的关键事实）：建模脚本真正调用的落盘入口是
+        #   `swapi.SWModel.save()`（脚本里 m.save(out)），它在本子进程内执行，
+        #   【完全不经过 sw_bridge.cmd_save】。
+        # 而子进程的 cwd 是【脚本所在目录】（见下方 cwd=...），
+        #   脚本若传相对路径，就会落到脚本目录/cwd，而不是任务 work_dir
+        #   → 与 workflow_gate init 的 work_dir 打架（零件掉到父目录）。
+        # 修法：run 执行脚本前把权威任务目录注入子进程环境，供 swapi 侧读取；
+        #   swapi.py 由父 agent 修改（本任务禁止改 swapi.py），约定变量名：
+        #     DSH_TASK_PARTS_DIR —— 【首选】，已算好的 `<work_dir>\parts`
+        #     DSH_TASK_WORK_DIR  —— 任务根（回退时由 swapi 自行拼 parts）
+        #   两者都拿不到时不设置 → swapi 侧保持旧行为（不作恶）；
+        #   也不覆盖调用方已设的值（run_env 是 os.environ 的拷贝，已带上）。
+        _wd_run = None
+        try:
+            _wd_run = _task_work_dir()
+        except Exception:
+            _wd_run = None
+        if _wd_run:
+            _pd_run = _parts_dir()
+            run_env["DSH_TASK_WORK_DIR"] = _wd_run
+            if _pd_run:
+                run_env["DSH_TASK_PARTS_DIR"] = _pd_run
         # ── 【Bug#4 修复】建模期间后台心跳线程 ────────────────────────────
         # 问题：sw_bridge.py run 可能耗时数分钟（复杂零件+保存+出图），
         #   期间小屋无暇调 room-heartbeat → 心跳文件 mtime 停滞 >180s
@@ -1349,12 +1973,30 @@ def cmd_run(sw, script_path, extra_args, room=None):
     # 这里【默认就回显】（无需额外参数），因为串号是静默的、代价极高。
     result["executed_script"] = script_abs
     result["executed_script_sha1"] = _script_sha
-    result["script_identity_verified"] = (proc.returncode not in (3, 4))
-    if proc.returncode in (3, 4):
+    # 【P1-BUG-退出码 3 语义重载】按 wrapper 专用码判定（不再是 3/4）
+    result["script_identity_verified"] = (
+        proc.returncode not in (_WRAPPER_EXIT_PATH_MISSING, _WRAPPER_EXIT_SHA_MISMATCH))
+    # ──【BUG-观察-1 修复】回显注入的任务目录，便于核对零件该落到哪 ──────
+    # 下游（总装/出图）按 work_dir 找零件；这里把"脚本执行时拿到的任务目录"
+    # 显式回传，一旦零件没归位可直接对照排查。
+    result["task_work_dir"] = run_env.get("DSH_TASK_WORK_DIR")
+    result["task_parts_dir"] = run_env.get("DSH_TASK_PARTS_DIR")
+    result["script_cwd"] = os.path.dirname(os.path.abspath(script_path))
+    if not result.get("task_work_dir"):
+        result["path_note"] = (
+            "未能归位到任务目录：读不到 work_dir（workflow_state.json 缺失"
+            "且未设 DSH_TASK_WORK_DIR / DSH_WORK_DIR）。脚本若用相对路径保存，"
+            "零件会落到脚本目录而非任务目录 —— 总装/出图可能找不到。")
+    # 【P1-BUG-退出码 3 语义重载】按 wrapper 专用码判定；明确回显"这不是 SW 忙"
+    if proc.returncode in (_WRAPPER_EXIT_PATH_MISSING, _WRAPPER_EXIT_SHA_MISMATCH):
         result["ok"] = False
+        result["script_identity_failed"] = True
         result["error"] = ("【Bug-39】脚本身份自校验失败（exit=%d）："
                            "待执行脚本路径不存在或内容在运行前被改变，"
-                           "已拒绝执行以免跑成别的脚本。" % proc.returncode)
+                           "已拒绝执行以免跑成别的脚本。"
+                           "（注意：本退出码是 wrapper 专用码，"
+                           "与 CLI 的 3=SW忙 无关，不要据此重试。）"
+                           % proc.returncode)
     # 脚本可选的业务结果（脚本内写 __RESULT__ = {...} 即会出现在这里）
     _biz = result.get("script_result")
     if isinstance(_biz, dict):
@@ -1488,6 +2130,87 @@ def cmd_run(sw, script_path, extra_args, room=None):
         result.setdefault("warnings_list", []).append(
             "磁盘落盘核对异常（不阻断）: %r" % (_e_disk,))
 
+    # ── 【P1-BUG-归属门禁漏挂 run】─────────────────────────────────────────
+    # 原缺陷：Bug-38 的零件归属校验（_check_part_before_save → workflow_gate
+    #   .check_part_ownership）只挂在 `save` 与 `check-part` 两个命令上
+    #   （调用点仅 4946/4957）。而【真正落盘的路径是 cmd_run → 脚本内
+    #   swapi.SWModel.save()】—— 它完全绕过 sw_bridge，因此越界产出
+    #   （结构件小屋产"电机座"、传动机构小屋产"转向支撑座"）在 run 路径上
+    #   没有任何拦截，Bug-38 的防护对最常用的建模链路实际是失效的。
+    # 修复：run 结束后，对本次磁盘上真实存在的 .sldprt 逐个做归属校验；
+    #   越界即判本次 run 失败（与 save 侧同口径），并写入违规台账。
+    #   注意：只在有 room 上下文时校验（串行/单房间无归属概念，保持原行为）。
+    if room and _art.get("checked"):
+        try:
+            import workflow_gate as _wg_own
+            _viol = []
+            for _p in (_art.get("present") or []):
+                if not str(_p).lower().endswith(".sldprt"):
+                    continue
+                try:
+                    _own = _wg_own.check_part_ownership(_p, room)
+                except Exception:
+                    continue
+                if _own.get("allowed") is False:
+                    _viol.append({
+                        "part": _own.get("part") or os.path.basename(_p),
+                        "owner_room": _own.get("owner_room"),
+                        "gate": _own.get("gate"),
+                        "error": _own.get("error"),
+                    })
+            if _viol:
+                result["ownership_check"] = _viol
+                if not result.get("ownership_blocked"):
+                    result["ownership_blocked"] = True
+                    # 与 save 侧一致：越界产出必须拦截（可通过 --force-part 放行）
+                    if "--force-part" not in (extra_args or []):
+                        result["ok"] = False
+                        result["error"] = (
+                            "【Bug-38】本次 run 产出的零件不属于房间 [%s]，已拒绝：\n  - %s"
+                            % (room, "\n  - ".join(
+                                "%s（实际归属 %s）" % (v["part"], v["owner_room"])
+                                for v in _viol))
+                            + "\n确需强制保存 → 给 run 传 --force-part；"
+                              "或修正 workflow_gate 的房间零件范围关键词。")
+        except Exception as _e_own:
+            result.setdefault("warnings_list", []).append(
+                "归属校验不可用（不阻断）: %r" % (_e_own,))
+
+    # ── 【装配强制路径】对本次产出的 .sldasm 做配合门禁 ────────────────────
+    # 用户强制要求：模型组装时【先走 CreateMate 配合】，不行再走其它方式。
+    # 详见 _assembly_mate_gate 的说明（判据按文档 §10.1，用 FeatureByName）。
+    # 放在归属校验之后、截图之前：此时磁盘产物已确定，且尚未做展示动作。
+    try:
+        _asm_cands = []
+        for _p in (_art.get("present") or []):
+            if str(_p).lower().endswith(".sldasm") and os.path.exists(_p):
+                _asm_cands.append(_p)
+        _biz_asm = result.get("script_result")
+        if isinstance(_biz_asm, dict):
+            for _c in (_biz_asm.get("artifacts") or _biz_asm.get("files") or []):
+                _s = str(_c)
+                if _s.lower().endswith(".sldasm") and os.path.exists(_s) \
+                        and _s not in _asm_cands:
+                    _asm_cands.append(_s)
+        if _asm_cands:
+            result["_extra_args"] = list(extra_args or [])
+            _mate_reports = []
+            _mate_block = []
+            for _ap in _asm_cands:
+                _mg = _assembly_mate_gate(sw, _ap, result, room=room)
+                _mg["assembly"] = os.path.basename(_ap)
+                _mate_reports.append(_mg)
+                if _mg.get("blocked"):
+                    _mate_block.append(_mg.get("error") or "未查到配合")
+            result["assembly_mate_gate"] = _mate_reports
+            if _mate_block:
+                result["ok"] = False
+                result["assembly_mate_blocked"] = True
+                result["error"] = "\n\n".join(_mate_block)
+    except Exception as _e_mate:
+        result.setdefault("warnings_list", []).append(
+            "装配配合门禁异常（未校验）: %r" % (_e_mate,))
+
     # 建模完成后自动展示：固定等轴测视角 + 中等缩放 + 截图（用户约定）
     try:
         import swapi
@@ -1564,88 +2287,226 @@ def _find_drawing_template(sw, paper_name=None):
     return candidates[0] if candidates else None
 
 
-def _get_bbox(view):
-    """获取单个视图的包围盒 (x1,y1,x2,y2)，单位米。
+def _assembly_mate_gate(sw, asm_path, result=None, room=None):
+    """【装配强制门禁】装配体落盘后校验"是否真的用配合装配"。
 
-    重要：必须直接调用 view.GetOutline，不能通过迭代器缓存的对象读取。
+    ══ 为什么需要它（用户强制要求）════════════════════════════════════════
+    来源：《SW装配实战经验总结·融合版》核心结论 ——
+      「装配定位只用【CreateMate 配合】，摆位用 add_component 带坐标或
+        set_component_transform，【绝对不要】用 SetTransform2/SetXform/
+        TranslateComponent 这类坐标硬设。」
+    用户要求：**强制保证模型在组装时先走 CreateMate 方式**，不行再走其它，
+    且核心命令集始终是 IAssemblyDoc::CreateMate。
+
+    本门禁的判据（严格按文档 §10.1 的正确判据，不用会误报的 FirstFeature）：
+      ① 用 FeatureByName 逐个查证常见配合名（重合N/同心N/平行N/垂直N/相切N/
+         距离N/角度N/锁定N/齿轮N/螺旋N/宽度N/凸轮N）；
+      ② 一个都没查到 → 判定"该装配体没有任何配合"= 违反强制路径；
+      ③ 命中即通过，并把查到的配合名回传（可审计）。
+
+    ⚠️ 只对 **.sldasm** 生效；零件（.sldprt）不受影响。
+    ⚠️ 与三道防线一样保留合法绕行：`DSH_ASSEMBLY_MATE_BYPASS=1`
+       或给 run 传 `--force-mate`，且**必定留痕**（reports/defense_bypass.json）。
+
+    Returns: dict（ok / applies / mate_names / blocked / ...）
     """
+    out = {"ok": True, "applies": False, "mate_names": [], "blocked": False}
     try:
-        # 直接用 view 对象读取（不经过列表迭代）
-        outline = view.GetOutline
-        if outline and isinstance(outline, (list, tuple)) and len(outline) == 4:
-            return tuple(outline)
-    except Exception:
-        pass
-    return None
-
-
-def _enumerate_view_bboxes(doc):
-    """枚举工程中所有视图，返回 [(label_or_idx, bb), ...] 跳过图纸轮廓。
-
-    使用链式调用避免 win32com 缓存问题。
-    """
-    result = []
-    try:
-        v = doc.GetFirstView
-        idx = 0
-        while v is not None and idx < 20:
+        if not str(asm_path or "").lower().endswith(".sldasm"):
+            return out
+        out["applies"] = True
+        # ── 合法绕行：显式豁免（留痕，绝不静默）──────────────────────────
+        _bypass = str(os.environ.get("DSH_ASSEMBLY_MATE_BYPASS") or "").strip().lower()
+        _bypass = _bypass in ("1", "true", "yes", "on")
+        if _bypass or "--force-mate" in (result or {}).get("_extra_args", []):
+            out["bypassed"] = True
             try:
-                bb = _get_bbox(v)
-                if bb:
-                    # 跳过图纸轮廓视图
-                    if abs(bb[2] - _paper_w) < 0.01 and abs(bb[3] - _paper_h) < 0.01:
-                        v = v.GetNextView
-                        idx += 1
-                        continue
-                    result.append((idx, bb))
+                import defense_gate as _dg
+                _dg.log_bypass(
+                    "sw_bridge.run.assembly_mate_gate",
+                    reason=("DSH_ASSEMBLY_MATE_BYPASS=1" if _bypass
+                            else "--force-mate"),
+                    by=("env" if _bypass else "cli"))
             except Exception:
                 pass
+            out["note"] = ("已显式豁免装配配合门禁（留痕到 reports/defense_bypass.json）。"
+                           "注意：文档核心结论是装配定位必须走 CreateMate 配合。")
+            return out
+
+        # ── 打开装配体，按文档 §10.1 用 FeatureByName 查证 ────────────────
+        _doc = None
+        try:
+            import swapi as _swapi
+            _op = _swapi.SWModel.open_part(sw, asm_path, doc_type=2)
+            _doc = _op.get("doc") if isinstance(_op, dict) else _op
+        except Exception as e:
+            out["open_error"] = repr(e)
+        if _doc is None:
+            # 打不开装配体 → 不误判为"无配合"，如实标注"未能校验"
+            out["verified"] = False
+            out["note"] = ("无法打开装配体做配合校验（%s）—— 本次不据此拦截，"
+                           "但请确认装配体确实是用 CreateMate 配合装配的。"
+                           % (out.get("open_error") or "open failed"))
+            return out
+
+        _base = ["重合", "同心", "平行", "垂直", "相切", "距离", "角度",
+                 "锁定", "齿轮", "螺旋", "宽度", "凸轮"]
+        _probe = ["%s%d" % (_b, _i) for _b in _base for _i in range(1, 21)]
+        _found = []
+        for _nm in _probe:
             try:
-                v = v.GetNextView
+                if _doc.FeatureByName(str(_nm)) is not None:
+                    _found.append(str(_nm))
             except Exception:
-                break
-            idx += 1
-    except Exception:
-        pass
-    return result
+                continue
+        out["mate_names"] = _found
+        out["checked_probe_count"] = len(_probe)
+        out["verified"] = True
+
+        if not _found:
+            out["ok"] = False
+            out["blocked"] = True
+            out["error"] = (
+                "【装配强制路径】装配体 [%s] 用 FeatureByName 逐个查证"
+                "【未发现任何配合】（探测 %d 个常见配合名）。\n"
+                "文档核心结论：装配定位必须走 IAssemblyDoc::CreateMate 配合；"
+                "坐标硬设（SetTransform2/SetXform/TranslateComponent）在 SW 上"
+                "全部不可用或必崩。\n"
+                "正确做法（文档 §6.1 六步）：\n"
+                "  ① m._pick_faces_of_component(comp) 取面（已包装 IFace2）\n"
+                "  ② asm.ClearSelection2(True)\n"
+                "  ③ f1.Select2(True, 1); f2.Select2(True, 1)\n"
+                "  ④ 确认 GetSelectedObjectCount2(-1) >= 2\n"
+                "  ⑤ m.create_mate(type, None, name=..., save=...)\n"
+                "  ⑥ m.verify_assembly_mates(expect_names=[...]) 验收\n"
+                "确需放行：设 DSH_ASSEMBLY_MATE_BYPASS=1 或给 run 传 --force-mate"
+                "（会留痕）。" % (os.path.basename(str(asm_path)), len(_probe)))
+            out["hint"] = ("可直接用：python sw_bridge.py asm-verify \"<装配体.sldasm>\" "
+                           "复核配合清单。")
+        else:
+            out["note"] = ("装配配合门禁通过：查到 %d 个配合（%s）。"
+                           % (len(_found), "、".join(_found[:10])))
+        return out
+    except Exception as e:
+        # 门禁自身异常：如实标注"未校验"，不静默假装通过
+        out["verified"] = False
+        out["error"] = "装配配合门禁异常（未校验）: %r" % (e,)
+        return out
 
 
-def _bbox_center(bb):
-    """包围盒中心点 (cx, cy)"""
-    return ((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2)
+def cmd_asm_verify(sw, asm_path):
+    """【装配配合验收】按文档 §10.1 的正确判据查证配合是否存在。
 
+    用法：python sw_bridge.py asm-verify "<装配体.sldasm>"
 
-def _bbox_spacing(bb1, bb2):
-    """计算两个包围盒之间的最小间距（米）。返回 0 表示有重叠。"""
-    x1a, y1a, x2a, y2a = bb1
-    x1b, y1b, x2b, y2b = bb2
-    dx = max(0, max(x1b - x2a, x1a - x2b))
-    dy = max(0, max(y1b - y2a, y1a - y2b))
-    return (dx**2 + dy**2) ** 0.5
-
-
-def _bbox_overlap(bb1, bb2, gap=0.035):
-    """检查两个包围盒是否相交（考虑最小间距 gap）。
-
-    返回 True = 有重叠/粘连（不允许），False = 安全分离。
+    文档 §10.1 教训：诊断方法错了会得出完全相反的结论 —— 查配合存在性
+    首选 FeatureByName，不要依赖 FirstFeature 遍历或 mate_count 的 count。
     """
-    x1a, y1a, x2a, y2a = bb1
-    x1b, y1b, x2b, y2b = bb2
-    # 水平方向是否完全分离
-    sep_h = (x2a + gap <= x1b) or (x2b + gap <= x1a)
-    # 垂直方向是否完全分离
-    sep_v = (y2a + gap <= y1b) or (y2b + gap <= y1a)
-    return not (sep_h or sep_v)  # True = 有交集
-
-
-def _move_view(view, cx, cy):
-    """移动视图使中心点到达指定位置（图纸坐标，米）"""
+    out = {"ok": False, "command": "asm-verify", "asm_path": asm_path}
+    if not asm_path or not os.path.exists(str(asm_path)):
+        out["error"] = "装配体文件不存在: %r" % (asm_path,)
+        out["hint"] = "用法：python sw_bridge.py asm-verify \"<装配体.sldasm>\""
+        return out
+    if not str(asm_path).lower().endswith(".sldasm"):
+        out["error"] = "asm-verify 只接受 .sldasm 装配体文件"
+        return out
     try:
-        view.Position = [cx, cy]
-        return True
-    except Exception:
-        pass
-    return False
+        import swapi as _swapi
+        _op = _swapi.SWModel.open_part(sw, asm_path, doc_type=2)
+        _doc = _op.get("doc") if isinstance(_op, dict) else _op
+        if _doc is None:
+            out["error"] = "无法打开装配体: %r" % (_op,)
+            return out
+        m = _swapi.SWModel(sw, _doc)
+        # 文档 §10.1 判据：FeatureByName 逐个查证
+        _base = ["重合", "同心", "平行", "垂直", "相切", "距离", "角度",
+                 "锁定", "齿轮", "螺旋", "宽度", "凸轮"]
+        _probe = ["%s%d" % (_b, _i) for _b in _base for _i in range(1, 21)]
+        _found = []
+        for _nm in _probe:
+            try:
+                if _doc.FeatureByName(str(_nm)) is not None:
+                    _found.append(str(_nm))
+            except Exception:
+                continue
+        out["mate_names"] = _found
+        out["mate_count_by_name"] = len(_found)
+        # 交叉参考：mate_count（可能因 FirstFeature 失效返回 0，仅作参考）
+        _mc = m.mate_count()
+        out["mate_count_report"] = {
+            "count": _mc.get("count"), "method": _mc.get("method"),
+            "unavailable": _mc.get("unavailable"),
+            "note": ("文档 §10.1：本版 SW 上 FirstFeature 遍历可能失效，"
+                     "count=0 不代表没有配合 —— 以 mate_names 为准。"),
+        }
+        # ── 【BUG-07 替代】特征树诊断（原 diag_mates.py 的正确实现）────────
+        # 原 diag_mates.py 用 `asm.FirstFeature` 顶层遍历，在本版 SW 上
+        #   **只返回 Comments 一个节点**（文档 BUG-01/07 同一根因），
+        #   于是"列不出装配特征树、看不到配合"，让人误判装配体是散的。
+        # 这里改用两道【不依赖 FirstFeature 全树遍历】的正确判据：
+        #   ① FeatureManager.GetFeatureCount(False) —— 特征总数（含配合），
+        #      可与已确认的配合名数量交叉验证"是否少算"；
+        #   ② FeatureByName 逐个查证 —— 已在上面的 mate_names 完成。
+        # 同时**如实回报 FirstFeature 的实测表现**，让后人一眼看出它坏了。
+        try:
+            _fc = None
+            try:
+                _fc = int(_doc.FeatureManager.GetFeatureCount(False))
+            except Exception:
+                _fc = None
+            # 实测 FirstFeature 顶层能走几个节点（预期：因失效而极少）
+            _ff_nodes = []
+            try:
+                _f = _doc.FirstFeature
+                _guard = 0
+                while _f is not None and _guard < 200:
+                    _guard += 1
+                    try:
+                        _tn = str(_f.GetTypeName2() or "")
+                    except Exception:
+                        _tn = "?"
+                    try:
+                        _nm = str(_f.Name or "")
+                    except Exception:
+                        _nm = ""
+                    _ff_nodes.append({"type": _tn, "name": _nm})
+                    try:
+                        _f = _f.GetNextFeature()
+                    except Exception:
+                        break
+            except Exception as _eff:
+                _ff_nodes = [{"error": repr(_eff)}]
+            out["feature_tree_diag"] = {
+                "feature_count_by_manager": _fc,
+                "firstfeature_nodes": _ff_nodes,
+                "firstfeature_node_count": len(_ff_nodes),
+                "firstfeature_usable": len(_ff_nodes) > 3,
+                "conclusion": (
+                    "FirstFeature 顶层遍历可用（节点数 %d）" % len(_ff_nodes)
+                    if len(_ff_nodes) > 3 else
+                    ("FirstFeature 顶层遍历【失效/极简】（仅 %d 个节点）—— "
+                     "与文档 BUG-01/07 现象一致。这是 API 在本版 SW 上的行为，"
+                     "不是你的用法问题。请改用 FeatureByName / "
+                     "FeatureManager.GetFeatureCount(False) 判据。"
+                     % len(_ff_nodes))),
+            }
+        except Exception as _e_diag:
+            out["feature_tree_diag"] = {"error": repr(_e_diag)}
+
+        try:
+            _lc = m.list_components()
+            _comps = _lc.get("components") if isinstance(_lc, dict) else _lc
+            out["component_count"] = len(_comps or [])
+        except Exception:
+            out["component_count"] = None
+        out["ok"] = True
+        if not _found:
+            out["warning"] = ("未查到任何配合 —— 该装配体可能是【坐标硬设摆位】"
+                              "而非 CreateMate 配合装配，违反文档核心结论。")
+        return out
+    except Exception as e:
+        out["error"] = "asm-verify 异常: %r" % (e,)
+        return out
 
 
 def _task_work_dir():
@@ -2313,6 +3174,217 @@ def cmd_drawing(sw, part_path, output_path=None):
     return result
 
 
+# ══ 【BUG-观察-17 修复】自动标注 API 的【权威归属】与【参数个数】 ══════════
+# 权威依据 = 已注册类型库（本机 SW 2025，makepy 产物）：
+#   C:\Users\j1877\AppData\Local\Temp\gen_py\3.13\
+#       83A33D31-27C5-11CE-BFD4-00400513BB57x0x33x0.py
+#   （= SldWorks 2025 Type Library；同源文件 Z:\...\SOLIDWORKS\sldworks.tlb）
+#
+# ── 原缺陷（BUG-观察-17 的【主因】，类型库实证 · 决定性）──────────────────
+#   原代码写 `getattr(v, "InsertModelAnnotations3", None)`（v 是 IView），
+#   并在 IView 上找 AutoDimension。但类型库实证：
+#     · InsertModelAnnotations* / InsertModelDimensions / AutoDimension
+#       【全部挂在 IDrawingDoc 上】；
+#     · IView(FView) 上【没有任何 Insert*Annotations / 任何 AutoDimension】
+#       —— 逐行扫描 IView 段（435 个方法）确认无此成员；
+#     · IModelDocExtension 上【也没有 AutoDimension】。
+#   → `getattr(v, ...)` / `getattr(doc.Extension, ...)` 【恒返回 None】，
+#     整条分支 0 次执行 → 这就是「插入了 0 个标注」的直接原因。
+#
+# ── 参数个数（类型库逐行实证，勿凭记忆改）────────────────────────────────
+#   IDrawingDoc.InsertModelDimensions(Option)                      —— 1 参
+#   IDrawingDoc.InsertModelAnnotations3(Option, Types, AllViews,
+#       DuplicateDims, HiddenFeatureDims, UsePlacementInSketch)    —— 6 参
+#   IDrawingDoc.InsertModelAnnotations2(Option, AllTypes, Types,
+#       AllViews, DuplicateDims, HiddenFeatureDims)                —— 6 参
+#   IDrawingDoc.InsertModelAnnotations(Option, AllTypes, Types,
+#       AllViews)                                                  —— 4 参
+#   IDrawingDoc.AutoDimension(EntitiesToDimension, HorizontalScheme,
+#       HorizontalPlacement, VerticalScheme, VerticalPlacement)    —— 5 参
+#   原实现统一传 5 参 / 0 参（还把 Types 当 Option 传），与签名不符。
+#
+# Types 位掩码取值来自 swconst.tlb（权威枚举常量库）：
+_SW_INSERT_DIMENSIONS = 8          # swInsertAnnotation_e: swInsertDimensions
+# AutoDimension 的 5 个入参同样取自 swconst.tlb：
+_SW_AUTODIM_ENTITIES_ALL = 1       # swAutodimEntities_e:      swAutodimEntitiesAll
+_SW_AUTODIM_SCHEME_BASELINE = 1    # swAutodimScheme_e:        swAutodimSchemeBaseline
+_SW_AUTODIM_H_BELOW = -1           # swAutodimHorizontalPlacement_e: ...Below
+_SW_AUTODIM_SCHEME_CHAIN = 3       # swAutodimScheme_e:        swAutodimSchemeChain
+_SW_AUTODIM_V_LEFT = -1            # swAutodimVerticalPlacement_e:   ...Left
+
+
+def _rc_int(v):
+    """把 COM 返回值安全压成 int（None / VARIANT / 异常都不得抛出）。"""
+    try:
+        if v is None:
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
+def _view_name(view, idx=0):
+    """取视图名（找不到时回退 viewN）。静态/动态分发下都可用的写法。"""
+    for _attr in ("GetName2", "Name"):
+        try:
+            _n = getattr(view, _attr, None)
+            if _n is None:
+                continue
+            if callable(_n):
+                _n = _n()
+            _s = str(_n or "").strip()
+            if _s:
+                return _s
+        except Exception:
+            continue
+    return "view%d" % (idx + 1)
+
+
+def _collect_drawing_views(doc):
+    """收集工程图里的【视图】（跳过图纸层本身）。
+
+    ★ 视图遍历起点【保持原样、不得更改】：doc.GetFirstView（IDrawingDoc）
+      → v.GetNextView（IView），第一个是图纸层，跳过。
+    Returns: (views, error_or_None)
+    """
+    views = []
+    try:
+        v = doc.GetFirstView
+        if v is not None:
+            v = v.GetNextView
+        _guard = 0
+        while v is not None and _guard < 200:
+            _guard += 1
+            views.append(v)
+            try:
+                v = v.GetNextView
+            except Exception:
+                break
+    except Exception as e:
+        return views, "遍历视图失败: %r" % (e,)
+    return views, None
+
+
+def _annotation_api_candidates(dim_types=None):
+    """生成 (api 名, 参数元组) 兜底链 —— 参数个数严格对齐 sldworks.tlb。
+
+    ★ 全部是【IDrawingDoc】上的方法（见上方权威依据），调用时必须传 doc。
+    顺序（首选 → 兜底）：
+      ① InsertModelDimensions(Option)  —— 单参，专用于「插入模型尺寸」，
+         最贴合「自动标注关键尺寸」的诉求，故置于首位；
+      ② InsertModelAnnotations3(6 参)  —— 最新版插入模型标注；
+      ③ InsertModelAnnotations2(6 参)  —— 旧版兜底；
+      ④ InsertModelAnnotations(4 参)   —— 最旧版兜底；
+      ⑤ AutoDimension(5 参)            —— SW 自带自动标注（逐个激活视图后调用）。
+    Types 位掩码依次尝试：调用方显式 dim_types > swInsertDimensions(8) > 1(旧行为)。
+    """
+    _types = []
+    for _t in (dim_types, _SW_INSERT_DIMENSIONS, 1):
+        if _t is None:
+            continue
+        try:
+            _t = int(_t)
+        except Exception:
+            continue
+        if _t not in _types:
+            _types.append(_t)
+
+    out = []
+    # ① InsertModelDimensions：1 参。Option 的语义随版本而异且无法离线核实，
+    #    故按 1 → 0 → 2 依次尝试（失败即换下一个，不影响正确性）。
+    for _opt in (1, 0, 2):
+        out.append(("InsertModelDimensions", (_opt,)))
+    # ② InsertModelAnnotations3：6 参
+    for _opt in (1, 2):
+        for _t in _types:
+            out.append(("InsertModelAnnotations3",
+                        (_opt, _t, True, False, False, False)))
+    # ③ InsertModelAnnotations2：6 参
+    for _opt in (1, 2):
+        for _t in _types:
+            out.append(("InsertModelAnnotations2",
+                        (_opt, True, _t, True, False, False)))
+    # ④ InsertModelAnnotations：4 参
+    for _opt in (1, 2):
+        for _t in _types:
+            out.append(("InsertModelAnnotations", (_opt, True, _t, True)))
+    # ⑤ AutoDimension：5 参（作用于【活动视图】，调用方需先 ActivateView）
+    out.append(("AutoDimension", (_SW_AUTODIM_ENTITIES_ALL,
+                                  _SW_AUTODIM_SCHEME_BASELINE,
+                                  _SW_AUTODIM_H_BELOW,
+                                  _SW_AUTODIM_SCHEME_CHAIN,
+                                  _SW_AUTODIM_V_LEFT)))
+    return out
+
+
+def _insert_model_annotations(doc, views, dim_types=None):
+    """在【IDrawingDoc】上按候选链插入模型标注，以「标注数真的变多」判定成功。
+
+    Returns: (used_api, attempts, counts_after)
+      used_api     —— 真正生效的 API 名；全失败则为 None（绝不假装成功）
+      attempts     —— 逐次尝试的记录（api / 参数 / 是否可调用 / 错误 / 计数增量）
+      counts_after —— 收尾时各视图的标注计数
+    """
+    _before = [_count_annotations(doc, v) for v in views]
+    attempts = []
+    used_api = None
+
+    def _snapshot():
+        return [_count_annotations(doc, v) for v in views]
+
+    for _api, _args in _annotation_api_candidates(dim_types):
+        # ★【BUG-观察-17 修复】必须 getattr(doc, ...)：这些 API 挂在 IDrawingDoc
+        #   上，原实现 getattr(view, ...) 恒为 None，是「插 0 个标注」的根因。
+        _fn = getattr(doc, _api, None)
+        if _fn is None:
+            attempts.append({"api": _api, "called": False,
+                             "error": "IDrawingDoc 上无此接口（跳过）"})
+            continue
+
+        if _api == "AutoDimension":
+            # AutoDimension 作用于【活动视图】→ 逐视图激活后再调用
+            for _i, _v in enumerate(views):
+                _vn = _view_name(_v, _i)
+                try:
+                    doc.ActivateView(_vn)
+                except Exception:
+                    pass
+                try:
+                    _st = _fn(*_args)
+                except Exception as _e:
+                    attempts.append({"api": _api, "view": _vn,
+                                     "args": list(_args), "called": True,
+                                     "error": repr(_e)})
+                    continue
+                _after = _snapshot()
+                _delta = sum(max(0, a - b) for a, b in zip(_after, _before))
+                attempts.append({"api": _api, "view": _vn, "args": list(_args),
+                                 "called": True, "rc": _rc_int(_st),
+                                 "delta": _delta})
+                if _delta > 0:
+                    used_api = _api
+                    _before = _after
+            if used_api:
+                break
+            continue
+
+        try:
+            _rc = _fn(*_args)
+        except Exception as _e:
+            attempts.append({"api": _api, "args": list(_args),
+                             "called": True, "error": repr(_e)})
+            continue
+        _after = _snapshot()
+        _delta = sum(max(0, a - b) for a, b in zip(_after, _before))
+        attempts.append({"api": _api, "args": list(_args), "called": True,
+                         "rc": _rc_int(_rc), "delta": _delta})
+        if _delta > 0:
+            used_api = _api
+            _before = _after
+            break
+    return used_api, attempts, _before
+
+
 def annotate_drawing(sw, drawing_path, dim_types=None, tol_mm=0.05):
     """【Bug-34 修复】对工程图自动添加关键尺寸标注。
 
@@ -2323,24 +3395,39 @@ def annotate_drawing(sw, drawing_path, dim_types=None, tol_mm=0.05):
     必须人工在 SW 里补标注才能加工（Bug-34）。
 
     ══ 本函数做什么 ════════════════════════════════════════════════════════
-    对工程图里的每个视图，调用 SW 的模型标注插入能力（多 API 兜底）：
-      ① View.InsertModelAnnotations3 / InsertModelAnnotations2 / InsertModelAnnotations
-         —— 把【模型里已存在的尺寸】插入到该视图（DimXpert/草图尺寸）。
-      ② ModelDocExtension.AutoDimension（部分版本）
-         —— SW 自带的"自动标注"（Autodimension）。
-      ③ 都不可用时，明确返回 ok=False 并说明原因，绝不假装标注成功。
+    在【工程图文档(IDrawingDoc)】上调用 SW 的模型标注插入能力（多 API 兜底）：
+      ① IDrawingDoc.InsertModelDimensions(Option)      —— 单参，首选
+      ② IDrawingDoc.InsertModelAnnotations3(...6 参)   —— 插入模型标注
+      ③ IDrawingDoc.InsertModelAnnotations2(...6 参)   —— 旧版兜底
+      ④ IDrawingDoc.InsertModelAnnotations(...4 参)    —— 最旧版兜底
+      ⑤ IDrawingDoc.AutoDimension(...5 参)             —— 自带自动标注
+      都不可用时，明确返回 ok=False 并说明原因，绝不假装标注成功。
+
+    ──【BUG-观察-17 修复】────────────────────────────────────────────────
+    原缺陷：原代码在【IView】上找 InsertModelAnnotations*，并在
+    【IModelDocExtension】上找 AutoDimension。但类型库实证这些 API
+    【全部挂在 IDrawingDoc 上】：
+      · IView（435 个方法逐行扫描）没有任何 Insert*Annotations / AutoDimension；
+      · IModelDocExtension 上没有 AutoDimension。
+    → 两处 getattr 恒为 None，分支 0 次执行 —— 这就是「插入了 0 个标注」
+    的直接原因。修法：统一改为 getattr(doc, ...)，并按类型库对齐参数个数
+    与回退顺序（详见 _annotation_api_candidates 的说明）。
+
+    ⚠️ 待实机验证：本修复基于【类型库静态实证】，本机当前【无运行中的
+    SLDWORKS 进程】，无法实机确认最终哪个 API 生效、各版本 Option 取值。
+    参数个数与归属已与 sldworks.tlb / swconst.tlb 逐条核对。
 
     Args:
         drawing_path: .slddrw 路径
-        dim_types:    传给 InsertModelAnnotations 的标注类型位掩码。
-                      None 时使用默认（尺寸+公差）。
+        dim_types:    传给 InsertModelAnnotations* 的 Types 位掩码。
+                      None 时按 swInsertDimensions(8) → 1 依次尝试。
         tol_mm:       判定"标注是否真的加上了"的容差
     Returns:
         {ok, drawing_path, annotated_views, total_annotations, api, per_view,
-         error?, hint?, gbt_report}
+         attempts, error?, hint?, gbt_report}
     """
     out = {"ok": False, "drawing_path": drawing_path, "annotated_views": 0,
-           "total_annotations": 0, "per_view": []}
+           "total_annotations": 0, "per_view": [], "attempts": []}
     if not drawing_path or not os.path.exists(drawing_path):
         out["error"] = "工程图文件不存在: %s" % drawing_path
         return out
@@ -2357,69 +3444,30 @@ def annotate_drawing(sw, drawing_path, dim_types=None, tol_mm=0.05):
         except Exception:
             pass
 
-        # 遍历视图（第一个是图纸本身，跳过）
-        views = []
-        try:
-            v = doc.GetFirstView
-            if v is not None:
-                v = v.GetNextView
-            _guard = 0
-            while v is not None and _guard < 200:
-                _guard += 1
-                views.append(v)
-                try:
-                    v = v.GetNextView
-                except Exception:
-                    break
-        except Exception as e:
-            out["error"] = "遍历视图失败: %r" % (e,)
+        # 遍历视图（第一个是图纸层，跳过）—— 起点保持原样
+        views, _verr = _collect_drawing_views(doc)
+        if _verr:
+            out["error"] = _verr
+            return out
+        if not views:
+            out["error"] = "工程图里没有视图（图纸层之外为空），无法标注"
+            out["hint"] = "请确认 .slddrw 里已建三视图；只有图纸层时无可标注对象。"
+            out["gbt_report"] = _gbt_annotation_report(out)
             return out
 
-        _used_api = None
+        _before = [_count_annotations(doc, v) for v in views]
+        # ★【BUG-观察-17 修复】API 挂在 IDrawingDoc 上 → 统一传 doc（原传 view）
+        _used_api, _attempts, _after = _insert_model_annotations(
+            doc, views, dim_types=dim_types)
+        out["attempts"] = _attempts
+        out["api"] = _used_api
         for _i, v in enumerate(views):
-            _vname = ""
-            try:
-                _vname = str(v.GetName2 or "")
-            except Exception:
-                _vname = "view%d" % (_i + 1)
-            _before = _count_annotations(doc, v)
-            _added = 0
-            # ① InsertModelAnnotations3/2/1（把模型尺寸插入视图）
-            for _api in ("InsertModelAnnotations3", "InsertModelAnnotations2",
-                         "InsertModelAnnotations"):
-                try:
-                    _fn = getattr(v, _api, None)
-                    if _fn is None:
-                        continue
-                    if _api == "InsertModelAnnotations3":
-                        _dt = int(dim_types) if dim_types is not None else 1
-                        _fn(_dt, 0, False, False, False)
-                    elif _api == "InsertModelAnnotations2":
-                        _dt = int(dim_types) if dim_types is not None else 1
-                        _fn(_dt, 0, False, False)
-                    else:
-                        _fn()
-                    _used_api = _api
-                    _added = 1
-                    break
-                except Exception:
-                    continue
-            # ② AutoDimension（SW 自带自动标注）
-            if not _added:
-                try:
-                    _ext = doc.Extension
-                    _fn = getattr(_ext, "AutoDimension", None)
-                    if _fn is not None:
-                        _fn(v, False)
-                        _used_api = "AutoDimension"
-                        _added = 1
-                except Exception:
-                    pass
-            _after = _count_annotations(doc, v)
-            _delta = max(0, _after - _before)
-            out["per_view"].append({"view": _vname, "before": _before,
-                                    "after": _after, "added": _delta,
-                                    "api": _used_api})
+            _b = _before[_i]
+            _a = _after[_i] if _i < len(_after) else _b
+            _delta = max(0, _a - _b)
+            out["per_view"].append({"view": _view_name(v, _i),
+                                    "before": _b, "after": _a,
+                                    "added": _delta, "api": _used_api})
             if _delta > 0:
                 out["annotated_views"] += 1
             out["total_annotations"] += _delta
@@ -2430,18 +3478,29 @@ def annotate_drawing(sw, drawing_path, dim_types=None, tol_mm=0.05):
         except Exception:
             pass
 
-        out["api"] = _used_api
         out["ok"] = out["total_annotations"] > 0
         # ── 【Bug-34 建议④】给出 GB/T 检查报告（逐项通过/缺失）──────────
         out["gbt_report"] = _gbt_annotation_report(out)
         if not out["ok"]:
-            out["error"] = ("未能通过 API 自动添加任何尺寸标注"
-                            "（InsertModelAnnotations* / AutoDimension 均不可用或无效）")
-            out["hint"] = ("① 确认零件【草图/特征里已有尺寸】—— "
-                           "InsertModelAnnotations 只能把【已存在的模型尺寸】"
-                           "插入视图，不会凭空生成尺寸；"
-                           "② 建模时应给关键尺寸加尺寸约束，出图才能自动带出；"
-                           "③ 仍缺失时需在 SW 界面手动标注（DimXpert / 智能尺寸）。")
+            # ──【BUG-观察-17 修复】如实报告：确实插入了 0 个标注，
+            #    并列出尝试过的 API 与错误；绝不假装成功，
+            #    也不再把原因推给"装配体过于复杂"。
+            _tried = sorted({str(a.get("api")) for a in _attempts
+                             if a.get("called")})
+            _skipped = sorted({str(a.get("api")) for a in _attempts
+                               if not a.get("called")})
+            out["error"] = ("插入了 0 个标注：已在 IDrawingDoc 上按类型库签名"
+                            "逐条尝试 [%s]，各视图标注计数均无变化。"
+                            % (", ".join(_tried) or "无可调用 API"))
+            out["hint"] = (
+                "① 已修复 API 挂错对象（原先查的是 IView，getattr 恒为 None）；"
+                "② 若仍为 0，通常是【模型里没有可带出的尺寸】："
+                "InsertModelAnnotations* 只能插入【已存在的模型尺寸】"
+                "（草图尺寸/DimXpert），不会凭空生成 —— "
+                "请在建模脚本里给关键尺寸加尺寸约束；"
+                "③ 跳过（IDrawingDoc 上不存在）：%s；"
+                "④ 仍缺失时需在 SW 界面手动标注（DimXpert / 智能尺寸）。"
+                % (", ".join(_skipped) if _skipped else "无"))
         return out
     except Exception as e:
         out["error"] = "自动标注异常: %r" % (e,)
@@ -2460,69 +3519,41 @@ def _annotate_views_in_doc(doc, dim_types=None):
     与 annotate_drawing 的区别：本函数不负责开关文档，直接作用于传入的 doc，
     因此可被 cmd_drawing 在保存前调用（避免二次开图、避免覆盖用户排版）。
 
-    Returns: {ok, annotated_views, total_annotations, api, per_view, gbt_report}
+    ──【BUG-观察-17 修复】────────────────────────────────────────────────
+    本函数原先有与 annotate_drawing 【完全相同】的错误：在 IView 上
+    getattr("InsertModelAnnotations*")、在 doc.Extension 上 getattr
+    ("AutoDimension") —— 类型库实证这些 API 全在 IDrawingDoc 上，
+    故 getattr 恒为 None、0 次执行。现在与 annotate_drawing 共用
+    _insert_model_annotations（统一走 doc + 类型库对齐的参数个数）。
+
+    ⚠️ 待实机验证（同 annotate_drawing）：本机无运行中的 SLDWORKS。
+
+    Returns: {ok, annotated_views, total_annotations, api, per_view,
+              attempts, gbt_report}
     """
     out = {"ok": False, "annotated_views": 0, "total_annotations": 0,
-           "per_view": [], "api": None}
-    views = []
-    try:
-        v = doc.GetFirstView
-        if v is not None:
-            v = v.GetNextView
-        _guard = 0
-        while v is not None and _guard < 200:
-            _guard += 1
-            views.append(v)
-            try:
-                v = v.GetNextView
-            except Exception:
-                break
-    except Exception as e:
-        out["error"] = "遍历视图失败: %r" % (e,)
+           "per_view": [], "api": None, "attempts": []}
+    views, _verr = _collect_drawing_views(doc)
+    if _verr:
+        out["error"] = _verr
+        out["gbt_report"] = _gbt_annotation_report(out)
+        return out
+    if not views:
+        out["error"] = "工程图里没有视图（图纸层之外为空），无法标注"
         out["gbt_report"] = _gbt_annotation_report(out)
         return out
 
-    _used_api = None
+    _before = [_count_annotations(doc, v) for v in views]
+    # ★【BUG-观察-17 修复】统一在 IDrawingDoc 上调用（原先是 getattr(v, ...)）
+    _used_api, _attempts, _after = _insert_model_annotations(
+        doc, views, dim_types=dim_types)
+    out["attempts"] = _attempts
     for _i, v in enumerate(views):
-        _vname = ""
-        try:
-            _vname = str(v.GetName2 or "")
-        except Exception:
-            _vname = "view%d" % (_i + 1)
-        _before = _count_annotations(doc, v)
-        _added = 0
-        for _api in ("InsertModelAnnotations3", "InsertModelAnnotations2",
-                     "InsertModelAnnotations"):
-            try:
-                _fn = getattr(v, _api, None)
-                if _fn is None:
-                    continue
-                if _api == "InsertModelAnnotations3":
-                    _dt = int(dim_types) if dim_types is not None else 1
-                    _fn(_dt, 0, False, False, False)
-                elif _api == "InsertModelAnnotations2":
-                    _dt = int(dim_types) if dim_types is not None else 1
-                    _fn(_dt, 0, False, False)
-                else:
-                    _fn()
-                _used_api = _api
-                _added = 1
-                break
-            except Exception:
-                continue
-        if not _added:
-            try:
-                _fn = getattr(doc.Extension, "AutoDimension", None)
-                if _fn is not None:
-                    _fn(v, False)
-                    _used_api = "AutoDimension"
-                    _added = 1
-            except Exception:
-                pass
-        _after = _count_annotations(doc, v)
-        _delta = max(0, _after - _before)
-        out["per_view"].append({"view": _vname, "before": _before,
-                                "after": _after, "added": _delta,
+        _b = _before[_i]
+        _a = _after[_i] if _i < len(_after) else _b
+        _delta = max(0, _a - _b)
+        out["per_view"].append({"view": _view_name(v, _i), "before": _b,
+                                "after": _a, "added": _delta,
                                 "api": _used_api})
         if _delta > 0:
             out["annotated_views"] += 1
@@ -2532,8 +3563,13 @@ def _annotate_views_in_doc(doc, dim_types=None):
     out["ok"] = out["total_annotations"] > 0
     out["gbt_report"] = _gbt_annotation_report(out)
     if not out["ok"]:
-        out["hint"] = ("未能自动插入标注：InsertModelAnnotations* 只能插入"
-                       "【模型中已存在的尺寸】—— 请确认建模时已给关键尺寸加约束；"
+        _tried = sorted({str(a.get("api")) for a in _attempts if a.get("called")})
+        out["error"] = ("插入了 0 个标注：已在 IDrawingDoc 上按类型库签名逐条"
+                        "尝试 [%s]，各视图标注计数均无变化。"
+                        % (", ".join(_tried) or "无可调用 API"))
+        out["hint"] = ("① 已修复 API 挂错对象（原先查的是 IView，恒为 None）；"
+                       "② InsertModelAnnotations* 只能插入【模型中已存在的"
+                       "尺寸】—— 请确认建模时已给关键尺寸加约束；"
                        "缺失项需在 SW 界面用 DimXpert/智能尺寸手动标注（Bug-34）。")
     return out
 
@@ -2751,6 +3787,35 @@ def cmd_dwg(sw, part_path, output_path=None):
             result["saveas3_error"] = str(e)
     except Exception as e:
         result["error"] = str(e)
+
+    # ── 【P1-BUG-DWG 不做图层重映射】───────────────────────────────────────
+    # 原缺陷：`_remap_dxf_layers()`（把 SW 中文图层"可见边线/尺寸/…"映射为
+    #   CADX 标准层 OUTLINE/THIN/CENTER/HIDDEN/DIM/TEXT/HATCH）唯一调用点在
+    #   cmd_dxf。于是 DWG 交付物保留中文层名，后续
+    #   `cad-validate <图纸.dwg>` 经 _dwg_to_dxf 转换后【仍无重映射】
+    #   → 每次出图都报一堆 MISSING_LAYER WARNING，CADX 验证必然不通过。
+    # 修复：DWG 落盘后，顺手转一份 DXF 做图层重映射，并把结果一并回传。
+    #   注意：DWG 是二进制格式、无法原地改层名，因此这里的语义是
+    #   ① 让 cad-validate 走 DWG 时能拿到【已重映射的 DXF】；
+    #   ② 把映射台账回显给调用方，明确告知"标准层是否已补齐"。
+    if result.get("ok") and os.path.exists(output_path):
+        try:
+            _conv = _dwg_to_dxf(output_path)
+            if _conv.get("ok") and _conv.get("dxf_path"):
+                _rm = _remap_dxf_layers(_conv["dxf_path"], rewrite=True)
+                result["layer_remap"] = _rm
+                result["dxf_for_validate"] = _conv["dxf_path"]
+                result["layer_remap_note"] = (
+                    "DWG 为二进制格式、无法原地改层名；已生成配套 DXF 并完成"
+                    "SW 中文层 → CADX 标准层重映射，供 cad-validate 使用。")
+            else:
+                result["layer_remap"] = {
+                    "ok": False,
+                    "error": _conv.get("error") or "DWG→DXF 转换失败，未能重映射图层",
+                    "hint": ("可改用 `python sw_bridge.py dxf <零件.SLDPRT>` "
+                             "直接产出已重映射的 DXF。")}
+        except Exception as _e_rm:
+            result["layer_remap"] = {"ok": False, "error": repr(_e_rm)}
 
     return result
 
@@ -3797,8 +4862,15 @@ def _gate_sw_lock(room):
     except Exception:
         return {"skipped": True}
     if not info.get("need_lock"):
+        # ── 【第4项 · 代码强制】无需排队也照样起看护 ──────────────────────
+        # 真实拿到使用权（need_lock=False 表示本模式不需要互斥）也意味着
+        # "马上要开始用 SW 建模"，看护必须已经在跑。
+        _ensure_guard_quiet(room)
         return {"skipped": True}
     if info.get("acquired"):
+        # ★【第4项】拿到锁 = 即将建模 → 立刻确保健康看护在跑。
+        #   这是"代码强制"：不依赖模型是否记得启动，任何取锁路径都会走到这里。
+        _ensure_guard_quiet(room)
         return {"room": room, "skipped": False}
     # 忙碌: 最多再等 ~24 秒（短等待避免 pwsh 工具超时），仍拿不到则返回 busy
     deadline = __import__("time").time() + 24
@@ -3810,6 +4882,8 @@ def _gate_sw_lock(room):
             r = json.loads(out.stdout or "{}")
             last = r
             if r.get("acquired"):
+                # ★【第4项】等待后拿到锁，同样要起看护
+                _ensure_guard_quiet(room)
                 return {"room": room, "skipped": False}
         except Exception:
             pass
@@ -3819,6 +4893,46 @@ def _gate_sw_lock(room):
             "owner": last.get("owner") or info.get("owner"),
             "error": (last.get("error") or info.get("wait_hint")
                       or "SW 正被其他小屋使用，请稍后重试同一命令。")}
+
+
+def _ensure_guard_quiet(room):
+    """确保 SW 健康看护在跑；**任何失败都不得影响建模主流程**。
+
+    设计取舍：看护是"保护性"功能，绝不能因为它的启动失败而让取锁失败
+    （那会让整个任务卡死）。因此这里吞掉所有异常，只把结果写进心跳备注，
+    真正的强制点在 mode_gate 的 sw-guard-status 里可查（running=false 即异常）。
+
+    ── 两条路都走（互补，用户明确要求用 ctx.jobs）────────────────────────────
+      ① mode_gate sw-guard-start：拉起一个 OS 子进程看护。
+         优点：不依赖 DSH 运行时，任何取锁路径必然触发；
+         缺点：没有 DSH job id。
+      ② 插件 /sw-guard-job（ctx.jobs 版）：把同一件事注册为 **DSH 后台任务**。
+         优点：有 job id，能被 job_list / job_output / job_kill 管理
+               （这正是用户要的"这个 job 会立即返回一个 job id"）；
+         缺点：需要 DSH 运行时 + jobs 服务。
+    两条并行不冲突：①保证"一定有看护"，②保证"有 job id 可管理"，
+    且两者都幂等（重复调用不会堆进程/job）。
+    """
+    # ① OS 子进程看护（保底，必须成功路径不依赖网络）
+    try:
+        gate = _get_mode_gate_path()
+        if os.path.exists(gate):
+            subprocess.run([sys.executable, gate, "sw-guard-start"],
+                           capture_output=True, text=True, encoding="utf-8", timeout=20)
+    except Exception:
+        pass
+    # ② ctx.jobs 版看护（走插件 HTTP，拿到 DSH job id）
+    #    端口与 DSH Web 同源；失败一律静默（不阻断建模）。
+    try:
+        _port = os.environ.get("DSH_WEB_PORT") or "19387"
+        _url = "http://127.0.0.1:%s/dsh-engineering-ui/sw-guard-job" % _port
+        import urllib.request as _ur
+        _req = _ur.Request(_url, method="POST",
+                           headers={"Content-Type": "application/json"})
+        _ur.urlopen(_req, timeout=5).read()
+    except Exception:
+        # 拿不到 job id 不影响建模：① 那条路已经在看护
+        pass
 
 
 def _gate_sw_unlock(lock):
@@ -3868,6 +4982,8 @@ def main():
                 "ping": "轻量存活探测（只读，不连 SW）",
                 "version": "桥接与依赖版本（只读，不连 SW）",
                 "self-path": "返回本脚本绝对路径（只读）",
+                "selftest": "【BUG-观察-17/1】离线自检：annotate API 归属+参数"
+                            "个数+回退顺序、save 相对路径归位（只读，不连 SW）",
                 "open/new/info/list/massprops/close/save": "文档基本操作",
                 "sketch-rect": "画矩形并拉伸（快速验证）",
                 "run <script.py>": "执行建模脚本（核心能力）",
@@ -3878,7 +4994,13 @@ def main():
                 "export-pdf <图纸>": "【Bug-45】导出 PDF（自动补 .pdf 后缀；"
                                      "多方法兜底 SaveAs3/SaveAs2/ExportToPDF）",
                 "annotate <图纸>": "【Bug-34】自动插入模型尺寸标注 + GB/T 检查报告",
-                "bore <孔径> [--axis Z]": "【Bug-42】专用孔命令（显式指定轴线方向）",
+                "bore <孔径> [深度] [--axis X|Y|Z] [--through]": "【Bug-42 + P1 修复】"
+                                     "专用孔命令（显式指定轴线方向）；"
+                                     "不给深度=完全贯穿，给深度=盲孔",
+                "asm-verify <装配体.sldasm>": "【装配强制路径】按文档 §10.1 用 "
+                                     "FeatureByName 逐个查证配合是否存在"
+                                     "（不要依赖 FirstFeature/mate_count 的 count）；"
+                                     "只读，不取锁、不需 --room",
                 "title-block <图纸> [字段=值 ...]": "【Bug-34】填写标题栏"
                                                     "（材料/比例/图号/设计者/日期）",
                 "cad-validate <图纸>": "CADX 几何验证（7 项检查）",
@@ -3964,6 +5086,10 @@ def main():
     #       否则无法回答"SW 到底连上没有"（这正是本集合存在的意义）。
     _NO_LOCK_CMDS = {"self-path", "doctor", "status", "info", "list",
                      "sw-proc", "help", "version", "ping",
+                     # ──【BUG-观察-17 / 观察-1 修复】selftest 是纯 Python 离线自检 ──
+                     # 不连 SW、不写业务产物、不抢独占权 → 既不取锁也不该被
+                     # "并行模式必须带 --room"拦住（否则 SW 未运行时自检跑不起来）。
+                     "selftest",
                      # ── 【BUG-02 实机补强】physics-* 全部是【纯计算】命令 ──
                      # 它们只读载荷工况 JSON、用 numpy 算，完全不碰 SolidWorks，
                      # 不产生文件冲突，因此不需要 SW 独占权、也不该被
@@ -3994,7 +5120,15 @@ def main():
                      # conn-launch 会拉起进程，但这正是它的语义（用户主动点击），
                      #   且它不写 SW 业务产物、不抢 SW 独占锁。
                      "conn-probe", "conn-status", "conn-gate",
-                     "conn-launch", "conn-log"}
+                     "conn-launch", "conn-log",
+                     # 【10 分钟自动刷新】纯进程层检测：只读 tasklist，
+                     #   比 conn-probe 更轻，同样是零副作用。
+                     "conn-probe-process-only",
+                     # ── 【装配强制路径】asm-verify 是只读验收命令 ──────────
+                     # 它只打开装配体查 FeatureByName，不改模型、不写产物
+                     # → 既不取 SW 独占锁，也不该被"并行模式必须带 --room"拦住
+                     # （主对话想全局核查装配质量时没有房间归属）。
+                     "asm-verify"}
     # ② 真正不碰 SolidWorks 的命令（main() 据此把 sw 置为 None）。
     #    ⚠️ 绝不包含 doctor / status / info / list —— 它们必须连 SW。
     #
@@ -4017,7 +5151,12 @@ def main():
     #      反而把 SolidWorks 拉起来了。
     _LOCAL_CMDS = {"self-path", "help", "version", "ping", "sw-proc",
                    "conn-probe", "conn-status", "conn-gate",
-                   "conn-launch", "conn-log"}
+                   "conn-launch", "conn-log",
+                   "conn-probe-process-only",
+                   # ──【BUG-观察-17 / 观察-1 修复】纯 Python 离线自检 ──────
+                   # 只用 mock 假对象 + 临时目录，【完全不碰 SolidWorks】，
+                   # 因此必须在此列：SW 未运行时也要能跑，否则自检形同虚设。
+                   "selftest"}
     _NO_SW_CMDS = _PURE_COMPUTE_CMDS | _CAD_ONLY_CMDS | _LOCAL_CMDS
     # ── 【观察点 10 修复】只读诊断类：需要连 SW，但不该强制 --room ─────────
     # ⚠️ 必须与 _READONLY_CMDS【分开】—— 后者会被 `_NO_SW_CMDS = _READONLY_CMDS`
@@ -4056,7 +5195,7 @@ def main():
         # 【Bug-34/35 修复】annotate / title-block 也要 SW 独占权并写文件；
         #   dxf 现在也接受 .slddrw（Bug-35）。
         _ROOM_REQUIRED_CMDS = {"run", "drawing", "dwg", "dxf", "cad-validate",
-                               "annotate", "title-block"}
+                               "annotate", "title-block", "bore"}
 
         # -- 【新-1 修复】单房间时自动采用，不再一律拒绝 ------------------
         # 测试反馈：照文档跑 sw_bridge.py drawing <零件> 直接被拒(rc=2)，
@@ -4220,6 +5359,23 @@ def main():
                 result = {"ok": False, "error": "需要零件路径"} 
         elif cmd == "sketch-rect":
             result = cmd_sketch_rect(sw, _args[1], _args[2], _args[3])
+        elif cmd == "bore":
+            # ── 【P1-BUG-bore 无 dispatch 分支】help 列出但无法调用 ──────────
+            # 原缺陷：help 文本（4592–4626）明确列出
+            #   `bore <孔径> [--axis Z]`，但 dispatch 链里【没有任何分支】，
+            #   调用会一路落到 else 的 `unknown command` 并 exit 2
+            #   （README「已知限制 1」已承认，但一直没补）。
+            # 修复：接通 swapi.SWModel.bore()（swapi.py:7120，Bug-42 已实现
+            #   但从未被 CLI 暴露），把 help 承诺的接口真正做出来。
+            # 用法：bore <孔径mm> [深度mm] [--axis X|Y|Z] [--through] [--cx] [--cy]
+            result = _cmd_bore(sw, _args, args)
+        elif cmd == "asm-verify":
+            # ── 【装配强制路径】配合验收命令 ──────────────────────────────
+            # 按《SW装配实战经验总结·融合版》§10.1 的正确判据
+            #（FeatureByName 逐个查证，不用会误报的 FirstFeature 遍历）
+            # 检查装配体到底有没有配合。用法：
+            #   python sw_bridge.py asm-verify "<装配体.sldasm>"
+            result = cmd_asm_verify(sw, _args[1] if len(_args) > 1 else "")
         elif cmd == "export-pdf":
             result = cmd_export_pdf(sw, _args[1] if len(_args) > 1 else "")
         elif cmd == "run":
@@ -4270,6 +5426,9 @@ def main():
             result = cmd_ping()
         elif cmd == "version":
             result = cmd_version()
+        elif cmd == "selftest":
+            # 【BUG-观察-17 / BUG-观察-1 修复】离线自检（不连 SW，零副作用）
+            result = cmd_selftest()
         # ── 【连接区】SW/CAD 连接探测与流程判断（零副作用，不取 SW 锁）──
         elif cmd == "conn-probe":
             _ct = None
@@ -4284,6 +5443,17 @@ def main():
                 resolve_paths=("--resolve-paths" in _args))
         elif cmd == "conn-status":
             result = cmd_conn_status()
+        # ── 【10 分钟自动刷新】纯进程层检测（零 COM / 零弹窗）──────────────
+        #   设置页每 10 分钟调它一次：只看进程在不在，没了就把灯熄灭。
+        #   与 conn-probe 严格分开 —— 后者会发 COM，可能把软件拉起来。
+        elif cmd == "conn-probe-process-only":
+            _pot = None
+            for _i in range(1, len(_args)):
+                if _args[_i] == "--target" and _i + 1 < len(_args):
+                    _pot = [str(_args[_i + 1]).strip().lower()]
+                elif _args[_i].startswith("--target="):
+                    _pot = [str(_args[_i].split("=", 1)[1]).strip().lower()]
+            result = cmd_conn_probe_process_only(_pot)
         elif cmd == "conn-gate":
             _gt = "sw"
             for _i in range(1, len(_args)):
@@ -4383,8 +5553,21 @@ def main():
                                           "conversion": conv}
                                 dxf_path = None
                         if dxf_path:
+                            # ── 【P1-BUG-验证链路缺图层重映射】────────────────
+                            # 原缺陷：重映射只在 cmd_dxf 导出时做。用户手工用
+                            #   AutoCAD 出图、或直接传一个 .dxf 进来验证时，
+                            #   中文层名原样进入检查 → 必然一堆 MISSING_LAYER。
+                            # 修复：验证【之前】对 DXF 做一次重映射（幂等：
+                            #   已是标准层的不会被再改），并回显映射台账。
+                            _rm_info = None
+                            try:
+                                _rm_info = _remap_dxf_layers(dxf_path, rewrite=True)
+                            except Exception as _e_rm2:
+                                _rm_info = {"ok": False, "error": repr(_e_rm2)}
                             try:
                                 result = ac_validate.validate_dxf(dxf_path, rules)
+                                if _rm_info is not None:
+                                    result["layer_remap"] = _rm_info
                                 if conv_info:
                                     result["dwg_converted_from"] = draw_path
                                     result["dxf_used"] = dxf_path
@@ -4564,6 +5747,29 @@ def main():
                 result = _pb.cmd_list_domains()
         else:
             result = {"ok": False, "error": f"unknown command: {cmd}"}
+        # ── 【P1 修复·实机发现】COM 对象兜底，绝不让 json.dumps 崩掉 ──────
+        # 实机跑 `bore` 时，swapi 把 win32com Feature 对象放进返回值，
+        #   json.dumps 直接抛 TypeError → 整条命令以 traceback 收场，
+        #   调用方拿不到"孔其实建成功了"这一事实。
+        # 这里做统一兜底：把任何不可序列化对象降级为 {__type__, repr}，
+        #   保证"命令成功/失败"始终可读；具体 handler 仍应自行转换（如 bore）。
+        try:
+            json.dumps(result, ensure_ascii=False)
+        except TypeError:
+            def _jsonable(o):
+                if isinstance(o, dict):
+                    return {str(k): _jsonable(v) for k, v in o.items()}
+                if isinstance(o, (list, tuple)):
+                    return [_jsonable(x) for x in o]
+                if isinstance(o, (str, int, float, bool)) or o is None:
+                    return o
+                # COM 句柄 / 其它对象：保留类型名，丢掉句柄本身
+                try:
+                    _r = repr(o)
+                except Exception:
+                    _r = "<unrepr>"
+                return {"__type__": type(o).__name__, "repr": _r[:200]}
+            result = _jsonable(result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         # ── 【退出码语义 · 最终约定（Bug1 修正）】────────────────────────────
         # 上一版一刀切"ok:false → exit 1"过严：像 `drawing 不存在的零件`

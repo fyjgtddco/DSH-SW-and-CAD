@@ -371,6 +371,22 @@ export class DefenseSigner {
       //   磁盘报告里取出并签名；Python 侧此后一个字段都不许再改。
       const _fea = rep.fea_result || {};
       const _fat = _fea.fatigue || {};
+      // ── 【观察点 14/BUG-观察-14 修复·等效模型失真披露】─────────────────
+      // 背景：physics-optimize 把零件【包围盒】的排序三边等效为【实心矩形
+      //   棱柱】悬臂梁建模（fea_solver 的 equivalent_solid_cantilever_from_bbox），
+      //   完全忽略真实截面形状与载荷路径。
+      //   实测 结构件：equivalent_solid_volume_mm3=9720000 是真实体积
+      //   164680 mm³ 的 59.02 倍 —— 而这个失真原先【只写进报告文本】，
+      //   从不参与任何判定，防线于是把一个建立在 59 倍失真模型上的
+      //   SF=8102 当作"强度合格"依据放行。
+      // 现在：把模型来源与失真倍数纳入待签体，供 judgeDefense 真正判定。
+      const _geo = _fea.geometry_used || {};
+      const _lim = (rep.release_readiness || {}).limitations;
+      // 失真倍数：字段缺失 / 非数 → null（老报告兼容，不因此拦截）
+      const _vinf = (_geo.volume_inflation_x === undefined
+                     || _geo.volume_inflation_x === null)
+        ? null : Number(_geo.volume_inflation_x);
+      const _viNum = Number.isFinite(_vinf) ? _vinf : null;
       const payload = {
         kind: 'physics',
         // schema / at / ts 由宿主在签名时写定，Python 侧不得再补（否则验签失配）
@@ -395,6 +411,17 @@ export class DefenseSigner {
         release_status: String((rep.release_readiness || {}).status || ''),
         fatigue_verdict: String(_fat.verdict || ''),
         fatigue_sf: _fat.fatigue_sf === undefined ? null : _fat.fatigue_sf,
+        // ── 【观察点 14/BUG-观察-14】等效模型的可信度事实（纳入签名，不可事后篡改）
+        //   model               —— 求解器实际使用的几何模型标识
+        //   volume_inflation_x  —— 等效实心体积 / 真实体积（失真倍数，可能为 null）
+        //   model_trustworthy   —— 失真 ≤1.5 倍视为可信；体积字段缺失(null)
+        //                          时 `!(null > 1.5) === true`，即判为"可信"，
+        //                          使"老报告无此字段"不会被误拦截
+        //   limitations         —— 报告自述的适用边界/局限（含等效性说明）
+        model: String(_geo.model || ''),
+        volume_inflation_x: _viNum,
+        model_trustworthy: !(_viNum > 1.5),
+        limitations: Array.isArray(_lim) ? _lim : [],
         source: 'physics_bridge',
       };
       return { ok: true, payload };
@@ -808,23 +835,106 @@ export class DefenseSigner {
           const ph = phD.cred;
           const overall = String(ph.overall_status || ph.overall || '').toUpperCase();
           if (overall === 'FAIL') {
-            // 凭据有效，结论不合格 —— 措辞必须点明"结论 FAIL"，
-            //   并带上实测值，避免被误读为"凭据/验签出问题"。
+            // ── 【BUG-观察-13 修复】归因必须【按 failed_gates 真实分派】────
+            // 实测缺陷（真实产物 output/tools/reports/结构件.physics.json）：
+            //   该凭据 overall=FAIL、failed_gates=[{id:DESIGN_SPACE}]（零件 z 跨度
+            //   180mm > 设计域 120mm，纯【几何越界】，与强度/寿命无关），
+            //   而原实现【对任何 FAIL 都硬编码】输出：
+            //     "…（安全系数 8102.09，要求≥见工况）；疲劳判定 PASS
+            //      —— 属【强度/寿命不达标】，不是凭据问题"
+            //   它只回显 safety_factor(8102.09) 与 fatigue_verdict(PASS)
+            //   —— 恰恰是最不可能导致 FAIL 的两个值 —— 却【完全不读
+            //   failed_gates】，于是把几何越界错报成"强度/寿命不达标"，
+            //   自相矛盾且把排查方向带偏。
+            // 现在：① 只按 failed_gates[].id 分派归因；
+            //   ② 仅当闸口里【确实含】SAFETY_FACTOR 时才回显 safety_factor，
+            //      仅当含 FATIGUE* 时才回显 fatigue_verdict（避免打印与
+            //      FAIL 无关的数值造成误导）；
+            //   ③ 明确列出未通过的闸口 id 列表（最有用的信息）；
+            //   ④ 未知 id 原样列出，不瞎归类。
+            const _att = this._gateAttribution(ph.failed_gates);
             const _sf = (ph.safety_factor === undefined ? null : ph.safety_factor);
             const _fat = String(ph.fatigue_verdict || '');
-            out.blockers.push(
-              '【防线②物理】凭据有效（已验签），但物理校核结论为 FAIL'
-              + (_sf !== null ? '（安全系数 ' + _sf : '')
-              + (_sf !== null ? '，要求≥' + (opts.minSafetyFactor || '见工况') + '）' : '')
-              + (_fat ? '；疲劳判定 ' + _fat : '')
-              + ' —— 属【强度/寿命不达标】，不是凭据问题，须改进设计后重跑校核');
+            if (!_att.ids.length) {
+              // 没有闸口明细 → 只能说"结论 FAIL"，绝不臆断成因
+              //   （尤其不得再写死"强度/寿命不达标"）
+              out.blockers.push(
+                '【防线②物理】凭据有效（已验签），但物理校核结论为 FAIL'
+                + '（报告未提供 failed_gates 闸口明细，无法据此归因）'
+                + ' —— 不是凭据问题，请查阅报告 '
+                + (String(ph.report_path || '') || String(ph.run_id || '（run_id 未记录）'))
+                + ' 的闸口结论后重跑校核');
+            } else {
+              out.blockers.push(
+                '【防线②物理】凭据有效（已验签），但物理校核结论为 FAIL'
+                + '；未通过闸口: ' + _att.ids.join('、')
+                + ' —— 属【' + _att.labels.join('、') + '】'
+                // 只有闸口【确实与强度相关】时才回显安全系数：否则 SF 常是
+                //   最不可能导致 FAIL 的值（实测 8102.09），打印只会误导。
+                + (_att.hasSafety
+                   ? '；安全系数 ' + (_sf === null ? '未提供' : _sf)
+                     + '，要求≥' + (opts.minSafetyFactor || '见工况')
+                   : '')
+                // 同理：只有含 FATIGUE* 闸口时才回显疲劳判定
+                + (_att.hasFatigue && _fat ? '；疲劳判定 ' + _fat : '')
+                + '；不是凭据问题，须按上述闸口修正设计后重跑校核');
+              // 兜底诚实性：若凭据 fatigue_verdict=FAIL 却未列入 failed_gates，
+              //   属报告口径不一致。该事实本身会阻断，不能因"无 FATIGUE 闸口"
+              //   就被静默丢弃 —— 但也不把它混进上面的归因句（那会重新变成
+              //   "回显无关数值"）。这里单列一条 warning。
+              if (!_att.hasFatigue && _fat.toUpperCase() === 'FAIL') {
+                out.warnings.push(
+                  '【防线②物理】凭据 fatigue_verdict=FAIL，但 failed_gates 未列出'
+                  + ' FATIGUE 闸口（报告口径不一致）—— 疲劳/寿命结论仍须按 FAIL 处理');
+              }
+            }
           } else if (overall !== 'PASS' && overall !== 'REVIEW') {
             out.blockers.push('【防线②物理】凭据有效（已验签），但校核结论缺失或无法识别（overall='
                               + (overall || '空') + '）');
           } else if (overall === 'REVIEW') {
             out.warnings.push('【防线②物理】物理校核为 REVIEW，已放行但留痕');
           }
-          out.details.physics = { overall, run_id: ph.run_id, verified: true };
+          // ── 【BUG-观察-14 修复·等效模型失真必须参与判定】────────────────
+          // 实测缺陷：physics-optimize 把零件【包围盒】的排序三边等效为【实心
+          //   矩形棱柱】悬臂梁建模，本次 equivalent_solid_volume_mm3=9720000
+          //   是真实体积 164680 mm³ 的 59.02 倍（volume_inflation_x=59.02）。
+          //   这个失真原先【只写进报告文本（limitations）】，从不参与任何
+          //   判定 —— 防线于是把一个建立在 59 倍失真模型上的 SF=8102 当作
+          //   "强度合格"依据放行。
+          // 现在：失真倍数已纳入待签体并被签名背书，这里据此判定。
+          //   · model_trustworthy === false（失真 >1.5 倍）→ 【阻断】：
+          //     安全系数不能作为强度合格依据，必须用真实几何重跑。
+          //   · 字段缺失（老报告 / volume_inflation_x=null）→ 不拦截，
+          //     保持原行为（model_trustworthy 不会为 false）。
+          //   · over_design（SF 高于上限）是良性情形，不改变 model_trustworthy，
+          //     因此不会误触发本条。
+          if (ph.model_trustworthy === false) {
+            const _vx = (typeof ph.volume_inflation_x === 'number'
+                         && Number.isFinite(ph.volume_inflation_x))
+              ? ph.volume_inflation_x : null;
+            const _sfTxt = (ph.safety_factor === undefined || ph.safety_factor === null)
+              ? '未提供' : String(ph.safety_factor);
+            out.blockers.push(
+              '【防线②物理】等效模型失真 ' + (_vx === null ? '超限' : _vx)
+              + ' 倍（等效实心体积 / 真实体积），安全系数 ' + _sfTxt
+              + ' 不可作为强度合格依据 —— 须用真实几何（STEP 导入或 --part 绑定）'
+              + '重跑校核'
+              + (String(ph.model || '')
+                 ? '（本次模型: ' + String(ph.model) + '）' : ''));
+          }
+          out.details.physics = { overall, run_id: ph.run_id, verified: true,
+                                  model: ph.model === undefined ? null : ph.model,
+                                  volume_inflation_x:
+                                    ph.volume_inflation_x === undefined
+                                      ? null : ph.volume_inflation_x,
+                                  model_trustworthy:
+                                    ph.model_trustworthy === undefined
+                                      ? null : ph.model_trustworthy,
+                                  failed_gates: Array.isArray(ph.failed_gates)
+                                    ? ph.failed_gates
+                                        .map((g) => String((g && g.id) || g || ''))
+                                        .filter(Boolean)
+                                    : [] };
         }
         const dmD = this.readCredentialDetailed(reportsDir, room, '.domain.json');
         if (!dmD.ok) {
@@ -896,6 +1006,73 @@ export class DefenseSigner {
       default:
         return label + '凭据不可用（' + ((det && det.reason) || '未知原因') + '）';
     }
+  }
+
+  /**
+   * 【BUG-观察-13】按 failed_gates 的闸口 id 分派【真实】归因文字。
+   *
+   * 为什么需要：原实现对任何 overall=FAIL 都写死"属【强度/寿命不达标】"，
+   *   只回显 safety_factor / fatigue_verdict，完全不读 failed_gates ——
+   *   于是把"几何越界"（DESIGN_SPACE）错报成强度问题（实测 reports/
+   *   结构件.physics.json：SF=8102、疲劳 PASS，FAIL 的真实原因是零件
+   *   z 跨度 180mm 超出 120mm 设计域）。
+   *
+   * 分派规则：
+   *   DESIGN_SPACE        → 几何越界/设计域不满足
+   *   SAFETY_FACTOR       → 强度不达标
+   *   FATIGUE*            → 寿命/疲劳不达标
+   *   WALL_THICKNESS      → 壁厚不达标
+   *   MAX_DISPLACEMENT    → 刚度/位移超限
+   *   CONNECTIVITY        → 拓扑不连通（多实体）
+   *   MESH_QUALITY        → 网格质量不达标
+   *   未知 id             → 原样列出 id，不归类（不瞎猜）
+   * 多个闸口同时 FAIL 时全部列出，用"、"连接。
+   *
+   * @param failedGates - 凭据里的 failed_gates（元素可为 {id} 或裸字符串）。
+   * @returns {{ids: string[], labels: string[], hasSafety: boolean, hasFatigue: boolean}}
+   */
+  _gateAttribution(failedGates) {
+    const out = { ids: [], labels: [], hasSafety: false, hasFatigue: false };
+    const arr = Array.isArray(failedGates) ? failedGates : [];
+    const _seenId = new Set();
+    const _seenLabel = new Set();
+    for (const g of arr) {
+      // 兼容两种形态：{id, status, ...} 与 裸字符串 'SAFETY_FACTOR'
+      const id = String((g && typeof g === 'object' ? g.id : g) || '').trim().toUpperCase();
+      if (!id || _seenId.has(id)) continue;
+      _seenId.add(id);
+      out.ids.push(id);
+      if (id === 'SAFETY_FACTOR') out.hasSafety = true;
+      if (id.indexOf('FATIGUE') === 0) out.hasFatigue = true;
+      // 归因标签：未知 id 不硬套类别，直接回显"未归类闸口 XXX"，
+      //   让读者看到原始 id 而不是一个编造的成因。
+      let label;
+      switch (id) {
+        case 'DESIGN_SPACE':
+          label = '几何越界/设计域不满足'; break;
+        case 'SAFETY_FACTOR':
+          label = '强度不达标'; break;
+        case 'WALL_THICKNESS':
+          label = '壁厚不达标'; break;
+        case 'MAX_DISPLACEMENT':
+          label = '刚度/位移超限'; break;
+        case 'CONNECTIVITY':
+          label = '拓扑不连通（多实体）'; break;
+        case 'MESH_QUALITY':
+          label = '网格质量不达标'; break;
+        default:
+          // FATIGUE_STRENGTH / FATIGUE_LIFE / 其它 FATIGUE* 前缀
+          label = (id.indexOf('FATIGUE') === 0)
+            ? '寿命/疲劳不达标'
+            : ('未归类闸口 ' + id);
+          break;
+      }
+      if (!_seenLabel.has(label)) {
+        _seenLabel.add(label);
+        out.labels.push(label);
+      }
+    }
+    return out;
   }
 
   /**
