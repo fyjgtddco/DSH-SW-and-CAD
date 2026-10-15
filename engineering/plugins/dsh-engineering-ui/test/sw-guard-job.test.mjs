@@ -274,6 +274,44 @@ test('★真执行：击杀失败（非"未找到"）必须 ok:false（不得当
 // 二、源码契约（ESM / 路由 / 常量）
 // ══════════════════════════════════════════════════════════════════════════
 
+test('★★第4项：用到的 node 内置模块必须已 import（曾漏 import os → 端点 404）', () => {
+  // 【为什么必须锁这条】实测踩到的真 bug：
+  //   sampleSystem() 里用了 os.totalmem()/os.freemem()/os.cpus()，
+  //   但 index.js 顶部**没有 import os** → 运行时 ReferenceError →
+  //   看护端点装载失败 → /dsh-engineering-ui/sw-guard-job 返回 404。
+  //   语法检查（node --check）发现不了这种"标识符未定义"的问题，
+  //   只有真正执行到那行才会炸 —— 因此这里做静态的"使用即须已导入"检查。
+  const code = HOST_SRC.replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  // 收集已 import 的绑定名
+  const imported = new Set();
+  for (const m of code.matchAll(/^import\s+(?:\*\s+as\s+(\w+)|(\w+)|{([^}]+)})\s+from/gm)) {
+    if (m[1]) imported.add(m[1]);
+    if (m[2]) imported.add(m[2]);
+    if (m[3]) {
+      for (const part of m[3].split(',')) {
+        const nm = part.trim().split(/\s+as\s+/).pop().trim();
+        if (nm) imported.add(nm);
+      }
+    }
+  }
+  // 检查本功能用到的 node 内置
+  const checks = [
+    ['os', /\bos\s*\.\s*(totalmem|freemem|cpus)\s*\(/],
+    ['spawnSync', /\bspawnSync\s*\(/],
+    ['path', /\bpath\s*\.\s*(join|dirname|basename|resolve)\s*\(/],
+    ['fs', /\bfs\s*\.\s*(readFileSync|writeFileSync|existsSync|promises)\b/],
+  ];
+  const missing = [];
+  for (const [name, re] of checks) {
+    if (re.test(code) && !imported.has(name) && !code.includes(`const ${name} =`)) {
+      missing.push(name);
+    }
+  }
+  assert.deepEqual(missing, [],
+    '★ 以下内置模块被使用但未 import（运行时会 ReferenceError）：' + missing.join(', '));
+});
+
 test('第4项：必须用 ctx.jobs（而不是另起一套进程管理）', () => {
   assert.ok(HOST_SRC.includes("ctx.get('jobs')") || HOST_SRC.includes('ctx.get("jobs")'),
     "必须读 ctx.get('jobs') 服务");

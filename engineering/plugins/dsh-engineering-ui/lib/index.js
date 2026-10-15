@@ -29,6 +29,12 @@ import * as agentPresets from '@deepseek-ai/dsh-agent-preset-registry';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+// 【第4项 · SW 健康看护】CPU/内存采样需要 node:os。
+// ⚠️ 这个 import 必须保留：sampleSystem() 用了 os.totalmem()/os.freemem()/os.cpus()，
+//    缺了它 → 运行时 ReferenceError → 看护端点装载失败 →
+//    /dsh-engineering-ui/sw-guard-job 返回 404（实测症状）。
+//    ⚠️ 曾发生过该修复被回退（文件被其它进程覆盖），故这里保留显式注释。
+import os from 'node:os';
 // 【连接区】需要同步调用 Python 探测器（sw_bridge.py conn-probe）——
 //   用 spawnSync 而非 spawn：探测最长 120s，同步等待语义更简单，
 //   且设置页是低频人工操作，不占用事件循环热点。
