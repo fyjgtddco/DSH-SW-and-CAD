@@ -25,8 +25,20 @@ print("\n=== Bug-39: 脚本身份自校验（wrapper 内容）===")
 check("wrapper 记录 _EXPECT_PATH", '_EXPECT_PATH' in src)
 check("wrapper 记录 _EXPECT_SHA", '_EXPECT_SHA' in src)
 check("wrapper 运行时重算 sha 并比对", 'hashlib.sha1(open(_EXPECT_PATH' in src)
-check("hash 不符时拒绝执行(exit=4)", 'raise SystemExit(4)' in src)
-check("路径不存在时拒绝执行(exit=3)", 'raise SystemExit(3)' in src)
+# ★【断言更新】退出码已从 3/4 改为专用码 11/12。
+#   原因（代码里的 P1-BUG 注释）：CLI 契约里 3 = "SW 忙需重试"，
+#   而 wrapper 原先也用 3 表示"脚本路径不存在"，同一码两套含义 →
+#   调用方无法区分"该等 90 秒重试"还是"脚本被人换了"。
+#   现改为 11/12（契约外专用码），并用常量而非字面量生成 wrapper。
+#   本测试原先硬编码 'raise SystemExit(3)'，代码改用常量后就误报失败。
+check("hash 不符时拒绝执行(专用码 12)",
+      'raise SystemExit({_WRAPPER_EXIT_SHA_MISMATCH})' in src
+      and '_WRAPPER_EXIT_SHA_MISMATCH = 12' in src)
+check("路径不存在时拒绝执行(专用码 11)",
+      'raise SystemExit({_WRAPPER_EXIT_PATH_MISSING})' in src
+      and '_WRAPPER_EXIT_PATH_MISSING = 11' in src)
+check("★ 专用码与 CLI 契约码 3 隔离（不再语义重载）",
+      'raise SystemExit(3)' not in src and 'raise SystemExit(4)' not in src)
 
 print("\n=== Bug-39: 结果回显实际执行脚本 ===")
 check("回显 executed_script", 'result["executed_script"] = script_abs' in src)

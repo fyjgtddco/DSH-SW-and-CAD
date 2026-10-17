@@ -198,7 +198,7 @@ export function classifyPnpmFailure(output, exitCode) {
         return {
             code: 'unexpected-store',
             recoverable: false,
-            message: `这个 profile 的 node_modules 链接到的 pnpm store，和当前 pnpm 默认使用的 store 不是同一个，pnpm 因此拒绝所有安装与卸载。${detail}\n在 profile 目录里执行一次 \`pnpm install --store-dir <上面第一个路径>\` 重新链接即可（dsh 运行时可能占用文件，必要时先退出 dsh）/ this profile's node_modules is linked to a different pnpm store than the one pnpm now resolves, so pnpm refuses every install and uninstall.${detail}\nRelink by running \`pnpm install --store-dir <the first path above>\` once in the profile directory (stop dsh first if files are locked)`,
+            message: `这个 profile 的 node_modules 链接到的 pnpm store，和 pnpm 现在解析出的 store 不是同一个，pnpm 因此拒绝这个 profile 的所有安装与卸载。典型触发是把 $DSH_HOME 迁到另一个挂载点：迁盘前建的 node_modules 记着旧盘上的 store，而 pnpm 会按新的挂载点自动改选一个（#244 的另一种触发，见 #715）。${detail}\n持久的修法：把**记录里的那个** store 写进 profile 的 pnpm-workspace.yaml（顶层、驼峰）：\n\n  storeDir: <上面第一个路径>\n\n加完不用重装任何东西——包本来就在那个 store 里，直接重试即可（dsh 运行时可能占用文件，必要时先退出 dsh）。\n注意 \`pnpm install --store-dir <路径>\` **不是修复**：它只对那一次命令生效，也不会改写 node_modules/.modules.yaml 里的记录，所以下一条命令会报同样的错（pnpm 11.7 与 11.22 实测）。\n想改用 pnpm 现在解析出的那个 store 也行，但那要求清空并重装整个 node_modules（包全部重新下载），代价由你决定。 / this profile's node_modules is linked to a different pnpm store than the one pnpm now resolves, so pnpm refuses every install and uninstall for it. The usual trigger is moving $DSH_HOME to another mount point: a node_modules built before the move records the old disk's store while pnpm re-selects one for the new mount.${detail}\nDurable fix: write the store from the RECORD into the profile's pnpm-workspace.yaml (top level, camelCase):\n\n  storeDir: <the first path above>\n\nNothing has to be reinstalled — the packages are already in that store — so just retry (stop dsh first if files are locked).\nNote that \`pnpm install --store-dir <path>\` is NOT a fix: it applies to that one command and does not rewrite the record in node_modules/.modules.yaml, so the next command fails exactly the same way (measured on pnpm 11.7 and 11.22).\nSwitching to the store pnpm now resolves is also possible, but it requires purging and reinstalling the whole node_modules (every package re-downloaded) — your call, not the market's.`,
         };
     }
     // #367: pnpm verifies every tarball resolution in the lockfile before it
@@ -270,6 +270,34 @@ export function classifyPnpmFailure(output, exitCode) {
             message: `profile 里的一个 pnpm 补丁打不上了${which}。pnpm 会继续把这个包装上，但装的是没打补丁的原版——通常下次启动才会以「插件加载失败」暴露出来。多半是包升级后挪动了补丁指向的文件（例如补丁改的是 client/client.js，而新版本发的是 lib/client.js）。请更新或删掉这个补丁文件，以及 profile package.json 里 pnpm.patchedDependencies 中对应的那一条 / a pnpm patch in this profile no longer applies${whichEn}. pnpm still installs the package, but unpatched — which usually surfaces at the next boot as "failed to load plugins" rather than here. The usual cause is the package moving the file the patch targets (for example a patch against client/client.js when the release now ships lib/client.js). Update or remove that patch file and its entry under pnpm.patchedDependencies in the profile's package.json`,
         };
     }
+    // #740 by @lws2004: the other half of the story above. `patchedDependencies`
+    // keys on `pkg@exactVersion`, and once the installed version moves past that
+    // key pnpm 12 treats the stale patch as a HARD error: it writes NOTHING at
+    // all. So an update of that plugin is refused in full — the version stays
+    // where it was, the market's own log holds only exit=1, and the user reads
+    // "the update did not apply" for what is really a patch that no longer
+    // matches. Unlike ERR_PNPM_PATCH_FAILED there is no unpatched install to
+    // discover later, which makes this the more confusing of the two. The patch
+    // is the user's, so the market names the entries and says where to fix them
+    // rather than guessing a retarget.
+    if (output.includes('ERR_PNPM_UNUSED_PATCH')) {
+        // `[^\n"]+`: the same sentence also arrives inside the ndjson stream,
+        // where it ends at a quote rather than at the line — matching to the line
+        // end there captured `"}}` as part of the package name.
+        const unused = /The following patches were not used:\s*([^\n"]+)/
+            .exec(withDecodedPnpmDiagnostics(output))?.[1];
+        const named = unused === undefined
+            ? []
+            : unused.split(',').map(entry => entry.trim()).filter(entry => entry !== '');
+        const which = named.length === 0 ? '' : `（${named.join('、')}）`;
+        const whichEn = named.length === 0 ? '' : ` (${named.join(', ')})`;
+        return {
+            code: 'unused-patch',
+            recoverable: false,
+            pkg: named.length === 1 ? named[0] : undefined,
+            message: `profile 里的 pnpm 补丁有一条已经用不上了${which}：patchedDependencies 是按「包名@精确版本」钉的，而这次要装的版本已经越过它，pnpm 12 因此判定整条命令失败——它什么都没写，所以看起来像「点了更新没反应」。要么把补丁更新到新版本、并把 profile package.json 里 pnpm.patchedDependencies 的键改成「包名@新版本」，要么在新版本已经自带这个修复时直接删掉这一条和对应的补丁文件 / a pnpm patch in this profile is no longer used${whichEn}: patchedDependencies keys on "package@exactVersion", and the version being installed has moved past that key, so pnpm 12 fails the WHOLE command and writes nothing at all — which is why the update looks like it simply did not apply. Either retarget the patch to the new version and change its pnpm.patchedDependencies key in the profile's package.json to "package@newVersion", or — when the new release already carries that fix — drop the entry and its patch file`,
+        };
+    }
     if (output.includes('ERR_PNPM_ADDING_TO_ROOT')) {
         return {
             code: 'adding-to-root',
@@ -313,6 +341,52 @@ export function classifyPnpmFailure(output, exitCode) {
     // pnpm's FETCHER, before anything lands in node_modules — so the package
     // the user must approve is not installed yet, and pnpm's own hint names a
     // commit-pinned codeload URL that changes on every push.
+    // #701: pnpm 12's native engine (pnpm-native) aborting on an allocation it
+    // cannot get — "memory allocation of 5368709120 bytes failed", Windows exit
+    // 3221226505 (0xC0000409, how a Rust abort ends there). Reported with an
+    // A/B: on pnpm 12.5.1 every run with `autoInstallPeers: false` in the
+    // workspace file (DSH writes it into every profile) aborted at ~5 GB peak
+    // RSS, every run without it passed at ~80 MB, with free memory to spare.
+    // Nothing about the plugin being installed; not something a retry of the
+    // same command changes on the reporter's data, so none is attempted.
+    if (/memory allocation of \d+ bytes failed/.test(output) || exitCode === 3221226505) {
+        return {
+            code: 'native-oom',
+            recoverable: false,
+            message: 'pnpm 12 的原生引擎在处理这个 profile 时耗尽了内存并中止——和要安装的插件无关。在 pnpm 修复之前，请改用 pnpm 11（npm install -g pnpm@11）后再试。 / pnpm 12\'s native engine ran out of memory on this profile and aborted — the plugin being installed is not the cause. Until pnpm fixes it, switch to pnpm 11 (npm install -g pnpm@11) and try again.',
+        };
+    }
+    // #698: pnpm 10.26+ and 11.0–11.5 read an allowBuilds key as
+    // `name@<version union>`, so a git or archive source there fails the WHOLE
+    // workspace file — every pnpm command in the profile, not the one plugin.
+    // Named separately from any install failure because the cure is in the
+    // profile's own pnpm-workspace.yaml, which withHoistRecovery repairs.
+    {
+        const found = /ERR_PNPM_INVALID_VERSION_UNION[\s\S]*?Found: \\?"([^"\\]+)\\?"/.exec(output);
+        if (found !== null && /@(?:git\+|https?:)/.test(found[1].slice(1))) {
+            return {
+                code: 'unparseable-build-key',
+                recoverable: false,
+                pkg: found[1],
+                message: `这个版本的 pnpm 读不懂 allowBuilds 里的 git 来源键（${found[1]}），整个 profile 的包操作都会因此失败 / this pnpm version cannot read a git-source key in allowBuilds (${found[1]}), which fails every package operation in the profile`,
+            };
+        }
+    }
+    // #596: the ssh half of #587. git asks for a passphrase (or a host-key
+    // confirmation) on a terminal a spawned child does not have; the market
+    // closes that prompt with `BatchMode=yes` so the question becomes a fast
+    // failure instead of a fifteen-minute hang. This is that failure, and it
+    // needs its own message because git's own words send the reader to the
+    // wrong place: `Permission denied (publickey)` reads as "your key is
+    // wrong", and the key is usually fine — it wants a passphrase, and the
+    // channel that would have asked for it is exactly what was shut.
+    if (/Permission denied \(publickey\)|Could not read from remote repository/.test(output)) {
+        return {
+            code: 'ssh-auth-failed',
+            recoverable: false,
+            message: 'git 无法在无人值守的情况下完成 SSH 认证。如果你的 SSH key 设了密码，请用 ssh-agent（ssh-add），或自己设置 GIT_SSH_COMMAND 指向你的命令，市场不会覆盖它。 / git could not complete SSH authentication unattended. If your SSH key has a passphrase, use ssh-agent (ssh-add), or set GIT_SSH_COMMAND to your own command — the market leaves yours alone.',
+        };
+    }
     if (output.includes('ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED')) {
         return {
             code: 'git-prepare-not-allowed',

@@ -16,6 +16,15 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# ★ 部分测试脚本把 tools 目录作为 argv[1] 读取（写成 `TOOLS = sys.argv[1]`）。
+#   原先 runner 一律不传参 → 它们在 __main__ 处 IndexError 直接崩，
+#   表现为"单独跑通过、汇总里却 ❌"的假失败（question_contract 就是这种）。
+_NEEDS_TOOLS_ARG = ("test_regression_question_contract.py",)
+
+
+def _needs_tools_arg(filename):
+    return filename in _NEEDS_TOOLS_ARG
+
 
 def discover(only=None):
     out = []
@@ -41,13 +50,23 @@ def main():
         print("RUN  " + f)
         print("=" * 72)
         try:
-            p = subprocess.run([sys.executable, os.path.join(HERE, f)],
+            # ★ 部分测试需要 tools 目录作为 argv[1]（见 _NEEDS_TOOLS_ARG）。
+            #   原先 runner 一律不传参 → 那些测试在 __main__ 处 IndexError 直接崩，
+            #   表现为"汇总里 ❌ 但单独跑却通过"的假失败。这里按需补上。
+            cmd = [sys.executable, os.path.join(HERE, f)]
+            if _needs_tools_arg(f):
+                cmd.append(HERE)
+            p = subprocess.run(cmd,
                                capture_output=True, text=True, timeout=600,
                                encoding="utf-8", errors="replace")
             tail = (p.stdout or "").strip().splitlines()
             for line in tail:
                 if "PASS=" in line or "[FAIL]" in line:
                     print("  " + line.strip())
+            if p.returncode != 0 and not any("PASS=" in l for l in tail):
+                # 崩了且没有结论行 → 打印尾部便于定位
+                for line in (tail or (p.stderr or "").strip().splitlines())[-6:]:
+                    print("  ! " + line.strip())
             results.append((f, p.returncode == 0))
         except Exception as e:
             print("  异常: %r" % (e,))

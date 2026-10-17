@@ -9,7 +9,13 @@ import { type CredentialRef } from '@deepseek-ai/dsh-credentials';
 import { type BuddyLoginFlowOptions } from './buddy-oauth.js';
 import type { BuddyRemoteModel } from './buddy.js';
 import { AccountPool } from './account-pool.js';
-/** Buddy 登录结果存储所用的凭据引用。 */
+import { type BuddyProduct } from './product.js';
+/**
+ * CodeBuddy 的登录结果存储所用的凭据引用。
+ *
+ * 等价于 `CODEBUDDY.defaultCredentialRef`，保留此导出仅为兼容既有导入方；
+ * 新代码请改用 `BuddyAuth` 实例的 `credentialRefName` 字段（随产品变化）。
+ */
 export declare const BUDDY_CREDENTIAL_REF = "BUDDY_ACCESS_TOKEN";
 /** 一次成功登录的结果。 */
 export interface BuddyLoginResult {
@@ -33,17 +39,31 @@ export interface BuddyLoginStatus {
     refreshable: boolean;
     /** 最近一次刷新失败的原因（如有）。 */
     refreshError?: string;
-    /** 当前凭据所属站点：`cn`（国内站）| `intl`（国际站）。 */
-    edition?: string;
 }
 declare module '@deepseek-ai/cordis' {
     interface Context {
         buddyAuth: BuddyAuth;
+        /**
+         * WorkBuddy 的认证服务实例。
+         *
+         * 与 `buddyAuth`（CodeBuddy）并列存在：cordis 的 `Service` 构造时按名称
+         * 注册，同名第二次注册会抛 `service "buddyAuth" has been registered`，
+         * 故两个产品必须各占一个服务名。
+         */
+        workbuddyAuth: BuddyAuth;
     }
 }
 /** Buddy 登录服务：轮询式登录 + refresh_token 静默续期。 */
 export declare class BuddyAuth extends Service {
     private readonly options;
+    /** 本实例所属的产品配置（CodeBuddy 或 WorkBuddy）。 */
+    readonly product: BuddyProduct;
+    /**
+     * 本实例默认读写的凭据 ref 名称。
+     * CodeBuddy 为 `BUDDY_ACCESS_TOKEN`，WorkBuddy 为 `WORKBUDDY_ACCESS_TOKEN`；
+     * 两个产品各自读写自己的 ref，凭据互不可见。
+     */
+    readonly credentialRefName: string;
     private readonly scheduler;
     /** refresh_token 已被后端判定失效；登录/刷新成功时重置。 */
     private refreshTokenInvalid;
@@ -52,6 +72,8 @@ export declare class BuddyAuth extends Service {
     private active;
     constructor(ctx: Context, options?: {
         fetcher?: typeof fetch;
+        product?: BuddyProduct;
+        serviceName?: string;
     });
     /** 标记 refresh_token 已失效：停止重试，并向 status() 暴露 refreshable: false 与重新登录提示。 */
     private markRefreshTokenInvalid;
@@ -68,29 +90,47 @@ export declare class BuddyAuth extends Service {
     saveCredential(credentialJson: string, refName: string, accountId: string, pool: AccountPool): Promise<void>;
     /** 报告凭据是否已配置、过期时间、是否可刷新以及最近刷新错误。 */
     status(): Promise<BuddyLoginStatus>;
+    /** 静默续期：refresh_token 换取；无 refresh_token 时明确报错（由命令提示重新登录）。 */
+    refresh(): Promise<void>;
     /**
-     * 静默续期。
+     * 用给定凭据换新令牌并合并字段（不触碰存储、调度器与错误状态）。
      *
-     * 优先刷新**账号池中当前生效的那个账号**：纯账号池部署下只有
-     * `BUDDY_ACCOUNT_*` 凭据，单凭据 ref（`BUDDY_ACCESS_TOKEN`）并不存在，
-     * 旧实现会直接抛「未配置凭据，请先登录」，导致池内 token 过期后无法续期。
-     * 池内没有可刷新账号时回退到单凭据 ref。
-     *
-     * @param pool - 账号池；提供时优先按池内账号续期。
+     * 抽出来供 {@link refresh} 与 {@link refreshAccountCredential} 共用，
+     * 避免两处各写一遍「换 token → 合并字段」而逐渐分叉。
      */
-    refresh(pool?: AccountPool): Promise<void>;
+    private refreshCredential;
     /**
-     * 刷新账号池中"下一个可用账号"的凭据，并写回该账号自身的 credentialRef。
+     * 按凭据 ref 续期**指定账号**的凭据。
      *
-     * @returns 是否刷新了某个池内账号（false 表示池内无可用/可刷新账号）。
+     * 与 {@link refresh} 的区别（这是修复既有缺陷的关键）：
+     * - `refresh()` 读写的是本实例的**默认单凭据 ref**（如 `BUDDY_ACCESS_TOKEN`），
+     *   而 Jet Hub 的账号卡片对应的是 `BUDDY_ACCOUNT_XXX` ——
+     *   用 `refresh()` 去刷账号池里的账号，实际刷的是另一个凭据；
+     * - 本方法也**不触碰** `refreshTokenInvalid` / `lastRefreshError` / 调度器：
+     *   那些状态属于「单凭据路径」，被多账号操作污染会让 UI 显示错误的失效提示。
+     *
+     * ⚠️ **必须回写账号池的 `expiresAt`**（issue !IKIRTT）：UI 卡片读的是池值，
+     * 只更新凭据会让「已过期」的红字在续期成功后依然挂着，用户无处自救。
      */
-    private refreshPoolAccount;
-    /** 用 refresh_token 换取新令牌并写回指定 ref（含登出竞态保护）。 */
-    private refreshInto;
+    refreshAccountCredential(refName: string, pool?: AccountPool, accountId?: string): Promise<void>;
     /**
-     * 批量续期所有 buddy 账号。
-     * 遍历 pool 中 enabled + refreshable 的 buddy 账号，逐一续期。
-     * 单账号失败不影响其他账号。
+     * 批量续期本产品的所有账号。
+     *
+     * **包含已停用账号**（只按 `refreshable` 过滤）。
+     *
+     * 为什么不能跳过停用账号（真实缺陷）：停用只应影响「账号池的自动选号」，
+     * 不该让凭据烂掉。早期实现有 `if (!entry.enabled ...) continue`，于是停用
+     * 一段时间后 refresh_token 过期，用户重新启用时拿到的是一个死凭据 ——
+     * 表现为「账号显示凭证过期」且**无法自动恢复**，只能重新登录。
+     * 更糟的是停用账号仍会出现在 Jet Hub 里并参与积分领取，于是点「一键领取」
+     * 时用过期凭据打腾讯接口，服务端回 HTML 错误页 → 前端报
+     * `Unexpected token '<'`。续期不该依赖「是否参与自动选号」。
+     *
+     * 单账号失败不影响其他账号，但失败**必须留日志**：静默的实现会让账号
+     * 在 UI 上永远显示「可续期」却刷不动，用户与开发者都拿不到线索。
+     *
+     * ⚠️ **lead-time 过滤**（issue !IKIRTT）：距过期不足 1 小时才发续期请求，
+     * 跳过的账号只做有效期对账。详见 `refreshAccountWithReconcile`。
      */
     refreshAll(pool: AccountPool): Promise<void>;
     /** 移除已存储的凭据并停止任何待处理的刷新。 */
@@ -106,9 +146,37 @@ export declare class BuddyAuth extends Service {
      * 失败或未登录时返回空数组（调用方回退到内置列表）。
      *
      * 优先使用账号池中的可用账号；无账号池或池为空时回退到固定凭据 ref。
+     *
+     * **关键**：两处调用都必须把 `this.product` 传给 `fetchModels`，否则
+     * WorkBuddy 实例（Task 7 的 `fetchRemoteModels: () => workbuddy.fetchModels(pool)`）
+     * 会以 `X-Product-Code: codebuddy` + CodeBuddy 的 UA 请求 /v3/config，
+     * 即携带另一个产品的身份标识。
      */
     fetchModels(pool?: AccountPool): Promise<BuddyRemoteModel[]>;
     /** 注入的 fetch（测试用）；默认为全局 fetch。 */
     private get fetchImpl();
 }
+/**
+ * 构造腾讯系（buddy / workbuddy）适配器的 `refresh` 回调。
+ *
+ * ⚠️ **必须刷新 `resolveCredential` 实际用到的那一个账号**，而不是
+ * {@link BuddyAuth.refresh} 读写的默认单凭据 ref（`BUDDY_ACCESS_TOKEN` /
+ * `WORKBUDDY_ACCESS_TOKEN`）。错配的后果是**整轮不可恢复的失败**
+ * （真实缺陷，2026-09-26 由用户报障定位：账号池里 5 个 workbuddy 账号、
+ * 凭据全部有效，却一直报「未配置凭据，请先登录」）：
+ *
+ * 1. Jet Hub 的登录入口只写 `WORKBUDDY_ACCOUNT_XXX`，**从不写**那个固定
+ *    ref —— 于是适配器在 `buddy-adapter.ts` 的 401/403 分支调 `refresh()`
+ *    时，本类 `refresh()` 里的 `resolve` 恒为 null，抛
+ *    「未配置凭据，请先登录」。该文案**完全是误导**：账号池里凭据齐全。
+ * 2. 那个 401/403 分支在刷新后即返回（修复前），**不走**账号轮换 ——
+ *    池里其余可用账号一个也用不上。
+ * 3. 刷新抛错前没有写回任何凭据 → 下一轮仍取池首账号 → 再次 401 →
+ *    再次同一条死路，表现为「中断后继续 goal 永远复现同一错误」的
+ *    **自锁**，重试与重启都无效。
+ *
+ * 池内无账号时才回退到 {@link BuddyAuth.refresh}（单凭据路径，供未迁移的
+ * 老数据）。与 LobsterAI / Qoder / TRAE 的既有实现同形。
+ */
+export declare function createPoolRefresh(pool: AccountPool, productId: string, auth: Pick<BuddyAuth, 'refreshAccountCredential' | 'refresh'>): () => Promise<void>;
 //# sourceMappingURL=buddy-auth.d.ts.map

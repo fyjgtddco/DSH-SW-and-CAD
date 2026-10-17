@@ -76,6 +76,29 @@ export interface LoaderRow {
     kind: 'insert' | 'patch';
     name?: string;
 }
+/**
+ * A directory in `node_modules` that no declaration accounts for and that
+ * cannot be used either (#663).
+ *
+ * The shape this exists for: an update blocked by open files leaves the
+ * target directory without its `package.json`, and the declaration that
+ * pointed at it is gone (the market drops it so the next start can compose).
+ * What remains is invisible — nothing in the profile references it, and
+ * `pnpm install` will not repair an empty shell ("Already up to date", #663)
+ * — so a user who goes looking finds an empty directory and no explanation.
+ */
+export interface ResidualDirectory {
+    /** Package name when it can be read, else the directory's own name. */
+    name: string;
+    /** Path relative to the profile, for the diagnostics listing. */
+    path: string;
+    kind: 'incomplete-package' | 'tmp-directory';
+    /**
+     * The profile still declares it. Then this is not junk: composition will
+     * try to load it, and the bundle layers above already report why it fails.
+     */
+    declared: boolean;
+}
 /** An id present in more than one composed row — the #98 duplicate-id boot failure. */
 export interface DuplicateId {
     id: string;
@@ -190,6 +213,14 @@ export interface CheckReport {
         ok: false;
         cycle: string[];
     } | null;
+    /**
+     * Leftover directories: incomplete packages and pnpm temp directories.
+     * Reported structurally rather than as warnings — same reasoning as
+     * `duplicateNames` above: a leftover that nothing references harms nothing
+     * today, and a warning on every profile that ever had an interrupted
+     * install would train people to ignore the list.
+     */
+    residuals: ResidualDirectory[];
     summary: CheckSummary;
 }
 export interface CheckOptions {
@@ -205,6 +236,8 @@ export declare function parsePatchFile(path: string): unknown[] | null;
 /** DSH host core packages: what the dsh installation ships under @deepseek-ai. */
 export declare function corePackageNames(dshInstallDir: string | null): Set<string>;
 /** Compare two semver strings: negative | zero | positive (prerelease < release of same base). */
+/** Whether a string is a well-formed semver `compareSemver` can order. */
+export declare function isSemver(value: string): boolean;
 export declare function compareSemver(a: string, b: string): number;
 /**
  * Minimal range matcher for the peer-range check: `*`, exact, ^, ~, >=, >,
@@ -261,6 +294,27 @@ export declare function buildBundleLayers(profileDirectory: string, bundleNames:
     bundles: BundleLayer[];
     layers: LayerInput[];
 };
+/**
+ * Which directories in `node_modules` are leftovers (#663).
+ *
+ * Two shapes, and both need to be VISIBLE rather than cleaned: a directory
+ * without a readable `package.json` (what a lock-blocked update leaves), and
+ * pnpm's `<name>_tmp_<pid>_<n>` staging directory (what an interrupted one
+ * leaves). Neither can be removed from in here in the case that produces
+ * them — the plugin's own process holds the directory open, so the rename
+ * and delete that would clear it are the operations that were just refused.
+ * Telling the user what is on disk, and which of it is merely junk, is the
+ * part this process can do.
+ *
+ * Bounded on purpose. The top level is scanned in full (that is where the
+ * profile's own packages live), plus one level inside the virtual store:
+ * pnpm stages a package's update in the `node_modules` beside it, so that is
+ * where a dependency's temp directory appears. It does NOT recurse through
+ * the whole virtual store: on a large Windows profile that is thousands of
+ * directories for a page the user opens by hand, and the store's OWN temp
+ * directories are already reclaimed by `cleanOrphanedStoreTmp`.
+ */
+export declare function findResidualDirectories(profileDirectory: string, declared: ReadonlySet<string>): ResidualDirectory[];
 /**
  * Analyze one profile directory (issue #98, phase 1). Pure function of the
  * directory contents — safe to call on every market open.

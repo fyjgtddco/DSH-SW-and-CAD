@@ -1082,6 +1082,25 @@ def _check_docx_deliverable(work_dir=None, registry_work_dir=None):
     for _d in (work_dir, registry_work_dir):
         if _d:
             _roots.append(os.path.abspath(str(_d)))
+    # ══ ★【实测缺陷修复 · 2026-10-13】先认【导出时记录的路径】══════════════
+    # 现象：`export-docx --out <任意路径>` 成功后，`check-docx` 却报
+    #   "在 <work_dir>、<load_cases> 下未找到任何 .docx" → 交付总闸误拦。
+    # 根因：本函数只在【固定目录】里 walk，而总理子代理完全可以把 docx
+    #   导出到别处（--out 是允许的），于是"真导出了却查不到"。
+    # 修法：把 export_docx_and_record 记录在计划文件里的路径优先纳入检查，
+    #   但仍**自己重查磁盘**（不采信记录本身），保持 fail-closed 语义不变。
+    _recorded = None
+    try:
+        _plan = load_plan(work_dir)
+        _de = (_plan or {}).get("docx_export") or {}
+        _rp = _de.get("path")
+        if _rp and os.path.isfile(str(_rp)):
+            _recorded = os.path.abspath(str(_rp))
+    except Exception:
+        _recorded = None
+    if _recorded:
+        _roots.insert(0, os.path.dirname(_recorded))
+        out["recorded_path"] = _recorded
     try:
         import part_registry as _pr
         try:
@@ -1099,6 +1118,12 @@ def _check_docx_deliverable(work_dir=None, registry_work_dir=None):
     out["checked_dirs"] = _roots
 
     _cands = []
+    # ★ 记录路径本身作为第一候选（已 isfile，且随后仍要过 zip 校验）
+    if _recorded:
+        try:
+            _cands.append((os.path.getmtime(_recorded), _recorded))
+        except Exception:
+            pass
     for _r in _roots:
         if not os.path.isdir(_r):
             continue

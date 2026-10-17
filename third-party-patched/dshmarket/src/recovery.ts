@@ -513,6 +513,39 @@ export async function respawnAndWatch(config: RecoveryConfig): Promise<boolean> 
   return false
 }
 
+/**
+ * Whether a process is still running, by the only portable test: signal 0.
+ * `EPERM` counts as alive — the process exists and belongs to someone else,
+ * which for this purpose is the same answer.
+ */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (cause) {
+    return (cause as { code?: string }).code !== 'ESRCH'
+  }
+}
+
+/**
+ * Wait for the replacement process to be gone.
+ *
+ * Taking the port while the replacement is still booting is what turned a
+ * slow start into a deadlock (#719): the helper gave up at 28s, the recovery
+ * surface bound the port, and the replacement — which binds at ~42-45s on a
+ * source-run host — died on EADDRINUSE. Nothing could then come back, because
+ * the process that had just been killed was the real host.
+ * @returns true when the process is gone, false when it outlasted the wait.
+ */
+async function waitForProcessGone(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (processAlive(pid)) {
+    if (Date.now() > deadline) return false
+    await sleep(250)
+  }
+  return true
+}
+
 /** Wait for a port to stop answering, so a new listener can take it. */
 async function waitForPortFree(port: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
@@ -1039,7 +1072,7 @@ export async function startRecoveryServer(
  */
 export async function runRecovery(
   config: RecoveryConfig,
-  facts: { exitCode: number | null; bound: boolean } = { exitCode: null, bound: false },
+  facts: { exitCode: number | null; bound: boolean; replacementPid?: number | null } = { exitCode: null, bound: false },
   options: { port?: number; idleTimeoutMs?: number } = {},
 ): Promise<'booted' | 'released' | 'idle'> {
   let failure = parseBootFailure(readLog(config.logs.err))
@@ -1055,6 +1088,18 @@ export async function runRecovery(
   const servePort = options.port ?? config.port
   /** Write errors from the previous apply; they travel into the next payload. */
   let writeErrors: string[] = []
+  // The replacement is not necessarily dead just because it has not bound the
+  // port: on a slow host it is still starting. It gets the same grace as a
+  // released port before the surface takes the port out from under it (#719).
+  if (facts.replacementPid !== null && facts.replacementPid !== undefined && facts.replacementPid > 0
+    && processAlive(facts.replacementPid)) {
+    note(config, `the replacement (pid ${String(facts.replacementPid)}) is still starting — waiting for it before taking port ${String(servePort ?? config.port)}`)
+    if (!(await waitForProcessGone(facts.replacementPid, PORT_FREE_TIMEOUT_MS))) {
+      note(config, `the replacement (pid ${String(facts.replacementPid)}) is still running after ${String(PORT_FREE_TIMEOUT_MS / 1000)}s and has not bound the port — serving anyway`)
+    } else {
+      note(config, `the replacement (pid ${String(facts.replacementPid)}) exited — serving the recovery surface`)
+    }
+  }
   for (;;) {
     // A failed attempt may still be holding the port while it disposes: binding
     // over it would fail, and the surface the user is looking at would vanish
@@ -1117,12 +1162,17 @@ export async function runRecoveryCli(argv: readonly string[]): Promise<void> {
   }
   const exitArg = argv.find(argument => argument.startsWith('--exit='))
   const boundArg = argv.find(argument => argument.startsWith('--bound='))
+  // The replacement's pid, handed over by the helper so this surface can tell
+  // "the host is dead" from "the host is still starting" (#719).
+  const pidArg = argv.find(argument => argument.startsWith('--pid='))
   const exitCode = exitArg === undefined ? null : Number(exitArg.slice('--exit='.length))
   const bound = boundArg?.slice('--bound='.length) === '1'
+  const replacementPid = pidArg === undefined ? null : Number(pidArg.slice('--pid='.length))
   try {
     const outcome = await runRecovery(config, {
       exitCode: exitCode === null || Number.isNaN(exitCode) ? null : exitCode,
       bound,
+      replacementPid: replacementPid === null || Number.isNaN(replacementPid) ? null : replacementPid,
     })
     note(config, `recovery surface finished: ${outcome}`)
   } catch (cause) {

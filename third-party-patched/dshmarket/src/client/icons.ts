@@ -36,6 +36,7 @@ export const ICON_ALIASES = [
   ['IconChevronRightOutline14', 'IconChevronRightOutlineRegular', 'IconChevronRightOutline14'],
   ['IconChevronUpOutline14', 'IconChevronUpOutlineRegular', 'IconChevronUpOutline14'],
   ['IconCodeOutline16', 'IconCodeOutlineRegular', 'IconCodeOutline16'],
+  ['IconCopyOutline16', 'IconCopyOutlineRegular', 'IconCopyOutline16'],
   ['IconCordisPluginOutline14', 'IconCordisPluginOutlineRegular', 'IconCordisPluginOutline14'],
   ['IconDownloadOutline16', 'IconDownloadOutlineRegular', 'IconDownloadOutline16'],
   ['IconFolderOpen16', 'IconFolderOpenRegular', 'IconFolderOpen16'],
@@ -117,6 +118,7 @@ export const IconChevronLeftOutline14 = pickIcon('IconChevronLeftOutlineRegular'
 export const IconChevronRightOutline14 = pickIcon('IconChevronRightOutlineRegular', 'IconChevronRightOutline14')
 export const IconChevronUpOutline14 = pickIcon('IconChevronUpOutlineRegular', 'IconChevronUpOutline14')
 export const IconCodeOutline16 = pickIcon('IconCodeOutlineRegular', 'IconCodeOutline16')
+export const IconCopyOutline16 = pickIcon('IconCopyOutlineRegular', 'IconCopyOutline16')
 export const IconCordisPluginOutline14 = pickIcon('IconCordisPluginOutlineRegular', 'IconCordisPluginOutline14')
 export const IconDownloadOutline16 = pickIcon('IconDownloadOutlineRegular', 'IconDownloadOutline16')
 export const IconFolderOpen16 = pickIcon('IconFolderOpenRegular', 'IconFolderOpen16')

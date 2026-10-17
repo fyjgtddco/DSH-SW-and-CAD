@@ -37,9 +37,27 @@ r_max, r_min = max(radii), min(radii)
 check("最大半径≈齿顶圆", abs(r_max - 16.0) < 0.01, round(r_max,4))
 check("最小半径≈齿根圆", abs(r_min - 13.75) < 0.05, round(r_min,4))
 
-print("\n=== Bug-41: 首尾闭合（polyline 能形成闭合轮廓）===")
+print("\n=== Bug-41: 单齿轮廓必须【开放】（由 gear() 拼成整圈闭合）===")
+# ★【断言已修正 —— 原断言是错的】
+#   原断言要求"单齿首尾点重合"，但那是【已知会导致 SolidWorks 建模失败】的行为：
+#     swapi.involute_gear_profile 的 Bug6 修复注释明确写着——
+#       原实现 pts.append(pts[0]) 把单齿自我闭合，而 gear() 又按齿数旋转复制，
+#       于是整条折线成了"一串各自闭合的小环"（z=20 时 60 个重复点），
+#       SW 无法识别为一个有效外轮廓，FeatureExtrusion3 返回 None（= no_body）。
+#     正确做法：单齿轮廓保持开放（根→顶→根），由 gear() 首尾相接成闭合外轮廓。
+#   因此本测试改为验证【正确的契约】：
+#     ① 返回里显式声明 closed=False；
+#     ② 单齿首尾点【不】重合（否则就是退化的小环）；
+#     ③ 单齿内部也【没有重复点】（原 Bug6 的根因）。
 f, l = prof["points"][0], prof["points"][-1]
-check("首尾点重合", abs(f[0]-l[0])<1e-9 and abs(f[1]-l[1])<1e-9, (f,l))
+check("★ 显式声明 closed=False（单齿不自我闭合）", prof.get("closed") is False,
+      prof.get("closed"))
+check("★ 单齿首尾点不重合（重合即退化小环 → SW 建模失败）",
+      not (abs(f[0]-l[0]) < 1e-9 and abs(f[1]-l[1]) < 1e-9), (f, l))
+_uniq = {(round(x, 9), round(y, 9)) for x, y in prof["points"]}
+check("★ 单齿内部无重复点（Bug6 根因已消除）",
+      len(_uniq) == len(prof["points"]),
+      "总点数=%d 去重后=%d" % (len(prof["points"]), len(_uniq)))
 
 print("\n=== Bug-41: 齿数自适应（z=10 也正常）===")
 prof10 = m.involute_gear_profile(1.0, 10)

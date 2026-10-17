@@ -13,8 +13,14 @@
  * instance manages: it is decided at mount from the composition or the
  * command line, and a running instance cannot switch to another one, so
  * offering it as a field would promise something the write cannot deliver.
- * Desktop registers an empty schema instead: the namespace still admits its
- * card, but the shell owns restart and no settings value feeds its routes.
+ *
+ * `buildEnv` (issue #336) is deliberately NOT here. It is a map, so it
+ * wants a form, and the market's own settings card is the form that renders
+ * one — editing it there persists through the market's state.json and
+ * reaches children through spawnEnv. Registering it here as well would make
+ * this namespace a SECOND writer for a value that already has an editor:
+ * the settings layer and the card would overwrite each other on their next
+ * events, the exact shape of the channel bug documented below.
  *
  * The release channel is NOT here either, and that is a correction rather
  * than an omission. It was, briefly, and it made this namespace a second
@@ -46,18 +52,42 @@
  *   SyntaxError: The requested module '@deepseek-ai/dsh-settings' does not
  *   provide an export named 'installSettingsSection'
  *
- * The service itself never changed — `sctx.settings.register(ns, schema,
- * { base })` is identical in 0.1.0-rc.7 and 0.1.2-alpha.2. Only the two
- * wrappers went away. So this inlines what the wrapper did (verified against
- * its source: an inject, a register, a watch, and an unload effect) and
- * validates the namespace here. Nothing about the graceful-degradation story
- * changes; it just stops being conditional on an export that upstream is
- * free to move.
+ * The service itself did not change then — `sctx.settings.register(ns,
+ * schema, { base })` is identical in 0.1.0-rc.7 and 0.1.2-alpha.2. Only the
+ * two wrappers went away. So this inlines what the wrapper did (verified
+ * against its source: an inject, a register, a watch, and an unload effect)
+ * and validates the namespace here.
+ *
+ * It DID change in 0.1.7 (#677): `SettingsService` there has `describe` and
+ * `update` and no `register` — namespaces are derived from a plugin's Config
+ * schema instead. The `settings` service still exists, so the inject callback
+ * runs and `register` threw a TypeError that cordis swallowed. Both entry
+ * points now check for the method and, without it, leave the composed entry
+ * standing and say so once in the host log. That is a stop-gap, not the
+ * migration: on 0.1.7 the allowRestart switch is absent until the market
+ * moves to the new model.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 /** Namespace the card on the browser side keys itself to. */
 export declare const MARKET_SETTINGS_NS = "dsh-market";
+/**
+ * What happened when the market offered its namespace to the host (#677).
+ *
+ * Reported rather than kept private because it is the difference between two
+ * host generations, and nothing else in the system can state it: 0.1.7
+ * derives settings from a plugin's Config schema and serves no third-party
+ * namespace at all, so the market's plugin-configuration card cannot be
+ * dispatched there. That is the host's model, not a profile defect — and a
+ * test that cannot tell the two apart either demands a namespace a host
+ * cannot serve, or passes while proving nothing.
+ *
+ * `pending` is the honest third answer: the market boots before the settings
+ * service settles, so a reader can be asked too early to have an answer.
+ */
+export type SettingsNamespaceState = 'pending' | 'registered' | 'unsupported-by-host';
+/** The state as of the last attempt to register the namespace. */
+export declare function settingsNamespaceState(): SettingsNamespaceState;
 /** The market settings a user may edit at runtime. */
 export interface MarketSettings {
     allowRestart: boolean;

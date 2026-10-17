@@ -7,7 +7,7 @@
  * the agent's sandboxed executor and denies writes to the profile directory.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -217,19 +217,77 @@ export function toolSearchDirs(
  * precisely the branch that cannot work from a spawned child.
  *
  * Scope, stated plainly because it is narrower than the issue title
- * suggests: this is the HTTPS half. pnpm falls back to `git@github.com:`
- * when HTTPS fails, and the ssh side needs `GIT_SSH_COMMAND`, which
- * overrides `core.sshCommand` and `GIT_SSH` — the two ordinary ways to
- * choose an identity — and whose `BatchMode=yes` would disable
- * `SSH_ASKPASS`, breaking key-passphrase installs that work today. That
- * half needs a policy decision, so it is not made here. Note also that on
- * POSIX `runDshPlugin` spawns detached, so the subtree has no controlling
- * terminal and the prompt already dies instantly; the hang the issue
- * reports needs Windows, where the spawn is not detached.
+ * suggests: this is the HTTPS half, and the FIRST attempt HTTPS is. Measured
+ * with a `GIT_SSH_COMMAND` sentinel that always fails: pnpm's clone of a
+ * `github:owner/repo#path:/sub` spec succeeds without ever calling it, so
+ * ssh is the fallback that runs after HTTPS fails — which is the private
+ * repository case, not the common one.
+ *
+ * The ssh half (#596, @JINITAIMI121) is a policy decision, and it is made
+ * here: `BatchMode=yes`, so a passphrase or host-key question fails fast
+ * instead of waiting on a terminal nobody is watching. The cost is real and
+ * is why it is conditional — `BatchMode` also disables `SSH_ASKPASS`, so a
+ * key that NEEDS a passphrase stops prompting even where something could
+ * have answered, and the install fails where it used to work.
+ *
+ * So it is set only when the user has expressed NO ssh preference at all:
+ * `GIT_SSH_COMMAND` and `GIT_SSH` in the environment, and `core.sshCommand`
+ * in git config — the three ordinary ways to choose an identity, and
+ * `GIT_SSH_COMMAND` would silently override all three (measured: with
+ * `core.sshCommand` set, ours wins and theirs is never run). A user who
+ * has an agent or a specific key configured keeps exactly what they have;
+ * the prompt is closed for everyone else, and `classifyPnpmFailure` says
+ * what to do if that turns out to be the passphrase case.
  */
-export function gitEnvForPnpm(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  if ((env.GIT_TERMINAL_PROMPT ?? '').trim() !== '') return {}
-  return { GIT_TERMINAL_PROMPT: '0' }
+let coreSshCommandProbe: string | null | undefined
+
+/**
+ * `core.sshCommand` from the user's git configuration, or null.
+ *
+ * The third place an ssh identity hides, and the one the environment cannot
+ * show: `git config --get` answers it. Memoized for the process — a user
+ * does not reconfigure git mid-install, and this runs on every spawn.
+ *
+ * @returns the configured command, or null when git has none (including
+ *   when git is absent — an unreadable answer is not a choice).
+ */
+export function probeCoreSshCommand(env?: NodeJS.ProcessEnv): string | null {
+  // Memoized only for the caller that has no opinion: a test that supplies
+  // its own environment is asking a different question and must get the
+  // fresh answer.
+  if (env === undefined && coreSshCommandProbe !== undefined) return coreSshCommandProbe ?? null
+  try {
+    const out = spawnSync('git', ['config', '--get', 'core.sshCommand'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      ...(env === undefined ? {} : { env }),
+      // A user's git may be a shim that prints to a console; nothing here
+      // wants a window.
+      windowsHide: true,
+    })
+    const answer = out.status === 0 && typeof out.stdout === 'string' && out.stdout.trim() !== ''
+      ? out.stdout.trim()
+      : null
+    if (env === undefined) coreSshCommandProbe = answer
+    return answer
+  } catch {
+    if (env === undefined) coreSshCommandProbe = null
+    return null
+  }
+}
+
+export function gitEnvForPnpm(
+  env: NodeJS.ProcessEnv = process.env,
+  coreSshCommand: string | null = probeCoreSshCommand(),
+): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {}
+  // Blank counts as unset: an empty value is not a setting git can parse.
+  const speaks = (value: string | undefined): boolean => (value ?? '').trim() !== ''
+  if (!speaks(env.GIT_TERMINAL_PROMPT)) out.GIT_TERMINAL_PROMPT = '0'
+  const choseElsewhere = speaks(env.GIT_SSH_COMMAND) || speaks(env.GIT_SSH) || speaks(coreSshCommand ?? '')
+  if (!choseElsewhere) out.GIT_SSH_COMMAND = 'ssh -oBatchMode=yes'
+  return out
 }
 
 /**
@@ -259,6 +317,32 @@ export function pnpmConfigEnvForArgs(pluginArgs: readonly string[]): NodeJS.Proc
   return env
 }
 
+/**
+ * The operator-configured build environment (issue #336): environment
+ * variables pinned in the market's config (cordis.yml `buildEnv`) or its
+ * settings section, for hosts — GUI, systemd/launchd, Windows Start menu —
+ * where the dsh process cannot inherit a shell environment.
+ *
+ * The value is read through a live SOURCE rather than copied at mount: the
+ * settings wiring mutates `config.buildEnv` at runtime, and a frozen copy
+ * would quietly keep every later spawn on the boot-time value. The default
+ * source answers nothing, so a host that never configures this (or that
+ * unmounts its routes) gets the exact same env it always did.
+ */
+let buildEnvSource: () => Readonly<Record<string, string>> = () => ({})
+
+/**
+ * Point every future child spawn at the configured build environment.
+ * @param source - Live source of the config's `buildEnv` object, re-read on
+ * every spawn so a settings change reaches the next child immediately.
+ * @returns the previous source, so a caller can restore it on teardown.
+ */
+export function setBuildEnvSource(source: () => Readonly<Record<string, string>>): () => Readonly<Record<string, string>> {
+  const previous = buildEnvSource
+  buildEnvSource = source
+  return previous
+}
+
 function spawnEnv(): NodeJS.ProcessEnv {
   // pnpm v10+ blocks forever on a silent interactive prompt without a TTY;
   // CI mode forces it to act or fail instead of asking.
@@ -274,15 +358,32 @@ function spawnEnv(): NodeJS.ProcessEnv {
   for (const bin of toolSearchDirs()) {
     if (!parts.includes(bin)) parts.push(bin)
   }
+  // Merge order is the feature (#336). The configured build env sits above
+  // BOTH the inherited process.env and the host's own `env` (#653): the
+  // inherited one is what the operator is trying to replace (a `g++` too old
+  // to compile a plugin), and the host's is a default it ships, which an
+  // explicit line is allowed to overrule. That precedence is a decision, not
+  // a property of the order these objects happen to be written in.
+  //
+  // It stays strictly below the two values the market computes for itself.
+  // PATH is its answer to "where is pnpm", CI is its answer to pnpm's
+  // interactive prompt, and either being overridden by a config value would
+  // produce a failure that looks nothing like its cause.
+  //
+  // proxyEnvForPnpm and gitEnvForPnpm are asked about the MERGED env, not
+  // process.env: both are "fill silence, never overwrite speech" guards, and
+  // a `GIT_SSH_COMMAND` pinned here is speech. Reading process.env would make
+  // the market inject its own BatchMode command over the operator's, which is
+  // the silent-overwrite shape #713 exists to end.
+  const withBuildEnv = { ...process.env, ...hostEnv, ...buildEnvSource() }
   // hostEnv follows process.env. PATH is `parts` below: host entries, then
   // the inherited PATH. That PATH is never empty, so dropping the host
   // entries whenever it is already set would leave the bundled Node off
   // the path (#653).
   return {
-    ...process.env,
-    ...hostEnv,
-    ...proxyEnvForPnpm(process.env, activeRegion()),
-    ...gitEnvForPnpm(process.env),
+    ...withBuildEnv,
+    ...proxyEnvForPnpm(withBuildEnv, activeRegion()),
+    ...gitEnvForPnpm(withBuildEnv),
     CI: 'true',
     PATH: parts.join(separator),
   }
@@ -430,6 +531,19 @@ export interface PluginCommandRuntime {
   cancelActive(): boolean
   /** Whether this host can execute an immutable rollback add target. */
   supportsExactRollbackTarget?(target: string): boolean
+  /**
+   * Whether this runtime runs pnpm itself and therefore accepts the market's
+   * own arguments — `--config.*` overrides, `--force`, `--no-frozen-lockfile`.
+   *
+   * The official Electron profile does not (#732): its in-process manager
+   * takes exactly `add <target>` or `remove <target>` and answers any other
+   * argv with exit 127. Every recovery step that decorates a command with an
+   * option is impossible there, and sending it anyway turned a pnpm failure
+   * into "this desktop operation is not supported" — a message about an
+   * operation that is in fact supported, which sent the reporter looking for
+   * a broken profile instead of the option. Absent means "accepts".
+   */
+  acceptsMarketPnpmFlags?: boolean
 }
 
 /** One running package operation, however it was started. */

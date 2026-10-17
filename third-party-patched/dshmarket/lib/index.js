@@ -2,8 +2,11 @@
  * dsh-market host entry: mounts the market's HTTP routes once the profile
  * composes the webServer and shell services.
  */
+import { dirname, isAbsolute } from 'node:path';
 import { createDesktopPluginRuntime, setHostPackageManager } from './dsh-cli.js';
+import { createOfficialDesktopRuntime } from './official-desktop.js';
 import { isDshProfileName } from './profile.js';
+import { setTrustedHostsSource } from './http.js';
 import { mountMarketRoutes } from './routes.js';
 import { installDesktopMarketSettings, installMarketSettings } from './settings.js';
 export const name = 'dsh-market';
@@ -87,6 +90,49 @@ function hostPackageManagerOf(context) {
 function agentsLookupOf(ctx) {
     return () => ctx.get('agents');
 }
+/**
+ * The deployment's declared authorities, read from the host (#729).
+ *
+ * DSH's own /api fence accepts loopback OR an authority the operator declared
+ * (`dsh web --trusted-host <name>`, plus the LAN literals the CLI derives when
+ * bound to 0.0.0.0). The market's routes are `exact` registrations on the bare
+ * webServer, and exact matches win over that fence's prefix, so they never
+ * pass through it — and a loopback-only rule of its own made every mutating
+ * route 403 on any deployment reached by a name.
+ *
+ * The `connection` service is optional: a host without it leaves the fence
+ * exactly as it was, which is the behaviour every release so far has had.
+ * @returns a restore function for the effect that installed it.
+ */
+export function useTrustedHosts(ctx) {
+    // Resolved per request, not at mount -- the same reason `agentsLookupOf` is
+    // lazy. The host provides `connection` only after its own async init
+    // (`HostConnectionService` is constructed behind `await BrowserAuth.create`),
+    // and the market mounts on `webServer` + `loader`, which are ready first: a
+    // mount-time read therefore sees no service on a web host, and the [] fallback
+    // then narrows the fence to loopback for the life of the process -- every
+    // mutating route 403 on a deployment that is reached by a name, while loopback
+    // keeps working (#729).
+    //
+    // Exported for the spec that covers this wiring; the fence it feeds is tested
+    // through `sameOrigin` in tests/http.spec.ts.
+    let warned = false;
+    const previous = setTrustedHostsSource(() => {
+        const connection = ctx.get('connection');
+        if (connection === undefined && !warned) {
+            // The silent version of this is what hid #729: "no service" and "no
+            // authorities declared" produced the same fence.
+            warned = true;
+            console.warn('dsh-market: the host connection service is not available; the origin fence accepts loopback only');
+        }
+        return Array.isArray(connection?.trustedHosts)
+            ? connection.trustedHosts.filter((entry) => typeof entry === 'string')
+            : [];
+    });
+    // The setter returns the PREVIOUS source, not a restore closure — the same
+    // contract as setBuildEnvSource in dsh-cli.ts.
+    return () => { setTrustedHostsSource(previous); };
+}
 export function apply(ctx, config) {
     ctx.inject(['webServer', 'loader'], (hostCtx) => {
         const host = hostCtx;
@@ -98,6 +144,63 @@ export function apply(ctx, config) {
             // its name, and never with somebody else's.
             const profileContext = ctx.get('profileContext');
             const launched = launchedProfile(profileContext);
+            // The official Electron app owns this profile. Its CLI explicitly
+            // refuses `--profile desktop`; use the app's pluginManager service.
+            // Looking it up at request time lets the market mount before the
+            // service while still failing closed if it never becomes available.
+            // The dsh CLI refuses a profile by NAME — `profile.toLowerCase() ===
+            // "desktop"` (@deepseek-ai/dsh 0.1.7-alpha.2) — so a launched profile
+            // with that name can never be changed through `dsh plugin`, whatever
+            // the install layout. Detection follows the same rule rather than the
+            // app.asar anchor shape an earlier draft keyed on: the official desktop
+            // host is not published, its layout could not be checked, and a host
+            // that missed the anchor test fell straight back to the CLI and failed
+            // every install (#702). A third-party shell announces itself through
+            // `desktopProfiles`, and this whole block runs only when that service
+            // is absent, so this never takes a third-party shell's profile.
+            const configured = config?.profile;
+            const configuredDesktop = configured !== undefined && configured.toLowerCase() === 'desktop';
+            const officialElectron = launched !== undefined && launched.name.toLowerCase() === 'desktop';
+            // An explicitly configured `profile: desktop` takes this branch too. The
+            // CLI refuses that profile by NAME, so routing it there — which is what
+            // an operator's own workaround for a host that hides `profileContext`
+            // does (#744) — makes every install fail for certain. The configuration
+            // still wins over the launcher for the name; it just cannot win a branch
+            // that is guaranteed to fail.
+            if (configuredDesktop || (configured === undefined && officialElectron)) {
+                const profileName = configured ?? launched.name;
+                // The launcher owns where a profile lives — and its directory rides
+                // along only when the launcher is the one that named this profile.
+                const profileDirectory = launched !== undefined && launched.name.toLowerCase() === profileName.toLowerCase()
+                    ? launched.dir
+                    : undefined;
+                const runtime = createOfficialDesktopRuntime(() => hostCtx.get('pluginManager'), profileName, profileDirectory);
+                const resolved = {
+                    profile: profileName,
+                    ...(profileDirectory === undefined ? {} : { profileDirectory }),
+                    desktopHost: true,
+                    allowRestart: false,
+                    maxSnapshots: config?.maxSnapshots,
+                    // The third construction site, and the one #527's review caught
+                    // missing: a `buildEnv` configured in cordis.yml was silently
+                    // dropped on the official desktop host — the very host the feature
+                    // exists for (a GUI launch inherits no shell environment).
+                    buildEnv: config?.buildEnv,
+                    ...(typeof profileContext?.installAnchor === 'string' && isAbsolute(profileContext.installAnchor)
+                        ? { dshInstallDir: dirname(profileContext.installAnchor) } : {}),
+                };
+                installDesktopMarketSettings(ctx);
+                host.effect(() => {
+                    const restoreTrustedHosts = useTrustedHosts(ctx);
+                    const disposeRoutes = mountMarketRoutes(host, resolved, runtime, agentsLookupOf(ctx));
+                    return async () => {
+                        disposeRoutes();
+                        restoreTrustedHosts();
+                        await runtime.dispose();
+                    };
+                }, 'dsh-market: official Desktop routes and package operations');
+                return;
+            }
             // The launcher's own package manager, when it publishes one. Registering
             // it here covers both the pnpm probe and every install spawn, since the
             // invocation's environment reaches both through spawnEnv (#653).
@@ -112,11 +215,21 @@ export function apply(ctx, config) {
                 // is exactly the distinction supervisor detection needs (#229).
                 allowRestart: config?.allowRestart,
                 maxSnapshots: config?.maxSnapshots,
+                // Build-time environment (#336); undefined means "inherit", and the
+                // settings wiring below is what makes it editable at runtime.
+                buildEnv: config?.buildEnv,
             };
             // Web settings may control restart; Desktop only registers the card's
             // namespace below. Both no-op on a host without a settings service.
             installMarketSettings(ctx, resolved);
-            host.effect(() => mountMarketRoutes(host, resolved, undefined, agentsLookupOf(ctx)), 'dsh-market: http routes');
+            host.effect(() => {
+                const restoreTrustedHosts = useTrustedHosts(ctx);
+                const disposeRoutes = mountMarketRoutes(host, resolved, undefined, agentsLookupOf(ctx));
+                return () => {
+                    disposeRoutes();
+                    restoreTrustedHosts();
+                };
+            }, 'dsh-market: http routes');
             return;
         }
         // Desktop's supported cross-environment contract guarantees that
@@ -139,11 +252,17 @@ export function apply(ctx, config) {
                 // lifecycle. The shell remains responsible for restart in this mode.
                 allowRestart: false,
                 maxSnapshots: config?.maxSnapshots,
+                // The operator's pinned build environment applies in Desktop mode
+                // too: Desktop's packaged pnpm still runs plugin build scripts.
+                buildEnv: config?.buildEnv,
             };
             const desktopHost = desktopCtx;
             installDesktopMarketSettings(desktopCtx);
             desktopHost.effect(() => {
-                const disposeRoutes = mountMarketRoutes(host, resolved, runtime, agentsLookupOf(ctx));
+                // The host that publishes `desktopProfiles` is the one that may own
+                // activation (#551): hand it the bridge it published, if any, so the
+                // market can ask for a replay instead of mounting a second entry.
+                const disposeRoutes = mountMarketRoutes(host, resolved, runtime, agentsLookupOf(ctx), desktopProfiles.pluginActivation);
                 return async () => {
                     disposeRoutes();
                     await runtime.dispose();

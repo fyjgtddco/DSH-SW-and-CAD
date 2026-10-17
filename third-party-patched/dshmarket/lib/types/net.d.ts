@@ -9,23 +9,34 @@
  * took 9.9s direct on a reporter's machine, seconds from the 15s timeout,
  * while their proxy sat unused a millisecond away.
  *
- * `setGlobalDispatcher` from the `undici` PACKAGE cannot fix this, because
- * `globalThis.fetch` runs on Node's INTERNAL copy of undici — a different
- * instance. Verified: with a dispatcher installed, a global fetch still
- * produced no CONNECT at a local proxy, while undici's own fetch produced
- * `CONNECT awesome-dsh-plugin.com:443`.
+ * Every market request therefore calls undici's own fetch and carries a
+ * dispatcher this module created. Two measurements say why, and they are
+ * not the same fact:
  *
- * So the market calls undici's fetch with an explicit dispatcher. The scope
- * is deliberate: only requests made by this module change, and the host's
- * own networking is left exactly as the host configured it.
+ * - On Node 25, `setGlobalDispatcher` from the undici package does not
+ *   steer global fetch. With a dispatcher installed that way, a global
+ *   fetch produced no CONNECT at a local proxy, while undici's own fetch
+ *   produced `CONNECT awesome-dsh-plugin.com:443`.
+ * - On Node 22 the two stacks share one symbol (#742). Global fetch reads
+ *   `Symbol.for('undici.globalDispatcher.1')`. The host's first import of
+ *   undici 8 (`web_fetch`) finds `.2` empty, installs its dispatcher, and
+ *   writes a `Dispatcher1Wrapper` onto `.1`. After that, global fetch
+ *   returns gzip bodies with null headers, and `JSON.parse` fails on the
+ *   catalog. undici 7's fetch reads `.1` too, so calling it with no
+ *   dispatcher fails the same way.
+ *
+ * The dispatcher is `EnvHttpProxyAgent` when a proxy is configured, and a
+ * plain `Agent` otherwise. Only requests made here take it. The host's own
+ * networking stays as the host configured it.
  */
 /**
  * The proxy this process would use for the catalog, if any.
  *
  * The standard variables mirror `EnvHttpProxyAgent`'s own resolution
  * deliberately, rather than picking the order that reads best, because the
- * same answer does two jobs: it decides whether to route through undici at
- * all, and it is what the failure message CLAIMS was tried. A helper that
+ * same answer does two jobs: it decides whether the request goes through
+ * the proxy agent or the direct one, and it is what the failure message
+ * CLAIMS was tried. A helper that
  * named a proxy undici would not have used would put a false statement in
  * every bug report. `npm_config_*` is an additional source on top of that:
  * npm holds its proxy in its own config namespace (a machine set up with
@@ -46,11 +57,9 @@
  */
 export declare function configuredProxy(): string | null;
 /**
- * Fetch through the proxy this machine is configured to use.
- *
- * Falls back to the global fetch when no proxy is set, which keeps the
- * ordinary case on the runtime's own path rather than routing it through a
- * second HTTP stack for no reason.
+ * Fetch through the proxy this machine is configured to use, or directly
+ * through this module's own agent when it has none. Both paths pass the
+ * dispatcher described on this module.
  */
 export declare function marketFetch(url: string, init?: {
     signal?: AbortSignal;

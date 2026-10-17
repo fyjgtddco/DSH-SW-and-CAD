@@ -136,11 +136,102 @@ export interface MarketState {
      * pre-install list, unlike groups/notes which target installed packages.
      */
     favorites?: string[];
+    /**
+     * Package names the user hid from Discover and Themes (#657).
+     *
+     * Local, per-profile, reversible. The Hidden tab lists the same names so
+     * the choice can be undone. Independent of `disabled` (the plugin can keep
+     * running) and of the session-only update ignore (that one dies on restart).
+     * A stored name may be the installed package name or the catalog package
+     * name; the client treats both as one plugin when it can match them.
+     *
+     * Optional on the way in, like `notes` / `favorites`: several callers
+     * build a state object from the few fields they own, and requiring this
+     * one would make every such call a silent way to erase the list (#339).
+     */
+    blocked?: string[];
+    /**
+     * Installed package names the user asked not to be reminded about (#728).
+     *
+     * This is not {@link blocked}. Hiding a plugin takes it off Discover.
+     * This list leaves the plugin where it is, and leaves the update itself
+     * on the installed row. It only stops the reminder: the badge, the
+     * "update all" count, the sort-to-top, and the reminder bar. A new
+     * version is still listed, and the row's own Update button still works.
+     *
+     * Optional on the way in, for the same reason as `blocked` (#339).
+     * An empty array is how the last name is removed.
+     */
+    updateExempt?: string[];
     /** User-supplied HTTPS prefix used when the built-in GitHub routes fail. */
     githubProxy?: string;
+    /**
+     * Packages the market removed from the profile's own declarations because
+     * the build on disk can no longer compose (#663).
+     *
+     * The case this exists for: an update blocked by open files leaves the
+     * target directory incomplete, `keepLockedBuild` cannot keep the previous
+     * build, and the profile goes on declaring a package whose `package.json`
+     * is missing. The next start dies in composition — on Desktop the window
+     * never opens — and the only way out was uninstalling the plugin by hand.
+     * So the declaration is dropped instead (a rename or a delete of the
+     * directory itself cannot be attempted: the same lock that stopped pnpm
+     * refuses the market's move too), and this map is what keeps that from
+     * being silent. The plugin disappears from the installed list; this is the
+     * record saying why, and what spec to reinstall.
+     *
+     * Optional on the way in, like `notes`: several callers write a state
+     * object built from the few fields they own, and requiring this one would
+     * make every such call a way to erase every entry (#339's shape).
+     */
+    brokenPlugins?: Record<string, BrokenPlugin>;
+    /**
+     * The operator's pinned build environment (issue #336) as saved from the
+     * market's own settings card. Absent means "the composition says" — the
+     * entry's `config.buildEnv`, or nothing at all. Present (non-empty) means
+     * a saved editor state REPLACES the composition map, so clearing the
+     * field on the card inherits the composition again rather than freezing
+     * an earlier save. Read live into `config.buildEnv` by the routes; see
+     * src/dsh-cli.ts spawnEnv for the precedence once it reaches a child.
+     */
+    buildEnv?: Record<string, string>;
+}
+/** Why a package is no longer declared, and what to put back. */
+export interface BrokenPlugin {
+    /** The dependency spec it had before removal — the reinstall target. */
+    spec: string;
+    /** Machine-readable cause; the UI owns the wording. */
+    reason: 'incomplete-build-locked';
+    /** When the market removed the declaration (ISO 8601). */
+    at: string;
 }
 /** Upper bound on bookmarked catalog URLs kept in state.json (#414). */
 export declare const MAX_FAVORITES = 500;
+/** Upper bound on blocked package names kept in state.json (#657). */
+export declare const MAX_BLOCKED = 500;
+/** Upper bound on the persistent do-not-remind list (#728). */
+export declare const MAX_UPDATE_EXEMPT = 500;
+/** npm package names are at most 214 characters. Longer values are not names. */
+export declare const MAX_BLOCKED_NAME = 214;
+/**
+ * Sanitize an untrusted build-env map (state.json, or the card route's body)
+ * into the shape spawnEnv can merge.
+ *
+ * An empty map and a non-object both read as undefined: clearing the card
+ * must inherit the composition, and a blank line in state.json must not
+ * disable every pinned variable. Only the merge precedence in
+ * src/dsh-cli.ts spawnEnv — never this — protects PATH and CI, but a value
+ * a user typed for them would silently do nothing there, so it is rejected
+ * here with a reason instead.
+ *
+ * `GIT_ASKPASS` and `SSH_ASKPASS` are deliberately NOT rejected, though they
+ * are the two names that can re-open a credential prompt: pointing them at a
+ * program is the supported non-interactive way to answer one, and #587/#596
+ * close the *terminal* fallback (GIT_TERMINAL_PROMPT, BatchMode) rather than
+ * the program one. A user who pins these has already said where the answer
+ * comes from; a user who does not still gets the closed prompt.
+ */
+export declare function buildEnvFromUnknown(value: unknown): Record<string, string> | undefined;
 /**
  * Read the whole market state. Legacy `disabledSkins` (the pre-#60
  * theme-only key) still loads; every new write uses the generic `disabled`

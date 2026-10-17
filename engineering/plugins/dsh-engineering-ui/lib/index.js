@@ -385,6 +385,92 @@ async function parentOf(ctx, childId) {
 export function apply(ctx) {
   const disposers = [];
 
+  // ══════════════════════════════════════════════════════════════════════
+  // 【DSH 0.2.1 适配 · 为 {{cwd}} 注册 prompt 变量】
+  // ══════════════════════════════════════════════════════════════════════
+  // 故障现象（2026-10-17 实测）：
+  //   切到工程模式后一发送消息就报
+  //     unknown prompt variable "{{cwd}}" in section "deployment:persona-prefix";
+  //     registered variables: provider, model
+  //   → 整轮请求失败，工程模式完全不可用。
+  //
+  // 根因：
+  //   · 0.2.0 的 dsh-agent-loop 注册过三个 prompt 变量：provider / model / cwd；
+  //   · 0.2.1-rc.2 只保留 provider 与 model
+  //     （dsh-agent-loop/lib/index.js:1591-1592），**cwd 被移除**；
+  //     全仓核实：0.2.1 里 `systemPrompt.variable(` 只有这两处调用；
+  //   · dsh-system-prompt 的 interpolate() 遇到未注册变量【直接抛错】
+  //     （dsh-system-prompt/lib/index.js:172-175），不是降级为空串 ——
+  //     所以只要人设里写了 {{cwd}}，整个会话就发不出消息。
+  //
+  // 为什么不改成"人设里不写 {{cwd}}"：
+  //   工作目录是工程模式人设的必要信息（模型要知道自己在哪建模）。
+  //   0.2.1 虽然用 working-directory 运行时上下文自动注入了一份
+  //   ("Current working directory: ...")，但人设里显式点名更稳，且
+  //   我们不应为了规避一个变量就删掉用户要的功能。
+  //
+  // 维修方案：由本插件注册 cwd 变量，把 0.2.0 的行为补回来。
+  //
+  // 为什么注册在【插件全局 ctx】而不是 agent.ctx：
+  //   · assembleContextFor(agent) 恒为 { agent, scope: agent }
+  //     （dsh-agent/lib/index.js:291-297），所以 provider 一定能拿到 context.agent；
+  //   · 变量装配是 global 先、scope 后覆盖（dsh-system-prompt/lib/index.js:360-362），
+  //     全局注册对每个会话都生效，且【不依赖 agent/created 的时序】——
+  //     否则可能出现在 persona section 已渲染、变量还没注册的竞态里。
+  //
+  // 取值优先级：
+  //   ① ctx.workingDirectory.get(session)：0.2.1 的权威同步值（无 I/O，
+  //      dsh-working-directory/lib/index.js:76-78）；
+  //   ② session.header.cwd：会话创建时的原始目录（兜底）；
+  //   ③ 都没有 → 返回【空字符串】（不是 undefined）。
+  // 为什么强调这一点：官方 interpolate() 对 value === undefined 会抛
+  //   'prompt variable "{{cwd}}" has no value for this assembly'
+  //   （dsh-system-prompt/lib/index.js:176-177），而空串是合法值。
+  //   取不到目录时让 {{cwd}} 渲染成空白，远好过让整轮请求失败。
+  let _cwdVariableDisposer = null;
+  try {
+    const _injectSystemPrompt = (scope) => {
+      try {
+        _cwdVariableDisposer = scope.systemPrompt.variable('cwd', (context) => {
+          try {
+            const agent = context && context.agent;
+            // ① 权威值：workingDirectory 服务的已提交目录（同步、无 I/O）
+            try {
+              const wd = ctx.workingDirectory;
+              if (wd && typeof wd.get === 'function' && agent && agent.session) {
+                const dir = wd.get(agent.session);
+                if (typeof dir === 'string' && dir.length > 0) return dir;
+              }
+            } catch (e) { /* 服务缺失 → 走兜底 */ }
+            // ② 会话头记录的创建目录
+            const headerCwd = agent && agent.session && agent.session.header
+              ? agent.session.header.cwd : undefined;
+            if (typeof headerCwd === 'string' && headerCwd.length > 0) return headerCwd;
+            // ③ 都没有：必须返回【空字符串】，绝不能返回 undefined。
+            //    官方语义（dsh-system-prompt/lib/index.js:176-177）：
+            //      value === undefined → 抛 'has no value for this assembly'
+            //    空串是合法值，只会让 {{cwd}} 渲染成空白，
+            //    不会把整轮请求打挂。这是本兜底的最后一层保险。
+            return '';
+          } catch (e) {
+            // 任何异常也只降级为空串，绝不让 prompt 装配失败
+            return '';
+          }
+        });
+      } catch (e) {
+        try { console.error('[dsh-engineering-ui] cwd prompt variable', e); } catch (e2) {}
+      }
+    };
+    // systemPrompt 是可选服务：缺失该服务的 profile 里本插件保持不激活，
+    // 而不是在 apply 阶段抛错（官方插件实践：可选服务走 ctx.inject）。
+    if (typeof ctx.inject === 'function') {
+      const _fiber = ctx.inject(['systemPrompt'], _injectSystemPrompt);
+      disposers.push(() => { try { if (_fiber && _fiber.dispose) _fiber.dispose(); } catch (e) {} });
+    }
+  } catch (e) {
+    try { console.error('[dsh-engineering-ui] cwd variable setup', e); } catch (e2) {}
+  }
+
   // ── 【Bug2】会话预设解析（同步缓存，供 turn-stopping 钩子零延迟查询）──────
   // 钩子必须同步返回，不能 await，所以这里预先把 sessionId → preset 缓存起来；
   // 缓存未命中时给一次异步回填，本次按"非工程模式"放行（宁可漏守一次，

@@ -85,6 +85,17 @@ export async function resolveGitRemoteHead(spec: string, ref?: string): Promise<
     }
     const quoted = ref.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`)
     for (const namespace of ['heads', 'tags']) {
+      // An annotated tag is advertised TWICE: the tag OBJECT on
+      // `refs/tags/<t>`, and the COMMIT it points at on `refs/tags/<t>^{}`.
+      // A lockfile records the commit, so resolving the tag object can never
+      // equal it — the row reports an update forever, and applying it
+      // reinstalls the same commit. The peeled ref has to win, and only the
+      // tag namespace has one (#597 resolved this on the GitHub path; this is
+      // the same fact on the smart-HTTP path).
+      if (namespace === 'tags') {
+        const peeled = new RegExp(String.raw`([0-9a-f]{40}) refs/tags/${quoted}\^\{\}`, 'u').exec(body)
+        if (peeled !== null) return peeled[1]!
+      }
       const found = new RegExp(String.raw`([0-9a-f]{40}) refs/${namespace}/${quoted}(?![^\s])`, 'u').exec(body)
       if (found !== null) return found[1]!
     }

@@ -21,7 +21,7 @@ import { fileFromTarball } from './catalog-npm.js';
 import { marketFetch } from './net.js';
 import { activeRegion, routesFor } from './regions.js';
 import { profileDir, readInstalled, readInstalledRepoEvidence, readLockCommits } from './profile.js';
-import { lookupRepoFromUrl, repoOf, repoOfTarget } from './sources.js';
+import { lookupRepoFromUrl, parseSourceUrl, repoOf, repoOfTarget } from './sources.js';
 import { checkUpdates } from './updates.js';
 import { loadRegistry } from './registry.js';
 const UPDATES_PACKAGE = 'dsh-plugin-updates';
@@ -170,6 +170,55 @@ export async function npmPublishTimes(name) {
     timesCache.set(name, { at: Date.now(), data });
     return data;
 }
+/** A probe entry the dialog can actually render — an empty object is a miss. */
+function usableNotes(entry) {
+    if (entry === undefined)
+        return false;
+    if (entry.release != null && (entry.release.body !== '' || entry.release.tag !== null))
+        return true;
+    return (entry.commits?.length ?? 0) > 0;
+}
+/**
+ * The catalog row for an npm install.
+ *
+ * The profile dependency key is the npm package name. The catalog `name`
+ * often is not: a monorepo entry is `repo#subpath`, and a scoped package's
+ * catalog name drops the scope (#746). `npm` is the identity the install
+ * used, so it wins; a bare `name` match remains for entries that publish
+ * under their catalog name. Several hits are disambiguated by the installed
+ * repository, and an ambiguous set is left unresolved (#598).
+ */
+function catalogEntryForNpmInstall(plugins, name, evidence) {
+    const byNpm = plugins.filter(p => p.npm === name);
+    const candidates = byNpm.length > 0 ? byNpm : plugins.filter(p => p.name === name);
+    if (candidates.length <= 1)
+        return candidates[0];
+    const identities = evidence().identities;
+    const matches = candidates.filter(p => identities.some(id => repoOf(p.url)?.toLowerCase() === id.split('#')[0].toLowerCase()));
+    return matches.length === 1 ? matches[0] : undefined;
+}
+/**
+ * The catalog row for a `github:…#path:` install.
+ *
+ * `repoKeyOf` keeps only the repository root, while a monorepo entry's notes
+ * are stored under its `/tree/<ref>/<subpath>` url (#746). The spec's subpath
+ * selects the row. Two rows with one subpath are not guessed between.
+ */
+function catalogEntryForGitSubpath(plugins, spec) {
+    const identity = repoOfTarget(spec);
+    const marker = identity?.indexOf('#path:/') ?? -1;
+    if (identity === null || marker === -1)
+        return undefined;
+    const repo = identity.slice(0, marker);
+    const subpath = identity.slice(marker + '#path:/'.length);
+    const matches = plugins.filter(p => {
+        const source = parseSourceUrl(p.url);
+        return source?.subpath != null
+            && source.repo.toLowerCase() === repo
+            && source.subpath.toLowerCase() === subpath;
+    });
+    return matches.length === 1 ? matches[0] : undefined;
+}
 /**
  * Resolve the notes for one installed plugin, or `{ kind: 'none' }`.
  *
@@ -185,52 +234,46 @@ export async function updateNotesFor(profile, explicitDir, name) {
     }
     try {
         const payload = await loadUpdateNotes();
-        let key = repoKeyOf(spec);
-        // If the spec is a Release asset URL (catalog format), try to extract
-        // the repo from the URL directly. This handles npm-installed plugins
-        // whose profile spec is the npm name but the catalog entry uses a
-        // Release asset tarball URL.
-        if (key === null) {
-            key = lookupRepoFromUrl(spec);
-        }
-        // If the spec is an npm package name (not a GitHub URL), look up the
-        // catalog to find the corresponding GitHub repo URL.
-        if (key === null) {
+        // A Release-asset spec carries the repo in the URL itself. An npm
+        // version range carries nothing, so `specKey` stays null and the catalog
+        // lookup below is what finds the repository.
+        const specKey = repoKeyOf(spec) ?? lookupRepoFromUrl(spec);
+        let key = specKey;
+        let entry = key === null ? undefined : entryForRepo(payload, key);
+        // The catalog is how an npm install, or a `#path:` install whose notes
+        // live under a /tree/ url, finds a key the spec itself does not name.
+        // A root github spec already is that key. Loading the catalog on a root
+        // miss would wait out its timeout to answer "no notes".
+        const needsCatalog = specKey === null || (repoOfTarget(spec)?.includes('#path:/') ?? false);
+        if (!usableNotes(entry) && needsCatalog) {
             try {
                 const registry = await loadRegistry();
-                const candidates = registry.plugins.filter(p => p.name === name);
-                let plugin;
-                if (candidates.length === 1) {
-                    plugin = candidates[0];
-                }
-                else if (candidates.length > 1) {
-                    // Same-named packages exist in the catalog; a bare name match can
-                    // pick someone else's repo and answer "no notes" for a plugin that
-                    // ships updates data under its own repository (#598). The installed
-                    // package declares its repository, so prefer the catalog entry that
-                    // agrees with it; only a unique agreement is trusted — an ambiguous
-                    // name falls through to npm publish times, which are honest for any
-                    // installed npm package.
-                    const evidence = readInstalledRepoEvidence(profile, name, spec, explicitDir);
-                    const matches = candidates.filter(p => evidence.identities.some(id => repoOf(p.url)?.toLowerCase() === id.split('#')[0].toLowerCase()));
-                    if (matches.length === 1)
-                        plugin = matches[0];
-                }
+                const plugin = specKey === null
+                    ? catalogEntryForNpmInstall(registry.plugins, name, () => readInstalledRepoEvidence(profile, name, spec, explicitDir))
+                    : catalogEntryForGitSubpath(registry.plugins, spec);
                 if (plugin !== undefined) {
-                    key = plugin.url;
+                    const catalogEntry = entryForRepo(payload, plugin.url);
+                    // An empty row does not become the key. Publish times for an npm
+                    // install follow from `specKey` staying null, and a subpath install
+                    // keeps the root key so the miss stays `none`.
+                    if (usableNotes(catalogEntry)) {
+                        key = plugin.url;
+                        entry = catalogEntry;
+                    }
                 }
             }
             catch {
-                // Catalog unavailable; fall through to npm times.
+                // Catalog unavailable; the tiers below still answer.
             }
         }
-        const entry = key === null ? undefined : entryForRepo(payload, key);
         // Both tiers below need the installed sha for github-kind installs.
         // For Release asset URLs and catalog lookups, checkUpdates doesn't
         // recognize the spec, so we read the lockfile directly using the repo key.
+        // `repoOf` drops a `/tree/<ref>/<subpath>` suffix; slicing the url at `#`
+        // would look the commit up under `owner/repo/tree/...` and miss it.
         let current = null;
         if (key !== null && key.startsWith('https://github.com/')) {
-            const repo = key.slice('https://github.com/'.length).split('#')[0].toLowerCase();
+            const repo = (repoOf(key) ?? key.slice('https://github.com/'.length).split('#')[0]).toLowerCase();
             current = readLockCommits(profile, activeProfileDir).get(`github.com/${repo}`) ?? null;
         }
         else {
@@ -243,8 +286,9 @@ export async function updateNotesFor(profile, explicitDir, name) {
         if (entry?.commits !== undefined && entry.commits.length > 0) {
             return { kind: 'commits', commits: sliceCommitsAt(entry.commits, current) };
         }
-        if (key === null) {
-            // Not a github-sourced plugin at all: npm times are the only tier left.
+        if (specKey === null) {
+            // The install spec did not name a repository. Publish times remain
+            // when the catalog row is missing or its probe has no notes.
             return { kind: 'npm', npmTimes: await npmPublishTimes(name) };
         }
         // A github plugin whose repo answered nothing — releases 404 AND the log

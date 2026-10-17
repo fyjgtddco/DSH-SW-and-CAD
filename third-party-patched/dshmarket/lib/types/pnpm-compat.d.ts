@@ -33,7 +33,7 @@ export declare function pluginArgsFor(profileDir: string, pluginArgs: string[]):
  */
 export declare const HOST_NAMESPACE_RE: RegExp;
 export interface PnpmFailure {
-    code: 'adding-to-root' | 'not-a-workspace' | 'hoist-pattern-diff' | 'pnpm-missing' | 'release-age-violation' | 'ignored-builds' | 'git-prepare-not-allowed' | 'git-prepare-failed' | 'tarball-url-mismatch' | 'fetch-404' | 'no-matching-version' | 'transient-network' | 'fetch-timeout' | 'unexpected-store' | 'patch-failed' | 'missing-tarball-integrity' | 'windows-file-locked' | 'pnpm-unusable' | 'missing-local-dependency';
+    code: 'adding-to-root' | 'not-a-workspace' | 'hoist-pattern-diff' | 'pnpm-missing' | 'release-age-violation' | 'ignored-builds' | 'git-prepare-not-allowed' | 'git-prepare-failed' | 'tarball-url-mismatch' | 'fetch-404' | 'no-matching-version' | 'transient-network' | 'fetch-timeout' | 'unexpected-store' | 'patch-failed' | 'unused-patch' | 'missing-tarball-integrity' | 'windows-file-locked' | 'pnpm-unusable' | 'missing-local-dependency' | 'unparseable-build-key' | 'native-oom' | 'ssh-auth-failed';
     /** Bilingual, actionable message shown to the user instead of the raw wall of text. */
     message: string;
     /** True when re-running `pnpm install` in the profile is the documented recovery. */

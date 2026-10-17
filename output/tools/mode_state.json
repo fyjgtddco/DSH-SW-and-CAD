@@ -1,8 +1,8 @@
 {
-  "mode": "1",
+  "mode": "2",
   "rooms": {},
-  "declared_at": null,
-  "mode_name": "基础零件搭建",
+  "declared_at": 1792249614.8575397,
+  "mode_name": "大型复杂器械装配",
   "sw_lock": {
     "owner": null,
     "queue": [],
@@ -10,5 +10,10 @@
     "prev_owner": null,
     "sw_by_room": false
   },
-  "subagents": {}
+  "subagents": {},
+  "subagent_history": [],
+  "task_epoch_started_at": 1791871158.3470435,
+  "task_epoch_at": "2026-10-13 13:59:18",
+  "parallel_mode": "parallel",
+  "parallel_mode_updated_at": 1792074241.9879081
 }

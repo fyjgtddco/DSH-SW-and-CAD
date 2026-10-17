@@ -23,7 +23,7 @@ import {
   IconChevronRightOutline14,
   IconChevronUpOutline14,
   IconCheckOutline16,
-  IconCodeOutline16,
+  IconCopyOutline16,
   IconCordisPluginOutline14,
   IconDownloadOutline16,
   IconFolderOpen16,
@@ -36,10 +36,12 @@ import {
   IconSparkle16,
   IconWarningOutline16,
 } from './icons.ts'
+import { HostCheckbox, HostSwitch, HostTag } from './optional-primitives.ts'
 import css from './Market.module.css'
 import { MARK_BLOCK_RADIUS, MARK_BLOCK_SIZE, MARK_GRID_BLOCKS, MARK_PLUG_BLOCK, MARK_VIEW_BOX } from './market-mark.ts'
 import { CommentsModal } from './CommentsModal.tsx'
 import { SearchInput } from './SearchInput.tsx'
+import { downloadStatsText } from './download-stats.ts'
 import { OperationsPanel } from './OperationsPanel.tsx'
 import { applyRecovery, fetchRecovery, initialKeep, RecoveryPanel, watchRestart, type RecoveryView } from './RecoveryPanel.tsx'
 import { clearSettled, drop, enqueue, patch as patchRecord, recordForUrl } from './operations.ts'
@@ -48,7 +50,7 @@ import { Diagnostics } from './Diagnostics.tsx'
 import { exportMarketLog } from './self-check.ts'
 import {
   api, applyGithubRouting, avatarColor, catalogEntryForInstalled, entryForDep, githubRouteCandidates, groupSwitchState, humanOutput, installedForCatalog, isGenerationSpec, isInstalled, localizeBilingual, localizeBilingualList, looksTerminal, matchInstalledName, orderedCategories, pluginCategories,
-  formatCount, pageItems, pluginName, pluginScreenshotCandidates, pluginScreenshots, pluginsForFavorites, rankThemeScreenshots, readSession, releaseNotesHttpsImage, rememberGithubRoute, resetScreenshotsCache, resolveCatalogRestore, safeScreenshots, sanitizeReleaseNotesBody, staleFavoriteUrls, themePlugins as themePluginsOf, themeSwatch, TIME_RANGE_DAYS, visiblePlugins,
+  formatCount, pageItems, pluginName, blockAliases, pluginScreenshotCandidates, pluginScreenshots, pluginsForFavorites, queuedRowApplies, rankThemeScreenshots, readSession, releaseNotesHttpsImage, rememberGithubRoute, resetScreenshotsCache, resolveCatalogRestore, safeScreenshots, sanitizeReleaseNotesBody, staleFavoriteUrls, themePlugins as themePluginsOf, themeSwatch, TIME_RANGE_DAYS, visiblePlugins,
 } from './market-data.ts'
 import type {
 ActivationInfo, ActivationState, GistExportResult, InstalledMap, InstalledRepoHints, InstalledRepoIdentities, MarketStatus, Registry, RegistryPlugin,
@@ -864,19 +866,44 @@ function useMediaWide(): boolean {
  * actually overflows the clamp: a two-line description has nothing to
  * "expand", so no button beats a button that does nothing.
  */
-function CardDesc({ text, t }: { text: string; t: Translate }) {
+function CardDesc({ text, t, lines = 5, className, textClassName }: {
+  text: string
+  t: Translate
+  lines?: 3 | 5
+  className?: string
+  textClassName?: string
+}) {
   const ref = useRef<HTMLDivElement>(null)
   const [expanded, setExpanded] = useState(false)
   const [canExpand, setCanExpand] = useState(false)
+  const base = textClassName === undefined ? css.desc : `${css.desc} ${textClassName}`
+  const clamp = lines === 3 ? css.descClamp3 : css.descClamp
   useLayoutEffect(() => {
     const el = ref.current
     if (el === null) return
-    setCanExpand(el.scrollHeight > el.clientHeight + 1)
-  }, [text])
+    // Measured while clamped only: expanded, scrollHeight equals clientHeight
+    // and would hide the button that collapses it again.
+    const measure = () => {
+      if (!el.classList.contains(clamp)) return
+      setCanExpand(el.scrollHeight > el.clientHeight + 1)
+    }
+    measure()
+    // A column width change re-wraps the text, so the answer can flip.
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [text, clamp])
   return (
-    <div>
-      <div ref={ref} className={expanded ? css.desc : `${css.desc} ${css.descClamp}`}>{text}</div>
-      {canExpand && (
+    <div className={className}>
+      <div ref={ref} className={expanded ? base : `${base} ${clamp}`}>{text}</div>
+      {canExpand && lines === 3 && (
+        <button type="button" className={css.descMore} onClick={() => setExpanded(e => !e)}>
+          {expanded ? t('descCollapse') : t('descMore')}
+          {expanded ? <IconChevronUpOutline14 size={12} /> : <IconChevronRightOutline14 size={12} />}
+        </button>
+      )}
+      {canExpand && lines === 5 && (
         <button
           type="button"
           className={css.descToggle}
@@ -1122,10 +1149,197 @@ function BookmarkMark({ size = 14, filled = false, className }: { size?: number;
   )
 }
 
-/**
- * Catalog npm latest in the card byline (#348). Same quiet style as ↓ / ★;
- * omitted when absent so github-only and not-yet-backfilled rows stay clean.
- */
+/** A compact rolling-period label, with source metadata on hover or focus. */
+function DownloadCount({ plugin, t }: { plugin: RegistryPlugin; t: Translate }) {
+  const tip = downloadStatsText(plugin, t)
+  if (tip === null) return null
+  return (
+    <Tooltip label={tip} side="top">
+      <span className={css.star} tabIndex={0} aria-label={tip}>
+        {'· ↓ ' + formatCount(plugin.downloads!) + ' / ' + t('downloadsPeriod')}
+      </span>
+    </Tooltip>
+  )
+}
+
+/** Circle with a question mark, in the same dark badge and light glyph as the
+ * terminal mark below it. */
+function ConfirmCapabilityIcon() {
+  return (
+    <svg className={css.confirmTerminalIcon} viewBox="0 0 16 16" width={16} height={16} aria-hidden="true" focusable="false">
+      <circle cx="8" cy="8" r="8" fill="currentColor" />
+      <path
+        className={css.confirmTerminalPrompt}
+        d="M6.2 6.25a1.8 1.8 0 1 1 2.7 1.55C8.35 8.1 8 8.5 8 9.05"
+        fill="none"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+      <circle className={css.confirmTerminalDot} cx="8" cy="11.2" r="0.75" />
+    </svg>
+  )
+}
+
+/** Design-spec terminal mark for the install-command fold: dark rounded
+ * square with a light `>_` prompt. Host ui-primitives has no matching glyph. */
+function ConfirmTerminalIcon() {
+  return (
+    <svg className={css.confirmTerminalIcon} viewBox="0 0 16 16" width={16} height={16} aria-hidden="true" focusable="false">
+      <rect width="16" height="16" rx="3.5" fill="currentColor" />
+      <path
+        className={css.confirmTerminalPrompt}
+        d="M4.25 5.25 L7.25 8 L4.25 10.75 M8.25 10.75 H12"
+        fill="none"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+/** execCommand only succeeds inside the click. writeText rejects later, after
+ * Chrome has already dropped the user activation, so the textarea copy has
+ * to happen before that promise. The field stays inside the dialog; removing
+ * a focused node outside it would drop the keyboard onto document.body. */
+function copyInstallCommandNow(text: string, anchor: HTMLElement): boolean {
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.setAttribute('aria-hidden', 'true')
+  area.tabIndex = -1
+  area.style.position = 'fixed'
+  area.style.top = '0'
+  area.style.left = '-9999px'
+  ;(anchor.parentElement ?? document.body).appendChild(area)
+  area.select()
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } catch {
+    ok = false
+  }
+  area.remove()
+  anchor.focus()
+  return ok
+}
+
+function writeInstallCommand(text: string, anchor: HTMLElement): Promise<void> {
+  const copiedNow = copyInstallCommandNow(text, anchor)
+  const write = navigator.clipboard?.writeText
+  if (typeof write !== 'function') {
+    return copiedNow ? Promise.resolve() : Promise.reject(new Error('copy failed'))
+  }
+  return write.call(navigator.clipboard, text).then(
+    () => undefined,
+    () => {
+      if (copiedNow) return
+      throw new Error('copy failed')
+    },
+  )
+}
+
+/** Copy control for the install command. Success shows 「已复制」 beside the
+ * icon; the command stays selectable if both copy paths fail. */
+function ConfirmCopyButton({ text, label, copiedLabel }: { text: string, label: string, copiedLabel: string }) {
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (timer.current !== null) clearTimeout(timer.current)
+  }, [])
+  const markCopied = () => {
+    setCopied(true)
+    if (timer.current !== null) clearTimeout(timer.current)
+    timer.current = setTimeout(() => setCopied(false), 1500)
+  }
+  return (
+    <>
+      {copied && <span className={css.confirmCopied} role="status">{copiedLabel}</span>}
+      <button
+        type="button"
+        className={css.confirmCopy}
+        aria-label={copied ? copiedLabel : label}
+        onClick={(event) => {
+          void writeInstallCommand(text, event.currentTarget).then(markCopied, () => {})
+        }}
+      >
+        {copied ? <IconCheckOutline16 size={14} /> : <IconCopyOutline16 size={14} />}
+      </button>
+    </>
+  )
+}
+
+/** Stroke glyphs the host primitives do not ship. They inherit the text colour. */
+function IconPlus({ size = 14 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} aria-hidden="true" focusable="false">
+      <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+/** Reminders off (Lucide `bell-off` geometry): the body breaks where the slash crosses it. */
+function IconBellOff({ size = 16 }: { size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M10.268 21a2 2 0 0 0 3.464 0" />
+      <path d="M17 17H4a1 1 0 0 1-.74-1.673C4.59 13.956 6 12.499 6 8a6 6 0 0 1 .258-1.742" />
+      <path d="M8.668 3.01A6 6 0 0 1 18 8c0 2.687.77 4.653 1.707 6.05" />
+      <path d="m2 2 20 20" />
+    </svg>
+  )
+}
+
+/** Design-spec warning mark: filled amber triangle, same visual size as the
+ * terminal badge above it. Title stays body ink. */
+function ConfirmWarnIcon() {
+  return (
+    <svg className={css.installCautionMark} viewBox="0 0 16 16" width={16} height={16} aria-hidden="true" focusable="false">
+      <path
+        fill="#f8b428"
+        d="M8 1.15Q8.72 1.15 9.15 2.05L14.4 12.35Q15.15 13.85 13.75 14.55H2.25Q0.85 13.85 1.6 12.35L6.85 2.05Q7.28 1.15 8 1.15Z"
+      />
+      <path d="M8 6.05v3.15" fill="none" stroke="#fff" strokeWidth="1.25" strokeLinecap="round" />
+      <circle cx="8" cy="11.15" r="0.68" fill="#fff" />
+    </svg>
+  )
+}
+
+/** Install-dialog fold (#739). A gray block, not an outlined frame: the icon
+ * stays on the left and the chevron stays on the right, open or closed. */
+function ConfirmFold({ icon, title, open, onToggle, children }: {
+  icon: ReactNode
+  title: string
+  open: boolean
+  onToggle: () => void
+  children: ReactNode
+}) {
+  return (
+    <div className={css.confirmPanel}>
+      <button type="button" className={css.confirmPanelRow} aria-expanded={open} onClick={onToggle}>
+        <span className={css.confirmPanelIcon}>{icon}</span>
+        <span className={css.confirmPanelTitle}>{title}</span>
+        {open
+          ? <IconChevronUpOutline14 size={14} className={css.confirmPanelChevron} />
+          : <IconChevronRightOutline14 size={14} className={css.confirmPanelChevron} />}
+      </button>
+      {open && <div className={css.confirmPanelBody}>{children}</div>}
+    </div>
+  )
+}
+
+/** Catalog npm latest, omitted for github-only and not-yet-backfilled rows. */
 function CatalogVersionMark({ version, tip }: { version: string | null | undefined; tip: string }) {
   if (typeof version !== 'string' || version.length === 0) return null
   const label = /^v/i.test(version) ? version : `v${version}`
@@ -1207,9 +1421,92 @@ function installedMap(value: unknown): InstalledMap {
   return installed
 }
 
+/** A `{name: {...}}` map, or anything else — for untyped server fields. */
+function isRecordOfRecords(value: unknown): value is Record<string, { spec?: string; reason?: string }> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 function sameInstalledMap(left: InstalledMap, right: InstalledMap): boolean {
   const names = Object.keys(left)
   return names.length === Object.keys(right).length && names.every(name => left[name] === right[name])
+}
+
+/** Same cap as `MAX_NOTE` in hot.ts; the server trims anything longer. */
+const NOTE_MAX = 200
+
+/**
+ * `/dsh-market/dismiss-broken` answers with the whole remaining map, but only
+ * `ok` is read: that map is a snapshot from when the request ran, and adopting
+ * it would resurrect or drop notices the panel has since settled (#763).
+ */
+type DismissBrokenReply = { ok?: unknown; brokenPlugins?: unknown; error?: unknown }
+
+/** `latest` is a semver for npm installs and a commit sha for github ones. */
+function displayLatest(latest: string): string {
+  if (/^\d/.test(latest)) return 'v' + latest
+  if (/^[0-9a-f]{12,40}$/i.test(latest)) return latest.slice(0, 7)
+  return latest
+}
+
+/** The tail of a local checkout path; the full path stays in the title and the copy button. */
+function shortLocalPath(path: string): string {
+  const parts = path.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean)
+  return parts.length <= 2 ? path : '…/' + parts.slice(-2).join('/')
+}
+
+/** A relative spec is resolved against the profile directory, so copying it elsewhere is meaningless. */
+function isAbsoluteLocalPath(path: string): boolean {
+  return /^(?:\/|~[\\/]|[A-Za-z]:[\\/]|\\\\)/.test(path)
+}
+
+/** `file:///abs` keeps one leading slash, like `file:/abs`. */
+function localPathOf(spec: string): string | null {
+  const match = /^(?:link|file):(?:\/\/(?=\/))?(.+)$/i.exec(spec)
+  return match !== null ? match[1] : null
+}
+
+/**
+ * A development checkout or local package. A generation is the desktop host's
+ * own install (#497) and is never one, even though its spec is a link:.
+ */
+function isLocalDev(spec: string, status: UpdateStatus | undefined): boolean {
+  if (status?.kind === 'generation' || isGenerationSpec(spec)) return false
+  return /^(?:link|file):/i.test(spec) || status?.kind === 'linked'
+}
+
+/**
+ * Whether one installed plugin has a pending update (either an ordinary
+ * upgrade via npm/git/restore, or a host-managed generation release), and has
+ * not already been updated in the current session.
+ *
+ * THE answer to that question. It used to have three copies that disagreed —
+ * the reminder count, the card's pill, and the installed list's ordering —
+ * which is the shape this repository already paid for once
+ * (`src/entry-identity.ts`: one assumption, several copies, each fixed at a
+ * different time). Callers now pass the two things that are genuinely their
+ * own policy:
+ *
+ * - `ignored`: a session-level "ignore this update" (#657). The NOTICE
+ *   surfaces pass it — the badge and the ordering, because a row the user
+ *   dismissed should not keep jumping to the top or counting toward
+ *   attention. The row's own pill does NOT, because the pill answers "is
+ *   there an update" (which dismissing does not change) and the row shows the
+ *   dismissal right beside it.
+ * - whether a disabled plugin counts, which the reminder count says no to and
+ *   the list says yes to: a disabled row is still a row someone may want to
+ *   update from the list, but it is not asking for attention.
+ */
+function isPluginUpdatable(
+  name: string,
+  spec: string,
+  status: UpdateStatus | undefined,
+  updatedNames: readonly string[],
+  ignored: ReadonlySet<string> = new Set<string>(),
+): boolean {
+  if (updatedNames.includes(name) || ignored.has(name) || status === undefined) return false
+  if (status.updateAvailable === true) return true
+  const generation = status.kind === 'generation' || isGenerationSpec(spec)
+  return generation && status.latest != null
 }
 
 /** Sort field choices in the filter panel. */
@@ -1252,6 +1549,22 @@ interface SourceMigrationConfirm {
   name: string
   source: string
   target: string
+}
+
+/**
+ * The sessions a host 409 named as blocking (#752).
+ *
+ * The agent guard refuses before it touches pnpm and answers with the sessions
+ * that are running. Keeping them on the record is what lets a queued row say
+ * WHY it is not moving: a queue entry with no reason reads as an operation
+ * that is merely last in line, and "it never starts" is what the user reports.
+ *
+ * @returns the session names, or undefined when the host named none.
+ */
+function blockedSessions(body: { runningAgents?: unknown }): string[] | undefined {
+  if (!Array.isArray(body.runningAgents)) return undefined
+  const names = body.runningAgents.map(String).filter(name => name !== '')
+  return names.length === 0 ? undefined : names
 }
 
 export function MarketSection(props: MarketSectionProps) {
@@ -1334,6 +1647,118 @@ export function MarketSection(props: MarketSectionProps) {
   const recoveredInstall = useRef<{ id: string; url: string; name?: string } | null>(null)
   /** The synthetic task rebuilt from dshm-updating after this section remounts. */
   const recoveredUpdateRecordId = useRef<string | null>(null)
+  /**
+   * The install queue: agents-busy 409s become `queued` records instead of
+   * failures, and drain automatically when agents go idle (see drainQueue).
+   * Persisted in localStorage so a refresh keeps the queue; only `queued`
+   * records persist — `running` recovery stays on the dshm-pending paths.
+   */
+  const queueRestoredRef = useRef(false)
+  useEffect(() => {
+    if (queueRestoredRef.current) return
+    let saved: unknown = null
+    try {
+      saved = JSON.parse(localStorage.getItem('dshm-queue-v1') ?? 'null')
+    } catch { saved = null }
+    if (!Array.isArray(saved) || saved.length === 0) {
+      queueRestoredRef.current = true
+      return
+    }
+    if (data === null) return
+    queueRestoredRef.current = true
+    // Consumed only once the rows can actually be restored. Removing it
+    // earlier lost the queue outright: this effect runs on the first render,
+    // where `data === null` (the catalog has not arrived), and the run that
+    // follows found the storage empty — so a REFRESH with a pending queue, the
+    // case this feature exists for, threw it away.
+    try { localStorage.removeItem('dshm-queue-v1') } catch { /* storage unavailable */ }
+    /**
+     * A queued row may only run while the world it was queued in still holds.
+     *
+     * It drains with no confirmation — that is what queueing is — so a row
+     * that has gone stale is a destructive operation launched from an old
+     * decision: queue an uninstall at 10:00, uninstall it by hand (or change
+     * your mind), open the market at 15:00 and it runs. Each kind therefore
+     * has to be true RIGHT NOW, and a row that no longer is gets REPORTED
+     * rather than executed or silently dropped — the user queued it, so the
+     * user is told what became of it.
+     */
+    const judged = (saved as unknown[]).flatMap((entry): Array<
+      { ok: true; row: { kind: OperationRecord['kind']; name: string; url?: string } }
+      | { ok: false; kind: OperationRecord['kind']; name: string; url?: string; reason: string }
+    > => {
+      if (entry === null || typeof entry !== 'object') return []
+      const row = entry as Record<string, unknown>
+      const kindRaw = row.kind
+      if (kindRaw !== 'install' && kindRaw !== 'update' && kindRaw !== 'uninstall') return []
+      if (typeof row.name !== 'string' || row.name === '') return []
+      if (row.url !== undefined && typeof row.url !== 'string') return []
+      const kind: OperationRecord['kind'] = kindRaw
+      const name = row.name
+      const url = typeof row.url === 'string' ? row.url : undefined
+      const stale = (reason: string) => [{ ok: false as const, kind, name, url, reason }]
+      const verdict = queuedRowApplies({ kind, name, ...(url === undefined ? {} : { url }) }, { installed, updates, plugins: data.plugins })
+      if (verdict !== null) return stale(verdict === 'gone' ? t('agentQueueStaleGone') : t('agentQueueStaleNoUpdate'))
+      if (kind === 'install' && url === undefined) return []
+      return [{ ok: true as const, row: { kind, name, ...(url === undefined ? {} : { url }) } }]
+    })
+    const valid = judged.flatMap(verdict => verdict.ok ? [verdict.row] : [])
+    const stale = judged.flatMap(verdict => verdict.ok ? [] : [verdict])
+    if (valid.length === 0 && stale.length === 0) {
+      return
+    }
+    setRecords(prev => {
+      const kept = [...prev]
+      for (const entry of valid) {
+        const dup = kept.some(record =>
+          record.state === 'queued'
+          && record.kind === entry.kind
+          && record.name === entry.name
+          && (entry.kind !== 'install' || record.url === entry.url))
+        if (dup) continue
+        recordSeq.current += 1
+        kept.push({
+          id: `op-${String(recordSeq.current)}`,
+          kind: entry.kind,
+          name: entry.name,
+          ...(entry.url === undefined ? {} : { url: entry.url }),
+          state: 'queued',
+          reason: t('agentBusyQueued'),
+        })
+      }
+      for (const row of stale) {
+        recordSeq.current += 1
+        kept.push({
+          id: `op-${String(recordSeq.current)}`,
+          kind: row.kind,
+          name: row.name,
+          ...(row.url === undefined ? {} : { url: row.url }),
+          // Reported, not executed and not hidden: the row is the user's, and
+          // "we did not do this, here is why" is the only honest end for it.
+          state: 'failed',
+          reason: row.reason,
+        })
+      }
+      return kept
+    })
+    setOperationsOpen(true)
+  }, [data, t])
+  useEffect(() => {
+    // Never write before the restore has read. On the first render `records`
+    // is empty, and this effect would then delete the stored queue that the
+    // restore — which waits for the catalog — is about to load: every refresh
+    // with a cold catalog silently lost the user's queued work. The restore is
+    // this queue's only reader, so waiting for it is also what makes the
+    // consume safe.
+    if (!queueRestoredRef.current) return
+    try {
+      const queued = records
+        .filter(record => record.state === 'queued')
+        .map(record => ({ kind: record.kind, name: record.name, ...(record.url === undefined ? {} : { url: record.url }) }))
+      if (queued.length === 0) localStorage.removeItem('dshm-queue-v1')
+      else localStorage.setItem('dshm-queue-v1', JSON.stringify(queued))
+    } catch { /* storage unavailable */ }
+  }, [records])
   /** Raised by the card marker, so "查看详情" lands on the record itself. */
   const [operationsOpen, setOperationsOpen] = useState(false)
   const openOperations = useCallback(() => setOperationsOpen(true), [])
@@ -1382,6 +1807,16 @@ export function MarketSection(props: MarketSectionProps) {
   const [favoriteError, setFavoriteError] = useState<string | null>(null)
   /** Ignores out-of-order /dsh-market/favorite responses after a newer toggle. */
   const favoriteOpGen = useRef(0)
+  const [blockError, setBlockError] = useState<string | null>(null)
+  const [updateExemptError, setUpdateExemptError] = useState<string | null>(null)
+  const [updateExemptNotice, setUpdateExemptNotice] = useState<string | null>(null)
+  const updateExemptOpGen = useRef(0)
+  /** Shown once a hide sticks, so the card vanishing has a place to look. */
+  const [blockNotice, setBlockNotice] = useState<string | null>(null)
+  /** Ignores out-of-order /dsh-market/block responses after a newer toggle. */
+  const blockOpGen = useRef(0)
+  const [pluginMenuUrl, setPluginMenuUrl] = useState<string | null>(null)
+  const [installedMenuName, setInstalledMenuName] = useState<string | null>(null)
   const [clearingStale, setClearingStale] = useState(false)
   /** The notes payload the server answers with, verbatim (see /changelog). */
   type NoteRelease = { tag: string | null; name: string | null; publishedAt: string | null; url: string | null; body: string }
@@ -1429,6 +1864,10 @@ export function MarketSection(props: MarketSectionProps) {
    * reset the Toast's auto-dismiss timer on every parent re-render. */
   const exportToastDone = useCallback(() => setExportState('idle'), [])
   const favoriteErrorDone = useCallback(() => setFavoriteError(null), [])
+  const blockErrorDone = useCallback(() => setBlockError(null), [])
+  const blockNoticeDone = useCallback(() => setBlockNotice(null), [])
+  const updateExemptErrorDone = useCallback(() => setUpdateExemptError(null), [])
+  const updateExemptNoticeDone = useCallback(() => setUpdateExemptNotice(null), [])
   const [updates, setUpdates] = useState<Record<string, UpdateStatus>>({})
   /** Update reminders dismissed for this host boot. The Installed tab still
    * shows these plugins and their update actions; only proactive prompts use
@@ -1445,8 +1884,59 @@ export function MarketSection(props: MarketSectionProps) {
   const [restoreConfirm, setRestoreConfirm] = useState<{ name: string; entry: RegistryPlugin; verified: boolean } | null>(null)
   /** A release whose declared host requirement this host does not meet (#404). kind distinguishes the update dialog from the fresh-install dialog. */
   const [hostIncompatible, setHostIncompatible] = useState<
-    { kind: 'update' | 'install'; name: string; version: string; requirement: string | null; hostVersion: string | null; plugin: RegistryPlugin | null } | null
+    {
+      kind: 'update' | 'install'
+      name: string
+      version: string
+      requirement: string | null
+      hostVersion: string | null
+      /** The npm package the search runs on; null when the entry has no npm name. */
+      npmName: string | null
+      /** Kept for the install path: the card this refusal came from. */
+      plugin: RegistryPlugin | null
+    } | null
   >(null)
+  /**
+   * The answer to "the newest release is too new for this host — what CAN I
+   * install?" (#581). The dialog asks as soon as it opens, because that
+   * question is the only way out it can offer: the alternative the route
+   * gives (install anyway) is a decision about breaking the host, and most
+   * users reaching this dialog have no way to weigh it.
+   */
+  const [findingCompat, setFindingCompat] = useState<
+    { status: 'idle' | 'loading' | 'not-found' | 'error' } | { status: 'found'; version: string }
+  >({ status: 'idle' })
+  const [compatRetry, setCompatRetry] = useState(0)
+  // Ask the moment the dialog opens: "which version still works" is the one
+  // answer that turns a refusal into a choice, and the route can only give it
+  // for a plugin the catalog carries by npm name.
+  useEffect(() => {
+    if (hostIncompatible === null || hostIncompatible.npmName === null) {
+      setFindingCompat({ status: 'idle' })
+      return
+    }
+    const controller = new AbortController()
+    setFindingCompat({ status: 'loading' })
+    fetch(api('/dsh-market/find-compatible'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ npmName: hostIncompatible.npmName, upgradeOnly: hostIncompatible.kind === 'update' }),
+      signal: controller.signal,
+    })
+      .then(async response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return await response.json() as { compatibleVersion?: string | null }
+      })
+      .then(data => {
+        if (controller.signal.aborted) return
+        setFindingCompat(typeof data.compatibleVersion === 'string' && data.compatibleVersion !== ''
+          ? { status: 'found', version: data.compatibleVersion }
+          : { status: 'not-found' })
+      })
+      .catch(() => { if (!controller.signal.aborted) setFindingCompat({ status: 'error' }) })
+    return () => controller.abort()
+  }, [hostIncompatible, compatRetry])
+
   const [restoreBlocked, setRestoreBlocked] = useState<{ name: string; reason: 'no-catalog' | 'repo-mismatch' } | null>(null)
   // Snapshot the source switch the user agreed to review; later renders must not change it under the dialog.
   const [migrationConfirm, setMigrationConfirm] = useState<SourceMigrationConfirm | null>(null)
@@ -1477,6 +1967,9 @@ export function MarketSection(props: MarketSectionProps) {
   const [notes, setNotes] = useState<Record<string, string>>({})
   /** Catalog URLs bookmarked for later install (#414). */
   const [favoriteUrls, setFavoriteUrls] = useState<string[]>([])
+  /** Package names the user hid from Discover (#657). */
+  const [blockedNames, setBlockedNames] = useState<string[]>([])
+  const [updateExemptNames, setUpdateExemptNames] = useState<string[]>([])
   /** Rows the user asked to show the AUTHOR's description on, despite a note. */
   const [showTheirs, setShowTheirs] = useState<string[]>([])
   /** The row whose note is being edited, and the text in the box. */
@@ -1490,6 +1983,8 @@ export function MarketSection(props: MarketSectionProps) {
    * real switch state so hand-edited cordis.patch.yml toggles are visible.
    */
   const [patchDisabledNames, setPatchDisabledNames] = useState<string[]>([])
+  /** Bundle packages DSH's own plugin page turned off by leaving them out of dsh.profile.bundles (#696). */
+  const [unbundledNames, setUnbundledNames] = useState<string[]>([])
   const [groups, setGroups] = useState<Record<string, string[]>>({})
   const [groupOrder, setGroupOrder] = useState<string[]>([])
   /** Installed-tab sub-view: flat list or groups (All-plugins was removed —
@@ -1525,6 +2020,20 @@ export function MarketSection(props: MarketSectionProps) {
    * first reply always has to ask which one it was.
    */
   const [version, setVersion] = useState<string | null>(null)
+  /**
+   * The catalog's own build date (#712). The version on a card is the
+   * catalog's copy, not a live npm lookup, so a plugin published after the
+   * last refresh shows the older number — the tooltip has to say so, or
+   * "npm latest" beside a number that is not npm's latest is a bug report
+   * waiting to be filed. Null until the catalog answers.
+   */
+  const [catalogUpdated, setCatalogUpdated] = useState<string | null>(null)
+  const catalogVersionTip = useMemo(
+    () => (catalogUpdated === null
+      ? t('catalogVersionUndated')
+      : t('catalogVersionDated').replace('{0}', catalogUpdated)),
+    [catalogUpdated, t],
+  )
   /** Non-live activation results from the last operation, shown as a banner. */
   const [activationWarnings, setActivationWarnings] = useState<{ name: string; info: ActivationInfo }[]>([])
   const [hostDependencyFindings, setHostDependencyFindings] = useState<SharedHostPackageDependencyFinding[]>([])
@@ -1549,6 +2058,34 @@ export function MarketSection(props: MarketSectionProps) {
   /** Client-part plugins toggled this session — their UI needs a refresh. */
   const [refreshNames, setRefreshNames] = useState<string[]>([])
   const [envReady, setEnvReady] = useState(true)
+  /**
+   * Packages the market stopped declaring because their build could no longer
+   * compose (#663). They are gone from the installed list — this is the only
+   * thing that can say why, so it is read from `/status` on every poll rather
+   * than folded into a one-shot reply.
+   */
+  const [brokenPlugins, setBrokenPlugins] = useState<Record<string, { spec?: string; reason?: string }>>({})
+  const brokenPluginNames = useMemo(() => Object.keys(brokenPlugins), [brokenPlugins])
+  const [dismissBrokenError, setDismissBrokenError] = useState<string | null>(null)
+  /**
+   * Per plugin, not one counter for the panel (#763 review).
+   *
+   * A shared generation made a second plugin's success swallow the first one's
+   * FAILURE, so a notice the server still had stayed hidden on screen with no
+   * error — the panel claimed a state the server did not have. Each name
+   * carries its own counter, so only a LATER click on the SAME plugin can
+   * supersede this one, and a different plugin's reply never can.
+   */
+  const dismissBrokenGen = useRef(new Map<string, number>())
+  /**
+   * Bumped by every authoritative `/installed` read. A dismiss whose reply
+   * arrives after one was overtaken by that read: the panel is already showing
+   * the server's truth, and rolling this failure back would put back a record
+   * the read has since settled.
+   */
+  const installedReadGen = useRef(0)
+  /** Rows with a dismiss in flight, so one row cannot queue two. */
+  const [dismissingBroken, setDismissingBroken] = useState<ReadonlySet<string>>(() => new Set())
   const [envFixing, setEnvFixing] = useState(false)
   const [envFailed, setEnvFailed] = useState(false)
   const [bootId, setBootId] = useState<string | null>(null)
@@ -1618,6 +2155,13 @@ export function MarketSection(props: MarketSectionProps) {
   const [presetOpen, setPresetOpen] = useState(false)
   /** Install-command disclosure inside the confirm dialog. */
   const [cmdOpen, setCmdOpen] = useState(false)
+  const [capsOpen, setCapsOpen] = useState(false)
+  // Both folds belong to one dialog opening; the next plugin starts collapsed
+  // no matter which path closed the previous one (cancel, Esc, install).
+  useEffect(() => {
+    setCapsOpen(false)
+    setCmdOpen(false)
+  }, [confirming])
   /** Per-row "why is it not live" disclosure (installed tab). */
   const [whyOpen, setWhyOpen] = useState<string | null>(null)
   /** Restore-confirm dialog (replaces window.confirm). */
@@ -1648,6 +2192,14 @@ export function MarketSection(props: MarketSectionProps) {
    * `catsOpen` in sync so unstuck restores the user's choice. */
   const [stuckExpanded, setStuckExpanded] = useState(false)
   const [catsSentinel, setCatsSentinel] = useState<HTMLDivElement | null>(null)
+  /**
+   * Latest /status sample for the queue drain: `busy` gates pnpm execution,
+   * `runningAgents` gates the agent-file guard. A ref (not state) because the
+   * drain interval is mount-once and must never read a stale closure.
+   */
+  const statusRef = useRef<{ busy: boolean; runningAgents: string[] }>({ busy: false, runningAgents: [] })
+  /** True while the drain is executing one queued request (no parallel starts). */
+  const drainingRef = useRef(false)
 
   const refreshInstalled = useCallback((force?: boolean) => {
     fetch(api('/dsh-market/installed'), { cache: 'no-store' })
@@ -1669,15 +2221,20 @@ export function MarketSection(props: MarketSectionProps) {
           setNotes(body.notes as Record<string, string>)
         }
         if (Array.isArray(body.patchDisabled)) setPatchDisabledNames(body.patchDisabled)
+        if (Array.isArray(body.unbundled)) setUnbundledNames(body.unbundled)
         if (body.groups && typeof body.groups === 'object') setGroups(body.groups)
         if (Array.isArray(body.groupOrder)) setGroupOrder(body.groupOrder)
         if (Array.isArray(body.favorites)) setFavoriteUrls(body.favorites.filter((url: unknown): url is string => typeof url === 'string'))
+        if (Array.isArray(body.blocked)) setBlockedNames(body.blocked.filter((name: unknown): name is string => typeof name === 'string'))
+        if (Array.isArray(body.updateExempt)) setUpdateExemptNames(body.updateExempt.filter((name: unknown): name is string => typeof name === 'string'))
         setInstalledBundles(Array.isArray(body.bundles) ? body.bundles.filter((name: unknown): name is string => typeof name === 'string') : [])
         if (body.activation && typeof body.activation === 'object') setActivations(body.activation)
         const findings = body.diagnostics?.schema === 'dsh-market/diagnostics/v1'
           && Array.isArray(body.diagnostics.findings)
           ? body.diagnostics.findings.filter(isHostDependencyFinding)
           : []
+        setBrokenPlugins(isRecordOfRecords(body.brokenPlugins) ? body.brokenPlugins : {})
+        installedReadGen.current += 1
         setHostDependencyFindings(findings)
       })
       .catch(() => {})
@@ -1695,10 +2252,12 @@ export function MarketSection(props: MarketSectionProps) {
   /** Lookup set for the persisted disable list (#60). */
   const disabledSet = useMemo(() => new Set(disabledNames), [disabledNames])
   const favoriteUrlSet = useMemo(() => new Set(favoriteUrls), [favoriteUrls])
+  const blockedNameSet = useMemo(() => new Set(blockedNames), [blockedNames])
+  const updateExemptSet = useMemo(() => new Set(updateExemptNames), [updateExemptNames])
   /** Effective switch state: market disable list ∪ user-patch-layer disables. */
   const effectiveDisabledSet = useMemo(
-    () => new Set([...disabledNames, ...patchDisabledNames]),
-    [disabledNames, patchDisabledNames],
+    () => new Set([...disabledNames, ...patchDisabledNames, ...unbundledNames]),
+    [disabledNames, patchDisabledNames, unbundledNames],
   )
 
   useEffect(() => {
@@ -1736,6 +2295,8 @@ export function MarketSection(props: MarketSectionProps) {
         }
         cachedRegistry = body.registry
         setData(body.registry)
+        const catalogDate = body.registry.updated
+        setCatalogUpdated(typeof catalogDate === 'string' && catalogDate.trim() !== '' ? catalogDate : null)
         setHostVersion(typeof body.hostVersion === 'string' ? body.hostVersion : null)
         setLoadError(null)
       })
@@ -1807,6 +2368,10 @@ export function MarketSection(props: MarketSectionProps) {
     fetch(api('/dsh-market/status'), { cache: 'no-store' })
       .then(res => res.json())
       .then(status => {
+        statusRef.current = {
+          busy: status.busy === true,
+          runningAgents: Array.isArray(status.runningAgents) ? status.runningAgents.map(String) : [],
+        }
         setEnvReady(status.pnpm !== false)
         // Applied before anything renders a github.com URL. The catalog this
         // page draws from is a larger request through the same server, so it
@@ -1949,6 +2514,10 @@ export function MarketSection(props: MarketSectionProps) {
       fetch(api('/dsh-market/status'), { cache: 'no-store' })
         .then(res => res.json())
         .then(status => {
+          statusRef.current = {
+            busy: status.busy === true,
+            runningAgents: Array.isArray(status.runningAgents) ? status.runningAgents.map(String) : [],
+          }
           setHostBusy(status.busy === true)
           setDebuggerLatch(typeof status.debugger === 'string' ? status.debugger : null)
           if (status.active) {
@@ -2064,7 +2633,7 @@ export function MarketSection(props: MarketSectionProps) {
     setShowTop(false)
   }, [tab, q, cat, sortField, sortDir, timeRange, compatibleWithHost, qThemes, themeSortField, themeSortDir, themeTimeRange, qFavorites, favSortField, favSortDir, favTimeRange, qInstalled, installedView])
 
-  const plugins = useMemo(
+  const pluginsAll = useMemo(
     () => (data === null ? [] : visiblePlugins(data.plugins, {
       category: cat, query: q, lang, categories: data.categories,
       sort: `${sortField}-${sortDir}`,
@@ -2073,6 +2642,26 @@ export function MarketSection(props: MarketSectionProps) {
       compatibleWithHost,
     })),
     [data, q, cat, lang, sortField, sortDir, timeRange, hostCompatibility, compatibleWithHost])
+  // One plugin can be stored under the installed name or the catalog name.
+  // Both have to hide the card and skip Update all (#657).
+  const pluginBlocked = (plugin: RegistryPlugin): boolean =>
+    blockAliases(plugin, matchInstalledName(plugin, installed, repoIdentities, data?.plugins, repoHints))
+      .some(name => blockedNameSet.has(name))
+  const installedBlocked = (name: string): boolean => {
+    if (blockedNameSet.has(name)) return true
+    if (data === null) return false
+    const spec = installed[name]
+    if (spec === undefined) return false
+    const entry = catalogEntryForInstalled(data.plugins, name, String(spec), repoIdentities[name], repoHints[name])
+    return entry !== undefined && blockAliases(entry, name).some(alias => blockedNameSet.has(alias))
+  }
+  const blockToggleName = (aliases: readonly string[]): string =>
+    aliases.find(name => blockedNameSet.has(name)) ?? aliases[0]!
+  const plugins = useMemo(
+    () => pluginsAll.filter(plugin => !pluginBlocked(plugin)),
+    // pluginBlocked closes over the installed map and the catalog match.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pluginsAll, blockedNameSet, installed, repoIdentities, data, repoHints])
   const { currentPage, totalPages, pageSize, goToPage, changePageSize } =
     usePagination(plugins.length, [q, cat, sortField, sortDir, timeRange, compatibleWithHost], scrollToTop)
   const pagePlugins = plugins.slice((currentPage - 1) * pageSize, currentPage * pageSize)
@@ -2099,13 +2688,28 @@ export function MarketSection(props: MarketSectionProps) {
     (count, name) => count + (hostCompatibility[name] === undefined ? 0 : 1), 0,
   )
 
-  const themePlugins = useMemo(
+  const themePluginsAll = useMemo(
     () => (data === null ? [] : visiblePlugins(data.plugins, {
       category: 'theme', query: qThemes, lang, categories: data.categories,
       sort: `${themeSortField}-${themeSortDir}`,
       sinceDays: themeTimeRange === 'all' ? undefined : TIME_RANGE_DAYS[themeTimeRange],
     })),
     [data, qThemes, lang, themeSortField, themeSortDir, themeTimeRange])
+  const themePlugins = useMemo(
+    () => themePluginsAll.filter(plugin => !pluginBlocked(plugin)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [themePluginsAll, blockedNameSet, installed, repoIdentities, data, repoHints])
+  const blockedPlugins = useMemo(
+    () => (data === null ? [] : data.plugins.filter(plugin => pluginBlocked(plugin))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, blockedNameSet, installed, repoIdentities, repoHints])
+  const blockedMissing = useMemo(
+    () => {
+      const covered = new Set(blockedPlugins.flatMap(plugin =>
+        blockAliases(plugin, matchInstalledName(plugin, installed, repoIdentities, data?.plugins, repoHints))))
+      return blockedNames.filter(name => !covered.has(name))
+    },
+    [blockedNames, blockedPlugins, installed, repoIdentities, data, repoHints])
   const themePagination = usePagination(
     themePlugins.length, [qThemes, themeSortField, themeSortDir, themeTimeRange], scrollToTop)
   const themePagePlugins = themePlugins.slice(
@@ -2213,7 +2817,7 @@ export function MarketSection(props: MarketSectionProps) {
     return `${first.name} — ${first.layers.join(' / ')}${rest}`
   }
 
-  const doInstall = useCallback((plugin: RegistryPlugin, force = false) => {
+  const doInstall = useCallback((plugin: RegistryPlugin, force = false, version?: string) => {
     setBuildsSkipped(null)
     setConfirming(null)
     setInstallError(null)
@@ -2229,7 +2833,10 @@ export function MarketSection(props: MarketSectionProps) {
     fetch(api('/dsh-market/install'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ url: plugin.url, ...(force ? { force: true } : {}) }),
+      // `version` when the refusal dialog found a release this host supports:
+      // the route pins THAT release instead of resolving the newest one —
+      // which is the release that was just refused (#581).
+      body: JSON.stringify({ url: plugin.url, ...(force ? { force: true } : {}), ...(version !== undefined ? { version } : {}) }),
     })
       .then(res => res.json().then(body => ({ status: res.status, body })))
       .then(({ status, body }) => {
@@ -2274,16 +2881,40 @@ export function MarketSection(props: MarketSectionProps) {
           }
           // `warned` keeps the ✓: the plugin IS installed, so calling a
           // compatibility risk a failure would misreport what happened.
-          setRecords(list => patchRecord(list, recordId, body.compatibility?.code === 'soft-incompatible'
-            ? { state: 'warned', reason: t('compatRiskBanner') }
-            : { state: 'done', needsRefresh: body.hot !== true }))
+          setRecords(list => patchRecord(list, recordId, body.heldRelease !== undefined
+            // The plugin is installed and works; the profile's own
+            // minimumReleaseAge is why it is not the newest one. A `warned`
+            // keeps the ✓ that the install earned, and the record carries the
+            // version the hold refused so the row can offer it (#635).
+            ? {
+                state: 'warned',
+                reason: t('heldReleaseNotice')
+                  .replace('{0}', String(body.heldRelease.latest))
+                  .replace('{1}', String(body.heldRelease.installed ?? '')),
+                heldRelease: body.heldRelease,
+              }
+            : body.compatibility?.code === 'soft-incompatible'
+              ? { state: 'warned', reason: t('compatRiskBanner') }
+              : { state: 'done', needsRefresh: body.hot !== true }))
           refreshInstalled()
         } else {
           if (status === 409) {
-            const busyReason = body.agentsBusy === true
-              ? t('agentBusyInstall') + (Array.isArray(body.runningAgents) && body.runningAgents.length > 0 ? ` (${body.runningAgents.join(', ')})` : '')
-              : t('busyWait')
-            setRecords(list => patchRecord(list, recordId, { state: 'failed', reason: busyReason }))
+            if (body.agentsBusy === true) {
+              // Agents-busy is a queue, not a failure: keep the record as
+              // `queued` so the drain below runs it when agents go idle.
+              // The host changed nothing (it refuses before touching pnpm),
+              // so there is nothing to roll back and nothing to decide — but
+              // the row has to say what is holding it, or "queued" reads as
+              // "waiting its turn" while it never moves at all (#752).
+              setRecords(list => patchRecord(list, recordId, {
+                state: 'queued',
+                reason: t('agentBusyQueued'),
+                blockedBy: blockedSessions(body),
+              }))
+              setOperationsOpen(true)
+              return
+            }
+            setRecords(list => patchRecord(list, recordId, { state: 'failed', reason: t('busyWait') }))
             setOperationsOpen(true)
             return
           }
@@ -2305,7 +2936,7 @@ export function MarketSection(props: MarketSectionProps) {
           // extended to fresh installs). `input` keeps the record in the
           // panel until the user answers it.
           if (body.hostIncompatible && typeof body.hostIncompatible === 'object') {
-            const notice = body.hostIncompatible as { name?: unknown; version?: unknown; requirement?: unknown; hostVersion?: unknown }
+            const notice = body.hostIncompatible as { name?: unknown; version?: unknown; requirement?: unknown; hostVersion?: unknown; npmName?: unknown }
             setRecords(list => drop(list, recordId))
             setHostIncompatible({
               kind: 'install',
@@ -2313,6 +2944,7 @@ export function MarketSection(props: MarketSectionProps) {
               version: String(notice.version ?? ''),
               requirement: typeof notice.requirement === 'string' ? notice.requirement : null,
               hostVersion: typeof notice.hostVersion === 'string' ? notice.hostVersion : null,
+              npmName: typeof notice.npmName === 'string' ? notice.npmName : (typeof plugin.npm === 'string' ? plugin.npm : null),
               plugin,
             })
             return
@@ -2555,7 +3187,7 @@ export function MarketSection(props: MarketSectionProps) {
       .catch(() => {})
   }, [])
 
-  const doUpdate = useCallback((name: string, force = false, restore = false) => {
+  const doUpdate = useCallback((name: string, force = false, restore = false, compatVersion?: string) => {
     setInstallError(null)
     setActivationWarnings([])
     // Only THIS row's stale marker is cleared. "Update all" walks the list
@@ -2582,7 +3214,7 @@ export function MarketSection(props: MarketSectionProps) {
     return fetch(api('/dsh-market/update'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name, ...(force ? { force: true } : {}), ...(restore ? { restore: true } : {}) }),
+      body: JSON.stringify({ name, ...(force ? { force: true } : {}), ...(restore ? { restore: true } : {}), ...(compatVersion !== undefined ? { compatVersion } : {}) }),
     })
       .then(res => res.json().then(body => ({ status: res.status, body })))
       .then(({ status, body }) => {
@@ -2629,9 +3261,16 @@ export function MarketSection(props: MarketSectionProps) {
         } else {
           if (status === 409) {
             if (body.agentsBusy === true) {
-              const running = Array.isArray(body.runningAgents) && body.runningAgents.length > 0 ? ` (${body.runningAgents.join(', ')})` : ''
-              setRecords(list => patchRecord(list, updateRecordId, { state: 'failed', reason: t('agentBusyUpdate') + running }))
-              setInstallError(t('agentBusyUpdate') + running)
+              // Same queue treatment as installs: the host refused before
+              // touching pnpm, so this becomes a `queued` record the drain
+              // runs when agents go idle — carrying the sessions that are
+              // holding it, so the row can say why (#752).
+              setRecords(list => patchRecord(list, updateRecordId, {
+                state: 'queued',
+                reason: t('agentBusyUpdateQueued'),
+                blockedBy: blockedSessions(body),
+              }))
+              setOperationsOpen(true)
               return
             }
             setRecords(list => patchRecord(list, updateRecordId, { state: 'failed', reason: t('busyWait') }))
@@ -2643,7 +3282,7 @@ export function MarketSection(props: MarketSectionProps) {
           // dialog with the two facts and a way past. The row is dropped
           // rather than marked failed: nothing was attempted.
           if (body.hostIncompatible && typeof body.hostIncompatible === 'object') {
-            const notice = body.hostIncompatible as { name?: unknown; version?: unknown; requirement?: unknown; hostVersion?: unknown }
+            const notice = body.hostIncompatible as { name?: unknown; version?: unknown; requirement?: unknown; hostVersion?: unknown; npmName?: unknown }
             setRecords(list => drop(list, updateRecordId))
             setHostIncompatible({
               kind: 'update',
@@ -2651,6 +3290,7 @@ export function MarketSection(props: MarketSectionProps) {
               version: String(notice.version ?? ''),
               requirement: typeof notice.requirement === 'string' ? notice.requirement : null,
               hostVersion: typeof notice.hostVersion === 'string' ? notice.hostVersion : null,
+              npmName: typeof notice.npmName === 'string' ? notice.npmName : null,
               plugin: null,
             })
             return
@@ -2890,6 +3530,185 @@ export function MarketSection(props: MarketSectionProps) {
       })
   }, [favoriteUrlSet, favoriteUrls, t])
 
+  const toggleBlock = useCallback((name: string) => {
+    const gen = ++blockOpGen.current
+    const nextBlocked = !blockedNameSet.has(name)
+    const previous = blockedNames
+    setBlockError(null)
+    setBlockedNames((list) => {
+      if (nextBlocked) return list.includes(name) ? list : [...list, name]
+      return list.filter(entry => entry !== name)
+    })
+    fetch(api('/dsh-market/block'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, blocked: nextBlocked }),
+    })
+      .then(async (res) => {
+        const text = await res.text()
+        let body: { ok?: unknown; blocked?: unknown; error?: unknown } | null = null
+        if (text !== '') {
+          try { body = JSON.parse(text) as { ok?: unknown; blocked?: unknown; error?: unknown } } catch { /* non-JSON */ }
+        }
+        return { status: res.status, body }
+      })
+      .then(({ status, body }) => {
+        if (gen !== blockOpGen.current) return
+        if (status === 200 && body?.ok === true && Array.isArray(body.blocked)) {
+          setBlockedNames(body.blocked.filter((entry: unknown): entry is string => typeof entry === 'string'))
+          if (nextBlocked) setBlockNotice(t('blockMoved'))
+          return
+        }
+        setBlockedNames(previous)
+        setBlockError(typeof body?.error === 'string' ? body.error : t('blockFailed'))
+      })
+      .catch((error: unknown) => {
+        if (gen !== blockOpGen.current) return
+        setBlockedNames(previous)
+        setBlockError(String(error))
+      })
+  }, [blockedNameSet, blockedNames, t])
+
+  const toggleUpdateExempt = useCallback((name: string) => {
+    const gen = ++updateExemptOpGen.current
+    const nextExempt = !updateExemptSet.has(name)
+    const previous = updateExemptNames
+    setUpdateExemptError(null)
+    setUpdateExemptNames((list) => {
+      if (nextExempt) return list.includes(name) ? list : [...list, name]
+      return list.filter(entry => entry !== name)
+    })
+    fetch(api('/dsh-market/update-exempt'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, exempt: nextExempt }),
+    })
+      .then(async (res) => {
+        const text = await res.text()
+        let body: { ok?: unknown; updateExempt?: unknown; error?: unknown } | null = null
+        if (text !== '') {
+          try { body = JSON.parse(text) as { ok?: unknown; updateExempt?: unknown; error?: unknown } } catch { /* non-JSON */ }
+        }
+        return { status: res.status, body }
+      })
+      .then(({ status, body }) => {
+        if (gen !== updateExemptOpGen.current) return
+        if (status === 200 && body?.ok === true && Array.isArray(body.updateExempt)) {
+          setUpdateExemptNames(body.updateExempt.filter((entry: unknown): entry is string => typeof entry === 'string'))
+          setUpdateExemptNotice(t(nextExempt ? 'updateExemptOn' : 'updateExemptOff'))
+          return
+        }
+        setUpdateExemptNames(previous)
+        setUpdateExemptError(typeof body?.error === 'string' ? body.error : t('updateExemptFailed'))
+      })
+      .catch((error: unknown) => {
+        if (gen !== updateExemptOpGen.current) return
+        setUpdateExemptNames(previous)
+        setUpdateExemptError(String(error))
+      })
+  }, [updateExemptSet, updateExemptNames, t])
+
+  /**
+   * Stop showing one removed-declaration notice (#763).
+   *
+   * The notice is durable on purpose — it is the only thing left that says why
+   * a plugin vanished — but the reporter's plugin was no longer in the catalog,
+   * so the search it offered found nothing and the banner outlived every other
+   * action. Hiding it says nothing about the plugin: the declaration stays
+   * dropped and the directory stays where it is.
+   *
+   * Every step touches THIS name and nothing else, in both directions:
+   *
+   * - success removes this key and ignores the reply's map. That map is a
+   *   snapshot from when the request ran, so adopting it wholesale would
+   *   resurrect a notice another click had already dismissed, and would drop a
+   *   record an `/installed` read reported while this was in flight — including
+   *   one written by a failed update (#663), which is the one thing the notice
+   *   exists for.
+   * - failure puts THIS key back, and only if no `/installed` read has landed
+   *   since: that read is the server's current truth and outranks a rollback
+   *   built from what the panel happened to be showing.
+   *
+   * A dismiss that silently did nothing is worse than having no button: the
+   * user would go on believing they had been told the truth about their profile.
+   */
+  const dismissBrokenPlugin = useCallback((name: string) => {
+    const record = brokenPlugins[name]
+    if (record === undefined) return
+    const gens = dismissBrokenGen.current
+    const gen = (gens.get(name) ?? 0) + 1
+    gens.set(name, gen)
+    const readAtRequest = installedReadGen.current
+    setDismissBrokenError(null)
+    setDismissingBroken(current => new Set(current).add(name))
+    // Optimistic; the failure path below puts this one key back.
+    setBrokenPlugins((current) => {
+      if (current[name] === undefined) return current
+      const next = { ...current }
+      delete next[name]
+      return next
+    })
+    /** This request's own failure, applied to this one name only. */
+    const restore = (reason: string) => {
+      // A later click on the same row owns this name now; that one reports its
+      // own outcome, and reporting this one too would be two answers to one
+      // question.
+      if (dismissBrokenGen.current.get(name) !== gen) return
+      // An `/installed` read landed meanwhile, so the panel is showing the
+      // server's current truth and this rollback — built from what the panel
+      // happened to be holding — would only argue with it. Skipping the record
+      // does NOT skip the message: the dismiss failed, the user is owed that.
+      if (installedReadGen.current === readAtRequest) {
+        setBrokenPlugins(current => (
+          current[name] === undefined ? { ...current, [name]: record } : current
+        ))
+      }
+      setDismissBrokenError(reason)
+    }
+    fetch(api('/dsh-market/dismiss-broken'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+      .then(async (res) => {
+        const text = await res.text()
+        let body: DismissBrokenReply | null = null
+        if (text !== '') {
+          try { body = JSON.parse(text) as DismissBrokenReply } catch { /* non-JSON */ }
+        }
+        return { status: res.status, body }
+      })
+      .then(({ status, body }) => {
+        if (status === 200 && body?.ok === true) {
+          // Said again, idempotently, and only for this name. The optimistic
+          // removal can have been undone by an `/installed` read that was
+          // already in flight when the click happened: it is a snapshot from
+          // before, so it still carries the notice, and it lands after. The
+          // server has now confirmed the record is gone, so the panel says so
+          // too — otherwise it would show a notice the server no longer has,
+          // with no error to explain it. Never the reply's whole map: that is
+          // older than anything the panel has learned since.
+          if (dismissBrokenGen.current.get(name) !== gen) return
+          setBrokenPlugins((current) => {
+            if (current[name] === undefined) return current
+            const next = { ...current }
+            delete next[name]
+            return next
+          })
+          return
+        }
+        restore(typeof body?.error === 'string' ? body.error : t('toggleFail'))
+      })
+      .catch((error: unknown) => { restore(String(error)) })
+      .finally(() => {
+        setDismissingBroken(current => {
+          const next = new Set(current)
+          next.delete(name)
+          return next
+        })
+      })
+  }, [brokenPlugins, t])
+
   const clearStaleFavorites = useCallback(() => {
     if (favoriteStale.length === 0) return
     const gen = ++favoriteOpGen.current
@@ -2944,6 +3763,10 @@ export function MarketSection(props: MarketSectionProps) {
     setInstallError(null)
     setActivationWarnings([])
     setRemovingName(name)
+    // Uninstalls join the same operation records as installs/updates, so an
+    // agents-busy refusal can queue them and the drain can run them later.
+    const uninstallRecordId = nextRecordId()
+    setRecords(list => enqueue(list, { id: uninstallRecordId, kind: 'uninstall', name, state: 'running' }))
     return fetch(api('/dsh-market/uninstall'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -2951,6 +3774,16 @@ export function MarketSection(props: MarketSectionProps) {
     })
       .then(res => res.json().then(body => ({ status: res.status, body })))
       .then(({ status, body }) => {
+        if (status === 409 && body.agentsBusy === true) {
+          setRecords(list => patchRecord(list, uninstallRecordId, {
+            state: 'queued',
+            reason: t('agentBusyUninstallQueued'),
+            blockedBy: blockedSessions(body),
+          }))
+          setOperationsOpen(true)
+          return
+        }
+        setRecords(list => drop(list, uninstallRecordId))
         if (status === 200 && body.ok) {
           if (!body.hot) setRemovedCount(n => n + 1)
           // A client-part plugin stays injected until a page reload — the same
@@ -2995,7 +3828,115 @@ export function MarketSection(props: MarketSectionProps) {
       .finally(() => setRemovingName(null))
     // hotNames/refreshNames are read above to tell a plugin this page loaded
     // from one installed inside it, so they belong in the closure.
-  }, [refreshInstalled, hotNames, refreshNames])
+  }, [refreshInstalled, hotNames, refreshNames, nextRecordId, t])
+
+  // Drain-loop refs, assigned after doInstall/doUpdate/doUninstall exist
+  // (the mount-once drain effect below only reads refs, never closures).
+  const busyUrlRef = useRef<string | null>(null)
+  busyUrlRef.current = busyUrl
+  const updatingNameRef = useRef<string | null>(null)
+  updatingNameRef.current = updatingName
+  const removingNameRef = useRef<string | null>(null)
+  removingNameRef.current = removingName
+  const dataRef = useRef<typeof data>(null)
+  dataRef.current = data
+  const doInstallRef = useRef<((plugin: RegistryPlugin) => void) | null>(null)
+  doInstallRef.current = doInstall
+  const doUpdateRef = useRef<((name: string, force?: boolean, restore?: boolean) => Promise<void>) | null>(null)
+  doUpdateRef.current = doUpdate
+  const doUninstallRef = useRef<((name: string) => Promise<void>) | null>(null)
+  doUninstallRef.current = doUninstall
+
+  /**
+   * The install queue drain: agents-busy 409s no longer ask the user to come
+   * back later — the queued record runs itself once agents go idle and the
+   * operation lock is free. Self-sufficient by design: when every operation
+   * is queued, nothing else polls /status, so this loop fetches it itself
+   * (only while a queued record exists, so an idle page makes no requests).
+   * One mutation at a time — the host still serializes via its lock, and a
+   * re-refused drain simply re-queues instead of failing.
+   */
+  useEffect(() => {
+    let disposed = false
+    const timer = setInterval(() => {
+      if (drainingRef.current) return
+      if (busyUrlRef.current !== null || updatingNameRef.current !== null || removingNameRef.current !== null) return
+      void fetch(api('/dsh-market/status'), { cache: 'no-store' })
+        .then(res => res.json())
+        .then(status => {
+          if (disposed) return
+          const runningAgents: string[] = Array.isArray(status.runningAgents) ? status.runningAgents.map(String) : []
+          const busy = status.busy === true
+          statusRef.current = { busy, runningAgents }
+          if (busy || runningAgents.length > 0) return
+          if (busyUrlRef.current !== null || updatingNameRef.current !== null || removingNameRef.current !== null) return
+          let next: OperationRecord | null = null
+          let hasRunning = false
+          setRecords(prev => {
+            hasRunning = prev.some(record => record.state === 'running')
+            const found = prev.find(record => record.state === 'queued')
+            next = found ?? null
+            return found === undefined ? prev : prev.filter(record => record.id !== found.id)
+          })
+          if (next === null || hasRunning) return
+          const task: OperationRecord = next
+          drainingRef.current = true
+          try {
+            if (task.kind === 'install') {
+              const plugin = dataRef.current?.plugins.find(candidate => candidate.url === task.url)
+              if (plugin !== undefined) doInstallRef.current?.(plugin)
+            } else if (task.kind === 'update') {
+              void doUpdateRef.current?.(task.name)
+            } else {
+              void doUninstallRef.current?.(task.name)
+            }
+          } finally {
+            drainingRef.current = false
+          }
+        })
+        .catch(() => { /* retry on the next tick */ })
+    }, 2000)
+    return () => {
+      disposed = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  /** A queued record's "run now": retry immediately instead of waiting for idle. */
+  const runQueuedNow = useCallback((record: OperationRecord) => {
+    // The host's guard will refuse this while anything is running, so asking
+    // produced a pixel-identical panel: the 409 handler re-queued the record
+    // and nothing else changed, which reads as a broken button (#752). Say
+    // what is in the way instead, and leave the row queued for the drain —
+    // that is the path which will actually run it.
+    const blockers = statusRef.current.runningAgents
+    if (blockers.length > 0) {
+      setInstallError(t('queuedRunBlocked').replace('{0}', String(blockers.length)))
+      setOperationsOpen(true)
+      return
+    }
+    if (record.kind === 'install') {
+      const plugin = data?.plugins.find(candidate => candidate.url === record.url)
+      if (plugin === undefined) {
+        // The catalog no longer holds it — a refresh or a page change replaced
+        // `data`. Dropping the row silently was the same defect in miniature
+        // (#752): the entry disappears and the user is left without an entry
+        // or a reason. The way back is the catalog, so point at it.
+        setRecords(prev => drop(prev, record.id))
+        setInstallError(t('queuedInstallGone'))
+        setOperationsOpen(true)
+        return
+      }
+      setRecords(prev => drop(prev, record.id))
+      doInstall(plugin)
+    } else if (record.kind === 'update') {
+      setRecords(prev => drop(prev, record.id))
+      void doUpdate(record.name)
+    } else {
+      setRecords(prev => drop(prev, record.id))
+      void doUninstall(record.name)
+    }
+  }, [data, doInstall, doUpdate, doUninstall, t])
 
   /** Live enable/disable of one installed plugin (#60). `reload` opts the
    * card-level theme flow into a page refresh so the visual result lands
@@ -3209,23 +4150,27 @@ export function MarketSection(props: MarketSectionProps) {
   const selfName = installed['dshmarket'] !== undefined ? 'dshmarket' : 'dsh-market'
   const updatableNames = Object.keys(installed).filter(
     name => name !== selfName
-      && !updatedNames.includes(name)
       && !effectiveDisabledSet.has(name)
-      && updates[name]
-      && updates[name].updateAvailable,
+      && isPluginUpdatable(name, String(installed[name]), updates[name], updatedNames),
   )
   // Replacing a local source with its catalog source is deliberately not a
   // batch update: every such plugin has an existing, explicit confirmation
   // gate because the source switch cannot be rolled back.
   const batchUpdatableNames = updatableNames.filter(name => updates[name]?.restoreRequired !== true)
   const ignoredUpdateSet = useMemo(() => new Set(ignoredUpdateNames), [ignoredUpdateNames])
-  const reminderUpdatableNames = updatableNames.filter(name => !ignoredUpdateSet.has(name))
-  const reminderBatchUpdatableNames = batchUpdatableNames.filter(name => !ignoredUpdateSet.has(name))
+  // Session dismissals die with the boot. The saved list does not. Reminders
+  // read the union; the row still shows that an update exists (#728).
+  const quietUpdateSet = useMemo(
+    () => new Set([...ignoredUpdateNames, ...updateExemptNames]),
+    [ignoredUpdateNames, updateExemptNames],
+  )
+  const reminderUpdatableNames = updatableNames.filter(name => !quietUpdateSet.has(name) && !installedBlocked(name))
+  const reminderBatchUpdatableNames = batchUpdatableNames.filter(name => !quietUpdateSet.has(name) && !installedBlocked(name))
   const selfUpdateAvailable = updates[selfName]?.updateAvailable === true && !updatedNames.includes(selfName)
   const reminderUpdateNames = [
     ...(selfUpdateAvailable ? [selfName] : []),
     ...updatableNames,
-  ].filter(name => !ignoredUpdateSet.has(name))
+  ].filter(name => !quietUpdateSet.has(name) && !installedBlocked(name))
   // The market manages itself from its own settings card (Settings → Plugins
   // → Plugin configuration), not as a row here — listing it in both places
   // read as two different controls for the same thing.
@@ -3238,6 +4183,17 @@ export function MarketSection(props: MarketSectionProps) {
       try {
         sessionStorage.setItem(IGNORED_UPDATES_SESSION_KEY, JSON.stringify({ boot: bootId, names: next }))
       } catch { /* storage unavailable: keep the dismissal for this mount */ }
+      return next
+    })
+  }, [bootId])
+
+  const unignoreUpdateNotice = useCallback((name: string) => {
+    if (bootId === null) return
+    setIgnoredUpdateNames(current => {
+      const next = current.filter(n => n !== name)
+      try {
+        sessionStorage.setItem(IGNORED_UPDATES_SESSION_KEY, JSON.stringify({ boot: bootId, names: next }))
+      } catch { /* storage unavailable: the change holds for this mount */ }
       return next
     })
   }, [bootId])
@@ -3491,6 +4447,43 @@ export function MarketSection(props: MarketSectionProps) {
   const showHostPending = hostPendingNames.length > 0 && !restartNoticeDismissed && sessionPendingRestart === 0
   const pendingRestart = sessionPendingRestart > 0 ? sessionPendingRestart : (showHostPending ? hostPendingNames.length : 0)
   const displayedInstalled = pendingBackup === null ? installed : { ...pendingDependencies, ...installed }
+  /**
+   * Installed entries ordered for the list view: enabled plugins first
+   * (#745), then rows with a pending update, then manifest order — a stable
+   * sort, so each of those groups keeps its own order.
+   *
+   * The order settles once and then holds, so rows never reshuffle under a
+   * pointer that is already aiming at one (#631). Two moments are allowed to
+   * move it. One is when the update check lands: `/installed` is a local read
+   * and `/updates` is a network probe over every package, so the list is
+   * always rendered BEFORE the answer exists — freezing on the view alone
+   * would leave it in manifest order forever. `updatesLoaded` is therefore
+   * the one part of `updates` allowed in, as a boolean: it flips once when
+   * the result arrives, and every later change (a newer check, a row the user
+   * just updated) leaves the boolean and the order alone. The other is the
+   * disable set changing: when the snapshot first arrives, or when a switch
+   * the user flipped settles — and in the switch case the toggled row is the
+   * only one that crosses the enabled/disabled line, so every other row
+   * stays where it was.
+   */
+  const isInstalledListActive = tab === 'installed' && installedView === 'list'
+  const updatesLoaded = Object.keys(updates).length > 0
+  const orderedInstalledEntries = useMemo(() => {
+    return Object.entries(displayedInstalled)
+      .filter(([name]) => name !== selfName)
+      .sort(([nameA, specA], [nameB, specB]) => {
+        // The list reads as "what is running", so a plugin that is off sinks
+        // below every one that is on (#745) — even a disabled row with a
+        // pending update, which only sorts inside the group it lands in.
+        const aOn = effectiveDisabledSet.has(nameA) ? 0 : 1
+        const bOn = effectiveDisabledSet.has(nameB) ? 0 : 1
+        if (aOn !== bOn) return bOn - aOn
+        const aUp = isPluginUpdatable(nameA, String(specA), updates[nameA], updatedNames, quietUpdateSet) ? 1 : 0
+        const bUp = isPluginUpdatable(nameB, String(specB), updates[nameB], updatedNames, quietUpdateSet) ? 1 : 0
+        return bUp - aUp
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `updatesLoaded` stands in for `updates`/`updatedNames`: reorder when the check lands, then hold (#631). `effectiveDisabledSet` only re-runs this when a disable state actually changed; the toggled row is the only one that moves.
+  }, [isInstalledListActive, displayedInstalled, selfName, updatesLoaded, effectiveDisabledSet])
   const missingRestoreCount = Object.keys(pendingDependencies).filter(name => !installedFiles.includes(name)).length
   // Self-update lives in the header button and the settings card, not this
   // tab's row list (the market itself is filtered out below) — so a pending
@@ -3534,6 +4527,248 @@ export function MarketSection(props: MarketSectionProps) {
     )
   }
 
+  const renderPluginMenu = (plugin: RegistryPlugin) => {
+    const aliases = blockAliases(plugin, matchInstalledName(plugin, installed, repoIdentities, data?.plugins, repoHints))
+    const hidden = aliases.some(name => blockedNameSet.has(name))
+    return (
+      <Menu
+        open={pluginMenuUrl === plugin.url}
+        onClose={() => setPluginMenuUrl(null)}
+        onSelect={(id) => {
+          setPluginMenuUrl(null)
+          if (id === 'block') toggleBlock(blockToggleName(aliases))
+        }}
+        align="end"
+        portal
+        anchor={(
+          <button
+            type="button"
+            className={css.cardMore}
+            aria-label={t('groupMore')}
+            aria-expanded={pluginMenuUrl === plugin.url}
+            onClick={() => setPluginMenuUrl(open => open === plugin.url ? null : plugin.url)}
+          >···</button>
+        )}
+        items={[{ id: 'block', label: hidden ? t('blockRemove') : t('blockAdd') }]}
+      />
+    )
+  }
+
+  const renderInstalledBlockMenu = (name: string) => {
+    const entry = data === null ? undefined : catalogEntryForInstalled(data.plugins, name, String(installed[name] ?? ''), repoIdentities[name], repoHints[name])
+    const aliases = entry === undefined ? [name] : blockAliases(entry, name)
+    const hidden = aliases.some(alias => blockedNameSet.has(alias))
+    const removing = removingName === name
+    const uninstallBusy = removingName !== null || busyUrl !== null || updatingName !== null
+    const spec = String(installed[name] ?? '')
+    const status = updates[name]
+    const localDev = isLocalDev(spec, status)
+    const exempt = updateExemptSet.has(name)
+    const updatable = isPluginUpdatable(name, spec, status, updatedNames)
+    // A plain checkout has no release feed to remind about. A local package the
+    // catalog can replace does (restoreRequired), and an existing entry stays
+    // reachable so it can still be removed.
+    const showExempt = !localDev || exempt || updatable
+    // Undo stays on the row ("恢复提醒"); only the dismissal itself lives here.
+    const showBootIgnore = bootId !== null && !exempt && !ignoredUpdateSet.has(name) && updatable
+    // With an update pending, the action band already offers the same switch
+    // as its primary button; one entry, one name.
+    const showRestore = localDev && !(status?.updateAvailable === true && status.restoreRequired === true)
+    return (
+      <Menu
+        open={installedMenuName === name}
+        onClose={() => setInstalledMenuName(null)}
+        onSelect={(id) => {
+          setInstalledMenuName(null)
+          if (id === 'restore-online' && data !== null && !uninstallBusy) askRestore(name)
+          if (id === 'block') toggleBlock(blockToggleName(aliases))
+          if (id === 'update-exempt') toggleUpdateExempt(name)
+          if (id === 'ignore-boot') ignoreUpdateNotices([name])
+          if (id === 'uninstall' && !uninstallBusy) setRemoveConfirm(name)
+        }}
+        align="end"
+        portal
+        anchor={(
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={t('groupMore')}
+            onClick={() => setInstalledMenuName(open => open === name ? null : name)}
+          >···</Button>
+        )}
+        items={[
+          ...(showRestore ? [{ id: 'restore-online', label: t('restoreOnline'), disabled: data === null || uninstallBusy }] : []),
+          { id: 'block', label: hidden ? t('blockRemove') : t('blockAdd') },
+          ...(showBootIgnore ? [{ id: 'ignore-boot', label: t('ignoreUpdateNotice') }] : []),
+          ...(showExempt ? [{ id: 'update-exempt', label: exempt ? t('updateExemptRemove') : t('updateExemptAdd') }] : []),
+          { type: 'separator' as const, id: 'uninstall-sep' },
+          { id: 'uninstall', label: removing ? t('uninstalling') : t('uninstall'), danger: true, disabled: uninstallBusy },
+        ]}
+      />
+    )
+  }
+
+  /**
+   * Chip label for one capability name, or the scanner's own name.
+   *
+   * `network` has a label; a name this build has never seen (`dynamic-code`
+   * arrived after the first integration) shows as itself rather than
+   * disappearing — an unlabelled fact is still a fact, and a missing chip
+   * would read as "does not do that".
+   */
+  const capabilityLabel = (name: string): string => {
+    const key = 'cap' + name.split('-').map(part => part.charAt(0).toUpperCase() + part.slice(1)).join('')
+    const label = t(key)
+    return label === key ? name : label
+  }
+
+  /**
+   * The scanner's red-line sentences, in the reader's language.
+   *
+   * The scanner emits a fixed set of shapes — one per rule family — and every
+   * one of them is translated here. A sentence from a family this build does
+   * not know stays in the scanner's own words on purpose: a mistranslation of
+   * a security fact is worse than a foreign word, and this is the one line on
+   * the card a reader must not misread. The shapes are matched by their stable
+   * prefix rather than in full, so the parenthesised detail the scanner
+   * attaches can change without falling back to English.
+   */
+  const redLineLabel = (line: string): string => {
+    if (line === 'reads credentials/secrets AND has network access') return t('capRedCredentialsNetwork')
+    const plaintext = /^uses plaintext http:\/\/ to (.+)$/.exec(line)
+    if (plaintext !== null) return t('capRedPlaintextHttp').replace('{0}', plaintext[1]!)
+    const literalIp = /^uses literal IP (.+) for network access$/.exec(line)
+    if (literalIp !== null) return t('capRedLiteralIp').replace('{0}', literalIp[1]!)
+    const installScript = /^runs code at install time(?: \((.+)\))?$/.exec(line)
+    if (installScript !== null) {
+      return installScript[1] === undefined
+        ? t('capRedInstallScript')
+        : t('capRedInstallScriptScripts').replace('{0}', installScript[1])
+    }
+    // The parenthesised detail is not a name. The scanner emits exactly two
+    // shapes — "overrides bundle <id>" and "disables bundle <id>" — and pasting
+    // either through leaves the verb in English. That verb is the fact: the
+    // install would replace a part of DSH, or switch one off.
+    const coreVerb = /^tampers with a core bundle \((overrides|disables) bundle (.+)\)$/.exec(line)
+    if (coreVerb !== null) {
+      const key = coreVerb[1] === 'overrides' ? 'capRedCoreOverride' : 'capRedCoreDisable'
+      return t(key).replace('{0}', coreVerb[2]!)
+    }
+    const coreTamper = /^tampers with a core bundle(?: \((.+)\))?$/.exec(line)
+    if (coreTamper !== null) {
+      return coreTamper[1] === undefined
+        ? t('capRedCoreTamper')
+        : t('capRedCoreTamperDetail').replace('{0}', coreTamper[1])
+    }
+    return line
+  }
+
+  /**
+   * Whether a red line is one a reader has to weigh BEFORE installing, rather
+   * than a fact about what the plugin does once it runs.
+   *
+   * Two families qualify, for one reason: they happen at install time. There is
+   * no "afterwards" to inspect, so this is the last moment the decision can be
+   * made. The other families — credentials+network above all, 73% of every red
+   * line the catalog holds — describe what plugins normally do, and calling
+   * that urgent is how a warning gets trained away.
+   */
+  const redLineIsUrgent = (line: string): boolean =>
+    line.startsWith('runs code at install time') || line.startsWith('tampers with a core bundle')
+
+  /**
+   * What the static scan found (#401), in the detail dialog and nowhere else.
+   *
+   * It used to sit on both cards. It does not any more, for three reasons that
+   * all pointed the same way: a capability list does not help anyone choose a
+   * plugin, most of it cannot be acted on, and — the one that decided it — a
+   * line every card carries is a line nobody reads, including the install-time
+   * script that IS worth stopping for. So the card says nothing about this, the
+   * dialog leads with the one thing that needs a decision before you press
+   * install, and the rest of the facts are one click away.
+   *
+   * Which lines count as that one thing is `redLineIsUrgent`, not a guess made
+   * here: a rare rule that fires at install time, never a description of what
+   * plugins normally do.
+   */
+  const capabilityDetail = (p: RegistryPlugin) => {
+    const redLines = p.capabilityRedLines ?? []
+    return (
+      <>
+        {redLines.filter(redLineIsUrgent).map(line => (
+          <p key={line} className={css.warnLine}>
+            <IconWarningOutline16 size={14} className={css.bannerIcon} />
+            {' ' + redLineLabel(line)}
+          </p>
+        ))}
+        <ConfirmFold
+          icon={<ConfirmCapabilityIcon />}
+          title={t('capabilityTitle')}
+          open={capsOpen}
+          onToggle={() => setCapsOpen(o => !o)}
+        >
+          <div className={css.caps}>
+            {p.capabilities === undefined
+              ? <span className={css.capMuted} data-state="unchecked">{t('capabilityUnchecked')}</span>
+              : p.capabilities.length === 0
+                ? <span className={css.capMuted} data-state="none">{t('capabilityNone')}</span>
+                : p.capabilities.map(name => (HostTag !== null
+                    ? <HostTag key={name} tone="outline" className={css.capChip}>{capabilityLabel(name)}</HostTag>
+                    : <span key={name} className={css.capChip}>{capabilityLabel(name)}</span>
+                  ))}
+            {redLines.filter(line => !redLineIsUrgent(line)).map(line => (
+              <span key={line} className={css.capFact}>{redLineLabel(line)}</span>
+            ))}
+          </div>
+          <p className={css.capCaveat}>
+            <span className={css.capCaveatNote}>{t('capabilityNote')}</span>
+            {typeof p.capabilityCheckedAt === 'string' && p.capabilityCheckedAt.length > 0 && (
+              <span className={css.capCaveatAt}>{t('capabilityScannedAt').replace('{0}', p.capabilityCheckedAt.slice(0, 10))}</span>
+            )}
+          </p>
+        </ConfirmFold>
+      </>
+    )
+  }
+
+  /**
+   * The enable/disable control, wherever it appears — the installed row, a
+   * group member row, the plugin detail view. One helper because they were
+   * three copies of the same markup, and because the host has this component:
+   * its own plugin list uses `Switch`, so the market's rows should look like
+   * the list they sit in. Before 0.1.7-rc.2 the market's own switch renders,
+   * with the same `role="switch"` contract either way.
+   */
+  const onOffSwitch = (opts: { label: string; on: boolean; disabled: boolean; toggle: () => void }) => (HostSwitch !== null
+    ? <HostSwitch checked={opts.on} onChange={() => opts.toggle()} label={opts.label} disabled={opts.disabled} />
+    : (
+        <button
+          type="button"
+          role="switch"
+          aria-checked={opts.on}
+          aria-label={opts.label}
+          className={opts.on ? `${css.switch} ${css.switchOn}` : css.switch}
+          disabled={opts.disabled}
+          onClick={opts.toggle}
+        >
+          <span className={css.switchKnob} />
+        </button>
+      ))
+
+  /**
+   * A labelled checkbox: the host's when it has one, the market's label+input
+   * otherwise. Only the simple ones go through here — see `HostCheckbox` for
+   * why the export rows and the recovery panel keep their own markup.
+   */
+  const labelledCheckbox = (opts: { label: string; checked: boolean; disabled?: boolean; className?: string; onChange: (next: boolean) => void }) => (HostCheckbox !== null
+    ? <HostCheckbox checked={opts.checked} onChange={opts.onChange} label={opts.label} disabled={opts.disabled} className={opts.className} />
+    : (
+        <label className={opts.className}>
+          <input type="checkbox" checked={opts.checked} disabled={opts.disabled} onChange={event => opts.onChange(event.target.checked)} />
+          {opts.label}
+        </label>
+      ))
+
   const pluginCard = (p: RegistryPlugin) => {
     const desc = (p.description && (p.description[lang] || p.description.en)) || ''
     const done = doneUrls.includes(p.url) || hotUrls.includes(p.url)
@@ -3545,6 +4780,7 @@ export function MarketSection(props: MarketSectionProps) {
     // is the obvious next move — which is how the same clash gets hit twice.
     const record = recordForUrl(records, p.url)
     const blocked = record !== null && (record.state === 'input' || record.state === 'failed')
+    const queued = record !== null && record.state === 'queued'
     const compatibility = typeof p.npm === 'string' ? hostCompatibility[p.npm] : undefined
     const hostRequirementLabel = compatibility?.requirement !== null && compatibility?.requirement !== undefined
       ? t('hostRequirement').replace('{0}', compatibility.requirement)
@@ -3576,12 +4812,8 @@ export function MarketSection(props: MarketSectionProps) {
             <div className={css.byline}>
               <OwnerAvatar name={p.name} owner={p.owner || ''} />
               <span className={css.owner} title={p.owner}>{p.owner}</span>
-              <CatalogVersionMark version={p.version} tip={t('catalogNpmLatest')} />
-              {typeof p.downloads === 'number' && (
-                <Tooltip label={String(p.downloads)} side="top">
-                  <span className={css.star}>{'· ↓ ' + formatCount(p.downloads)}</span>
-                </Tooltip>
-              )}
+              <CatalogVersionMark version={p.version} tip={catalogVersionTip} />
+              <DownloadCount plugin={p} t={t} />
               {typeof p.stars === 'number' && (
                 <Tooltip label={String(p.stars)} side="top">
                   <span className={css.star}>{'· ★ ' + formatCount(p.stars)}</span>
@@ -3600,7 +4832,14 @@ export function MarketSection(props: MarketSectionProps) {
                 ? <span className={css.okState}>{t('alreadyInstalled')}</span>
                 : busy
                   ? <Button variant="primary" size="sm" className={css.installBtn} disabled>{t('installing')}</Button>
-                  : blocked
+                  : queued
+                    ? (
+                        <button type="button" className={css.cardBlockedMark} onClick={openOperations}>
+                          <IconWarningOutline16 size={13} />
+                          {t('queuedBadge')}
+                        </button>
+                      )
+                    : blocked
                     ? (
                         <button type="button" className={css.cardBlockedMark} onClick={openOperations}>
                           <IconWarningOutline16 size={13} />
@@ -3658,6 +4897,7 @@ export function MarketSection(props: MarketSectionProps) {
             <button type="button" className={css.commentsLink} onClick={() => setCommentsFor(p)}>
               {t('comments')}
             </button>
+            {renderPluginMenu(p)}
           </span>
         </div>
         {busy && (
@@ -3699,6 +4939,7 @@ export function MarketSection(props: MarketSectionProps) {
     const busy = busyUrl === p.url
     const record = recordForUrl(records, p.url)
     const blocked = record !== null && (record.state === 'input' || record.state === 'failed')
+    const themeQueued = record !== null && record.state === 'queued'
     // A theme switched off via the Installed-tab toggle (or a group switch)
     // stays in the boot manifest, so the disabled set must veto the badge.
     const mounted = instName !== null
@@ -3718,12 +4959,8 @@ export function MarketSection(props: MarketSectionProps) {
               <div className={css.byline}>
                 <OwnerAvatar name={p.name} owner={p.owner || ''} />
                 <span className={css.owner} title={p.owner}>{p.owner}</span>
-                <CatalogVersionMark version={p.version} tip={t('catalogNpmLatest')} />
-                {typeof p.downloads === 'number' && (
-                  <Tooltip label={String(p.downloads)} side="top">
-                    <span className={css.star}>{'· ↓ ' + formatCount(p.downloads)}</span>
-                  </Tooltip>
-                )}
+                <CatalogVersionMark version={p.version} tip={catalogVersionTip} />
+                <DownloadCount plugin={p} t={t} />
                 {typeof p.stars === 'number' && (
                   <Tooltip label={String(p.stars)} side="top">
                     <span className={css.star}>{'· ★ ' + formatCount(p.stars)}</span>
@@ -3758,6 +4995,7 @@ export function MarketSection(props: MarketSectionProps) {
           <div className={css.themeCardFooter}>
             <span className={css.footActions}>
               {renderFavoriteControl(p.url)}
+              {renderPluginMenu(p)}
             </span>
             {instName === null && (
               <span className={css.themeLifecycle}>{done ? t('installedBadge') : t('notInstalled')}</span>
@@ -3768,7 +5006,14 @@ export function MarketSection(props: MarketSectionProps) {
                   ? <span className={css.okState}>{t('installedBadge')}</span>
                   : busy
                     ? <Button variant="primary" size="sm" className={css.installBtn} disabled>{t('installing')}</Button>
-                    : blocked
+                    : themeQueued
+                      ? (
+                          <button type="button" className={css.cardBlockedMark} onClick={openOperations}>
+                            <IconWarningOutline16 size={13} />
+                            {t('queuedBadge')}
+                          </button>
+                        )
+                      : blocked
                       ? (
                           <button type="button" className={css.cardBlockedMark} onClick={openOperations}>
                             <IconWarningOutline16 size={13} />
@@ -4025,7 +5270,7 @@ export function MarketSection(props: MarketSectionProps) {
             const self = installed['dshmarket'] !== undefined ? 'dshmarket' : 'dsh-market'
             const status = updates[self]
             return status && status.updateAvailable && !updatedNames.includes(self)
-              && !ignoredUpdateSet.has(self)
+              && !quietUpdateSet.has(self)
               && (
                 <Button
                   variant="primary"
@@ -4079,6 +5324,9 @@ export function MarketSection(props: MarketSectionProps) {
             {t('tabInstalled') + (installedOtherCount > 0 ? ' (' + installedOtherCount + ')' : '')}
             {hasUpdates && <StateDot state="error" size={7} className={css.dot} />}
           </button>
+          <button className={tab === 'blocked' ? `${css.tab} ${css.on}` : css.tab} onClick={() => setTab('blocked')}>
+            {t('tabBlocked') + (blockedNames.length > 0 ? ' (' + blockedNames.length + ')' : '')}
+          </button>
           <button
             className={(tab === 'backup' || tab === 'diagnostics') ? `${css.tab} ${css.on}` : css.tab}
             onClick={() => { if (tab !== 'backup' && tab !== 'diagnostics') setTab('backup') }}
@@ -4100,6 +5348,17 @@ export function MarketSection(props: MarketSectionProps) {
             onDismiss={record => setRecords(list => drop(list, record.id))}
             onRefresh={() => location.reload()}
             onResolveConflict={resolveConflict}
+            onForceInstall={(record) => {
+              // Same road as any other install, with the one flag that says
+              // the user has seen the hold and wants the release anyway. The
+              // record is dropped first so the retry replaces it rather than
+              // sitting beside a row that already said "installed".
+              const plugin = record.url === undefined ? undefined : data?.plugins.find(p => p.url === record.url)
+              if (plugin === undefined) return
+              setRecords(list => drop(list, record.id))
+              doInstall(plugin, true)
+            }}
+            onRunNow={runQueuedNow}
             onApproveBuilds={(record) => {
               const names = record.blockedBuilds ?? []
               if (names.length === 0) return
@@ -4221,6 +5480,46 @@ export function MarketSection(props: MarketSectionProps) {
           </div>
         )}
         {tab === 'installed' && <HostDependencyDiagnostics findings={hostDependencyFindings} t={t} />}
+        {tab === 'installed' && brokenPluginNames.length > 0 && (
+          <div className={css.brokenPluginNotice}>
+            {brokenPluginNames.map(name => (
+              <div key={name} className={css.brokenPluginItem}>
+                <div className={css.brokenPluginText}>
+                  <b>{t('brokenPluginTitle').replace('{0}', name)}</b>
+                  <span>{t('brokenPluginBody')}</span>
+                </div>
+                {/* Same road the replacement hint takes: search for it and
+                    land on the catalog, where Install does the right thing. */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setCat('all'); setQ(name); setTab('discover') }}
+                >{t('brokenPluginAction')}</Button>
+                {/* A second, quieter way out (#763): the plugin may be gone from
+                    the catalog too, and then the search above finds nothing and
+                    the user has no way to make the banner stop. Ghost, because
+                    hiding a message is not one of the two things they may have
+                    come here to do. Disabled while in flight so one row cannot
+                    queue two requests against the same record. */}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={dismissingBroken.has(name)}
+                  onClick={() => dismissBrokenPlugin(name)}
+                >{t('brokenPluginDismiss')}</Button>
+              </div>
+            ))}
+            {/* A dismiss that did not take says so here, next to the notice it
+                belongs to — and that notice is still on screen, because the
+                failure path put it back rather than leaving the user with an
+                error and no explanation. */}
+            {dismissBrokenError !== null && (
+              <div className={css.brokenPluginItem} role="alert">
+                <span className={css.brokenPluginText}>{dismissBrokenError}</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
       {buildsSkipped !== null && (
         <div className={css.banner}>
@@ -4393,7 +5692,12 @@ export function MarketSection(props: MarketSectionProps) {
                     <Button variant="primary" size="sm" disabled={backupBusy || webdavUrl.trim() === ''} onClick={() => runWebdav('backup')}>{backupBusy ? t('backupWorking') : t('webdavUpload')}</Button>
                     <Button variant="outline" size="sm" disabled={backupBusy || webdavUrl.trim() === ''} onClick={() => runWebdav('restore')}>{t('webdavRestore')}</Button>
                   </div>
-                  <label className={css.backupCheck}><input type="checkbox" checked={autoBackup} onChange={e => setAutoBackup(e.target.checked)} />{t('autoBackup')}</label>
+                  {labelledCheckbox({
+                    label: t('autoBackup'),
+                    checked: autoBackup,
+                    className: css.backupCheck,
+                    onChange: setAutoBackup,
+                  })}
                   <p>{t('webdavNote')}</p>
                   <p className={css.backupWarn}>{t('credsWarning')}</p>
                 </section>
@@ -4458,7 +5762,7 @@ export function MarketSection(props: MarketSectionProps) {
                     <div ref={setCatsSentinel} />
                     <div className={css.stickyHead}>
                     <div className={css.tabSearchRow}>
-                      <SearchInput key="discover" resetToken={discoverSearchReset} className={css.tabSearch} placeholder={t('searchPh')} value={q} onCommit={setQ} />
+                      <SearchInput key="discover" resetToken={discoverSearchReset} className={css.tabSearch} placeholder={t('searchPh')} value={q} onCommit={setQ} t={t} />
                     </div>
                     <div className={css.cats}>
                       <div className={css.catsRow}>
@@ -4532,7 +5836,7 @@ export function MarketSection(props: MarketSectionProps) {
                     </div>
                     </div>
                     {plugins.length === 0
-                      ? <div className={css.empty}>{t('empty')}</div>
+                      ? <div className={css.empty}>{pluginsAll.length > 0 ? t('blockedFilteredEmpty') : t('empty')}</div>
                       : (
                           <>
                             <Masonry items={pagePlugins} render={pluginCard} />
@@ -4562,6 +5866,7 @@ export function MarketSection(props: MarketSectionProps) {
                           placeholder={t('searchFavoritesPh')}
                           value={qFavorites}
                           onCommit={setQFavorites}
+                          t={t}
                         />
                         <div className={css.themeToolbarActions}>
                           <FilterMenu
@@ -4647,7 +5952,7 @@ export function MarketSection(props: MarketSectionProps) {
             ? (
                 <>
                   <div className={css.themeToolbar}>
-                    <SearchInput key="themes" className={css.themeSearch} placeholder={t('searchPh')} value={qThemes} onCommit={setQThemes} />
+                    <SearchInput key="themes" className={css.themeSearch} placeholder={t('searchPh')} value={qThemes} onCommit={setQThemes} t={t} />
                     <div className={css.themeToolbarActions}>
                       <FilterMenu
                         sortField={themeSortField}
@@ -4687,7 +5992,7 @@ export function MarketSection(props: MarketSectionProps) {
                     : anyThemePlugins.length === 0
                       ? <div className={css.empty}>{t('themeEmpty')}</div>
                       : themePlugins.length === 0
-                        ? <div className={css.empty}>{t('empty')}</div>
+                        ? <div className={css.empty}>{themePluginsAll.length > 0 ? t('blockedFilteredEmpty') : t('empty')}</div>
                         : (
                             <>
                               <div className={css.themeResultBar}>
@@ -4710,6 +6015,27 @@ export function MarketSection(props: MarketSectionProps) {
               )
             : tab === 'diagnostics'
             ? <Diagnostics t={t} />
+            : tab === 'blocked'
+              ? data === null
+                ? <div className={css.loading}><span className={css.logoMark}><MarketLogo size={26} animated /></span>{t('loading')}</div>
+                : blockedNames.length === 0
+                  ? <div className={css.empty}>{t('blockedEmpty')}</div>
+                  : (
+                      <>
+                        <div className={css.blockedTabHint}>{t('blockedTabHint')}</div>
+                        {blockedPlugins.length > 0 && <Masonry items={blockedPlugins} render={pluginCard} />}
+                        {blockedMissing.length > 0 && (
+                          <div className={css.blockedMissing}>
+                            {blockedMissing.map(name => (
+                              <div key={name} className={css.blockedBarRow}>
+                                <span className={css.blockedBarName} title={name}>{name}</span>
+                                <button type="button" className={css.blockedBarUndo} onClick={() => toggleBlock(name)}>{t('blockRemove')}</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )
             : (
                 <>
                   <div className={css.viewBar}>
@@ -4717,7 +6043,7 @@ export function MarketSection(props: MarketSectionProps) {
                     <button type="button" className={installedView === 'groups' ? `${css.viewBtn} ${css.viewOn}` : css.viewBtn} onClick={() => setInstalledView('groups')}>{t('tabGroups')}</button>
                   </div>
                   <div className={css.tabSearchRow}>
-                    <SearchInput key="installed" resetToken={installedSearchReset} className={css.tabSearch} placeholder={t('searchPh')} value={qInstalled} onCommit={setQInstalled} />
+                    <SearchInput key="installed" resetToken={installedSearchReset} className={css.tabSearch} placeholder={t('searchPh')} value={qInstalled} onCommit={setQInstalled} t={t} />
                     {installedView === 'groups' && (
                       creatingGroup
                         ? (
@@ -4771,6 +6097,12 @@ export function MarketSection(props: MarketSectionProps) {
                                             ? <IconChevronRightOutline14 size={14} />
                                             : <IconChevronDownOutline14 size={14} />}
                                         </button>
+                                        {/* Deliberately NOT onOffSwitch: a group's state is
+                                            three-valued (all on / all off / mixed), and the
+                                            host's Switch is a boolean control — routing this
+                                            through it would flatten "mixed" into one of the
+                                            two, which is the one thing this switch must not
+                                            say. */}
                                         <button
                                           type="button"
                                           role="switch"
@@ -4850,17 +6182,12 @@ export function MarketSection(props: MarketSectionProps) {
                                                 {installedThemeNames.has(member) && <span className={css.memberKind}>· {t('groupThemeBadge')}</span>}
                                               </span>
                                               {effectiveDisabledSet.has(member) && <span className={css.spec}>{t('disabledState')}</span>}
-                                              <button
-                                                type="button"
-                                                role="switch"
-                                                aria-checked={!effectiveDisabledSet.has(member)}
-                                                aria-label={(effectiveDisabledSet.has(member) ? t('enable') : t('disable')) + ' ' + member}
-                                                className={effectiveDisabledSet.has(member) ? css.switch : `${css.switch} ${css.switchOn}`}
-                                                disabled={togglingName !== null}
-                                                onClick={() => doToggle(member, effectiveDisabledSet.has(member))}
-                                              >
-                                                <span className={css.switchKnob} />
-                                              </button>
+                                              {onOffSwitch({
+                                                label: (effectiveDisabledSet.has(member) ? t('enable') : t('disable')) + ' ' + member,
+                                                on: !effectiveDisabledSet.has(member),
+                                                disabled: togglingName !== null,
+                                                toggle: () => doToggle(member, effectiveDisabledSet.has(member)),
+                                              })}
                                               <Button variant="ghost" size="sm" onClick={() => doRemoveMember(gid, member)}>{t('groupRemove')}</Button>
                                             </div>
                                           ))}
@@ -4965,15 +6292,12 @@ export function MarketSection(props: MarketSectionProps) {
                             <p className={css.groupOrgHint}>{t('groupOrgHint')}</p>
                           </>
                         )
-                      : Object.keys(displayedInstalled).filter(name => name !== selfName).length === 0
+                      : orderedInstalledEntries.length === 0
                         ? <div className={css.empty}>{t('installedEmpty')}</div>
                         : (
                           <Masonry
-                            items={Object.entries(displayedInstalled)
+                            items={orderedInstalledEntries
                             .filter(([name, spec]) => {
-                              // The market manages itself from its own settings
-                              // card, not as a row in this list (#188-adjacent).
-                              if (name === selfName) return false
                               const needle = qInstalled.trim().toLowerCase()
                               if (needle === '') return true
                               if (name.toLowerCase().includes(needle)) return true
@@ -4996,7 +6320,7 @@ export function MarketSection(props: MarketSectionProps) {
                             // "local" tag and no restore — the host would put the
                             // generation straight back.
                             const generation = status?.kind === 'generation' || isGenerationSpec(String(spec))
-                            const localDev = !generation && (/^(?:link|file):/i.test(String(spec)) || status?.kind === 'linked')
+                            const localDev = isLocalDev(String(spec), status)
                             const act = activations[name]
                             const meta = act !== undefined ? activationMeta(act.state, t, act.dependencyOf) : null
                             const version = status && status.version ? 'v' + status.version : ''
@@ -5006,6 +6330,7 @@ export function MarketSection(props: MarketSectionProps) {
                             // link:, a tag — is the only place the row says where
                             // the plugin came from, so it stays.
                             const specRedundant = version !== '' && /^[\^~]?\d/.test(specText)
+                            const localPath = localPathOf(specText)
                             const ghSpec = /^github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:#|$)/.exec(specText)
                             const repoUrl = entry !== undefined ? entry.url : ghSpec !== null ? 'https://github.com/' + ghSpec[1] : null
                             const off = effectiveDisabledSet.has(name)
@@ -5037,17 +6362,38 @@ export function MarketSection(props: MarketSectionProps) {
                                         : name}
                                     </span>
                                     {entry?.deprecated === true && <span className={css.depBadge}>{t('deprecatedBadge')}</span>}
-                                    {version && <span className={css.owner} title={version}>{version}</span>}
                                   </div>
-                                  {localDev && (
-                                    <span className={css.irowDevTag} title={t('linkedDev')} role="status">{t('linkedDev')}</span>
+                                  {!missing && name !== 'dsh-market' && name !== 'dshmarket' && (
+                                    <span className={css.irowMenu}>{renderInstalledBlockMenu(name)}</span>
                                   )}
                                   </div>
+                                  {(version !== '' || localDev) && (
+                                    <div className={css.irowMeta}>
+                                      {[version, localDev ? t('linkedDev') : ''].filter(Boolean).join(' · ')}
+                                    </div>
+                                  )}
                                   {specRedundant
                                     ? null
-                                    : repoUrl !== null
-                                      ? <a className={`${css.spec} ${css.src}`} href={repoUrl} target="_blank" rel="noreferrer">{specText}</a>
-                                      : <div className={css.spec}>{specText}</div>}
+                                    : localPath !== null
+                                      ? (
+                                          <div className={css.irowPath}>
+                                            <span className={css.irowPathIcon}><IconFolderOpen16 size={14} /></span>
+                                            <span className={css.spec} title={localPath}>{shortLocalPath(localPath)}</span>
+                                            {isAbsoluteLocalPath(localPath) && (
+                                              <span className={css.irowPathCopy}>
+                                                <ConfirmCopyButton text={localPath} label={t('copyPath')} copiedLabel={t('pathCopied')} />
+                                              </span>
+                                            )}
+                                          </div>
+                                        )
+                                      : repoUrl !== null
+                                        ? (
+                                            <div className={css.irowPath}>
+                                              <span className={css.irowPathIcon}><IconLinkOutline14 size={14} /></span>
+                                              <a className={`${css.spec} ${css.src}`} href={repoUrl} target="_blank" rel="noreferrer">{specText}</a>
+                                            </div>
+                                          )
+                                        : <div className={css.spec}>{specText}</div>}
                                   {/* The user's own note REPLACES the author's
                                       description (#347): a catalog blurb answers
                                       "what is this", written for strangers and
@@ -5062,17 +6408,22 @@ export function MarketSection(props: MarketSectionProps) {
                                           <Input
                                             className={css.noteInput}
                                             value={noteDraft}
-                                            maxLength={200}
+                                            maxLength={NOTE_MAX}
                                             autoFocus
                                             placeholder={t('notePlaceholder')}
                                             onChange={e => setNoteDraft(e.target.value)}
                                             onKeyDown={(e) => {
+                                              // Enter while an IME is composing commits the candidate, not the note.
+                                              if (e.nativeEvent.isComposing || e.keyCode === 229) return
                                               if (e.key === 'Enter') saveNote(name, noteDraft)
                                               if (e.key === 'Escape') setNotingName(null)
                                             }}
                                           />
-                                          <Button variant="outline" size="sm" onClick={() => saveNote(name, noteDraft)}>{t('noteSave')}</Button>
-                                          <Button variant="ghost" size="sm" onClick={() => setNotingName(null)}>{t('cancel')}</Button>
+                                          <div className={css.noteEditBar}>
+                                            <span className={css.noteCount} aria-hidden="true">{`${noteDraft.length}/${NOTE_MAX}`}</span>
+                                            <Button variant="ghost" size="sm" onClick={() => setNotingName(null)}>{t('cancel')}</Button>
+                                            <Button variant="primary" size="sm" onClick={() => saveNote(name, noteDraft)}>{t('noteSave')}</Button>
+                                          </div>
                                         </div>
                                       )
                                     : (() => {
@@ -5083,7 +6434,14 @@ export function MarketSection(props: MarketSectionProps) {
                                         return (
                                           <div className={`${css.desc} ${css.descTight} ${css.noteRow}`}>
                                             {shown !== '' && (
-                                              <span className={note !== undefined && !theirs ? css.noteMine : undefined}>{shown}</span>
+                                              <CardDesc
+                                                key={shown}
+                                                text={shown}
+                                                t={t}
+                                                lines={3}
+                                                className={css.irowDesc}
+                                                textClassName={note !== undefined && !theirs ? css.noteMine : undefined}
+                                              />
                                             )}
                                             {note !== undefined && authored !== '' && (
                                               <button
@@ -5096,41 +6454,76 @@ export function MarketSection(props: MarketSectionProps) {
                                             )}
                                             <button
                                               type="button"
-                                              className={`${css.noteToggle} ${css.noteAction}`}
-                                              title={note === undefined ? t('noteAdd') : t('noteEdit')}
-                                              aria-label={note === undefined ? t('noteAdd') : t('noteEdit')}
+                                              className={css.noteAdd}
                                               onClick={() => { setNoteDraft(note ?? ''); setNotingName(name) }}
-                                            >{note === undefined ? t('noteAdd') : t('noteEdit')}</button>
+                                            >
+                                              {note === undefined && <IconPlus size={14} />}
+                                              {note === undefined ? t('noteAdd') : t('noteEdit')}
+                                            </button>
                                           </div>
                                         )
                                       })()}
-                                  {/* Update-notes entry (#294). Only a row with an
-                                      update pending renders it — a plugin that is
-                                      up to date has nothing to preview — and it is
-                                      one quiet line in the flow the row already
-                                      reserves for conditional content, so rows
-                                      without it are pixel-identical to before. */}
-                                  {status !== undefined && (status.updateAvailable || (generation && status.latest != null)) && (
-                                    <div className={css.noteRow}>
-                                      <button
-                                        type="button"
-                                        className={css.notesLink}
-                                        onClick={() => openNotes(name, status.current ?? null, status.latest ?? null, repoUrl)}
-                                      >{`▸ ${t('notesLink')}`}</button>
-                                      {bootId !== null && (
-                                        ignoredUpdateSet.has(name)
-                                          ? <span className={css.metaInline}>{t('updateNoticeIgnored')}</span>
-                                          : (
-                                              <button
-                                                type="button"
-                                                className={css.noteToggle}
-                                                aria-label={`${t('ignoreUpdateNotice')} ${name}`}
-                                                onClick={() => ignoreUpdateNotices([name])}
-                                              >{t('ignoreUpdateNotice')}</button>
-                                            )
-                                      )}
-                                    </div>
-                                  )}
+                                  {/* Update and reminder lines (#294, #728). An up-to-date row
+                                      with reminders on renders neither. */}
+                                  {(() => {
+                                    const updatable = isPluginUpdatable(name, String(spec), status, updatedNames)
+                                    const exempt = updateExemptSet.has(name)
+                                    if (!updatable && !exempt) return null
+                                    const ignored = !exempt && bootId !== null && ignoredUpdateSet.has(name)
+                                    const sep = <span className={css.irowStatusSep} aria-hidden="true">·</span>
+                                    return (
+                                      <>
+                                        {/* The fact and the reminder are separate lines: silencing one
+                                            must never read as hiding the other (#728). */}
+                                        {updatable && (
+                                          <div className={css.irowStatus}>
+                                            {/* A generation's newer release is already stated in the action band. */}
+                                            {!generation && (
+                                              <span className={css.irowStatusPart}>
+                                                <span className={css.irowStatusFact}>
+                                                  {status?.latest != null ? t('hostUpdateReady').replace('{0}', displayLatest(status.latest)) : t('updateAvailableShort')}
+                                                </span>
+                                                {sep}
+                                              </span>
+                                            )}
+                                            <button
+                                              type="button"
+                                              className={css.notesLink}
+                                              onClick={() => openNotes(name, status?.current ?? null, status?.latest ?? null, repoUrl)}
+                                            >{`${t('notesLink')} ›`}</button>
+                                          </div>
+                                        )}
+                                        {(exempt || ignored) && (
+                                          <div className={css.irowStatus}>
+                                            <span className={css.irowStatusIcon}><IconBellOff size={16} /></span>
+                                            {exempt
+                                              ? <span className={css.metaInline} title={t('updateExemptHint')} role="status">{t('updateExemptMark')}</span>
+                                              : <span className={css.metaInline} role="status">{t('updateNoticeIgnored')}</span>}
+                                            <span className={css.irowStatusAction}>
+                                              {exempt
+                                                ? (
+                                                    <button
+                                                      type="button"
+                                                      className={css.noteToggle}
+                                                      title={t('updateExemptHint')}
+                                                      aria-label={`${t('updateExemptRestore')} ${name}`}
+                                                      onClick={() => toggleUpdateExempt(name)}
+                                                    >{t('updateExemptRestore')}</button>
+                                                  )
+                                                : (
+                                                    <button
+                                                      type="button"
+                                                      className={css.noteToggle}
+                                                      aria-label={`${t('updateExemptRestore')} ${name}`}
+                                                      onClick={() => unignoreUpdateNotice(name)}
+                                                    >{t('updateExemptRestore')}</button>
+                                                  )}
+                                            </span>
+                                          </div>
+                                        )}
+                                      </>
+                                    )
+                                  })()}
                                   {!off && act !== undefined && meta !== null && (
                                         <div className={css.act}>
                                           {/* Only a state the switch does NOT already show earns a
@@ -5201,17 +6594,12 @@ export function MarketSection(props: MarketSectionProps) {
                                   </span>
                                 )}
                                 {toggleable && (
-                                  <button
-                                    type="button"
-                                    role="switch"
-                                    aria-checked={!off}
-                                    aria-label={(off ? t('enable') : t('disable')) + ' ' + name}
-                                    className={off ? css.switch : `${css.switch} ${css.switchOn}`}
-                                    disabled={togglingName !== null || busyUrl !== null || updatingName !== null || removingName !== null}
-                                    onClick={() => doToggle(name, off)}
-                                  >
-                                    <span className={css.switchKnob} />
-                                  </button>
+                                  onOffSwitch({
+                                    label: (off ? t('enable') : t('disable')) + ' ' + name,
+                                    on: !off,
+                                    disabled: togglingName !== null || busyUrl !== null || updatingName !== null || removingName !== null,
+                                    toggle: () => doToggle(name, off),
+                                  })
                                 )}
                                 {/* State and switch pack left, the operations
                                     pack right: with everything in one flow the
@@ -5230,13 +6618,7 @@ export function MarketSection(props: MarketSectionProps) {
                                     </>
                                   )
                                 })()}
-                                {/* Status slot and Uninstall wrap as ONE unit. As
-                                    sibling children of a wrapping flex row they broke
-                                    apart independently, leaving the tag on one line and
-                                    the button on the next (#242 by @Ztyss). Nested,
-                                    the pair either fits or moves together, and the tag
-                                    — already ellipsizing since #234 — is what gives up
-                                    width first. */}
+                                {/* The status tags stay one unit, so a wrap moves them together (#242). */}
                                 <span className={css.irowTrailing}>
                                 {!missing && status?.sourceMigration !== undefined && (
                                   <Button
@@ -5268,30 +6650,9 @@ export function MarketSection(props: MarketSectionProps) {
                                             >{status.restoreRequired === true ? t('restoreOnline') : t('update')}</Button>
                                           )
                                         : localDev
-                                          ? (
-                                              <button
-                                                type="button"
-                                                className={css.metaTagAction}
-                                                title={`${t('restore')} — ${t('restoreOnline')}`}
-                                                aria-label={t('restore')}
-                                                disabled={data === null || removingName !== null || busyUrl !== null || updatingName !== null}
-                                                onClick={() => askRestore(name)}
-                                              >{t('restore')}</button>
-                                            )
+                                          ? null
                                           : <span className={css.metaTag} title={t('upToDate')}>{t('upToDate')}</span>}
-                                {!missing && name !== 'dsh-market' && name !== 'dshmarket' && (
-                                  removingName === name
-                                    ? <Button variant="outline" size="sm" className={css.dangerBtn} disabled>{t('uninstalling')}</Button>
-                                    : (
-                                        <Button
-                                          variant="outline"
-                                          size="sm"
-                                          className={css.dangerBtn}
-                                          disabled={removingName !== null || busyUrl !== null || updatingName !== null}
-                                          onClick={() => setRemoveConfirm(name)}
-                                        >{t('uninstall')}</Button>
-                                      )
-                                )}
+                                {removingName === name && <span className={css.metaTag}>{t('uninstalling')}</span>}
                                 </span>
                                 </div>
                               </div>
@@ -5377,6 +6738,7 @@ export function MarketSection(props: MarketSectionProps) {
                 value={addQuery}
                 onCommit={setAddQuery}
                 placeholder={t('groupAddSearchPh')}
+                t={t}
               />
               {candidates.length === 0
                 ? <p className={css.groupAddModalHint}>{t('groupAddEmpty')}</p>
@@ -5454,11 +6816,13 @@ export function MarketSection(props: MarketSectionProps) {
       {confirming !== null && (
         <Modal
           open
-          onClose={() => { setConfirming(null); setCmdOpen(false) }}
+          className={css.confirmModal}
+          contentClassName={css.confirmContent}
+          onClose={() => setConfirming(null)}
           title={t('confirmTitle') + ' ' + confirming.name + '?'}
           footer={(
             <>
-              <Button variant="ghost" onClick={() => { setConfirming(null); setCmdOpen(false) }}>{t('cancel')}</Button>
+              <Button variant="ghost" onClick={() => setConfirming(null)}>{t('cancel')}</Button>
               <Button variant="primary" onClick={() => doInstall(confirming)}>{t('confirmInstall')}</Button>
             </>
           )}
@@ -5466,70 +6830,96 @@ export function MarketSection(props: MarketSectionProps) {
           {/* The detail dialog has to show at LEAST what the card already
               does — owner, version, downloads, stars, published date, category —
               a "detail" view that shows less than the summary it opened from
-              is backwards. */}
+              is backwards. The rolling-window explanation stays on the
+              download mark (hover, focus, aria-label): repeating it as the
+              first paragraph made the methodology louder than the blurb (#739). */}
+          <div className={css.confirmBody}>
           <div className={css.byline}>
             <OwnerAvatar name={confirming.name} owner={confirming.owner || ''} />
             <span className={css.owner} title={confirming.owner}>{confirming.owner}</span>
-            <CatalogVersionMark version={confirming.version} tip={t('catalogNpmLatest')} />
-            {typeof confirming.downloads === 'number' && (
-              <Tooltip label={String(confirming.downloads)} side="top">
-                <span className={css.star}>{'· ↓ ' + formatCount(confirming.downloads)}</span>
-              </Tooltip>
-            )}
+            <CatalogVersionMark version={confirming.version} tip={catalogVersionTip} />
+            <DownloadCount plugin={confirming} t={t} />
             {typeof confirming.stars === 'number' && (
-              <Tooltip label={String(confirming.stars)} side="top">
-                <span className={css.star}>{'· ★ ' + formatCount(confirming.stars)}</span>
-              </Tooltip>
+              <span className={css.star}>{'· ★ ' + formatCount(confirming.stars)}</span>
             )}
-            <span className={css.grow} />
-            {pluginCategories(confirming).map(category => (
-              <span key={category} className={css.tag}>
-                {(data!.categories[category] && (data!.categories[category]![lang] || data!.categories[category]!.en)) || category}
-              </span>
-            ))}
+            {confirming.added && (
+              <span className={css.star} title={t('published')}>{`· ${confirming.added}`}</span>
+            )}
           </div>
-          {confirming.added && <div className={css.metaInline}>{t('published') + ' ' + confirming.added}</div>}
+          {pluginCategories(confirming).length > 0 && (
+            <div className={css.confirmTags}>
+              {pluginCategories(confirming).map(category => (
+                <span key={category} className={css.tag}>
+                  {(data!.categories[category] && (data!.categories[category]![lang] || data!.categories[category]!.en)) || category}
+                </span>
+              ))}
+            </div>
+          )}
           {/* The Modal primitive's own `description` prop is sized for a
               one-line subtitle under the title — a full plugin description
               rendered there read as an oversized heading, not body text
-              (reported on a real host). Rendering it here, at the card's own
-              size, also matches the card's own reading order: name, byline,
-              description, then screenshots. */}
-          <CardDesc text={(confirming.description && (confirming.description[lang] || confirming.description.en)) || ''} t={t} />
+              (reported on a real host). The card's .desc is tertiary and
+              clamped so a grid stays even; here the blurb is what the dialog
+              is for, so it takes body color and body size (#739). */}
+          {(() => {
+            const text = (confirming.description && (confirming.description[lang] || confirming.description.en)) || ''
+            return text === '' ? null : <p className={css.confirmDesc}>{text}</p>
+          })()}
           <ScreenshotStrip plugin={confirming} onOpen={openLightbox} />
-          <DisclosureRow
-            icon={<IconCodeOutline16 size={16} />}
+          {/* A rule between "what it is" and the disclosures. Without it the
+              fold rows sat in the same block as the blurb (#739). */}
+          <div className={css.confirmFold}>
+          {capabilityDetail(confirming)}
+          <ConfirmFold
+            icon={<ConfirmTerminalIcon />}
             title={t('cmdDetails')}
             open={cmdOpen}
-            expandable
-            expandOnRowClick
             onToggle={() => setCmdOpen(o => !o)}
           >
-            <div className={css.cmd}>{confirming.install}</div>
-          </DisclosureRow>
-          {looksTerminal(confirming, lang) && (
-            <p className={css.warnLine}>
-              <IconWarningOutline16 size={14} className={css.bannerIcon} />
-              {' ' + t('terminalWarn') + ' '}
-              <a className={css.src} href={confirming.url + '#readme'} target="_blank" rel="noreferrer">{t('readme')}</a>
-            </p>
+            <div className={css.confirmCmd}>
+              <div className={css.cmd}>{confirming.install}</div>
+              {typeof confirming.install === 'string' && confirming.install !== '' && (
+                <ConfirmCopyButton text={confirming.install} label={t('cmdCopy')} copiedLabel={t('cmdCopied')} />
+              )}
+            </div>
+          </ConfirmFold>
+          </div>
+          {(looksTerminal(confirming, lang) || confirming.deprecated === true) && (
+            <div className={css.installCaution}>
+              <p className={css.installCautionLabel}>{t('installCaution')}</p>
+              {looksTerminal(confirming, lang) && (
+                <>
+                  <p className={css.installCautionHead}>
+                    <ConfirmWarnIcon />
+                    {t('terminalCautionTitle')}
+                  </p>
+                  <p className={css.installCautionBody}>{t('terminalCautionBody')}</p>
+                  <p className={css.installCautionFoot}>
+                    <span>{t('terminalCautionStartup')}</span>
+                    <a className={css.installCautionLink} href={confirming.url + '#readme'} target="_blank" rel="noreferrer">{t('terminalCautionLink')}</a>
+                  </p>
+                </>
+              )}
+              {confirming.deprecated === true && (() => {
+                const replacement = replacementOf(confirming)
+                return (
+                  <p className={css.installCautionBody}>
+                    {t('deprecatedWarn')}
+                    {replacement !== undefined && (
+                      <>
+                        {' '}
+                        <a className={css.src} href={replacement.url} target="_blank" rel="noreferrer">
+                          {t('replacementHint') + ' ' + replacement.name}
+                        </a>
+                      </>
+                    )}
+                  </p>
+                )
+              })()}
+            </div>
           )}
-          {confirming.deprecated === true && (() => {
-            const replacement = replacementOf(confirming)
-            return (
-              <div className={css.deprecate}>
-                <div className={css.depLine}>
-                  <span>⚠️ {t('deprecatedWarn')}</span>
-                  {replacement !== undefined && (
-                    <a className={css.src} href={replacement.url} target="_blank" rel="noreferrer">
-                      {t('replacementHint') + ' ' + replacement.name}
-                    </a>
-                  )}
-                </div>
-              </div>
-            )
-          })()}
-          <p className={css.modalNote}><IconWarningOutline16 size={14} className={css.bannerIcon} />{' ' + t('confirmWarn')}</p>
+          <p className={css.confirmFineprint}>{t('confirmWarn')}</p>
+          </div>
         </Modal>
       )}
       {recovery !== null && (
@@ -5646,16 +7036,63 @@ export function MarketSection(props: MarketSectionProps) {
           open
           onClose={() => setHostIncompatible(null)}
           title={t('hostIncompatibleTitle')}
-          description={t(hostIncompatible.kind === 'install' ? 'hostIncompatibleBodyInstall' : 'hostIncompatibleBody')
-            .replace('{plugin}', `${hostIncompatible.name} ${hostIncompatible.version}`.trim())
-            .replace('{requirement}', hostIncompatible.requirement ?? t('hostIncompatibleUnknown'))
-            .replace('{host}', hostIncompatible.hostVersion ?? t('hostIncompatibleUnknown'))}
+          description={[
+            t(hostIncompatible.kind === 'install' ? 'hostIncompatibleBodyInstall' : 'hostIncompatibleBody')
+              .replace('{plugin}', `${hostIncompatible.name} ${hostIncompatible.version}`.trim())
+              .replace('{requirement}', hostIncompatible.requirement ?? t('hostIncompatibleUnknown'))
+              .replace('{host}', hostIncompatible.hostVersion ?? t('hostIncompatibleUnknown')),
+            // The way out, said in the same breath as the refusal: what the
+            // user can install instead of a version this host cannot run.
+            hostIncompatible.npmName === null
+              ? null
+              : findingCompat.status === 'loading'
+                ? t('hostIncompatibleSearching')
+                : findingCompat.status === 'found'
+                  ? t(hostIncompatible.kind === 'install' ? 'hostIncompatibleFoundInstall' : 'hostIncompatibleFoundUpdate')
+                      .replace('{version}', findingCompat.version)
+                  : findingCompat.status === 'not-found'
+                    ? t('hostIncompatibleNoCompat')
+                    : findingCompat.status === 'error'
+                      ? t('hostIncompatibleSearchFailed')
+                      : null,
+          ].filter((line): line is string => line !== null).join('\n')}
           footer={(
             <>
               {/* Staying put is the recommended action, so it is the primary
                   one — the opposite of the usual dialog, because here the
                   safe choice is to do nothing. */}
-              <Button variant="primary" onClick={() => setHostIncompatible(null)}>{t(hostIncompatible.kind === 'install' ? 'hostIncompatibleCancel' : 'hostIncompatibleKeep')}</Button>
+              {/* A release this host can actually run is the best outcome
+                  available, so it takes the primary seat — and `stay put`
+                  moves to outline rather than disappearing. The "anyway"
+                  button keeps the ghost seat: it is the only option here
+                  that asks the user to accept a broken host, and it must not
+                  look like the recommended one. */}
+              <Button
+                variant={findingCompat.status === 'found' ? 'outline' : 'primary'}
+                onClick={() => setHostIncompatible(null)}
+              >{t(hostIncompatible.kind === 'install' ? 'hostIncompatibleCancel' : 'hostIncompatibleKeep')}</Button>
+              {findingCompat.status === 'found' && (
+                <Button
+                  variant="primary"
+                  disabled={hostIncompatible.kind === 'install' ? busyUrl !== null : updatingName !== null}
+                  onClick={() => {
+                    const kind = hostIncompatible.kind
+                    const target = hostIncompatible.name
+                    const plugin = hostIncompatible.plugin
+                    const version = findingCompat.version
+                    setHostIncompatible(null)
+                    if (kind === 'install') {
+                      if (plugin !== null) doInstall(plugin, false, version)
+                    } else {
+                      doUpdate(target, false, false, version)
+                    }
+                  }}
+                >{t(hostIncompatible.kind === 'install' ? 'hostIncompatibleInstallCompat' : 'hostIncompatibleUpdateCompat')
+                  .replace('{version}', findingCompat.version)}</Button>
+              )}
+              {findingCompat.status === 'error' && hostIncompatible.npmName !== null && (
+                <Button variant="outline" onClick={() => setCompatRetry(n => n + 1)}>{t('hostIncompatibleRetry')}</Button>
+              )}
               <Button
                 variant="ghost"
                 disabled={hostIncompatible.kind === 'install' ? busyUrl !== null : updatingName !== null}
@@ -5824,10 +7261,12 @@ export function MarketSection(props: MarketSectionProps) {
                   </label>
                 ))}
               </div>
-              <label className={css.backupCheck}>
-                <input type="checkbox" checked={exportIncludeConfig} onChange={e => setExportIncludeConfig(e.target.checked)} />
-                {t('gistIncludeConfig')}
-              </label>
+              {labelledCheckbox({
+                label: t('gistIncludeConfig'),
+                checked: exportIncludeConfig,
+                className: css.backupCheck,
+                onChange: setExportIncludeConfig,
+              })}
               {exportIncludeConfig && <p className={css.backupWarn}>{t('credsWarning')}</p>}
               {exportError !== null && <p className={css.backupWarn}>{exportError}</p>}
             </>
@@ -5844,6 +7283,18 @@ export function MarketSection(props: MarketSectionProps) {
       )}
       {favoriteError !== null && (
         <Toast text={localizeBilingual(favoriteError, lang)} icon={<IconWarningOutline16 size={14} />} onDone={favoriteErrorDone} />
+      )}
+      {blockError !== null && (
+        <Toast text={localizeBilingual(blockError, lang)} icon={<IconWarningOutline16 size={14} />} onDone={blockErrorDone} />
+      )}
+      {blockNotice !== null && (
+        <Toast text={blockNotice} onDone={blockNoticeDone} />
+      )}
+      {updateExemptError !== null && (
+        <Toast text={localizeBilingual(updateExemptError, lang)} icon={<IconWarningOutline16 size={14} />} onDone={updateExemptErrorDone} />
+      )}
+      {updateExemptNotice !== null && (
+        <Toast text={updateExemptNotice} onDone={updateExemptNoticeDone} />
       )}
       {toggled !== null && (
         <Toast

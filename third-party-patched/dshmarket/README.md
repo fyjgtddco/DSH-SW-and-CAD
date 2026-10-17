@@ -31,15 +31,17 @@ its own dsh: it may be older than the one `npm` would give you (#139).
 
 ## What you get
 
-- **Browse & search** the full community catalog (2300+ plugins, growing daily) — category filters, star counts, top/new sorting, bilingual descriptions that follow your UI language
+- **Browse & search** the full community catalog (4200+ plugins, growing daily) — category filters, star counts, top/new sorting, bilingual descriptions that follow your UI language
 - **Host-aware discovery** — cards show the DSH requirement declared by `engines.dsh` or lockstep `@deepseek-ai/dsh-*` peers; an opt-in filter hides only confirmed mismatches with the running host. Undeclared, malformed, unavailable, and GitHub-only entries remain visible rather than being guessed incompatible
 - **Screenshots** — AppStore-style screenshots, auto-carousel when there's more than one, click to preview full-size: author-curated shots show right on the card (zero extra requests); plugins without curated shots fall back to automatic README extraction once you open the install dialog. Images load from GitHub hosting only
 - **Comments** — every card opens the plugin's discussion thread in place. It is the same thread its pages on [dshmarket.com](https://dshmarket.com) and the [catalog](https://awesome-dsh-plugin.com) show, so a plugin has one conversation rather than three. Backed by GitHub Discussions through giscus: it loads when you open it, needs a GitHub account only to post, and the note above it says plainly that opening it contacts giscus.app and GitHub. On local dsh web, reading stays embedded while a dedicated GitHub action opens the exact discussion in a new tab for sign-in and posting, so the cross-site return never carries or depends on the host session
 - **Favorites** — bookmark plugins and themes from Discover or the Themes tab; a dedicated Favorites tab lists them with search, sort, and install actions. Bookmarks persist in the profile's market state (`state.json`); entries that leave the catalog can be cleared in one click
+- **Groups** — organise installed plugins into named groups (rename, delete, and per-group search); a plugin lives in one group and ungrouped is the default. Purely organisational: the panel says so, and nothing about enable state changes. The grouping itself is local state in the profile's `state.json`
+- **Notes** — write your own one-line description for any installed plugin and it replaces the author's on that row, so a shelf of forty plugins answers "why did I install this" in your words. Stored locally beside groups and favorites, never sent anywhere
 - **Themes** — a dedicated tab for community themes and skins: install → active immediately, switch with one click (themes are mutually exclusive, your choice survives restarts), uninstall to revert
 - **One-click install** — confirm the source, watch live progress; most plugins go live after a page refresh, no restart
 - **Backup & restore** — export your profile's plugin list and configuration as readable JSON, import it on another machine, store it on WebDAV with daily auto-backup, or sync through a private GitHub Gist; restores **merge** (plugins installed after the backup are kept), validate before writing, and roll back on failure
-- **Updates** — per-plugin update checks (npm version or pinned commit vs HEAD), one-click update, or update everything at once; the market updates itself the same way
+- **Updates** — per-plugin update checks (npm version or pinned commit vs HEAD), one-click update, or update everything at once; the market updates itself the same way. Each row with an update pending carries a **What changed** link — the release notes, or the commits when the version cannot be aligned to one. A notice you are not acting on can be ignored for the rest of the boot instead of being dismissed again on every reload — scoped to the running host, so a restart brings the reminder back and ignoring it is never the same as turning it off
 - **Resilient GitHub routes** — in the China download region, Git refs, README content, and avatars each keep their own fallback order. The market remembers the last working route, switches only after transport/HTTP/payload validation fails, and rejects proxy error pages disguised as HTTP 200. If every built-in route fails, **Settings → Plugins → Plugin configuration → GitHub acceleration** accepts one persistent custom HTTPS prefix; `DSHM_GITHUB_PROXY` remains the operator-owned override
 - **Public update API** — plugin-owned settings pages can use the versioned, capability-gated [update API v1](UPDATE-API-V1.md) (beta) instead of copying package-manager logic or depending on private Market UI responses
 - **Uninstall** — two-step confirm; plugins installed this session are removed live
@@ -49,7 +51,7 @@ its own dsh: it may be older than the one `npm` would give you (#139).
 - **Zero jargon** — if a component is missing (pnpm), the market detects it and offers a one-click automatic setup
 - **Log export** — one click produces a sanitized plain-text log for bug reports (home paths and credential shapes are masked; nothing is ever sent anywhere). The market's version sits next to the page heading, so a screenshot of a problem already carries it
 - **Settings card** — on dsh 0.1.0-rc.7 and newer the market manages *itself* from **Settings → Plugins → Plugin configuration**, next to every other plugin: see the running version, pick a **release channel** (stable, or beta to try builds still being verified — the market only, never your other plugins; a third *dev* channel appears once developer mode is switched on, and carries builds published straight off a branch), update, or remove the market — with an opt-in cleanup that also drops the disable rows it wrote, so plugins it switched off start running again rather than staying off with no UI left to switch them back on
-- **Diagnostics** — the plugin load order and conflict surface, one page: bundle stack with official/community badges, duplicate loader entries, dependency version mismatches, multi-version core packages, overrides and invalid config entries. Plain-language terms, problem blocks highlighted, everything collapsible
+- **Diagnostics** — the plugin load order and conflict surface, one page: bundle stack with official/community badges, duplicate loader entries, dependency version mismatches, multi-version core packages, overrides and invalid config entries, and leftover directories — a package directory an interrupted update left without its `package.json`, and pnpm's own `*_tmp_*` staging directories. Nothing there stops a start, so it is listed rather than warned about, and it is the only place that names what is on disk. Plain-language terms, problem blocks highlighted, everything collapsible
 
 - **Load order** — drag community bundles into the order you want, or take the suggested one derived from the plugins' own before/after rules. Nothing is written until a trial composition passes, and the panel tells you what the new order would change (overrides, invalid or duplicate entries) before you apply it
 - **AI fix** — one click copies a diagnostics-driven fix prompt (errors/warnings/order conflicts + conservative scope instructions) to the clipboard; you paste it into a new conversation and decide whether to send. The prompt first asks the agent to detect whether it is itself the harness running this profile — if so it hard-forbids mutating the live composition, upgrading/restarting the harness or core packages, or reinstalling deps, and instead has it write an idempotent `apply` script plus a `rollback` script, have you run them in an external terminal, and paste the output back
@@ -76,7 +78,21 @@ Installs prefer repo-verified npm packages, then author-supplied prebuilt GitHub
       allowRestart: false   # NOT at the top level beside `name:`
   ```
 
+  **On dsh 0.1.7 and newer there is no switch to flip**: the host derives a plugin's settings from its own Config schema and no longer serves a plugin-registered settings namespace, so the market has no control there. The profile patch below is the way on every host.
+
   `GET /dsh-market/status` reports `"restart": false` once it has taken effect.
+- Plugins that compile (native modules) build under the environment the dsh process inherited — which a GUI, a systemd/launchd unit, or a Windows Start-menu launch does **not** inherit from your shell. If a plugin needs a newer compiler than the machine's default (`g++` too old while other work depends on that version), pin the build-time variables with `buildEnv` under `config:` — the config equivalent of `CC=... CXX=... dsh` from a terminal, without changing anything globally. Pinned values may override inherited ones but never the `PATH` or `CI` the market computes for its children (issue #336):
+
+  ```yaml
+  - id: dsh-market
+    name: dshmarket
+    config:
+      buildEnv:
+        CC: /usr/bin/gcc-11     # or CXX, NODE_OPTIONS, ...
+        CXX: /usr/bin/g++-11
+  ```
+
+  In the UI the same variables are edited live in **Settings → Plugins → Plugin configuration → dshmarket → Build environment** (one `KEY=value` per line; saving applies to the next install without a restart, and saving an empty list goes back to the profile config above). `PATH` and `CI` are always managed by the market and cannot be overridden from either place.
 - For terminal-attached launches, the detached replacement keeps running after the original terminal closes
 - Listing ≠ endorsement: plugins are third-party code, install sources you trust
 
@@ -96,7 +112,9 @@ Fetched live on every open from [awesome-dsh-plugin.com/plugins.json](https://aw
 
 There is deliberately no bundled snapshot to fall back on: for a catalog that grows daily, a stale answer is not a degraded one but a wrong one — a plugin published this morning would read as "does not exist".
 
-**If that host is unreachable from your network**, point the market at a mirror instead. Set `DSHM_REGISTRY_URL` in the environment dsh runs in, to anything serving the same `plugins.json` shape:
+In the China download region the same catalog is read from npm first, through the same region-aware routes the plugins themselves arrive on: every China mirror already carries it, it comes off the mirror rather than bouncing back to the origin registry, and it carries a version, so a bad catalog build can be rolled back instead of only being fixed forwards. The origin stays last in the list as the route that has always worked. Region detection happens once and the answer is remembered; **Settings → Plugins → Plugin configuration** can override it.
+
+**If that host is unreachable from your network**, point the market at a mirror. Set `DSHM_REGISTRY_URL` in the environment dsh runs in, to anything serving the same `plugins.json` shape:
 
 ```sh
 DSHM_REGISTRY_URL=https://your-mirror.example/plugins.json dsh web

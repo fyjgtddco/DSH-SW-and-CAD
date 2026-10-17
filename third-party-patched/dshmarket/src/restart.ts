@@ -394,6 +394,10 @@ export function restartHelperSource(
     // How the replacement ended, when it ended before it bound the port.
     // Top level rather than inside main() because the handoff reads it.
     'let exited = null',
+    // The pid of the replacement, so the recovery surface can refuse to take
+    // the port while that process is still alive (#719). Passed as an argument
+    // rather than through the config: the config is written before the spawn.
+    'let replacementPid = null',
     'const handOff = async () => {',
     '  if (!recoveryScript || !recoveryConfig) return',
     '  try {',
@@ -402,7 +406,7 @@ export function restartHelperSource(
     // Measured on Windows 11: the flag combination is accepted and the child
     // runs (the two flags are documented as mutually exclusive on MSDN, so
     // the probe matters more than the docs here).
-    '    const child = spawn(process.execPath, [recoveryScript, recoveryConfig, "--exit=" + String(exited), "--bound=0"], { detached: true, stdio: "ignore", env: process.env, windowsHide: true })',
+    '    const child = spawn(process.execPath, [recoveryScript, recoveryConfig, "--exit=" + String(exited), "--bound=0", "--pid=" + String(replacementPid ?? 0)], { detached: true, stdio: "ignore", env: process.env, windowsHide: true })',
     '    child.on("error", (error) => note(`could not start the recovery surface: ${error && error.message ? error.message : error}`))',
     '    child.unref()',
     '    note("the replacement never came up — starting the recovery surface")',
@@ -450,6 +454,7 @@ export function restartHelperSource(
     // page's own poll is racing that same clock.
     '    child.on("exit", (code) => { exited = code === null ? -1 : code })',
     '    child.unref()',
+    '    replacementPid = child.pid ?? null',
     '    note(`replacement started (pid ${child.pid})`)',
     '  } catch (error) {',
     '    note(`could not start the replacement: ${error && error.message ? error.message : error}`)',
@@ -473,7 +478,16 @@ export function restartHelperSource(
     // than a user would notice. (src/recovery.ts keeps the same rule for the
     // boots it supervises.)
     '  const SETTLE_MS = 8000',
-    '  const upBy = Date.now() + 20000 + SETTLE_MS',
+    // 45s, not 20s: this window has to outlast a real cold start, and on a
+    // source-run host with a large plugin tree the webserver binds at ~42-45s
+    // (measured, #719). At 20s the helper gave up while the replacement was
+    // still starting, handed the port to the recovery surface, and the
+    // replacement then died on EADDRINUSE — a deadlock nothing could break.
+    // Matches BOOT_TIMEOUT_MS in src/recovery.ts, which is the same budget
+    // seen from the other side. A replacement that EXITS still ends this
+    // early (the `exited` break below), so a genuinely failed boot is not
+    // made slower by the wider backstop.
+    '  const upBy = Date.now() + 45000 + SETTLE_MS',
     '  let steadySince = null',
     '  while (Date.now() < upBy) {',
     '    if (await listening()) {',

@@ -133,6 +133,64 @@
    squeezed into a vertical stack instead of dropping to its own line. */
 .warnLine{color:var(--dsw-alias-state-warn-primary,#b45309);font-weight:600;font-size:12px;line-height:18px;margin:0;display:flex;align-items:center;gap:4px;flex-wrap:wrap}
 .modalNote{font-size:12px;color:var(--dsw-alias-label-tertiary,#8b93a1);line-height:18px;margin:12px 0 0;display:flex;align-items:center;gap:4px}
+/* Install confirm (#739). Card density is for a grid; this dialog is the
+   decision, so the blurb is body text and the signature, the blurb, and the
+   disclosures are separate bands. The card's own .desc / .byline stay put. */
+.confirmBody{display:flex;flex-direction:column;gap:12px}
+/* A step wider than the default Modal so the signature — owner, version,
+   downloads, stars, date — stays one line. Notes stay wider than this (#739). */
+.confirmModal{width:min(560px,92vw);max-width:min(560px,92vw);max-height:100%}
+/* The host frame already insets the card. Cap against that box, then scroll
+   the body so the title and the install buttons stay put. */
+.confirmContent{flex:1 1 auto;min-height:0;overflow:hidden}
+.confirmContent > :first-child{flex-shrink:0}
+/* The host body always starts 20px under the title. This dialog has no
+   description, so that band is empty; the same element is what scrolls once
+   the card hits the frame. */
+.confirmContent > :last-child{margin-top:0;flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.confirmModal > :last-child{flex-shrink:0}
+.confirmBody .byline{margin-top:0;flex-wrap:nowrap}
+.confirmBody .owner{min-width:0}
+.confirmBody .shots{margin:0;padding:0}
+.confirmBody .modalNote{margin:0}
+.confirmTags{display:flex;flex-wrap:wrap;gap:6px}
+.confirmDesc{margin:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,#1f2328);white-space:pre-wrap}
+.confirmFold{display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--dsw-alias-border-l2,#e5e7eb);padding-top:12px}
+/* Gray block, like the design's fold rows. layer-1 is white on this dialog,
+   which is why a bordered panel read as an empty frame (#739). */
+.confirmPanel{--fold-bg:#f7f8fa;--fold-border:#e7e8ea;--fold-ink:#1c1d1f;--fold-on-ink:#fff;background:var(--fold-bg);border:1px solid var(--fold-border);border-radius:8px}
+/* The hex above is the light-theme design spec; dark takes the host tokens so
+   the block does not become a light island on a dark dialog. */
+:global(body[data-ds-dark-theme]) .confirmPanel{--fold-bg:var(--dsw-alias-bg-layer-3,#353638);--fold-border:var(--dsw-alias-border-l2,#ffffff1f);--fold-ink:var(--dsw-alias-label-primary,#f9fafb);--fold-on-ink:var(--dsw-alias-bg-layer-2,#2c2c2e)}
+.confirmPanelRow{display:flex;align-items:center;gap:8px;width:100%;min-height:40px;padding:0 12px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.confirmPanelRow:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#4176e6);outline-offset:-2px}
+.confirmPanelIcon{display:inline-flex;flex:none;color:var(--fold-ink)}
+.confirmTerminalIcon{display:block;flex:none;color:var(--fold-ink)}
+.confirmTerminalPrompt{stroke:var(--fold-on-ink);fill:none}
+.confirmTerminalDot{fill:var(--fold-on-ink)}
+.confirmPanelTitle{flex:1;min-width:0;font-size:13px;line-height:20px;color:var(--fold-ink)}
+.confirmPanelChevron{flex:none;color:var(--dsw-alias-label-tertiary,#8b93a1)}
+.confirmPanelBody{padding:0 12px 10px 16px}
+.confirmCmd{display:flex;align-items:center;gap:8px}
+.confirmPanel .cmd{flex:1;min-width:0;margin:0;padding:0;background:transparent;border-radius:0;line-height:24px}
+.confirmCopied{flex:none;font-size:12px;line-height:24px;color:var(--dsw-alias-state-success-primary,#22c55e);white-space:nowrap}
+.confirmCopy{display:inline-flex;flex:none;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--fold-ink,#1c1d1f);cursor:pointer}
+.confirmCopy:hover{background:color-mix(in srgb, var(--fold-ink, #1c1d1f) 8%, transparent)}
+.confirmCopy:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#4176e6);outline-offset:1px}
+.confirmPanel .caps{gap:6px;padding:0}
+.confirmPanel .caps .capChip{background:var(--fold-on-ink,#fff);border:1px solid var(--fold-border,#e7e8ea);border-radius:999px;padding:2px 8px;color:var(--fold-ink,#1c1d1f);font-size:12px;line-height:18px}
+.confirmPanel .caps .capMuted{border-color:var(--fold-border,#e7e8ea);color:var(--dsw-alias-label-secondary,#6b7280);font-size:12px;line-height:18px;padding:2px 8px}
+.confirmPanel .caps .capFact{flex-basis:100%;margin:2px 0 0;font-size:13px;line-height:20px;color:var(--fold-ink,#1c1d1f)}
+.confirmPanel .capCaveat{color:var(--dsw-alias-label-secondary,#6b7280);font-size:12px;line-height:18px}
+.installCaution{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary, #b45309) 12%, transparent);border-radius:8px;padding:12px 13px}
+.installCautionLabel{margin:0 0 8px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#6b7280)}
+.installCautionHead{display:flex;align-items:center;gap:6px;margin:0;font-size:13px;line-height:20px;font-weight:600;color:var(--dsw-alias-label-primary,#1f2328)}
+.installCautionMark{display:block;flex:none}
+.installCautionBody{margin:6px 0 0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,#1f2328)}
+.installCautionFoot{display:flex;align-items:baseline;gap:12px;margin:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,#1f2328)}
+.installCautionLink{margin-left:auto;flex:none;white-space:nowrap;font-weight:600;font-size:13px;line-height:20px;color:var(--dsw-alias-link,#3b82f6);text-decoration:none}
+.installCautionLink:hover{text-decoration:underline}
+.confirmFineprint{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#6b7280)}
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:10px}
 /* Masonry: two independent columns, each packing its own cards tight.
    A CSS grid cannot do this — its rows are as tall as their tallest cell, so
@@ -189,6 +247,9 @@
 .themeResultBar{display:flex;align-items:center;min-height:24px;padding:0 4px 8px;color:var(--dsw-alias-label-tertiary,#8b93a1);font-size:12px;line-height:18px}
 .favoritesSectionHead{margin:16px 0 8px;padding:0 4px;font-size:13px;font-weight:600;line-height:20px;color:var(--dsw-alias-label-primary,#1f2328)}
 .favoritesSectionHead:first-of-type{margin-top:0}
+.brokenPluginNotice{display:flex;flex-direction:column;gap:8px;margin:0 0 8px}
+.brokenPluginItem{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--dsw-alias-state-warn-tertiary,rgba(180,83,9,.2));border-radius:8px;background:var(--dsw-alias-state-warn-tertiary,rgba(180,83,9,.06));color:var(--dsw-alias-state-warn-primary,#b45309);font-size:12px;line-height:18px}
+.brokenPluginText{display:flex;flex-direction:column;gap:2px;min-width:0}
 .favoritesStaleBar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:0 0 8px;padding:8px 10px;border:1px solid var(--dsw-alias-state-warn-tertiary,rgba(180,83,9,.2));border-radius:8px;background:var(--dsw-alias-state-warn-tertiary,rgba(180,83,9,.06));color:var(--dsw-alias-state-warn-primary,#b45309);font-size:12px;line-height:18px}
 .favoritesStaleOnly{display:flex;flex-direction:column;align-items:flex-start;gap:10px}
 .themeGallery{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));align-items:stretch;gap:10px}
@@ -264,7 +325,9 @@
 .row1{display:flex;align-items:flex-start;gap:10px;min-width:0}
 .cardAction{flex-shrink:0;display:inline-flex;align-items:center}
 .installBtn.installBtn{min-width:64px}
-.av{width:16px;height:16px;border-radius:50%;display:grid;place-items:center;font-weight:700;color:#fff;font-size:9px;flex-shrink:0;object-fit:cover;background:var(--dsw-alias-bg-layer-2,#f3f4f6)}
+/* The avatar letter sits on `bg-layer-2`, which is white in the light theme:
+   a hardcoded white was invisible there. Ink on a surface is `label-primary`. */
+.av{width:16px;height:16px;border-radius:50%;display:grid;place-items:center;font-weight:700;color:var(--dsw-alias-label-primary,#1f2328);font-size:9px;flex-shrink:0;object-fit:cover;background:var(--dsw-alias-bg-layer-2,#f3f4f6)}
 /* The plugin name carries the card, so it is the one thing sized up; the
    author sits under it as a signature. Same reading order as a post
    header — you take in who wrote it in one glance and spend the rest on
@@ -315,6 +378,7 @@
    line up; masonry packs each column independently, so reserving five lines
    for a one-line description now just wastes the space it was buying. */
 .descClamp{display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
+.descClamp3{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .descToggle{display:flex;align-items:center;justify-content:center;width:20px;height:16px;margin-top:2px;
             color:var(--dsw-alias-label-tertiary,#8b93a1);background:none;border:none;padding:0;cursor:pointer}
 .descToggle:hover{color:var(--dsw-alias-brand-primary,#4f6ef7)}
@@ -349,10 +413,15 @@
 .noteMine{color:var(--dsw-alias-label-primary,#1f2328)}
 .noteToggle{font:inherit;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8b93a1);background:0 0;border:none;padding:0;cursor:pointer;flex-shrink:0;white-space:nowrap}
 .noteToggle:hover{color:var(--dsw-alias-brand-primary,#4f6ef7);text-decoration:underline}
-.noteAction{display:inline-flex;align-items:center;color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-bg-layer-2,#f3f4f6);border:1px solid var(--dsw-alias-border-l3,#d9dde3);border-radius:4px;padding:0 5px;font-weight:600;text-decoration:none}
-.noteAction:hover{color:var(--dsw-alias-label-primary,#1f2328);border-color:var(--dsw-alias-brand-primary,#4f6ef7);text-decoration:none}
-.noteEdit{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap;margin-top:6px}
-.noteInput{flex:1;min-width:160px}
+/* Input on its own line so a half-width card never squeezes it; the actions
+   sit under it, right-aligned, with the count on the left. */
+.noteEdit{display:flex;flex-direction:column;gap:6px;min-width:0;margin-top:6px}
+/* The host Input is a span around a native input, which keeps an intrinsic
+   width of its own; both must be allowed to shrink or the field overflows. */
+.noteInput{display:flex;box-sizing:border-box;width:100%;max-width:100%;min-width:0}
+.noteInput input{flex:1 1 auto;width:100%;min-width:0;box-sizing:border-box}
+.noteEditBar{display:flex;align-items:center;justify-content:flex-end;gap:6px}
+.noteCount{margin-right:auto;font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary,#8b93a1)}
 .descTight{min-height:0}
 .src{font-size:11px;color:var(--dsw-alias-label-secondary,#9ca3af);text-decoration:none}
 .src:hover{color:var(--dsw-alias-brand-primary,#4f6ef7)}
@@ -475,21 +544,36 @@
          background:var(--dsw-alias-bg-layer-2,#f3f4f6);color:var(--dsw-alias-label-tertiary,#8b93a1)}
 .metaTagOk{color:var(--dsw-alias-state-success-primary,#16a34a);
            background:color-mix(in srgb, var(--dsw-alias-state-success-primary,#16a34a) 10%, transparent)}
-/* Local-dev restore in the same status slot as 已是最新 — same pill as
-   .metaTag but clickable and never ellipsized. */
-.metaTagAction{font-family:inherit;font-size:11px;line-height:18px;font-weight:inherit;
-              cursor:pointer;border:none;flex-shrink:0;padding:1px 7px;border-radius:5px;
-              background:var(--dsw-alias-bg-layer-2,#f3f4f6);
-              color:var(--dsw-alias-label-secondary,#6b7280)}
-.metaTagAction:hover:not(:disabled){color:var(--dsw-alias-brand-primary,#4f6ef7)}
-.metaTagAction:disabled{opacity:.5;cursor:default}
-/* Installed-row header: title left, local-dev badge top-right. */
+/* The name owns the line; the version and source sit on the meta line below,
+   so a long name cannot push them out (#257). */
 .irowHead{display:flex;align-items:flex-start;gap:8px;min-width:0}
 .irowHead .irowName{flex:1 1 0;min-width:0}
-.irowDevTag{flex-shrink:0;border-radius:99px;padding:2px 8px;font-size:10px;line-height:14px;font-weight:600;
-            letter-spacing:0.02em;white-space:nowrap;cursor:default;user-select:none;
-            color:var(--dsw-alias-label-tertiary,#8b93a1);
-            background:color-mix(in srgb, var(--dsw-alias-brand-primary,#4f6ef7) 9%, var(--dsw-alias-bg-layer-2,#f3f4f6))}
+.irowMenu{margin-left:auto;flex-shrink:0;margin-top:-4px;margin-right:-6px}
+.irowMeta{font-size:12px;line-height:18px;margin-top:2px;color:var(--dsw-alias-label-secondary,#6b7280)}
+.irowPath{display:flex;align-items:center;gap:6px;min-width:0;margin-top:6px}
+.irowPath .spec{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.irowPathIcon,.irowStatusIcon{display:inline-flex;flex-shrink:0;color:var(--dsw-alias-label-tertiary,#8b93a1)}
+.irowPathCopy{margin-left:auto;display:inline-flex;align-items:center;gap:4px;flex-shrink:0}
+.irowPath .confirmCopy{width:20px;height:20px;color:var(--dsw-alias-label-tertiary,#8b93a1)}
+.irowPath .confirmCopy:hover{color:var(--dsw-alias-label-primary,#1f2328)}
+.irowPath .confirmCopied{order:1;font-size:11px;color:var(--dsw-alias-label-secondary,#6b7280)}
+.irowDesc{flex:1 1 100%;min-width:0}
+.irowStatus{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0;margin-top:8px;font-size:12px;line-height:18px}
+.irowStatus + .irowStatus{margin-top:4px}
+.irowStatusPart{display:inline-flex;align-items:baseline;gap:6px}
+.irowStatus .notesLink{display:inline;margin:0}
+.irowStatus .metaInline{font-size:12px}
+.irowStatusAction{margin-left:auto;display:inline-flex}
+.irowStatusAction .noteToggle{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#6b7280)}
+.irowStatusAction .noteToggle:hover{color:var(--dsw-alias-label-primary,#1f2328);text-decoration:none}
+.descMore{display:inline-flex;align-items:center;gap:2px;margin-top:4px;padding:0;border:none;background:none;cursor:pointer;
+          font:inherit;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#6b7280)}
+.descMore:hover{color:var(--dsw-alias-label-primary,#1f2328)}
+.noteAdd{display:inline-flex;align-items:center;gap:6px;margin-top:4px;padding:0;border:none;background:none;cursor:pointer;
+         font:inherit;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#6b7280);white-space:nowrap}
+.noteAdd:hover{color:var(--dsw-alias-label-primary,#1f2328)}
+.irowStatusFact{color:var(--dsw-alias-label-primary,#1f2328)}
+.irowStatusSep{color:var(--dsw-alias-label-tertiary,#8b93a1)}
 .nameLink{color:inherit;text-decoration:none}
 /* Installed-row title only. The version is a fact the row exists to state,
    so it never truncates; the name is the variable-length part and is the
@@ -569,7 +653,7 @@
    same way .installBtn and .catsToggle do. */
 .dangerBtn.dangerBtn{color:var(--dsw-alias-state-error-primary,#dc2626);border-color:var(--dsw-alias-state-error-primary,#dc2626)}
 .dangerBtn.dangerBtn:hover:not(:disabled){background:var(--dsw-alias-state-error-primary,#dc2626);color:#fff}
-.dangerArmed.dangerArmed{background:var(--dsw-alias-state-error-primary,#dc2626);border-color:var(--dsw-alias-state-error-primary,#dc2626);color:#fff}
+.dangerArmed.dangerArmed{background:var(--dsw-alias-state-error-primary,#dc2626);border-color:var(--dsw-alias-state-error-primary,#dc2626);color:var(--dsw-alias-label-primary-foreground,#fff)}
 .retryBtn{margin-top:4px}
 .irow{background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2,#e5e7eb);
       border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:10px;min-width:0}
@@ -584,17 +668,47 @@
    ellipsizes) rather than forcing the whole row wider (#242). */
 .irowTrailing{display:inline-flex;align-items:center;gap:8px;flex-wrap:nowrap;flex-shrink:0;min-width:0}
 .irowTrailing .metaTag{flex-shrink:1;min-width:0}
-.irowTrailing .metaTagAction{flex-shrink:0}
 .irowMissing{filter:grayscale(1);opacity:.5}
 .irow>.src,.irow>.owner{white-space:nowrap;flex-shrink:0}
 .irow button{white-space:nowrap;flex-shrink:0}
 .tabSearchRow{display:flex;align-items:center;gap:8px;padding:0 4px 12px}
 .tabSearch{flex:1;min-width:0}
+/* Capability disclosure (#401). Quiet by design: these are facts beside the
+   install button, not a warning banner — the one loud element is a red line,
+   and it borrows the warning colour rather than inventing a severity scale. */
+.caps{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:0 2px 6px;font-size:11px;line-height:1.5;min-width:0}
+.capsTitle{color:var(--dsw-alias-label-secondary,#8b949e);cursor:help}
+.capChip{border:1px solid var(--dsw-alias-border-l2,#30363d);border-radius:999px;padding:0 6px;color:var(--dsw-alias-label-primary,#c9d1d9);white-space:nowrap}
+.capMuted{border:1px dashed var(--dsw-alias-border-l2,#30363d);border-radius:999px;padding:0 6px;color:var(--dsw-alias-label-secondary,#8b949e);white-space:nowrap}
+/* The scanned facts that are not warnings: same quiet tone as the chips they
+   sit beside, because they are the same kind of thing — a statement about the
+   plugin, not a judgement about it. */
+.capFact{color:var(--dsw-alias-label-secondary,#8b949e)}
+/* The honesty clause under the facts. It was a hover tooltip while this row sat
+   on a card; it is body copy now, because the reader who opened this is the
+   reader who needs it. */
+.capCaveat{display:flex;align-items:baseline;gap:12px;color:var(--dsw-alias-label-tertiary,#8b93a1);font-size:11px;line-height:16px;margin:6px 0 0}
+.capCaveatNote{min-width:0}
+.capCaveatAt{margin-left:auto;flex:none;white-space:nowrap}
+.searchField{position:relative;min-width:0;box-sizing:border-box}
+/* The primitives' Input applies className to its padded OUTER span, not the
+   native input, so the reserved space for the clear button belongs here and
+   the button itself is positioned against .searchField. Doubled class for
+   specificity against the sheet's other input rules, and border-box for the
+   grid case in #305: 34px of padding on a 100%-wide box is 34px more than the
+   grid cell otherwise. */
+.searchInput.searchInput{width:100%;min-width:0;box-sizing:border-box;padding-right:34px}
+.searchClear{position:absolute;right:5px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--dsw-alias-label-secondary,#59636e);font:inherit;font-size:20px;line-height:1;cursor:pointer}
+.searchClear:hover{background:var(--dsw-alias-bg-layer-2,#f3f4f6);color:var(--dsw-alias-label-primary,#1f2328)}
+.searchClear:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#4f6ef7);outline-offset:1px}
 /* Buttons sharing the row with a description must keep one line (#26, thanks @yanshuai2002) */
 .spec{font-size:11px;color:var(--dsw-alias-label-secondary,#9ca3af);font-family:ui-monospace,Menlo,monospace;overflow-wrap:anywhere;min-width:0}
 .specTag{display:inline-flex;align-items:center;height:16px;padding:0 5px;border-radius:4px;font-size:10px;font-weight:600;white-space:nowrap;flex-shrink:0}
-.specTagGit{color:#0b7285;background:rgba(18,163,196,.12)}
-.specTagFile{color:#b07d1b;background:rgba(240,180,41,.14)}
+/* The text colour comes from the host palette like everything else here; the
+   wash behind it stays a local tint, because the host has no "tinted chip" role
+   to borrow. Fallbacks are the values these had hardcoded. */
+.specTagGit{color:var(--dsw-alias-state-business-primary,#0b7285);background:rgba(18,163,196,.12)}
+.specTagFile{color:var(--dsw-alias-state-warn-primary,#b07d1b);background:rgba(240,180,41,.14)}
 .backupCheckList .grow{flex:1 1 70%;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .backupCheckList .spec{flex:0 1 30%;max-width:30%;text-align:right;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 /* A row, with room between the two buttons. `.err` sets break-all for long
@@ -720,10 +834,19 @@
 .diagVal{font-size:12px;font-weight:500;color:var(--dsw-alias-label-primary,#1f2328);font-family:ui-monospace,Menlo,monospace;overflow-wrap:anywhere;min-width:0}
 .diagIndex{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f3f4f6);color:var(--dsw-alias-label-secondary,#6b7280);font-size:11px;font-weight:600;flex-shrink:0}
 .diagArrow{color:var(--dsw-alias-label-tertiary,#9ca3af);font-size:12px;flex-shrink:0}
-.diagBadgeOfficial{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-brand-primary,#4f6ef7);color:#fff;font-size:11px;font-weight:600;flex-shrink:0}
+/* The filled badge pair (#731). `--dsw-alias-brand-primary` is an INK token:
+   near-black in the light theme, near-white in the dark one — the host uses it
+   for text and strokes, never as a surface. The market had it as a background
+   with a hardcoded #fff, so in dark mode the badge and its label were both
+   #f9fafb: white on white, invisible, and only on the one host line whose theme
+   resolves that token that way. The host's own filled primary pair is
+   `button-primary-fill` + `label-primary-foreground`, which is what a filled
+   badge has to use — both fall back to the old pair for hosts that predate
+   them. */
+.diagBadgeOfficial{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary,#4f6ef7));color:var(--dsw-alias-label-primary-foreground,#fff);font-size:11px;font-weight:600;flex-shrink:0}
 .diagBadgeCommunity{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f3f4f6);color:var(--dsw-alias-label-secondary,#6b7280);font-size:11px;flex-shrink:0}
-.diagBadgeShadow{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-state-error-primary,#dc2626);color:#fff;font-size:11px;font-weight:600;flex-shrink:0}
-.diagBadgeWarn{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-state-warn-primary,#b45309);color:#fff;font-size:11px;font-weight:600;flex-shrink:0;white-space:nowrap}
+.diagBadgeShadow{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-state-error-primary,#dc2626);color:var(--dsw-alias-label-primary-foreground,#fff);font-size:11px;font-weight:600;flex-shrink:0}
+.diagBadgeWarn{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-state-warn-primary,#b45309);color:var(--dsw-alias-label-primary-foreground,#fff);font-size:11px;font-weight:600;flex-shrink:0;white-space:nowrap}
 .diagBadgeInfo{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f3f4f6);color:var(--dsw-alias-label-secondary,#6b7280);font-size:11px;flex-shrink:0;white-space:nowrap}
 .diagList{display:flex;flex-direction:column;gap:6px}
 
@@ -732,10 +855,10 @@
 .diagAlert{color:var(--dsw-alias-state-warn-primary,#b45309)}
 .ovRow{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:12px;line-height:18px;background:var(--dsw-alias-bg-layer-2,#f7f8fa);border-radius:8px;padding:6px 10px;min-width:0}
 .ovArrow{color:var(--dsw-alias-label-tertiary,#9ca3af);font-size:12px;flex-shrink:0}
-.ovByTag{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-brand-primary,#4f6ef7);color:#fff;font-size:11px;font-weight:600;flex-shrink:0;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ovByTag{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary,#4f6ef7));color:var(--dsw-alias-label-primary-foreground,#fff);font-size:11px;font-weight:600;flex-shrink:0;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ovFrom{color:var(--dsw-alias-label-secondary,#6b7280);font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .orphRow{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:12px;line-height:18px;background:var(--dsw-alias-bg-layer-2,#f7f8fa);border-radius:8px;padding:6px 10px;min-width:0}
-.orphBadge{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-state-warn-primary,#b45309);color:#fff;font-size:11px;font-weight:600;flex-shrink:0;white-space:nowrap}
+.orphBadge{display:inline-flex;align-items:center;padding:0 8px;height:18px;border-radius:9px;background:var(--dsw-alias-state-warn-primary,#b45309);color:var(--dsw-alias-label-primary-foreground,#fff);font-size:11px;font-weight:600;flex-shrink:0;white-space:nowrap}
 .dragHandle{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;color:var(--dsw-alias-label-tertiary,#9ca3af);cursor:grab;flex-shrink:0;user-select:none;font-size:12px;line-height:20px}
 .dragOver{outline:2px dashed var(--dsw-alias-brand-primary,#4f6ef7);outline-offset:2px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,#f0f2f8)}
 .dragging{opacity:.45;background:var(--dsw-alias-bg-layer-2,#f3f4f6)}
@@ -761,6 +884,9 @@
    text block, so the user can still copy it by hand. */
 .fixFallback{display:flex;flex-direction:column;gap:6px;margin:8px 0}
 .fixFallbackText{width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:16px;color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-bg-layer-2,#f3f4f6);border:1px solid var(--dsw-alias-border-l2,#e5e7eb);border-radius:6px;padding:8px 10px;resize:vertical;white-space:pre-wrap;word-break:break-all}
+/* #336: the build-environment editor on the market's own card — same
+   sheet-metal as the AI-fix fallback textarea, so both read as one format. */
+.envEditor{width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:16px;color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-bg-layer-2,#f3f4f6);border:1px solid var(--dsw-alias-border-l2,#e5e7eb);border-radius:6px;padding:8px 10px;resize:vertical;white-space:pre-wrap;word-break:break-all}
 /* Plugin-configuration card (dsh >= rc.7). Drawn here rather than imported:
    the section's own cards live in a package whose value import would fail
    the client bundle-purity gate, so a card owns its appearance. Matches the
@@ -816,6 +942,13 @@
 .favoriteBtn{background:none;border:0;padding:0;cursor:pointer;display:inline-flex;align-items:center;color:var(--dsw-alias-label-secondary,#9ca3af)}
 .favoriteBtn:hover{color:var(--dsw-alias-brand-primary,#4f6ef7)}
 .favoriteOn{color:var(--dsw-alias-brand-primary,#4f6ef7)}
+.cardMore{background:none;border:0;padding:0 2px;cursor:pointer;font:inherit;font-size:14px;line-height:16px;letter-spacing:1px;color:var(--dsw-alias-label-secondary,#9ca3af)}
+.cardMore:hover{color:var(--dsw-alias-label-primary,#1f2328)}
+.blockedTabHint{margin:0 0 12px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#9ca3af)}
+.blockedMissing{display:flex;flex-direction:column;gap:4px;margin-top:8px}
+.blockedBarRow{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+.blockedBarName{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;line-height:20px}
+.blockedBarUndo{background:none;border:0;padding:0;cursor:pointer;font:inherit;font-size:12px;line-height:18px;color:var(--dsw-alias-brand-primary,#4f6ef7)}
 .commentsNote{font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary,#9ca3af);margin:0 0 8px}
 .commentsGithubPrompt{padding:10px;margin:0 0 10px;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 24%,transparent);border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 6%,transparent)}
 .commentsGithubHint{font-size:12px;line-height:17px;color:var(--dsw-alias-label-primary,#1f2328);margin:0 0 8px}

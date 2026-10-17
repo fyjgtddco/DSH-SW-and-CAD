@@ -310,7 +310,8 @@ export function githubTargetAtCommit(spec, sha) {
  *
  * @param name - installed package name.
  * @param spec - the dependency spec from package.json, or the install target.
- * @returns the stable key, or null when the spec is not github-hosted.
+ * @returns the stable key, or null when the spec is not a git source pnpm
+ *   installs as one (an npm name, a local path, the scp-like `git@host:` form).
  */
 export function gitAllowBuildsKey(name, spec) {
     const parsed = repoFromTarget(spec);
@@ -354,6 +355,12 @@ export function gitAllowBuildsKey(name, spec) {
  * @param sha - the commit the install will actually fetch.
  * @returns the key, or null when the spec is not github-hosted.
  */
+export function codeloadAllowBuildsKey(name, spec, sha) {
+    const parsed = repoFromTarget(spec);
+    if (parsed === null || !/^[0-9a-f]{40}$/.test(sha))
+        return null;
+    return `${name}@https://codeload.github.com/${parsed.repo}/tar.gz/${sha}`;
+}
 /**
  * The pinned allowBuilds key for a NON-GitHub git source — the other half of
  * the pair `codeloadAllowBuildsKey` gives GitHub, for the same reason (#285):
@@ -390,12 +397,6 @@ export function pinnedGitAllowBuildsKey(name, spec, sha) {
     }
     const remote = gitRemoteSpelling(spec);
     return remote === null ? null : `${name}@${remote}#${sha}`;
-}
-export function codeloadAllowBuildsKey(name, spec, sha) {
-    const parsed = repoFromTarget(spec);
-    if (parsed === null || !/^[0-9a-f]{40}$/.test(sha))
-        return null;
-    return `${name}@https://codeload.github.com/${parsed.repo}/tar.gz/${sha}`;
 }
 /**
  * The pnpm install target for a registry entry. Repo-verified npm packages

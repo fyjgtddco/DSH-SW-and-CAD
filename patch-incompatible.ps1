@@ -1,5 +1,5 @@
 # =============================================================================
-# Patch the two DSH-0.1.x-era plugins so DSH 0.2.0 accepts them.
+# Patch the two DSH-0.1.x-era plugins so DSH 0.2.0 / 0.2.1 accepts them.
 # =============================================================================
 # Verified first (see plugin_patch_plan.md): neither plugin's CODE references a
 # package 0.2.0 no longer ships. They were refused purely because their
@@ -7,7 +7,7 @@
 # whose declared @deepseek-ai/dsh* range does not satisfy the running runtime.
 #
 # So the change is ONE thing, on the plugin side:
-#   append " || ^0.2.0-rc.2" to each offending peer range.
+#   append " || ^<Runtime>" to each offending peer range.
 # No source file, no cordis.patch.yml, no behaviour is touched. The original
 # branches are kept, so the plugin still loads on the older runtime too.
 #
@@ -20,7 +20,7 @@
 
 param(
     [string]$BackupRoot = "$env:USERPROFILE\.workbuddy\dsh_backup\20260929-214541-full-removal",
-    [string]$Runtime    = '0.2.0-rc.2'
+    [string]$Runtime    = '0.2.1-rc.2'
 )
 
 $ErrorActionPreference = 'Stop'

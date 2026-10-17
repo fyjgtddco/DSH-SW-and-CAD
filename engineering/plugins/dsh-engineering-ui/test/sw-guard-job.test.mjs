@@ -21,12 +21,40 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOST_SRC = readFileSync(join(__dirname, '..', 'lib', 'index.js'), 'utf8');
+
+/**
+ * 定位工程根的 tools/mode_gate.py，兼容两种目录布局：
+ *   ① 源码仓库：<repo>\engineering\plugins\dsh-engineering-ui\test
+ *              → <repo>\engineering\tools\mode_gate.py
+ *   ② DSH 安装副本：<DSH_HOME>\profiles\<p>\node_modules\dsh-engineering-ui\test
+ *              → <DSH_HOME>\.agent-presets\engineering\tools\mode_gate.py
+ *              （sync-to-dsh.ps1 把 engineering/tools 同步到这里）
+ * 两条路径都找不到时返回 null，由调用方 skip 而不是误报失败。
+ */
+function findModeGate() {
+  const candidates = [
+    // ① 仓库布局
+    resolve(__dirname, '..', '..', '..', 'tools', 'mode_gate.py'),
+    // ② 安装副本布局（--host 同级的 .agent-presets）
+    resolve(__dirname, '..', '..', '..', '..', '..', '.agent-presets', 'engineering', 'tools', 'mode_gate.py'),
+    // ③ DSH_HOME 显式指定
+    process.env.DSH_HOME
+      ? resolve(process.env.DSH_HOME, '.agent-presets', 'engineering', 'tools', 'mode_gate.py')
+      : null,
+    // ④ 用户目录兜底
+    process.env.USERPROFILE
+      ? resolve(process.env.USERPROFILE, '.dsh', '.agent-presets', 'engineering', 'tools', 'mode_gate.py')
+      : null,
+  ].filter(Boolean);
+  for (const c of candidates) if (existsSync(c)) return c;
+  return null;
+}
 
 /** 取某个 `[async] function NAME(...) { ... }` 的完整源码（按花括号配平）。
  *
@@ -343,9 +371,16 @@ test('第4项：阈值与间隔必须是代码常量（用户指定的 10 秒 / 
   assert.equal(mem && mem[1], '85', '内存阈值必须是 85');
 });
 
-test('第4项：不得与 sw_guard.py 那条路冲突（两条互补，都要在）', () => {
+test('第4项：不得与 sw_guard.py 那条路冲突（两条互补，都要在）', (t) => {
   // mode_gate 的 OS 子进程看护仍须存在（取锁即拉起，不依赖 DSH 运行时）
-  const mg = readFileSync(join(__dirname, '..', '..', '..', 'tools', 'mode_gate.py'), 'utf8');
+  const mgPath = findModeGate();
+  if (mgPath === null) {
+    // 安装副本里 tools/ 可能尚未同步（例如只装了插件、没跑 sync-to-dsh.ps1）。
+    // 这是环境缺失，不是插件缺陷 —— 跳过而不是误报失败。
+    t.skip('未找到 mode_gate.py（仓库与安装副本两种布局都不存在），跳过跨目录断言');
+    return;
+  }
+  const mg = readFileSync(mgPath, 'utf8');
   assert.ok(mg.includes('def ensure_sw_guard'), 'mode_gate 应保留 ensure_sw_guard');
   assert.ok(mg.includes("'sw-guard-start'") || mg.includes('"sw-guard-start"'),
     'mode_gate 应保留 sw-guard-start 命令');

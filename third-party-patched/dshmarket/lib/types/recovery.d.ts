@@ -329,6 +329,7 @@ export declare function startRecoveryServer(config: RecoveryConfig, failure: Boo
 export declare function runRecovery(config: RecoveryConfig, facts?: {
     exitCode: number | null;
     bound: boolean;
+    replacementPid?: number | null;
 }, options?: {
     port?: number;
     idleTimeoutMs?: number;

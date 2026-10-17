@@ -1,0 +1,194 @@
+{
+  "schema_version": "1.0",
+  "meta": {
+    "problem_id": "GATE_4820BB247FC9",
+    "title": "校内比赛轨迹小车（3D打印）：在4500x4500mm场地内按给定路线快速行驶并完成多组180°/S形转弯；含车架、车轮、转向/传动机构、电子舱；要求速度快、转弯灵活、全部3D打印可制作",
+    "revision": "A",
+    "generated_by": "workflow_gate.estimate_mechanics",
+    "generated_at": "2026-10-17 23:00:28",
+    "task_type": "vehicle",
+    "task_type_label": "轮式车辆 / 小车",
+    "design_domain_mm": [
+      350.0,
+      65.0,
+      18.0
+    ],
+    "design_domain_note": "零件包络取自任务/回答中的零件语境尺寸 [350.0, 65.0, 18.0]",
+    "design_domain_basis": "零件包络（Bug-12：不再沿用赛道/整机尺寸）"
+  },
+  "units": {
+    "length": "mm",
+    "force": "N",
+    "stress": "MPa",
+    "mass": "kg"
+  },
+  "design_domain": {
+    "bounds": {
+      "x_min": 0.0,
+      "x_max": 350.0,
+      "y_min": 0.0,
+      "y_max": 65.0,
+      "z_min": 0.0,
+      "z_max": 18.0
+    },
+    "keep_in_regions": [],
+    "keep_out_regions": []
+  },
+  "material": {
+    "id": "PETG",
+    "name": "PETG",
+    "youngs_modulus_mpa": 2000.0,
+    "poissons_ratio": 0.37,
+    "yield_strength_mpa": 40.0,
+    "uts_mpa": 50.0,
+    "density_kg_m3": 1270.0,
+    "source": "workflow_gate.infer_material"
+  },
+  "spatial_selectors": [
+    {
+      "id": "fixed_end",
+      "type": "box",
+      "bounds": {
+        "x_min": 0.0,
+        "x_max": 17.5,
+        "y_min": -10.0,
+        "y_max": 75.0,
+        "z_min": -10.0,
+        "z_max": 28.0
+      },
+      "selection_rule": "faces_intersecting_region"
+    },
+    {
+      "id": "load_face",
+      "type": "box",
+      "bounds": {
+        "x_min": 340.0,
+        "x_max": 350.0,
+        "y_min": -10.0,
+        "y_max": 75.0,
+        "z_min": -10.0,
+        "z_max": 28.0
+      },
+      "selection_rule": "faces_intersecting_region"
+    }
+  ],
+  "boundary_conditions": [
+    {
+      "id": "bc_fixed",
+      "spatial_selector_id": "fixed_end",
+      "type": "fixed_displacement",
+      "dof_lock": {
+        "x": true,
+        "y": true,
+        "z": true,
+        "rx": true,
+        "ry": true,
+        "rz": true
+      }
+    }
+  ],
+  "loads": [
+    {
+      "id": "load_rated",
+      "spatial_selector_id": "load_face",
+      "type": "distributed_force",
+      "magnitude_n": 500.0,
+      "direction": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "case_name": "额定重力工况",
+      "note": "主工况：magnitude_n 必须等于门禁 nominal_load_n"
+    },
+    {
+      "id": "load_lateral",
+      "spatial_selector_id": "load_face",
+      "type": "distributed_force",
+      "magnitude_n": 500.0,
+      "direction": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "case_name": "侧向工况（过弯侧倾/转向拉杆受拉）",
+      "note": "侧向力 = 额定载荷（【P0 修复】不再预乘动载系数 —— 动载系数由 physics 的 governing_design_force 统一施加一次，避免二次放大）"
+    },
+    {
+      "id": "load_longitudinal",
+      "spatial_selector_id": "load_face",
+      "type": "distributed_force",
+      "magnitude_n": 500.0,
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "case_name": "纵向工况（启停驱动力/制动）",
+      "note": "纵向力 = 额定载荷"
+    }
+  ],
+  "load_cases": [
+    {
+      "id": "rated",
+      "load_ids": [
+        "load_rated"
+      ],
+      "description": "额定重力工况（主工况）"
+    },
+    {
+      "id": "lateral",
+      "load_ids": [
+        "load_lateral"
+      ],
+      "description": "侧向工况：过弯侧倾、转向拉杆受拉"
+    },
+    {
+      "id": "longitudinal",
+      "load_ids": [
+        "load_longitudinal"
+      ],
+      "description": "纵向工况：频繁启停/制动"
+    },
+    {
+      "id": "combined",
+      "load_ids": [
+        "load_rated",
+        "load_lateral",
+        "load_longitudinal"
+      ],
+      "description": "组合工况：全部载荷同时作用（最恶劣）"
+    }
+  ],
+  "acceptance": {
+    "analysis_type": "linear_static",
+    "min_safety_factor": 3.5,
+    "target_safety_factor_max": 5.0,
+    "anisotropy_factor": 0.8,
+    "process": "FDM 增材制造",
+    "max_displacement_mm": null,
+    "min_wall_thickness_mm": null,
+    "max_mass_kg": null,
+    "must_remain_in_design_domain": true,
+    "mesh_quality_min": 0.1,
+    "design_life_years": 30.0,
+    "operating_cycles_per_year": 200000.0,
+    "load_type": "static",
+    "impact_factor": 1.0,
+    "fatigue_check_required": false,
+    "required_load_cases": [
+      "rated",
+      "lateral",
+      "longitudinal"
+    ],
+    "part_load_share": 0.25,
+    "parallel_load_paths": 4,
+    "load_share_basis": "单件按 4 条并联承力路径折算（=0.2500）；若该零件实际承担更大/更小份额，请在工况 acceptance.part_load_share 显式覆盖"
+  },
+  "optimization": {
+    "primary": "minimize_mass",
+    "secondary": [
+      "minimize_max_displacement"
+    ]
+  }
+}

@@ -6366,21 +6366,39 @@ class SWModel:
             n = max(2, int(steps_per_flank))
             r_lo = max(r_f, r_b)          # 渐开线起算半径
             pts = []
-            # ① 齿根起点（左侧）
+            # ══ 【退化零长边修复 · 两种情形都要处理】══════════════════════════
+            # 实测（m=1）：z=30 时 r_f(13.75) < r_b(14.095)，下标 1≡2、15≡16 重合；
+            #              z=50 时 r_f(23.75) > r_b(23.49)，下标 0≡1 重合。
+            # 两处根因相同：**相邻两点算出来是同一个坐标** → 零长边。
+            #   零长边会让 SolidWorks 的轮廓识别不稳定（与 Bug6 同源），必须消除。
+            #
+            #   · r_f < r_b：齿根(①) → 基圆径向段(②) → 渐开线(③)。
+            #       ③ 的 i=0 点 == ② 的基圆点（同为 r_b、同角度）→ 跳过 ③ 的 i=0。
+            #   · r_f ≥ r_b：齿根点(①) 与 ③ 的 i=0 点（r_lo == r_f、同角度）重合
+            #       → **不再单独 append ①**，直接由 ③ 的 i=0 充当齿根点。
             _root_ang = base_ang - (_polar(r_lo) if r_lo > r_b else 0.0)
-            pts.append((r_f * _math.cos(-_root_ang),
-                        r_f * _math.sin(-_root_ang)))
-            # ② 左齿廓：齿根 → 基圆（径向段，仅 r_f < r_b 时需要）
             if r_f < r_b:
+                # 情形 A：先给齿根点，再由径向段补基圆点
+                pts.append((r_f * _math.cos(-_root_ang),
+                            r_f * _math.sin(-_root_ang)))
                 pts.append((r_b * _math.cos(-_root_ang),
                             r_b * _math.sin(-_root_ang)))
+                _skip_first_involute = True
+            else:
+                # 情形 B：齿根就在基圆之外，③ 的 i=0 即齿根点，无需另加
+                _skip_first_involute = False
             # ③ 左齿廓：基圆 → 齿顶（渐开线，极角递减）
             for i in range(n + 1):
+                if _skip_first_involute and i == 0:
+                    continue          # 该点已由径向段终点给出，跳过以免零长边
                 rx = r_lo + (r_a - r_lo) * (i / float(n))
                 ang = base_ang - _polar(rx)
                 pts.append((rx * _math.cos(-ang), rx * _math.sin(-ang)))
             # ④ 右齿廓：齿顶 → 基圆（渐开线镜像）
+            #   同理：末尾 i==0 的点与 ⑤ 的基圆点重合，需跳过。
             for i in range(n, -1, -1):
+                if _skip_first_involute and i == 0:
+                    continue
                 rx = r_lo + (r_a - r_lo) * (i / float(n))
                 ang = base_ang - _polar(rx)
                 pts.append((rx * _math.cos(ang), rx * _math.sin(ang)))

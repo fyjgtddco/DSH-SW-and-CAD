@@ -50,6 +50,16 @@ export interface OperationRecord {
   /** Set with `warned` or `failed`: one sentence naming what went wrong. */
   reason?: string
   /**
+   * Set with `queued` when the host's agent guard is what is holding this
+   * record: the sessions that were running when it refused (#752).
+   *
+   * Without it a queued row said only "queued · N ahead", which reads as an
+   * operation that is merely last in line — and the user cannot tell that the
+   * line is not moving at all, or why. The guard refuses before touching pnpm
+   * ("wait for the running work"), so the count is the whole reason.
+   */
+  blockedBy?: string[]
+  /**
    * Set with `failed` when pnpm refused to run a dependency's build scripts.
    * The way out is one click, so it belongs on the record that reports the
    * failure — the approval banner lives elsewhere on the page, and a reader
@@ -58,6 +68,16 @@ export interface OperationRecord {
   blockedBuilds?: string[]
   /** Set with `done` when the change needs a page refresh to be visible. */
   needsRefresh?: boolean
+  /**
+   * Set with `warned` when the profile's own minimumReleaseAge is what kept
+   * this install off the newest release (#635).
+   *
+   * The plugin IS installed and works; it is simply not the newest one, and
+   * the hold is the profile's policy rather than a failure. Carried on the
+   * record so the row can say both things and offer the version the hold
+   * refused — the one action a reader of that row would want.
+   */
+  heldRelease?: { latest: string; installed: string | null; because: string }
 }
 
 /**
@@ -136,6 +156,14 @@ export function queuePosition(list: readonly OperationRecord[], id: string): num
 export interface OperationSummary {
   running: number
   queued: number
+  /**
+   * Queued records the host's agent guard refused, out of `queued` (#752).
+   *
+   * Counted apart because the aggregate line has to be able to say it: with
+   * nothing running, "installing 0/3" states a contradiction the user cannot
+   * resolve, while "3 waiting for the agents to go idle" names the obstacle.
+   */
+  blocked: number
   /** Records waiting on a decision. */
   attention: number
   /** Records that finished, however they finished. */
@@ -153,17 +181,21 @@ export interface OperationSummary {
 export function summarize(list: readonly OperationRecord[]): OperationSummary {
   let running = 0
   let queued = 0
+  let blocked = 0
   let attention = 0
   let settled = 0
   for (const record of list) {
     if (record.state === 'running') running += 1
-    else if (record.state === 'queued') queued += 1
-    else if (needsUser(record)) attention += 1
+    else if (record.state === 'queued') {
+      queued += 1
+      if ((record.blockedBy?.length ?? 0) > 0) blocked += 1
+    } else if (needsUser(record)) attention += 1
     else settled += 1
   }
   return {
     running,
     queued,
+    blocked,
     attention,
     settled,
     total: running + queued + settled,

@@ -8,13 +8,7 @@ export declare const CHAT_API_BASE = "https://snap-access.cn-north-4.myhuaweiclo
 export declare const PROVIDER = "codearts";
 export interface CodeArtsAdapterOptions {
     credentialRef: CredentialRef;
-    /**
-     * 从凭据存储解析凭据。
-     *
-     * `model` 为本次请求的模型 id：多账号池据此**跳过该模型已限流的账号**。
-     * 不传模型时无法做限流过滤（历史行为）。
-     */
-    resolveCredential: (model?: string) => Promise<CodeArtsCredential | undefined>;
+    resolveCredential: () => Promise<CodeArtsCredential | undefined>;
     refresh: () => Promise<void>;
     /** 动态拉取远端模型列表；失败时调用方回退到静态列表。 */
     fetchRemoteModels?: () => Promise<Array<{
@@ -27,6 +21,23 @@ export interface CodeArtsAdapterOptions {
     /** 多账号池（用于限流时切换账号） */
     accountPool?: AccountPool;
 }
+/**
+ * 将 harness 对话消息序列化为 CodeArts chat-completions 的传输
+ * 格式。助手的 `tool-call` 块转换为 `tool_calls` 字段；`reasoning`
+ * 块折叠为 `reasoning_content` 字段（deepseek-v4 等推理模型的后端
+ * 校验要求 assistant 消息必须携带该字段，缺失会报 "Missing
+ * `reasoning_content` field"）；工具结果（搭载在 harness 用户消息中）
+ * 展开为独立的 `{role: 'tool'}` 消息，使模型能看到其调用的返回值。
+ * 其余非文本块（图片）被丢弃，与端点接受的格式一致。
+ *
+ * ⚠️ 入口先做 **DSH 0.1.7 消息形状归一化**（见 `message-shape.ts`）：0.1.7 把工具
+ * 结果改为一等 `role:'tool'` 消息，若不归一化，下面的 `type === 'tool-result'`
+ * 判据恒不命中 → 工具调用被 `resolveToolPairing` 整体剔除。
+ */
+export declare function serializeMessages(messages: readonly {
+    role: string;
+    content: unknown;
+}[]): Array<Record<string, unknown>>;
 /**
  * CodeArts 并发排队端点。当后端按账户的会话
  * 并发上限达到时，chat completions 请求会以
@@ -63,6 +74,18 @@ export declare class CodeArtsAdapter extends LlmAdapter {
      * （如直接进入会话），此时同样触发远端拉取。
      */
     private ensureRemoteModels;
+    /**
+     * 完整模型目录（**不应用用户黑名单**）。
+     *
+     * 设置页必须渲染被关闭的模型（否则用户无法重新打开），而 `listModels` 会按
+     * 黑名单过滤掉它们 —— RPC 层只能凭裸 id 补回，展示名随之丢失
+     * （用户报障：「关闭的就没有显示倍率」）。CodeArts 目录虽无倍率，但同样
+     * 需要正确的 `name`（否则关闭项显示 `deepseek-v4-flash` 这类裸 id）。
+     */
+    listAllModels(): readonly {
+        id: string;
+        name: string;
+    }[];
     listModels(_provider: string): Promise<readonly LlmModelInfo[]>;
     resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;
     prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<{
@@ -94,33 +117,11 @@ export declare class CodeArtsAdapter extends LlmAdapter {
     private queryQueueStatus;
 }
 /** 在 ctx.llm 上注册 codearts 提供商路由和适配器。 */
-export declare function registerCodeArtsLlm(ctx: Context, options: CodeArtsAdapterOptions): void;
-/**
- * 判断响应是否属于频率限制。
- *
- * 除响应体措辞外还要看 **HTTP 状态码**：上游（尤其国际站/CDN 边缘节点）在
- * 限流时可能返回 429 但响应体为空或只有一句 `Too Many Requests`——只匹配
- * 文本会漏判，导致本该切账号的请求直接按普通错误抛出。
- *
- * @param body - 响应体文本（可能为空）。
- * @param status - HTTP 状态码；429 一律视为限流。
- */
-export declare function isRateLimited(body: string, status?: number): boolean;
-/** 无法从错误消息解析重置时间时的默认冷却时长（60 秒，对齐 workbuddy-gateway）。 */
-export declare const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 60000;
-/**
- * 从限流错误中提取重置时间。
- *
- * 支持国内站中文措辞与国际站英文措辞，并按消息声明的时区偏移换算。
- * 响应体不是 JSON（如 CDN 返回 HTML）时不再直接放弃——转为文本继续匹配，
- * 保证切换逻辑仍能拿到一个（哪怕是默认的）冷却时刻。
- *
- * @returns 解析出的模型 id 与重置毫秒时间戳；完全无法识别时返回 null。
- */
-export declare function parseRateLimitError(body: string, currentModel: string, options?: {
-    status?: number;
-    now?: number;
-}): {
+export declare function registerCodeArtsLlm(ctx: Context, options: CodeArtsAdapterOptions): CodeArtsAdapter;
+/** 判断错误文本是否为频率限制错误 */
+export declare function isRateLimited(body: string): boolean;
+/** 从限流错误中提取重置时间 */
+export declare function parseRateLimitError(body: string, currentModel: string): {
     modelId: string;
     resetTimeMs: number;
 } | null;

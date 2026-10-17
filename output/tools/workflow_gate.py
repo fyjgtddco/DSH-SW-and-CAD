@@ -40,6 +40,56 @@ try:
 except Exception:  # 模块缺失时降级为"不强制"，绝不锁死流程
     _cc = None
 
+# ══════════════════════════════════════════════════════════════════════════
+# 【模式二新流程 · 代码级强制契约】mode2_flow
+# ══════════════════════════════════════════════════════════════════════════
+# 用户要求：「所有改动都要写在代码里面，强制执行的」「不能是写在提示词里面的」。
+#
+# mode2_flow 承载原本只写在 SKILL.md 里的流程约束，并升级为**会返回失败、
+# 能阻断流程**的代码契约：
+#   · 提问数量硬约束（强 10~50 / 弱 5~10）
+#   · 按需提问（必须先分析到该阶段 + 必须写理由，禁止一股脑全问）
+#   · 十阶段按序推进
+#   · 子代理编制只能由【总计子代理】决定（取消固定 3 个）
+#   · 总理子代理上报必填（三道防线凭据/尺寸/名称/相邻配合件）
+#   · 相邻尺寸不一致 → 必须升级父代理
+#   · 交付前总闸
+#
+# 注意：模块导入失败时 **不降级为"不强制"** —— 而是让门禁明确报错。
+#   理由：这些是用户点名要强制的东西，静默降级等于没做。
+_m2 = None
+_m2_error = None
+try:
+    import mode2_flow as _m2  # noqa: F401
+except Exception as _e:  # pragma: no cover
+    _m2 = None
+    _m2_error = repr(_e)
+
+
+def _m2_require():
+    """取 mode2_flow 模块；不可用时返回 (None, 错误说明)。
+
+    为什么不像 _cc 那样降级：choice_contract 只提供题面，缺了还能走；
+    而 mode2_flow 是用户要求的【强制约束本体】，缺了必须显式暴露。
+    """
+    if _m2 is None:
+        return None, ("模式二强制契约模块 mode2_flow 不可用（%s）—— "
+                      "流程约束无法强制执行，禁止继续。请确认 "
+                      "tools/mode2_flow.py 存在且可导入。" % _m2_error)
+    return _m2, None
+
+
+def _m2_work_dir(state=None):
+    """把模式二计划文件放到【本任务的交付目录】，与零件/报告同生共死。"""
+    try:
+        st = state if isinstance(state, dict) else load_state()
+        wd = st.get(WORKDIR_STATE_KEY)
+        if wd:
+            return wd
+    except Exception:
+        pass
+    return None
+
 CHOICES = {
     "A": {"label": "完全自主搭建", "strategy": "parallel", "detail": "full", "desc": "AI自主决策"},
     "B": {"label": "部分自主搭建", "strategy": "hybrid", "detail": "key_points", "desc": "关键节点询问"},
@@ -213,10 +263,20 @@ def _extract_load_n(text):
     import re as _re
     s = str(text or "")
     # 单位 → N 的换算系数；长单位排前面，避免 "kn" 被 "n" 抢先匹配
+    # ── 【P1 修复·量纲误读】排除力矩/能量/应力单位 ──────────────────────
+    # 原缺陷：`20N.m`（扭矩）会被 "n" 模式命中并当成 20N 的【力】载荷，
+    #   扭矩被静默降维成力，载荷量级与物理含义全错；
+    #   同理 20N·m / 50 N*m / 100N/mm² 也一样被误读。
+    # 修复：匹配到数值后，检查其后紧邻的单位串是否含力矩/能量/压强标记，
+    #   命中则【跳过该次命中】（不把它当载荷）。
+    _NEGATIVE_AFTER = _re.compile(
+        r"^\s*(?:[·*x×.]?\s*(?:m|mm|cm|m2|mm2|米|毫米)|/\s*(?:mm2|mm²|m2|米))",
+        flags=_re.IGNORECASE)
     _PATTERNS = (
         (r"(\d+(?:\.\d+)?)\s*(?:kn|千牛)", 1000.0),
         (r"(\d+(?:\.\d+)?)\s*(?:kgf|千克力|公斤力)", 9.80665),
         (r"(\d+(?:\.\d+)?)\s*(?:lbf|磅)", 4.4482216152605),
+        # (?![a-z0-9]) 保证 "n" 后面不是字母/数字；但 ".m" 这类符号需另行排除
         (r"(\d+(?:\.\d+)?)\s*(?:n|牛顿)(?![a-z0-9])", 1.0),
         (r"(\d+(?:\.\d+)?)\s*(?:kg|公斤|千克)", 9.80665),
         (r"(\d+(?:\.\d+)?)\s*(?:t|吨)(?![a-z0-9])", 9806.65),
@@ -224,6 +284,9 @@ def _extract_load_n(text):
     best = None
     for pat, k in _PATTERNS:
         for m in _re.finditer(pat, s, flags=_re.IGNORECASE):
+            # 量纲排除：紧邻其后若出现力矩/压强记号，则不是纯力载荷
+            if _NEGATIVE_AFTER.match(s[m.end():m.end() + 6]):
+                continue
             try:
                 v = float(m.group(1)) * k
             except Exception:
@@ -542,6 +605,12 @@ def infer_material(task, context=None):
     Returns:
         (display_name, source, material_dict) —— material_dict 与 load_case 的
         material 字段同形，可直接写入 physics 工况。
+
+    ⚠️ 所有分支【必须】返回 3 元组。历史缺陷：③④ 分支曾直接 return dict，
+       而唯一调用点（estimate_mechanics）按 3 元组解包 → 凡任务里出现
+       Q235/45#/6061/40Cr/304/316/GCr15/HT200/Q355/Cr12MoV/碳钢/轻量 等
+       任一 token 即抛 ValueError，provide_context 第二次直接崩溃，
+       state 永久停在 context_asked，整个工作流无法走完。
     """
     import re as _re
     raw = (str(task or "") + " " + str(context or ""))
@@ -588,7 +657,9 @@ def infer_material(task, context=None):
             _hit_grade = True
             _g = _gb_grade_props(disp)
             if _g:
-                return _g
+                return (_g.get("name") or disp,
+                        "用户点名的国标牌号（外部国标材料库）",
+                        dict(_g, source="workflow_gate.infer_material(GB_GRADE)"))
             break
     if not _hit_grade:
         for keys, disp in _GB_KEYWORD_TO_GRADE:  # ② 用途/泛化词
@@ -596,7 +667,9 @@ def infer_material(task, context=None):
                 _hit_grade = True
                 _g = _gb_grade_props(disp)
                 if _g:
-                    return _g
+                    return (_g.get("name") or disp,
+                            "用途/泛化词映射到国标牌号（外部国标材料库）",
+                            dict(_g, source="workflow_gate.infer_material(GB_KEYWORD)"))
                 break
     _ = _hit_grade
     # ② 原有等效映射兜底（关键词是【元组】，不是正则 —— 用 in 判定）
@@ -1389,7 +1462,19 @@ def write_load_case_file(state, mechanics, work_dir=None):
             _part_load_share = 1.0 / _parallel_paths
         if not (_part_load_share > 0):
             _part_load_share = 1.0
-        _lat = round(nominal * _impact, 3)
+        # ── 【P0-BUG-动载系数二次施加】载荷文件只存【额定（未乘系数）】值 ────
+        # 原缺陷：侧向工况写成 `_lat = nominal * _impact`（预乘一次），
+        #   而 physics 的 governing_design_force() 会按 acceptance.impact_factor
+        #   再乘一次 → 动载系数被施加两次，载荷被放大 impact² 倍。
+        #   实测（nominal=1224.745N, impact=2.0）：
+        #     侧向 magnitude=2449.49 → governing=2449.49×2=4898.98N
+        #   这与本文件 load_rated 的注释「magnitude_n 必须等于门禁 nominal_load_n」
+        #   以及 load_case.py:769「动载系数只施加一次」的口径直接矛盾。
+        # 修复：三个工况一律写【额定载荷】，动载系数只由 physics 施加一次；
+        #   侧向/纵向工况的意义是【覆盖失效方向】（过弯侧倾、启停驱动），
+        #   不是第二次放大。combined 工况按矢量合成后自然会给出最恶劣结果
+        #   （√3×nominal × impact），无需在此预乘。
+        _lat = round(nominal, 3)
         _lon = round(nominal, 3)
         case = {
             "schema_version": "1.0",
@@ -1443,7 +1528,9 @@ def write_load_case_file(state, mechanics, work_dir=None):
                  "magnitude_n": _lat,
                  "direction": [1.0, 0.0, 0.0],
                  "case_name": "侧向工况（过弯侧倾/转向拉杆受拉）",
-                 "note": "侧向力 = 额定载荷 × 动载系数 %.2f" % _impact},
+                 "note": ("侧向力 = 额定载荷（【P0 修复】不再预乘动载系数 —— "
+                          "动载系数由 physics 的 governing_design_force 统一施加一次，"
+                          "避免二次放大）")},
                 {"id": "load_longitudinal", "spatial_selector_id": "load_face",
                  "type": "distributed_force",
                  "magnitude_n": _lon,
@@ -1559,7 +1646,27 @@ def _default_delivery_root():
 def prepare_task_workdir(task, state=None):
     """【观察点1/5】为新任务创建隔离的交付目录。
 
-    Returns: {ok, work_dir, task_id, created, backed_up, info_path, error?}
+    ── 【BUG-观察-1 修复】消除"交付目录双轨" ────────────────────────────────
+    现场问题（竞速小车任务）：三处路径互相打架
+      · init 返回 work_dir    = ...\\Desktop\\test\\20261007_153308_673CC22C（子目录）
+      · TASK_INFO.delivery_root = ...\\Desktop\\test                  （父目录）
+      · 零件实际落盘            = ...\\Desktop\\test                  （父目录根）
+    根因：work_dir（子）与 delivery_root（父）**同以"交付"命名却语义不同**，
+      并列回传且没有任何"零件到底存哪"的字段；`sw_bridge.cmd_save()` 对相对
+      路径零决策，直落进程 cwd → 于是零件跑到父目录，总装/出图按 work_dir 找
+      零件必然找不到。
+
+    修复：
+      ① 明确目录分工并【实际创建】：parts/（零件）、drawings/（工程图）、
+         scripts/（建模脚本）—— 从机制上保证产物有唯一归宿；
+      ② 返回里新增 `save_dir_hint`（给模型的**唯一权威**保存目录）与
+         `parts_dir`，并在 `work_dir_note` 里用一句话讲清"零件存 parts_dir"；
+      ③ `delivery_root` 保留（仍是有用的"本轮所有任务的上层"概念），
+         但语义在 TASK_INFO 里写明，不再与 work_dir 混淆。
+
+    Returns: {ok, work_dir, task_id, created, backed_up, info_path,
+              delivery_root, parts_dir, drawings_dir, scripts_dir,
+              save_dir_hint, dir_semantics, error?}
     """
     out = {"ok": False}
     try:
@@ -1568,14 +1675,37 @@ def prepare_task_workdir(task, state=None):
         wd = os.path.join(root, _tid)
         _created = not os.path.isdir(wd)
         os.makedirs(wd, exist_ok=True)
+        # ── 【BUG-观察-1 修复】建立产物子目录，给产物唯一归宿 ──────────────
+        parts_dir = os.path.join(wd, "parts")
+        drawings_dir = os.path.join(wd, "drawings")
+        scripts_dir = os.path.join(wd, "scripts")
+        for _d in (parts_dir, drawings_dir, scripts_dir):
+            try:
+                os.makedirs(_d, exist_ok=True)
+            except Exception:
+                pass
         # 写任务信息（可追溯：哪个目录属于哪个任务）
         _info = {
             "task_id": _tid,
             "task": str(task or "")[:2000],
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "delivery_root": root,
+            # ── 【BUG-观察-1 修复】把"零件存哪"写成显式字段 ────────────────
+            "work_dir": wd,
+            "parts_dir": parts_dir,
+            "drawings_dir": drawings_dir,
+            "scripts_dir": scripts_dir,
+            "dir_semantics": {
+                "delivery_root": "本机所有任务的【上层】交付根目录，不要往这里直接存零件",
+                "work_dir": "【本任务】的隔离目录，所有产物都应在此之下",
+                "parts_dir": "★ 零件(.sldprt/.sldasm)唯一保存目录",
+                "drawings_dir": "★ 工程图(.slddrw/.dwg/.dxf/.pdf)唯一保存目录",
+                "scripts_dir": "建模脚本(.py)保存目录",
+            },
             "note": ("【观察点1/5 修复】每个任务独立交付目录，避免同名零件覆盖上一轮成果。"
-                     "上一轮成果保留在同级其它目录中。"),
+                     "上一轮成果保留在同级其它目录中。"
+                     "【BUG-观察-1 修复】零件请存 parts_dir，工程图存 drawings_dir —— "
+                     "不要存到 delivery_root（那是所有任务的上层根目录）。"),
         }
         info_path = os.path.join(wd, "TASK_INFO.json")
         try:
@@ -1585,24 +1715,19 @@ def prepare_task_workdir(task, state=None):
             pass
         out.update({"ok": True, "work_dir": wd, "task_id": _tid,
                     "created": _created, "info_path": info_path,
-                    "delivery_root": root})
+                    "delivery_root": root,
+                    "parts_dir": parts_dir,
+                    "drawings_dir": drawings_dir,
+                    "scripts_dir": scripts_dir,
+                    # 给模型的唯一权威保存目录（相对路径解析基准）
+                    "save_dir_hint": parts_dir,
+                    "dir_semantics": _info["dir_semantics"]})
         return out
     except Exception as e:
         out["error"] = "创建任务交付目录失败: %r" % (e,)
         return out
 
 
-def backup_existing(path):
-    """【观察点5】同名文件已存在时自动备份为 .bak-<时间戳>（防覆盖丢失）。"""
-    try:
-        if path and os.path.isfile(path):
-            _bak = "%s.bak-%s" % (path, time.strftime("%Y%m%d_%H%M%S"))
-            import shutil as _shutil
-            _shutil.copy2(path, _bak)
-            return {"ok": True, "backup": _bak}
-    except Exception as e:
-        return {"ok": False, "error": repr(e)}
-    return {"ok": False, "reason": "文件不存在，无需备份"}
 
 
 def cmd_work_dir(new_dir=None):
@@ -1655,6 +1780,23 @@ def _rooms_detail():
     return detail
 
 
+def _cross_file_sync():
+    """【BUG-观察-5 修复】调用 _store.sync_report() 做真正的跨文件一致性检查。
+
+    原 `in_sync` 是假校验（两侧同源、恒为 True）。这里委托给 _store 里
+    权威的跨文件比对（parallel_mode / task_id / 房间表与 step 相容性 / 完成态分歧）。
+    任何异常都不得影响主流程 —— 失败时返回 ok=False 并说明原因，而不是抛错。
+    """
+    try:
+        import _store
+        return _store.sync_report()
+    except Exception as e:
+        return {"ok": False, "checked": False, "in_sync": None,
+                "error": "跨文件同步检查不可用: %r" % (e,),
+                "warning": ("无法执行跨文件一致性检查；"
+                            "注意 select 里原有的 in_sync 是自指校验，不能作为同步证据。")}
+
+
 def _check_wave1_done():
     """【总装门禁核心】检查第一波（全部建模类房间）是否全部完成。
 
@@ -1695,6 +1837,14 @@ def _wave1_room_names():
             if str(row.get("type") or "") in WAVE1_TYPES:
                 out.append(str(row.get("name") or row.get("room")))
     # 兜底：退化为 mode_state 里已登记的房间（排除总装/出图）
+    # ── 【P1 修复】兜底必须真的排除非建模房间 ──────────────────────────
+    # 原缺陷：注释写"排除总装/出图"，代码却是
+    #   out = [所有房间名] —— 把 assembly/drafting 房间也塞进第一波清单。
+    #   随后 check_room_defense 对这些房间按"rtype 未知 → require_physics=True"
+    #   判定（defense_gate.py 的 room_type 为空即强制要物理凭据），
+    #   而总装/出图房间本就不该有零件级 FEA →
+    #   实测 legacy 状态下 confirm-assembly 永久 DEFENSE_REQUIRED，流程卡死。
+    # 修复：兜底时按房间类型过滤，只保留建模类（WAVE1_TYPES）。
     if not out:
         try:
             import json as _json
@@ -1702,7 +1852,24 @@ def _wave1_room_names():
             if os.path.exists(_mp):
                 with open(_mp, "r", encoding="utf-8") as _f:
                     _ms = _json.load(_f)
-                out = [str(n) for n in (_ms.get("rooms") or {})]
+                _rt = {}
+                try:
+                    import defense_gate as _dg_rt
+                    _rt = _dg_rt._room_types() or {}
+                except Exception:
+                    _rt = {}
+                _all_names = [str(n) for n in (_ms.get("rooms") or {})]
+                if _rt:
+                    # 有类型信息：只保留建模类房间
+                    out = [n for n in _all_names
+                           if str(_rt.get(n) or "") in WAVE1_TYPES]
+                    # 类型全为空（legacy）时退回"排除已知非建模名"的保守过滤
+                    if not out:
+                        _non_model = ("总装与验证", "工程图输出")
+                        out = [n for n in _all_names if n not in _non_model]
+                else:
+                    _non_model = ("总装与验证", "工程图输出")
+                    out = [n for n in _all_names if n not in _non_model]
         except Exception:
             out = []
     return out
@@ -1745,11 +1912,36 @@ def cmd_confirm_assembly(parts_payload):
                     "error": "【三大防线】第一波房间未通过强制校验，禁止开启总装。",
                     "message": _nl.join(_lines),
                 }
-        except ImportError:
-            pass
-        except Exception:
-            pass
+        except ImportError as _e_imp:
+            # ── 【P0-BUG-防线 fail-open】不再静默放行 ──────────────────────
+            # 原实现 `except ImportError: pass` → 直接进入总装流程。
+            #   defense_gate.py 一旦不可导入，三道防线全部不执行且无留痕。
+            #   与 fail-closed 语义矛盾，改为显式拒绝并给出排查指引。
+            return {
+                "ok": False,
+                "gate": "DEFENSE_ERROR",
+                "phase": "confirm-assembly",
+                "error": ("【三大防线】defense_gate.py 不可导入，按[失效关闭]"
+                          "拒绝开启总装。"),
+                "detail": repr(_e_imp),
+                "message": ("=== 三大防线不可用（拒绝开启总装）===\n"
+                            "原因: defense_gate.py 导入失败 %r\n\n"
+                            "请先修复：python defense_gate.py status\n"
+                            "确需放行：DSH_DEFENSE_BYPASS=1（会留痕）。" % (_e_imp,)),
+            }
+        except Exception as _e_other:
+            return {
+                "ok": False,
+                "gate": "DEFENSE_ERROR",
+                "phase": "confirm-assembly",
+                "error": "【三大防线】校验链路异常，按[失效关闭]拒绝开启总装。",
+                "detail": repr(_e_other),
+                "message": ("=== 三大防线链路异常（拒绝开启总装）===\n"
+                            "异常: %r\n\n"
+                            "确需放行：DSH_DEFENSE_BYPASS=1（会留痕）。" % (_e_other,)),
+            }
     elif bypass_requested():
+        # 【合法绕行留痕】DSH_DEFENSE_BYPASS=1 跳过防线，但必须记账（绝不静默）
         try:
             import defense_gate as _dg
             _dg.log_bypass("workflow_gate.confirm-assembly",
@@ -1773,9 +1965,18 @@ def cmd_confirm_assembly(parts_payload):
     #   只看这一个字段，没有结合"任务实际是否已推进"来判断。
     # 现改为：只要【已选过搭建方式】或【已有房间记录】，即视为门禁已走过
     #   select 阶段，允许进入总装确认（真正的把关交给下面的 _check_wave1_done）。
+    # ── 【P2 修复】state["rooms"] 是【幽灵键】：全文件无任何写入点，
+    #   故 `bool(state.get("rooms"))` 恒为 False，这个"或"条件永远不生效。
+    #   真正有房间记录的地方是 subagent_config.rooms（由 select 写入），
+    #   以及 mode_state.json。这里改读真实来源，让该判据恢复作用。
+    _rooms_cfg = []
+    try:
+        _rooms_cfg = ((state.get("subagent_config") or {}).get("rooms") or [])
+    except Exception:
+        _rooms_cfg = []
     _advanced = (_step == "user_selected"
                  or bool(state.get("user_choice"))
-                 or bool(state.get("rooms"))
+                 or bool(_rooms_cfg)
                  or bool(state.get("subagent_config")))
     if not _advanced:
         return {"ok": False, "gate": "ASSEMBLY_CONFIRM_REJECTED",
@@ -1981,18 +2182,6 @@ def _format_question_block(num, q):
     return chr(10).join(lines)
 
 
-def question_spec_for_prompt(task=None, context=None):
-    """供子代理 prompt 注入的精简版（保证小屋也按同一套维度设计）。
-
-    【Bug-03 修复】按任务类型取问题集 —— 小车任务注入的是车辆维度。
-    """
-    out = []
-    for q in question_spec_for(task, context):
-        opts = q.get("options") or []
-        out.append("- %s：%s%s" % (
-            q.get("title", ""), q.get("hint", ""),
-            ("  可选: " + " / ".join(opts)) if opts else "  （开放填写）"))
-    return out
 
 
 def _ask_questions(task_desc, depth="lite", context=None):
@@ -2075,40 +2264,6 @@ def _ask_questions(task_desc, depth="lite", context=None):
     return nl.join(body)
 
 
-def _extract_structure_spec(context_text):
-    """【B4修复】从用户对「A组·结构形态」的回答中提取几何规格。
-
-    这些尺寸会注入每个建模小屋的 prompt，避免子代理无据建模。
-    """
-    import re as _re
-    spec = {"axes": None, "arm_lengths": None, "base_type": None,
-            "end_effector": None, "envelope": None, "raw": context_text or ""}
-    if not context_text:
-        return spec
-    text = str(context_text)
-    # 1) 轴数
-    m = _re.search(r"(\d+)\s*轴", text)
-    if m:
-        spec["axes"] = int(m.group(1))
-    # 2) 臂长/行程（抓 数字+mm）
-    dims = _re.findall(r"(\d+(?:\.\d+)?)\s*(?:mm|毫米|MM)", text)
-    if dims:
-        spec["arm_lengths"] = [float(d) for d in dims[:8]]
-    # 3) 基座形式
-    for kw in ("落地", "壁挂", "法兰", "导轨", "移动式", "固定式", "旋转式"):
-        if kw in text:
-            spec["base_type"] = kw
-            break
-    # 4) 末端执行器
-    for kw in ("夹爪", "吸盘", "法兰盘", "卡盘", "焊枪"):
-        if kw in text:
-            spec["end_effector"] = kw
-            break
-    # 5) 整体包络
-    env = _re.search(r"(\d+)\s*[x×*]\s*(\d+)(?:\s*[x×*]\s*(\d+))?", text)
-    if env:
-        spec["envelope"] = env.group(0)
-    return spec
 
 
 def _room_parts_scope(task, context=None):
@@ -2338,13 +2493,130 @@ def _image_ref_hint(task_desc, state=None):
     }
 
 
+def _mode_confirm_message(task_desc, state=None):
+    r"""【模式二新流程】第一步的题面：确认模式 + 并行策略 + 是否 AI 自主。
+
+    ══ 为什么必须有这一步（用户需求原文）════════════════════════════════════
+    用户要求：
+      「第一步是变成 AI 在收到用户指令的时候，流程大概变为确认模式
+        （模式二：大型机械组装），先问是并行还是单行，问是是否为 AI 自主设计
+        （即前期三大问题中的后俩个问题），然后确认之后，直接开一个子代理
+        去通过这个步骤（称为总计子代理）」
+
+    也就是说：**原流程的"第一步"（多子代理并行建零件）及其后面全部后移一位**，
+    新的第一步就是本函数返回的内容 —— 确认模式 + 固定两问。
+
+    ⚠️ 历史教训：本模块曾只把"题数校验"接进 provide_context，却**没有改 init**
+    —— 于是 init 仍返回"第 0 题参数需求强度"，用户看到的行为与改造前完全一样
+    （实测反馈："问需求也是和之前的一模一样"）。因此这里必须是 init 的返回内容。
+    """
+    nl = chr(10)
+    return nl.join([
+        "=== 设计任务确认（第 1 步 / 共 3 步：模式与策略）===",
+        "任务描述: %s" % (task_desc or ""),
+        "",
+        "【模式确认】",
+        "  本次按【模式二 · 大型复杂器械/多零件装配体】流程执行：",
+        "  主对话（大屋）编排多个子代理（小屋），每个小屋独立建模；",
+        "  由【总计子代理】先按十阶段流水线分析，并决定本轮开几个子代理。",
+        "  （零件数量不再固定为 3 个 —— 由总计子代理的分析结论决定。）",
+        "",
+        "请依次用系统问题询问用户以下【两项固定问题】（题面由代码固定，不可改写）：",
+        "  ① 并行策略（D / E）",
+        "       D = 部分小屋并行（按波次分批启动）",
+        "       E = 单小屋串联（一次一个房间，完成后开下一个）",
+        "  ② 搭建方式（A / B / C）—— 即『是否 AI 自主设计』",
+        "       A = 完全自主搭建（AI 自主决策，按门禁波次调度）",
+        "       B = 部分自主搭建（关键节点询问）",
+        "       C = 步步确认（每个零件参数表逐件确认后再建模）",
+        "",
+        "⚠️ 这两问是【两个独立问题】：可以先问并行策略、再问搭建方式。",
+    ])
+
+
+def _extract_choice_parallel(text):
+    r"""从用户对第一步的自由回答里解析出 (搭建方式 A/B/C, 并行策略 D/E)。
+
+    宽松匹配（用户在自然语言里写了 A/D 等字母即可），解析不出就返回 None，
+    由调用方决定是"继续（后续 select 再兜底校验）"还是提示。
+    注意：**不在此处 fail-closed** —— 真正的强制点在 select 的参数校验，
+    这里只做"尽量预填"，避免把流程卡死。
+    """
+    import re as _re
+    t = str(text or "")
+    choice = None
+    parallel = None
+    # 搭建方式：A/B/C（避免误匹配英文单词里的字母，要求独立出现）
+    for m in _re.finditer(r"(?:^|[^A-Za-z0-9])([ABCabc])(?![A-Za-z0-9])", t):
+        c = m.group(1).upper()
+        if c in ("A", "B", "C"):
+            choice = c
+            break
+    # 并行策略：D/E
+    for m in _re.finditer(r"(?:^|[^A-Za-z0-9])([DEde])(?![A-Za-z0-9])", t):
+        c = m.group(1).upper()
+        if c in ("D", "E"):
+            parallel = c
+            break
+    # 中文兜底
+    if parallel is None:
+        if "并行" in t and "串" not in t:
+            parallel = "D"
+        elif "串行" in t or "单小屋" in t or "串联" in t:
+            parallel = "E"
+    if choice is None:
+        if "完全自主" in t:
+            choice = "A"
+        elif "部分自主" in t:
+            choice = "B"
+        elif "步步确认" in t or "逐件确认" in t:
+            choice = "C"
+    return choice, parallel
+
+
+def _ask_depth_question(task_desc):
+    r"""第 2 步：强需求 / 弱需求（原第 0 题，但在新流程里排到模式确认之后）。"""
+    nl = chr(10)
+    return nl.join([
+        "=== 设计任务确认（第 2 步 / 共 3 步：参数需求强度）===",
+        "任务描述: %s" % (task_desc or ""),
+        "",
+        "【参数需求强度】本次设计是否需要严格把关参数"
+        "（载荷/尺寸/公差/材料都要有据可依）？",
+        "  可选：",
+        "    · 强需求：需要严格校核，参数要有设计依据（提问数允许 10 ~ 50 题）",
+        "    · 不强：先出大致结构即可，细节由你按经验定（提问数允许 5 ~ 10 题）",
+        "",
+        "⚠️ 题数区间由代码硬性校验（mode2_flow.validate_question_budget）：",
+        "   强需求 10~50、弱需求 5~10（**可以恰好等于上下界**），超界或不足都会被拒绝。",
+        "⚠️ 并且【取消了一股脑全问】：改为 AI 分析到需要时才按需提问。",
+    ])
+
+
+
 def cmd_init(task_desc):
-    """【问题2 修复】门禁第一步只问 1 题（参数需求强度），不再一次抛 17 题。
+    r"""【模式二新流程 · 第一步】确认模式 + 固定两问（并行策略 / 是否 AI 自主）。
+
+    ══ 流程已重排（用户需求）════════════════════════════════════════════════
+    旧的「第一步」= 多子代理并行建零件 —— 现在**后移一位**成为第二步。
+    新的第一步 = 本函数返回的内容：
+        ① 确认模式（模式二 · 大型机械组装）
+        ② 问「并行还是串行」（D/E）
+        ③ 问「是否 AI 自主设计」（A/B/C）—— 即"前期三大问题"的后两个
+
+    随后：
+        第 2 步 → 强需求 / 弱需求（题数区间 10~50 / 5~10）
+        第 3 步 → 启动【总计子代理】按十阶段流水线分析，AI 按需提问
+        第二步（原第一步）→ 多子代理并行建零件（数量由总计子代理决定）
+
+    ⚠️ 实测教训：只把题数校验接进 provide_context、却没改 init，
+       用户看到的『第一步』仍是"参数需求强度"，反馈"和之前一模一样"。
+       所以**第一步必须在 init 的返回值里**，不能只写文档。
 
     ── 【C4 修复】对"进行中的任务"加保护，防止误调 init 把流程打回起点 ──
-    测试反馈原文：误调一次 init 把 step 打回 depth_asked，
-      导致 17 题被重复问、且再也回不到总装确认态（因为 confirm-assembly
-      要求 step==user_selected，而 step 已被改成 depth_asked）→ 流程卡死。
+    测试反馈原文：误调一次 init 把 step 打回起点，
+      导致问题被重复问、且再也回不到总装确认态（因为 confirm-assembly
+      要求 step==user_selected，而 step 已被改成提问态）→ 流程卡死。
     修复策略：
       · 若当前任务已走过 select（step 属于 user_selected/mechanics_done 等
         "已推进"状态），或已有房间记录 → 判定为"进行中"。
@@ -2443,6 +2715,58 @@ def cmd_init(task_desc):
     #   此时 _in_progress 判定不成立 → 新任务被放行 → 两个任务同时抢 SW API。
     # 这是一条真实的缺口（测试用例 TEST4 暴露）。
     # 修复：只要有活着的房间且未加 --force，一律拒绝 init，并明确告知是谁在跑。
+    #
+    # ══ ★【实测缺陷 · 2026-10-13】僵尸房间会把新流程永久挡在门外 ═══════════
+    # 现场：安装副本里残留 4 个旧流程房间（结构件/传动机构/壳体机架/支撑结构），
+    #   心跳约 486s、**无任何产物、无子代理**，却因 SW_STALE_GRACE=600（10 分钟
+    #   宽限期）仍被 residue-check 判为 running_unverified → _alive_live 非空
+    #   → init 被 INIT_BLOCKED_ALIVE_SUBAGENTS 拒绝。
+    # 后果（用户实测反馈）："总计子代理没用出来"，AI 无法进入新流程，
+    #   只能退回旧路径 —— 表现得"改造完全没生效"。
+    #
+    # 判定修正：只有【真的可能还在干活】的房间才算活。判据（三选一即算活）：
+    #   ① 有子代理登记（subagents 里能查到该房间）；
+    #   ② 有产物落盘（该房间最近有 DSH_* 文件）；
+    #   ③ 心跳非常新鲜（< 60s，说明刚刚还在上报）。
+    # 三者都不满足 → 判为僵尸，允许自动清理并放行 init（这正是它该走的路）。
+    def _room_maybe_working(x):
+        try:
+            room = x.get("room") or ""
+            detail = str(x.get("detail") or "")
+            # ① 有子代理登记
+            _subs = state.get("subagents") or {}
+            if room and room in _subs:
+                return True
+            # ② 有产物（detail 里会写 产物=True/False）
+            if "产物=True" in detail:
+                return True
+            # ③ 心跳非常新鲜（detail 形如 心跳=12.3s）
+            import re as _re
+            _m = _re.search(r"心跳=([\d.]+)s", detail)
+            if _m:
+                try:
+                    if float(_m.group(1)) < 60.0:
+                        return True
+                except Exception:
+                    pass
+            return False
+        except Exception:
+            return True      # 判定异常时保守认为"可能在工作"，不误杀
+
+    _alive_real = [x for x in _alive_live if _room_maybe_working(x)]
+    _zombies = [x for x in _alive_live if x not in _alive_real]
+
+    if _zombies and not _force_now:
+        # 全是僵尸 → 自动清理后放行；混合 → 只清僵尸、保留真活的
+        try:
+            _residue_check(auto_clean=True)
+            _residue_cleaned = True
+            state = load_state()
+            _step_now = str(state.get("step") or "")
+        except Exception:
+            pass
+        _alive_live = _alive_real
+
     if _alive_live and not _force_now:
         return {
             "ok": False,
@@ -2450,6 +2774,8 @@ def cmd_init(task_desc):
             "step": _step_now,
             "alive_subagents": [x.get("detail") or x.get("room") for x in _alive_live],
             "alive_count": len(_alive_live),
+            "zombies_cleaned": ([x.get("room") for x in _zombies]
+                                if _zombies else []),
             "error": ("【开始前残留检测】检测到 %d 个仍在活动的子对话/房间，"
                       "拒绝为同一工作区开启新任务。" % len(_alive_live)),
             "message": ("上一轮任务的房间仍在运行（有新鲜心跳/登记），"
@@ -2609,7 +2935,7 @@ def cmd_init(task_desc):
             _reset_mode_rooms()
         except Exception:
             pass
-    state["step"] = "depth_asked"
+    state["step"] = "mode_confirm_asked"
     state["task"] = task_desc
     state["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     # ── 【FL-02 修复】记录本次流程的起始时刻，供 select 做时序校验 ────────
@@ -2642,11 +2968,19 @@ def cmd_init(task_desc):
             os.remove(_mk)
     except Exception:
         pass
-    return {"ok": True, "step": "depth_asked", "task": task_desc,
-            # ── 【固定两问】此处只登记参数深度题；A/B/C 与 D/E 在
-            #   provide_context 末段以固定两问给出（见 choice_contract）。
-            "message": _ask_questions(task_desc, depth="ask",
-                                      context=(state.get("context") or "")),
+    return {"ok": True, "step": "mode_confirm_asked", "task": task_desc,
+            # ── 【模式二新流程 · 第一步】确认模式 + 并行策略 + 是否 AI 自主 ──
+            # 这是"流程重排"的落点：init 直接给出**新的第一步**，
+            # 而不是旧的"第 0 题参数需求强度"（那已后移到第 2 步）。
+            "first_step": "mode_confirm",
+            "message": _mode_confirm_message(task_desc, state),
+            "flow_order": [
+                "1. 确认模式（模式二）+ 并行策略 D/E + 是否 AI 自主 A/B/C  ← 本次",
+                "2. 强需求/弱需求（题数区间：强 10~50、弱 5~10）",
+                "3. 总计子代理按十阶段分析（AI 按需提问）",
+                "4. 多子代理并行建零件（数量由总计子代理决定）",
+                "5. 总装与验证 → 出图",
+            ],
             # ── 【残留检测】把"开始前清掉了什么"透明地报给用户 ──────────
             "residue_cleaned": bool(_residue_cleaned or _need_reset),
             "residue_actions": ((_residue or {}).get("actions") or []) if _residue_cleaned else (
@@ -2657,11 +2991,27 @@ def cmd_init(task_desc):
             # ── 【观察点1/5 修复】新任务的隔离交付目录 ────────────────────
             "work_dir": state.get(WORKDIR_STATE_KEY),
             "task_id": state.get("task_id"),
+            # ── 【BUG-观察-1 修复】把"零件/图纸到底存哪"明确回传 ───────────
+            # 原缺陷：只回传 work_dir 一个候选落点，且它与 delivery_root（父目录）
+            #   同以"交付"命名却语义不同 → 小屋据 cwd 存零件、总装按 work_dir 找
+            #   零件，两处对不上（竞速小车任务现场）。
+            # 现在：显式给出 parts_dir / drawings_dir / save_dir_hint，
+            #   小屋 prompt 必须原样使用 save_dir_hint 作为保存目录。
+            "parts_dir": _wd_info.get("parts_dir"),
+            "drawings_dir": _wd_info.get("drawings_dir"),
+            "scripts_dir": _wd_info.get("scripts_dir"),
+            "save_dir_hint": _wd_info.get("save_dir_hint"),
+            "dir_semantics": _wd_info.get("dir_semantics"),
             "work_dir_note": (
                 ("【观察点1/5 修复】已为本任务创建独立交付目录 %s —— "
                  "同名零件不会覆盖上一轮成果；如需改到别处，用 "
                  "workflow_gate.py work-dir <绝对路径>。"
-                 % (state.get(WORKDIR_STATE_KEY) or "（创建失败，沿用默认）"))
+                 "【BUG-观察-1 修复】★零件一律存 parts_dir=%s，"
+                 "工程图存 drawings_dir=%s；"
+                 "不要存到 work_dir 之外、更不要存到 delivery_root（所有任务的上层根）。"
+                 % (state.get(WORKDIR_STATE_KEY) or "（创建失败，沿用默认）",
+                    _wd_info.get("parts_dir") or "（未创建）",
+                    _wd_info.get("drawings_dir") or "（未创建）"))
                 if _wd_info.get("ok") else
                 ("⚠️ 交付目录创建失败（%s），将沿用默认目录 —— "
                  "注意同名零件可能覆盖上一轮成果。" % _wd_info.get("error"))),
@@ -2688,6 +3038,11 @@ def cmd_init(task_desc):
                     _pre_reset_snapshot.get("has_lock_owner")))
                 if _need_reset else
                 "无上一轮残留，未改动 mode_state（本次 init 零副作用）"),
+            # ── 【BUG-观察-5 修复】init 也给出跨文件一致性结论 ────────────
+            #   报告曾以为 init 返回里有 sync 字段，实际【没有】（只有
+            #   mode_state_reset / mode_state_snapshot_before_reset）。
+            #   这里补上权威的跨文件检查，让 init 阶段就能发现残留分裂。
+            "sync": _cross_file_sync(),
             "residue_note": (
                 ("⚠️ 开始前检出并清理了上一轮对话残留（%d 项操作）：%s。"
                  "这原本会导致 init 被 IN_PROGRESS 拦截（Bug#1）。"
@@ -2746,7 +3101,38 @@ def cmd_provide_context(context_text):
     step = state.get("step")
     nl = chr(10)
 
-    # ── 第一段：判定参数需求深度，返回第二段问题 ──────────────────────
+    # ── 第 1 段（模式二新流程的第一步）：收模式确认 + 并行策略 + 是否 AI 自主 ──
+    # 用户要求的第一步：确认模式 → 问并行/串行 → 问是否 AI 自主。
+    # 收到回答后，再进入第 2 步（强/弱需求），因此这里只做"记录 + 追问"。
+    if step == "mode_confirm_asked":
+        _choice_pre, _parallel_pre = _extract_choice_parallel(context_text)
+        state["mode_confirmed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        state["mode_confirm_answer"] = context_text or ""
+        state["mode2_confirmed"] = True
+        if _choice_pre:
+            state["prefill_choice"] = _choice_pre
+        if _parallel_pre:
+            state["prefill_parallel"] = _parallel_pre
+        # 第 1 步的提问时刻 → 满足 select 的 FL-02 时序校验（depth_asked_ts）
+        state["depth_asked_ts"] = time.time()
+        state["step"] = "depth_asked"
+        save_state(state)
+        return {
+            "ok": True,
+            "step": "depth_asked",
+            "mode_confirmed": True,
+            "parsed": {"choice": _choice_pre, "parallel": _parallel_pre},
+            "message": _ask_depth_question(state.get("task")),
+            "next_command": ("请把上面的【参数需求强度】问给用户；用户回答后再次调用：\n"
+                             "  python \"<工程模式根目录>\\tools\\workflow_gate.py\" "
+                             "provide_context \"<强需求/弱需求的回答原文>\"\n"
+                             "⚠️ 是命令行脚本，不是 DSH 工具（BUG-03）。"),
+            "note": ("已确认模式二。解析到的预选项："
+                     "搭建方式=%s、并行策略=%s（若未解析出，select 时再显式给出即可）。"
+                     % (_choice_pre or "未识别", _parallel_pre or "未识别")),
+        }
+
+    # ── 第 2 段：判定参数需求深度，给出题数预算 + 按需提问指引 ──────────
     if step == "depth_asked":
         # ── 【问题1 修复】第0题由模型用系统问题问；此处据其回答定深度 ──
         depth = resolve_depth(context_text)
@@ -2766,14 +3152,57 @@ def cmd_provide_context(context_text):
         _spec2 = (question_spec_for(state.get("task"), state.get("context"))
                   if depth == "full"
                   else question_spec_lite(state.get("task"), state.get("context")))
-        # ── 【固定两问】末段一并给出 A/B/C 与 D/E 的固定问题 ────────────
-        _fixed_qs = _cc.questions_payload() if _cc is not None else _choice_qs_fallback()
+        # ── ★【已移除 · 流程重排】────────────────────────────────────────
+        # 原代码在此处产 `_fixed_qs`（A/B/C 搭建方式 + D/E 并行策略），
+        # 与 init 的 `_mode_confirm_message` **重复** → 用户被问了两遍
+        #   （实测反馈："A，B，C，D，E这俩个问题合集问了俩次，疑似是旧问题
+        #     没有删完"）。A/B/C + D/E 现在是【第 1 步 init 的职责】，
+        # 本段（第 3 步）不得再输出它们。故删除该行，保留说明以防回归。
+        #   _fixed_qs = _cc.questions_payload() if _cc is not None else _choice_qs_fallback()
+
+        # ══ 【模式二新流程】把"题数"从写死的份数改为【区间 + 按需提问】══════
+        # 用户口径：
+        #   「强需求的18题限制取消，但是最少不能少于10但是可以等于10，
+        #     不能超过50题；弱需求取消5题，但不能少于5题或者可以等于5题，
+        #     但不能超过10题。所有的问题都要交给AI自己分析。」
+        #
+        # 因此：
+        #   · QUESTION_SPEC 退化为【候选题库】（AI 从中挑，不再"一股脑全问"）；
+        #   · 真正要问几题由 AI 按分析进度决定，但**必须**落在 [min,max] 内；
+        #   · 每问一题都要挂到"已经分析到的阶段"并写明理由（mode2_flow.record_question）。
+        _m2mod, _m2err = _m2_require()
+        _budget = None
+        if _m2mod is not None:
+            _wd2 = _m2_work_dir(state)
+            _sd = _m2mod.set_depth(depth, _wd2)
+            if not _sd.get("ok"):
+                # set_depth 失败（例如已按另一口径问过题）→ fail-closed
+                return {"ok": False, "gate": "MODE2_DEPTH_REJECTED",
+                        "step": "context_asked", "error": _sd.get("error"),
+                        "hint": ("参数需求强度一经登记不得更改；"
+                                 "如需重来请先 workflow_gate.py reset。")}
+            _budget = {"min": _sd["min"], "max": _sd["max"],
+                       "label": _sd["label"], "asked": 0}
+            # 题库规模与区间的关系要讲清楚，避免调用方以为"必须问满题库"
+            _pool = len(_spec2)
+            _budget["candidate_pool"] = _pool
+            _budget["note"] = (
+                "题库共 %d 题（候选池，不必全问）。%s 的实际提问数必须落在 "
+                "[%d,%d]：AI 按十阶段分析进度【按需】提问 —— 分析到哪个阶段、"
+                "确实缺信息时才问对应问题，每问一题都要写明理由（record_question）。"
+                % (_pool, _sd["label"], _sd["min"], _sd["max"]))
+
         return {
             "ok": True,
             "step": "context_asked",
             "param_depth": depth,
             "param_depth_label": "强需求(全量)" if depth == "full" else "不强(精简)",
             "question_count": total,
+            # ── 【模式二新流程】题数硬约束（强 10~50 / 弱 5~10）──────────────
+            "question_budget": _budget,
+            "budget_enforced_by": ("mode2_flow.validate_question_budget"
+                                   if _budget else None),
+            "budget_error": _m2err,
             # ── 【固定两问】参数题由门禁给出；A/B/C 与 D/E 在末段固定问 ──
             "mandatory_contract": {
                 "enforced": bool(_cc is not None),
@@ -2784,16 +3213,52 @@ def cmd_provide_context(context_text):
                          "禁止用正文文字代替提问。" % total),
             },
             "message": nl.join([
-                "已识别参数需求强度: 【%s】→ 接下来问 %d 题。"
-                % ("强需求" if depth == "full" else "不强", total),
+                "已识别参数需求强度: 【%s】→ 提问数必须落在 %d ~ %d 题之间。"
+                % ("强需求" if depth == "full" else "不强",
+                   (_budget["min"] if _budget else 10),
+                   (_budget["max"] if _budget else 50)),
                 "",
-                _ask_questions(state["task"], depth=depth,
-                               context=state.get("context")),
+                "─" * 62,
+                "【模式二新流程 · 第 3 步：启动总计子代理（不要再一股脑问题）】",
+                "─" * 62,
+                "",
+                "★ 用户要求：『取消之前的一股脑全部问，交由 AI 在分析机械时，",
+                "  思考到那里，然后就问对应的问题』。因此：",
+                "",
+                "  1) 先启动【总计子代理】，让它按【十阶段流水线】分析本任务：",
+                "       TaskUnderstanding → FunctionalDecomposition → PhysicsReasoning",
+                "       → PrincipleSynthesis → MechanismSynthesis → RecursivePartReasoning",
+                "       → PartSynthesis → EngineeringValidation → DesignIteration",
+                "       → ExplainableDesignOutput",
+                "     推进阶段（必须按序，跳阶段会被拒）：",
+                "       python mode2_flow.py begin-stage TaskUnderstanding",
+                "",
+                "  2) 分析到【确实缺某个信息】时，才登记并提问（不允许开头就把题抛完）：",
+                "       python mode2_flow.py ask \"<问题>\" --stage <当前阶段> --reason \"<为什么现在要问>\"",
+                "     硬性约束：① 该阶段必须先 begin-stage；② 必须写理由；③ 总题数不超上界。",
+                "",
+                "  3) 总计子代理分析完后，用 set-subagent-plan 登记【本轮开几个子代理】：",
+                "       python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
+                "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
+                "     数量不再固定为 3 —— 由它按分析结论决定。",
+                "",
+                "  4) 同时固定增设【总理子代理】（统一尺寸、校验相邻一致性、汇总 docx）。",
+                "",
+                "查看进度：python workflow_gate.py stage-status",
+                "查看题数：python workflow_gate.py mode2 questions --final",
             ]),
-            "next_command": ("请把上述 %d 题问给用户；用户回答后再次调用：\n"
+            "question_budget": _budget,
+            "next_command": ("请按上面的【按需提问】流程推进：先启动总计子代理，"
+                             "分析到确实缺信息时再用 mode2_flow.py ask 提问。\n"
+                             "全部提问完成后，把用户回答汇总后调用：\n"
                              "  python \"<工程模式根目录>\\tools\\workflow_gate.py\" "
-                             "provide_context \"<第二段全部回答原文>\"\n"
-                             "⚠️ 是命令行脚本，不是 DSH 工具（BUG-03）。" % total),
+                             "provide_context \"<全部回答原文>\"\n"
+                             "⚠️ 是命令行脚本，不是 DSH 工具（BUG-03）。"),
+            # ── 【模式二新流程】把下一步（总计子代理）也一并交代清楚 ────────
+            "next_after_mechanics": (
+                "力学估算通过后，**第一步改为确认模式 + 固定两问（并行/单行、是否AI自主）**，"
+                "随后必须由【总计子代理】按十阶段流水线分析并决定开几个子代理 —— "
+                "见 mode2_flow.py 的 begin-stage / set-subagent-plan。"),
         }
 
     # ── 第二段：收齐背景信息，做力学估算 ─────────────────────────────
@@ -2860,29 +3325,31 @@ def cmd_provide_context(context_text):
             "      并会在每个零件的参数表中标注。若后续发现参数不够，可随时补充，",
             "      C 模式（步步确认）下每个零件的参数表都会重新展示供你复核。",
         ])
-    # ── 【固定两问】A/B/C 与 D/E 由代码固定，模型必须原样询问 ────────────
-    # 这两问是【两个独立问题】：分两次问、或一次问两题都合法。
-    # 旧规则用 max_per_call=1 强制"每次只问一题"，把正常的
-    #   "连着问两次"也纳入题数校验，经常误判违规 —— 已按用户要求移除。
-    _fixed_qs = _cc.questions_payload() if _cc is not None else [
-        {"id": "build_mode", "question": "请选择搭建方式（A/B/C）",
-         "options": [{"label": "A"}, {"label": "B"}, {"label": "C"}]},
-        {"id": "parallel_mode", "question": "请选择并行策略（D/E）",
-         "options": [{"label": "D"}, {"label": "E"}]},
-    ]
+    # ── ★【已移除 · 流程重排】────────────────────────────────────────────
+    # 原代码在此处再次产出 A/B/C + D/E（mandatory_questions）。
+    # 但流程重排后，这两问已是【第 1 步 init】的职责：
+    #     init → _mode_confirm_message() 已问 A/B/C + D/E
+    #     provide_context #1 → 收答案
+    #     provide_context #2 → 强/弱需求
+    #     provide_context #3 → 总计子代理 + 按需提问（本段）
+    # 若此处再问一遍，用户会被问【两次】——
+    #   实测反馈："A，B，C，D，E这俩个问题合集问了俩次，疑似是旧问题没有删完"。
+    # 因此不再输出 mandatory_questions；改为回传"已收集到的选择"，
+    # 供调用方核对（若第 1 步没解析出来，这里提示用 select 显式给出）。
+    _collected_choice = state.get("prefill_choice")
+    _collected_parallel = state.get("prefill_parallel")
     return {"ok": True, "step": "mechanics_done", "task": state["task"],
             "param_depth": depth, "mechanics": m,
-            # ── 【固定两问】机器契约：问题与选项由代码固定 ──────────────
-            "mandatory_questions": _fixed_qs,
-            "mandatory_contract": {
+            # ── 【流程重排】A/B/C + D/E 已在第 1 步问过，此处只回传已收集值 ──
+            "choice_already_asked": True,
+            "collected_choice": _collected_choice,
+            "collected_parallel": _collected_parallel,
+            "choice_contract": {
                 "enforced": bool(_cc is not None),
-                "stage": "choice",
-                "mode": "by-question-id",
-                "required_questions": 2,
-                "must_use": "ask_user_question",
-                "rule": ("必须用系统问题询问【搭建方式 A/B/C】与【并行策略 D/E】；"
-                         "这两问是两个独立问题 —— 分两次问或一次问两题都可以，",
-                         "不存在\"合并即违规\"的判定。"),
+                "asked_at": "step1_mode_confirm",
+                "note": ("搭建方式 A/B/C 与并行策略 D/E 已在第 1 步（init）询问并收集；"
+                         "本步【不再重复提问】。若上一步未解析出，"
+                         "请在 select 时显式给出（如 select B,D）。"),
             },
             # 【BUG-07】把落盘路径与数值契约显式回传，便于自动化校验一致性
             "load_case_file": state.get("load_case_file"),
@@ -2935,6 +3402,49 @@ def _archive_finished(state, done_count, total, message):
     #   因此这是最后、也是最重要的一道强制点：任何房间三防线未通过，
     #   一律拒绝归档，退回"继续干活"。
     if not bypass_requested():
+        # ══ 【模式二新流程 · 交付前总闸】══════════════════════════════════
+        # 用户要求「所有改动都要写在代码里强制执行」。因此把原先只写在
+        #   SKILL.md 里的流程要求（十阶段走完 / 题数达标 / 编制由总计子代理
+        #   决定 / 总理子代理收到全部上报 / 相邻尺寸一致）升级为**总闸**：
+        #   任一不满足 → 拒绝归档（拒绝宣告完成）。
+        #
+        # 这是"不可逆终态"前的最后一道强制点，与下面的三道防线并列。
+        try:
+            _m2g, _m2gerr = _m2_require()
+            if _m2g is not None:
+                _pd = _m2g.pre_delivery_check(_m2_work_dir(state))
+                if not _pd.get("ok"):
+                    _nl3 = chr(10)
+                    _ls3 = ["=== 【模式二流程】交付前总闸拦截：流程契约未满足 ===", ""]
+                    for _b in (_pd.get("blockers") or [])[:20]:
+                        _ls3.append("  ✗ " + str(_b))
+                    _ls3 += [
+                        "",
+                        "任务【不得】宣告完成。请先补齐上述各项：",
+                        "  ① 十阶段分析走完（mode2_flow.py stage-status 查看缺哪些）；",
+                        "  ② 按需提问且题数达标（强 10~50 / 弱 5~10）；",
+                        "  ③ 由总计子代理登记子代理编制（set-subagent-plan）；",
+                        "  ④ 每个零件向总理子代理上报（prime-report，含三道防线凭据/尺寸/相邻件）；",
+                        "  ⑤ 跑相邻尺寸一致性（check-consistency）；不一致必须交父代理干涉。",
+                        "",
+                        "（确需放行：设 DSH_DEFENSE_BYPASS=1，会留痕到 reports/defense_bypass.json）",
+                    ]
+                    return {
+                        "ok": False,
+                        "gate": "MODE2_PRE_DELIVERY_BLOCKED",
+                        "blockers": _pd.get("blockers"),
+                        "check_detail": _pd,
+                        "message": _nl3.join(_ls3),
+                    }
+        except Exception as _e2:
+            # 总闸自身异常【不得】静默放行 —— 明确报错让人看到
+            return {
+                "ok": False,
+                "gate": "MODE2_PRE_DELIVERY_ERROR",
+                "error": "交付前总闸执行异常: %r" % (_e2,),
+                "message": ("【模式二流程】交付前总闸无法执行，按 fail-closed 拒绝归档。"
+                            "请检查 tools/mode2_flow.py 是否完好。"),
+            }
         try:
             import defense_gate as _dg
             _dt = _dg.check_task_defense()
@@ -2966,11 +3476,35 @@ def _archive_finished(state, done_count, total, message):
                     "error": "【三大防线】交付前总闸未通过，拒绝宣告完成。",
                     "message": _nl2.join(_ls),
                 }
-        except ImportError:
-            pass
-        except Exception:
-            pass
+        except ImportError as _e_imp:
+            # ── 【P0-BUG-防线 fail-open】交付前总闸同样不得静默放行 ─────────
+            # 归档是不可逆终态（写 TASK_FINISHED.json 后守卫即放行、对话结束），
+            #   原先 `except ImportError: pass` 会让"防线缺失"直接变成"任务完成"。
+            return {
+                "ok": False,
+                "gate": "DEFENSE_ERROR",
+                "phase": "finish",
+                "error": ("【三大防线】defense_gate.py 不可导入，按[失效关闭]"
+                          "拒绝宣告完成。"),
+                "detail": repr(_e_imp),
+                "message": ("=== 三大防线不可用（拒绝宣告完成）===\n"
+                            "原因: defense_gate.py 导入失败 %r\n\n"
+                            "请先修复：python defense_gate.py status\n"
+                            "确需放行：DSH_DEFENSE_BYPASS=1（会留痕）。" % (_e_imp,)),
+            }
+        except Exception as _e_other:
+            return {
+                "ok": False,
+                "gate": "DEFENSE_ERROR",
+                "phase": "finish",
+                "error": "【三大防线】交付前总闸链路异常，按[失效关闭]拒绝宣告完成。",
+                "detail": repr(_e_other),
+                "message": ("=== 三大防线链路异常（拒绝宣告完成）===\n"
+                            "异常: %r\n\n"
+                            "确需放行：DSH_DEFENSE_BYPASS=1（会留痕）。" % (_e_other,)),
+            }
     else:
+        # 【合法绕行留痕】DSH_DEFENSE_BYPASS=1 跳过总闸，但必须记账（绝不静默）
         try:
             import defense_gate as _dg
             _dg.log_bypass("workflow_gate.finish",
@@ -3142,7 +3676,34 @@ def cmd_select(choice, parallel=None, unknown=None):
                             "这是防循环铁闸。若确要开始新任务，先调 workflow_gate.py reset 再走门禁。"
                             % state.get("finished_at", "未知时间"))}
     # 串行模式允许重复调用 select 获取下一个房间
-    _pmode_val = PARALLEL_CHOICES.get(state.get("parallel_mode", ""), {}).get("mode", "")
+    # ── 【P1 修复·parallel_mode 口径分裂导致 select 死锁】───────────────
+    # 原缺陷：本行用 PARALLEL_CHOICES.get(值) 取 mode，而该表的【键是 D/E】。
+    #   但 mode_gate.set_parallel_mode 会把 state["parallel_mode"] 归一化成
+    #   "sequential"/"parallel" 并双写（mode_gate.py:2714/2723）。
+    #   于是【一旦归一化】：
+    #     PARALLEL_CHOICES.get("sequential") → {} → _pmode_val = ""
+    #   → 下面 3371 的 `_pmode_val in ("sequential","parallel")` 恒假
+    #   → 只要 step 不是 mechanics_done，select 就永远返回
+    #     「请先完成力学估算！」—— 流程彻底卡死（实测复现）。
+    # 修复：D/E 与已归一化的 mode 值【都能解析出 mode】。
+    #   这是纯读取侧兼容，不改变 select 的对外契约。
+    def _mode_of(v):
+        _v = str(v or "").strip()
+        if not _v:
+            return ""
+        if _v in PARALLEL_CHOICES:
+            return PARALLEL_CHOICES[_v].get("mode", "")
+        _lv = _v.lower()
+        if _lv in ("parallel", "sequential"):
+            return _lv
+        # 兼容大小写与中文别名
+        if _lv in ("d", "部分小屋并行", "并行"):
+            return "parallel"
+        if _lv in ("e", "单小屋串联", "串联", "串行"):
+            return "sequential"
+        return ""
+
+    _pmode_val = _mode_of(state.get("parallel_mode", ""))
     # ── 【FL-02 修复】首次 select 必须校验"本次会话真的走过提问流程" ────────
     # 实测缺陷：workflow_state.json 里【上一次正常流程的残留状态】
     #   （step=mechanics_done）能让直接 `select C E` 返回 gate=True，
@@ -3224,10 +3785,88 @@ def cmd_select(choice, parallel=None, unknown=None):
     state["user_choice"] = choice
     state["choice_detail"] = config
     state["parallel_mode"] = parallel
-    _pmode = PARALLEL_CHOICES.get(parallel, {}).get("mode", parallel)
-    state["subagent_config"] = generate_subagent_config(choice, _pmode, state["task"], state.get("context"))
-    # 【用户要求：不要回退】不再做任何隐式降级写回。
-    # 用户选了 D 就按 D 调度（并行模式会自动启动 SW 监控进程做 FIFO 排队）。
+    # 【修复值体系混用】state["parallel_mode"] 存的是用户选项 'D'/'E'，
+    # 而 subagent_config 里是 'parallel'/'sequential'。旧代码只查 PARALLEL_CHOICES
+    # （键为 D/E），当值是 'parallel' 时查不到，仅靠兜底参数侥幸正确。
+    # 这里显式同时接受两种写法，避免任何一条路径解析错。
+    _raw_pmode = state.get("parallel_mode", "parallel")
+    if _raw_pmode in ("parallel", "sequential"):
+        _pmode = _raw_pmode
+    else:
+        _pmode = PARALLEL_CHOICES.get(_raw_pmode, {}).get("mode", _raw_pmode)
+    # ⚠️ subagent_config 必须按【解析后的模式】重建：上面那次生成用的是
+    #    可能未定义的 _pmode（P1-24 验收用例抓到的 NameError）。
+    state["subagent_config"] = generate_subagent_config(
+        choice, _pmode, state["task"], state.get("context"))
+
+    # ══ 【模式二新流程 · 第一步重排】确认模式 + 固定两问 + 总计子代理 ══════
+    # 用户要求：流程第一步改为「确认模式（模式二：大型机械组装）→ 问并行/单行
+    #           → 问是否 AI 自主设计 → 然后开【总计子代理】分析」。
+    #
+    # 代码强制点（不是提示词）：
+    #   ① A/B/C（是否 AI 自主）与 D/E（并行/单行）必须先被登记过 —— 这里把它们
+    #      写进 state 并回传"已确认"凭据；
+    #   ② 【总计子代理】必须先按十阶段分析、并由它给出子代理编制；
+    #      未给出编制时，**不允许**创建任何建模小屋（下面会拦）。
+    _m2mod, _m2err = _m2_require()
+    _m2_block = None
+    if _m2mod is not None:
+        _wd3 = _m2_work_dir(state)
+        state["mode2_flow"] = {
+            "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": "② 大型复杂器械/多零件装配体",
+            "ai_autonomy": choice,           # A/B/C = 是否 AI 自主设计
+            "parallel": parallel,            # D/E   = 并行 / 单行
+            "plan_file": _m2mod.plan_path(_wd3),
+        }
+        # 编制是否已由总计子代理登记 —— 决定本次 select 能否放行"创建小屋"
+        _sp = _m2mod.get_subagent_plan(_wd3)
+        _m2_block = {
+            "plan_file": _m2mod.plan_path(_wd3),
+            "subagent_plan_ready": bool(_sp.get("ok")),
+            "subagent_plan_error": (None if _sp.get("ok") else _sp.get("error")),
+            "authority": _m2mod.SUBPLAN_AUTHORITY,
+            "prime_room": _m2mod.PRIME_ROOM_NAME,
+            "stages": [s[0] for s in _m2mod.STAGES],
+            "rule": ("子代理数量不再固定为 3 —— 必须由【%s】先走十阶段分析，"
+                     "再调 mode2_flow.py set-subagent-plan 登记编制；"
+                     "另有一个固定角色【%s】负责统一尺寸、校验相邻一致性、"
+                     "汇总 docx。未登记编制前不得创建建模小屋。"
+                     % (_m2mod.SUBPLAN_AUTHORITY, _m2mod.PRIME_ROOM_NAME)),
+        }
+    save_state(state)
+    _sync_mode_gate(choice, parallel)
+    # ── 【BUG-观察-1 修复】把【权威保存目录】注入 subagent_config ──────────
+    # 这样生成小屋 prompt 时能拿到绝对路径，不必让模型自己猜"工作目录"。
+    # 竞速小车任务的教训：门禁给的 work_dir 与零件实际落盘处不一致，
+    # 总装/出图按 work_dir 找零件找不到。
+    try:
+        _wd = state.get(WORKDIR_STATE_KEY)
+        if _wd:
+            _parts = os.path.join(_wd, "parts")
+            _draw = os.path.join(_wd, "drawings")
+            try:
+                os.makedirs(_parts, exist_ok=True)
+                os.makedirs(_draw, exist_ok=True)
+            except Exception:
+                pass
+            state["subagent_config"]["save_dirs"] = {
+                "work_dir": _wd,
+                "parts_dir": _parts,
+                "drawings_dir": _draw,
+                "instruction": ("★ 零件(.sldprt/.sldasm)一律保存到 parts_dir=%s；"
+                                "工程图保存到 drawings_dir=%s。"
+                                "必须用这里的【绝对路径】，不要用相对路径、"
+                                "也不要存到 work_dir 之外。" % (_parts, _draw)),
+            }
+            state["subagent_config"]["save_dir_hint"] = _parts
+        else:
+            state["subagent_config"]["save_dirs"] = None
+            state["subagent_config"]["save_dir_note"] = (
+                "⚠️ 未取到任务 work_dir，无法给出权威保存目录 —— "
+                "请用 workflow_gate.py work-dir <绝对路径> 指定后重试。")
+    except Exception as _e:
+        state["subagent_config"]["save_dir_note"] = ("保存目录注入失败: %r" % (_e,))
     save_state(state)
     _sync_mode_gate(choice, parallel)
 
@@ -3241,6 +3880,46 @@ def cmd_select(choice, parallel=None, unknown=None):
             pass
 
     rooms = state["subagent_config"]["rooms"]
+    # ══ 【模式二新流程 · 取消固定 3 个子代理】══════════════════════════════
+    # 用户要求：「取消在第二段多个子代理固定三个，第二次该建多少个子代理
+    #           交由总计子代理分析应该开多少个子代理，同时再固定开一个总理子代理」。
+    #
+    # 代码强制点：
+    #   · 若【总计子代理】已登记编制 → **用编制里的房间表覆盖**代码默认表；
+    #     数量完全由它决定（1~24 都合法），不再固定 3 个。
+    #   · 总理子代理是**固定角色**，无论编制如何都追加一个，且不可被编制覆盖。
+    #   · 未登记编制时 → 下面的返回值会带 `subagent_plan_required`，
+    #     由主对话先跑总计子代理（十阶段分析）再回来 select。
+    _prime_room = None
+    if _m2mod is not None:
+        try:
+            _sp_ok = _m2mod.get_subagent_plan(_m2_work_dir(state))
+            if _sp_ok.get("ok"):
+                _planned = _sp_ok.get("rooms") or []
+                if _planned:
+                    # 用总计子代理的编制替换固定房间表（保留 type 语义供波次路由用）
+                    rooms = [(r["name"], r.get("type") or "structural") for r in _planned]
+                    state["subagent_config"]["rooms"] = rooms
+                    state["subagent_config"]["total_rooms"] = len(rooms)
+                    state["subagent_config"]["rooms_source"] = "总计子代理（mode2_flow.set-subagent-plan）"
+                    state["subagent_config"]["rooms_rationale"] = _sp_ok.get("rationale")
+                    # 每个房间的零件范围也以编制为准（覆盖硬编码的 _room_parts_scope）
+                    state["subagent_config"]["room_parts"] = {
+                        r["name"]: r.get("parts") or [] for r in _planned}
+                # ── 总理子代理：固定追加，不可被编制顶掉 ──────────────────
+                _pr = _m2mod.prime_room_definition(_m2_work_dir(state))
+                _prime_room = {"name": _pr["name"], "type": _pr["type"],
+                               "why": _pr["why"], "duties": _pr["duties"]}
+                if not any(n == _pr["name"] for n, _t in rooms):
+                    rooms = list(rooms) + [(_pr["name"], _pr["type"])]
+                    state["subagent_config"]["rooms"] = rooms
+                    state["subagent_config"]["total_rooms"] = len(rooms)
+                state["subagent_config"]["prime_room"] = _prime_room
+        except Exception as _e:
+            state["subagent_config"]["rooms_source"] = (
+                "总计子代理编制应用失败（%r）—— 已回退代码默认表" % (_e,))
+    save_state(state)
+
     # 【修复值体系混用】state["parallel_mode"] 存的是用户选项 'D'/'E'，
     # 而 subagent_config 里是 'parallel'/'sequential'。旧代码只查 PARALLEL_CHOICES
     # （键为 D/E），当值是 'parallel' 时查不到，仅靠兜底参数侥幸正确。
@@ -3479,6 +4158,41 @@ def cmd_select(choice, parallel=None, unknown=None):
     _po_written = write_part_ownership(state)
     _po_manifest = _po_written.get("manifest") if _po_written.get("ok") else None
 
+    # ══ ★【强制点】未登记子代理编制 → 拒绝放行创建小屋 ═══════════════════════
+    # 用户要求：「取消在第二段多个子代理固定三个，第二次该建多少个子代理
+    #           交由总计子代理分析应该开多少个」+「固定开一个总理子代理」。
+    # 若此处放行，就会用**代码默认房间表**（旧的 5 房间）继续，
+    #   总计子代理永远不启动 —— 实测就是"总计子代理没用出来"。
+    # 因此编制必须成为【前置条件】：没登记就拒绝，并给出可执行的下一步。
+    if _m2_block and not _m2_block.get("subagent_plan_ready"):
+        return {
+            "ok": False,
+            "gate": "MODE2_SUBAGENT_PLAN_REQUIRED",
+            "step": "mechanics_done",
+            "error": ("【模式二强制】尚未由【%s】登记子代理编制，"
+                      "拒绝放行创建建模小屋。" % (_m2mod.SUBPLAN_AUTHORITY
+                                                  if _m2mod else "总计子代理")),
+            "why": ("子代理数量不再固定 —— 必须由总计子代理先按十阶段流水线分析，"
+                    "再登记本轮要开几个房间、每个房间负责哪些零件。"
+                    "否则会退回代码默认房间表，改造等于没生效。"),
+            "subagent_plan": _m2_block,
+            "stages": (list(_m2mod.STAGES) if _m2mod else []),
+            "how": [
+                "1) 先启动【总计子代理】，按十阶段按序分析（跳阶段会被拒）：",
+                "     python mode2_flow.py begin-stage TaskUnderstanding",
+                "2) 分析到确实缺信息时才提问（不允许开头一股脑抛题）：",
+                "     python mode2_flow.py ask \"<问题>\" --stage <阶段> --reason \"<为什么现在问>\"",
+                "3) 分析完登记编制（decided_by 必须是『总计子代理』）：",
+                "     python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
+                "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
+                "4) 再回来执行 select（会自动追加固定的【总理子代理】）。",
+            ],
+            "plan_file": _m2_block.get("plan_file"),
+            "next_command": ("完成上述 1~3 步后，重新执行：\n"
+                             "  python \"<工程模式根目录>\\tools\\workflow_gate.py\" "
+                             "select %s,%s" % (choice, parallel)),
+        }
+
     return {
         "ok": True, "step": "user_selected", "choice": choice,
         "choice_label": config["label"], "parallel_mode": parallel,
@@ -3492,6 +4206,10 @@ def cmd_select(choice, parallel=None, unknown=None):
         #    "mode_state 实际 ended 数"并排给出，一眼可辨是否不同步。
         #    若两者不一致，说明 room-end 尚未落盘或有房间被回收，
         #    调用方应先 mode_gate.py room-status 对账再继续。
+        # ── 【BUG-观察-5 修复】并补【真正的跨文件一致性检查】─────────────
+        #   上面 in_sync 的两侧同源（都读 mode_state.json 的 rooms[*].ended_at），
+        #   除极端竞态外恒为 True —— 保留它是为了兼容既有读者，但**不能当证据**。
+        #   真正需要比对的 workflow_state ↔ mode_state 由 _store.sync_report() 负责。
         "sync": {
             "done_rooms": sorted(_get_done_rooms()),
             "all_rooms": sorted([r[0] for r in rooms]),
@@ -3499,9 +4217,13 @@ def cmd_select(choice, parallel=None, unknown=None):
                 k for k, v in (_rooms_detail() or {}).items() if v.get("ended_at")]),
             "mode_state_active": sorted([
                 k for k, v in (_rooms_detail() or {}).items() if v.get("active")]),
+            # ⚠️ 同源自检（恒真，仅作展示，勿据此判断同步）
             "in_sync": (sorted(_get_done_rooms()) ==
                         sorted([k for k, v in (_rooms_detail() or {}).items()
                                 if v.get("ended_at")])),
+            "in_sync_self_referential": True,
+            # ★ 跨文件一致性的权威结论（BUG-观察-5 修复）
+            "cross_file": _cross_file_sync(),
         },
         "total_rooms": len(rooms),
         "wave": wave_num, "wave_name": wave_name,
@@ -3519,6 +4241,40 @@ def cmd_select(choice, parallel=None, unknown=None):
             "【Bug-38】每个小屋只允许产出本房间 keywords 命中的零件；"
             "保存前用 sw_bridge.py check-part <文件> --room <房间名> 自检；"
             "总装前用 workflow_gate.py verify-ownership 去重核对。"),
+        # ══ 【模式二新流程】编制来源 + 总理子代理职责（代码强制，非提示词）══
+        # 用户要求：
+        #   · 子代理数量不再固定 3 个 → 由总计子代理决定；
+        #   · 固定再开一个【总理子代理】统一规划尺寸、校验相邻一致性、
+        #     汇总 docx；不一致交父代理干涉；
+        #   · 建模小屋必须向总理上报三道防线凭据链接/尺寸/名称/相邻配合件。
+        "subagent_plan": _m2_block,
+        # ══ ★【实测缺陷修复 · 2026-10-13】未登记编制必须【真正拒绝】═══════
+        # 原实现只把 subagent_plan_required 置 true，注释写着"不阻断第一波，
+        #   但交付总闸会拦住" —— 这是**错的设计**，实测后果：
+        #     用户走完 init→provide_context×3 后直接 select，
+        #     select 返回 ok=true 并生成**旧的 5 个房间**
+        #     （结构件/传动机构/壳体机架/总装与验证/工程图输出），
+        #     流程当场跳到"建零件"阶段 → 总计子代理**永远不会被启动**，
+        #     十阶段分析、按需提问、编制登记全部落空。
+        #     用户实测反馈："总计子代理没用出来…其他的步骤都没有生效"。
+        # 正确做法：编制是**前置条件**，未登记就不得放行创建小屋
+        #   （fail-closed）。这样 AI 只能先跑总计子代理，
+        #   强制路径才真正成立。交付总闸的检查保留为第二道保险。
+        "subagent_plan_required": bool(
+            _m2_block and not _m2_block.get("subagent_plan_ready")),
+        "prime_room": _prime_room,
+        "prime_report_contract": ({
+            "required_fields": list(_m2mod.REQUIRED_REPORT_FIELDS),
+            "required_credential_keys": list(_m2mod.REQUIRED_CREDENTIAL_KEYS),
+            "how": ("每个建模小屋在 save() 之后必须调：\n"
+                    "  python mode2_flow.py prime-report --json @<上报.json>\n"
+                    "缺任何字段都会被拒绝登记（三道防线凭据 / 尺寸 / 名称 / 相邻配合件）。"),
+            "consistency": ("总理子代理调 python mode2_flow.py check-consistency；"
+                            "发现不一致会返回 escalate_to_parent=true，"
+                            "必须交父代理做干涉处理。"),
+            "final_docx": ("全部完成后总理子代理汇总导出 docx 交主对话"
+                           "（part_registry.py export-docx）。"),
+        }) if (_m2_block and _m2mod is not None) else None,
         "ready_to_build": True
     }
 
@@ -4008,9 +4764,38 @@ def cmd_status():
             "ready": state.get("step") == "user_selected"}
 
 def cmd_reset():
+    r"""清空本轮流程状态。
+
+    ══ ★【实测缺陷修复 · 2026-10-13】reset 必须连 mode_state 的房间一起清 ══
+    原实现只重置 workflow_state（step/choice/…），**完全没碰 mode_state.json**。
+    实测后果（用户现场）：
+      · mode_state 里残留 9 个旧房间（结构件/验证房/物理深挖房/流程深挖房…），
+        其中若干标 active 但无子代理登记 → 被判定为【僵尸任务残留】；
+      · 于是 `reset` 之后 `init` **仍然被 ZOMBIE_DETECTED 拒绝**，
+        用户以为"重置了"，实际房间还在，新流程永远进不去；
+      · 这正是"旧问题没有删完"的根源。
+    修复：reset 同步调 mode_gate.py rooms-reset 清空房间/子代理/锁，
+      让 reset 真正回到"干净可开新任务"的状态。
+    """
     state = _fresh_state()
     save_state(state)
-    return {"ok": True, "step": "idle"}
+    _rooms_cleared = None
+    try:
+        import subprocess as _sp
+        _p = _sp.run([sys.executable, MODE_GATE_PATH, "rooms-reset"],
+                     capture_output=True, text=True, encoding="utf-8",
+                     errors="replace", timeout=20,
+                     creationflags=0x08000000 if sys.platform == "win32" else 0)
+        try:
+            _rooms_cleared = json.loads(_p.stdout or "{}").get("cleared_before")
+        except Exception:
+            _rooms_cleared = None
+    except Exception as _e:
+        _rooms_cleared = {"error": repr(_e)}
+    return {"ok": True, "step": "idle",
+            "mode_state_cleared": _rooms_cleared,
+            "note": ("已同时清空 mode_state 的房间/子代理/锁（原先只清 workflow_state，"
+                     "导致 reset 后仍被僵尸房间挡住 init）。")}
 
 def cmd_check():
     state = load_state()
@@ -4221,6 +5006,16 @@ def _main_body():
                               "recover": "恢复卡住的任务状态：python %s recover" % _me,
                               "restart": "重做指定房间：python %s restart <房间名>" % _me,
                               "reset": "清空并重新开始：python %s reset" % _me,
+                              # ── 【模式二新流程】强制契约命令 ──────────────
+                              "mode2 <子命令>": "【模式二强制契约】透传 mode2_flow.py："
+                                                "set-depth / begin-stage / mark-stage-done / "
+                                                "ask / questions / set-subagent-plan / "
+                                                "prime-report / check-consistency 等；"
+                                                "python %s mode2 --help 查看全部" % _me,
+                              "stage-status": "【模式二】查看十阶段推进情况："
+                                              "python %s stage-status" % _me,
+                              "pre-delivery": "【模式二】交付前总闸自检（缺项会列出）："
+                                              "python %s pre-delivery" % _me,
                           },
                           "note": ("【BUG-03/04】历史文档中的 workflow-gate-init / "
                                    "workflow-gate-provide-context / workflow-gate-select "
@@ -4278,6 +5073,32 @@ def _main_body():
         print(json.dumps(cmd_restart(room_name) if room_name else {"ok":False,"error":"need room name"}, ensure_ascii=False, indent=2))
     elif cmd == "check":
         print(json.dumps(cmd_check(), ensure_ascii=False, indent=2))
+    # ══ 【模式二新流程】把 mode2_flow 的强制契约命令透传出来 ══════════════
+    # 这样调用方只需记住一个入口（workflow_gate.py），不必再去记第二个脚本，
+    # 降低"忘了跑强制检查"的概率。
+    elif cmd in ("mode2", "m2"):
+        _m2c, _m2e = _m2_require()
+        if _m2c is None:
+            print(json.dumps({"ok": False, "error": _m2e}, ensure_ascii=False, indent=2))
+            sys.exit(1)
+        _rc = _m2c.main(sys.argv[2:])
+        sys.exit(_rc)
+    elif cmd in ("stage-status", "stages"):
+        _m2c, _m2e = _m2_require()
+        if _m2c is None:
+            print(json.dumps({"ok": False, "error": _m2e}, ensure_ascii=False, indent=2))
+            sys.exit(1)
+        _r = _m2c.stage_status(_m2_work_dir())
+        print(json.dumps(_r, ensure_ascii=False, indent=2))
+        sys.exit(0 if _r.get("ok") else 1)
+    elif cmd in ("pre-delivery", "predelivery"):
+        _m2c, _m2e = _m2_require()
+        if _m2c is None:
+            print(json.dumps({"ok": False, "error": _m2e}, ensure_ascii=False, indent=2))
+            sys.exit(1)
+        _r = _m2c.pre_delivery_check(_m2_work_dir())
+        print(json.dumps(_r, ensure_ascii=False, indent=2))
+        sys.exit(0 if _r.get("ok") else 1)
     else:
         print(json.dumps({"ok": False, "error": "未知命令: " + cmd,
                           "hint": "运行 `python workflow_gate.py --help` 查看全部命令"},

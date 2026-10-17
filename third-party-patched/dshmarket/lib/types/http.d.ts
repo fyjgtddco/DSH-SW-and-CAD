@@ -6,6 +6,19 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 /** Write a JSON payload with no-store caching. */
 export declare function sendJson(response: ServerResponse, status: number, payload: unknown): void;
+/** Point the fence at the host's declared authorities. Returns the previous source. */
+export declare function setTrustedHostsSource(source: () => readonly string[]): () => readonly string[];
+/**
+ * Whether a request authority is one of the declared ones.
+ *
+ * Mirrors @deepseek-ai/dsh-client-connection's rule, because the two fences
+ * have to agree: an entry with an explicit port matches that exact authority,
+ * a port-less entry matches the hostname on any port (the shape the CLI
+ * derives for IP-literal LAN serving, where the bound port may be assigned by
+ * the OS). Both sides compare through WHATWG normalization, so case and a
+ * redundant `:80` never decide trust.
+ */
+export declare function trustedAuthority(host: string, trustedHosts: readonly string[]): boolean;
 /**
  * True when the request's Origin, IF IT HAS ONE, matches its Host — required
  * on every POST route.

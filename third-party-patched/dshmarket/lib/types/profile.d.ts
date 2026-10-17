@@ -90,6 +90,11 @@ export declare function restoreProfileManifest(profile: string, snapshot: Profil
 export declare function dropFromManifest(profile: string, name: string, explicitDir?: string): boolean;
 /** The version actually present in the profile's node_modules, or null. */
 export declare function readInstalledVersion(profile: string, name: string, explicitDir?: string): string | null;
+/**
+ * The `name` in the package.json of the directory a dependency is installed
+ * under, or null. DSH Desktop requires it to equal the dependency key (#694).
+ */
+export declare function readInstalledPackageName(profile: string, name: string, explicitDir?: string): string | null;
 /** The installed package manifest, or null when absent or malformed. */
 export declare function readInstalledManifest(profile: string, name: string, explicitDir?: string): unknown | null;
 /**
@@ -323,3 +328,65 @@ export declare function pluginSubdirs(root: string): string[];
  * @returns every package now allowed.
  */
 export declare function setAllowBuilds(profile: string, packages: string[], explicitDir?: string): string[];
+/**
+ * Remove the allowBuilds keys pnpm cannot parse as a version range, and say
+ * which (#698).
+ *
+ * pnpm reads an allowBuilds key as `name@<version union>`, and on 10.26 to
+ * the latest 10.x and on 11.0 to 11.5 a git or archive source there —
+ * `name@git+https://…`, `name@https://codeload…` — is rejected as
+ * "Invalid versions union … Use exact versions only". Not the one entry: the
+ * whole workspace file, so EVERY later pnpm command in the profile fails,
+ * including installs that have nothing to do with it. Measured on 9.15,
+ * 10.0 through 10.29, 11.0 through 11.8, 11.21 and 12.4; 10.25 and below
+ * ignore allowBuilds and 11.6 and above accept these keys.
+ *
+ * Those are exactly the keys the market writes for a git source (#68, #285,
+ * #637), because the pnpm versions that need them to authorize anything
+ * read them fine. On the versions in between, a bare name is what
+ * authorizes a git dependency — measured on 10.29 — and it is kept.
+ *
+ * @returns the keys removed; empty when nothing matched, in which case the
+ *   file is left untouched.
+ */
+export declare function dropUnparseableBuildKeys(profile: string, explicitDir?: string): string[];
+/**
+ * Make a profile's `minimumReleaseAgeExclude` readable again (#732).
+ *
+ * pnpm appends a second rule for a package that already has one, while its
+ * `evaluateVersionPolicy` honours only the FIRST rule per package name — so
+ * its own new entry is dead, the young version stays unexcluded, and every
+ * later command in that profile fails lockfile verification with
+ * ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION, including commands that have nothing
+ * to do with that package.
+ *
+ * (#733 reported a separate, unexplained 80 GiB allocation abort on pnpm
+ * 12.4.1 that its author first tied to the union spelling. Review on that
+ * issue — and the reporter's own follow-up, which could no longer reproduce it
+ * — settled that `name@a || b` is a documented pnpm form, that the validator's
+ * "Use exact versions only" is about ranges and name patterns, and that the
+ * abort is not this market's to fix. Do not "repair" a union into a bare name
+ * on the strength of it: see below.)
+ *
+ * pnpm WRITES this key itself, and one of the forms it writes is what breaks a
+ * profile (#732): pnpm 11.7.0 APPENDS a second rule for a package that already
+ * has one, while its `evaluateVersionPolicy` honours only the FIRST rule per
+ * package name. Its own new entry is therefore dead, the young version stays
+ * unexcluded, and every later command in that profile fails lockfile
+ * verification with ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION — installs, updates
+ * and uninstalls alike, including ones that have nothing to do with that
+ * package. Merging the same-name rules into one makes the file readable again.
+ *
+ * The merge keeps the UNION of the versions the file already lists
+ * (`name@1.2.3 || 1.4.0`), which is a documented pnpm spelling. What this
+ * deliberately does NOT do is collapse a version list to a bare package name:
+ * a bare name exempts EVERY version of that package from the cooldown, which
+ * is wider than what the file says, and the market pins exact versions
+ * precisely so a fresh install cannot silently land on an older release
+ * (#594). A form the file cannot be read exactly from is left alone.
+ *
+ * @returns the package names whose rules were merged; empty when the file
+ *   needed no repair or could not be repaired, in which case it is left
+ *   byte-for-byte as it was.
+ */
+export declare function mergeDuplicateReleaseAgeExcludes(profile: string, explicitDir?: string): string[];

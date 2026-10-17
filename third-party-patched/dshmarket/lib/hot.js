@@ -198,6 +198,26 @@ export function cleanHotDir(profileDir) {
 function stateFile(profileDir) {
     return join(profileDir, HOT_DIR, 'state.json');
 }
+const BROKEN_REASONS = new Set(['incomplete-build-locked']);
+/** The on-disk shape of {@link MarketState.brokenPlugins}, sanitized. */
+function brokenPluginsFromUnknown(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value))
+        return undefined;
+    const out = {};
+    for (const [name, raw] of Object.entries(value)) {
+        if (name === '' || raw === null || typeof raw !== 'object' || Array.isArray(raw))
+            continue;
+        const record = raw;
+        if (typeof record.reason !== 'string' || !BROKEN_REASONS.has(record.reason))
+            continue;
+        out[name] = {
+            spec: typeof record.spec === 'string' ? record.spec.slice(0, MAX_NOTE) : '',
+            reason: 'incomplete-build-locked',
+            at: typeof record.at === 'string' ? record.at : '',
+        };
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+}
 /** Unique non-empty strings in `value`, order preserved. */
 function uniqueStrings(value) {
     if (!Array.isArray(value))
@@ -214,9 +234,70 @@ function uniqueStrings(value) {
 }
 /** Upper bound on bookmarked catalog URLs kept in state.json (#414). */
 export const MAX_FAVORITES = 500;
+/** Upper bound on blocked package names kept in state.json (#657). */
+export const MAX_BLOCKED = 500;
+/** Upper bound on the persistent do-not-remind list (#728). */
+export const MAX_UPDATE_EXEMPT = 500;
+/** npm package names are at most 214 characters. Longer values are not names. */
+export const MAX_BLOCKED_NAME = 214;
 /** Catalog URLs the user may favorite; http(s) only, order preserved. */
 function favoriteUrls(value) {
     return uniqueStrings(value).filter(url => url.startsWith('http://') || url.startsWith('https://'));
+}
+/** Package names, non-empty, order preserved, capped. */
+function cappedPackageNames(value, cap) {
+    const trimmed = Array.isArray(value)
+        ? value.map(item => typeof item === 'string' ? item.slice(0, MAX_BLOCKED_NAME) : item)
+        : value;
+    return uniqueStrings(trimmed).slice(0, cap);
+}
+/** Package names the user may block. */
+function blockedNames(value) {
+    return cappedPackageNames(value, MAX_BLOCKED);
+}
+/** Package names the user may stop being reminded about. */
+function updateExemptNames(value) {
+    return cappedPackageNames(value, MAX_UPDATE_EXEMPT);
+}
+/** A POSIX-looking environment variable name: the name part of `KEY=value`. */
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Upper bound on one pinned env value, so state.json cannot balloon. */
+const MAX_ENV_VALUE = 4096;
+/**
+ * Sanitize an untrusted build-env map (state.json, or the card route's body)
+ * into the shape spawnEnv can merge.
+ *
+ * An empty map and a non-object both read as undefined: clearing the card
+ * must inherit the composition, and a blank line in state.json must not
+ * disable every pinned variable. Only the merge precedence in
+ * src/dsh-cli.ts spawnEnv — never this — protects PATH and CI, but a value
+ * a user typed for them would silently do nothing there, so it is rejected
+ * here with a reason instead.
+ *
+ * `GIT_ASKPASS` and `SSH_ASKPASS` are deliberately NOT rejected, though they
+ * are the two names that can re-open a credential prompt: pointing them at a
+ * program is the supported non-interactive way to answer one, and #587/#596
+ * close the *terminal* fallback (GIT_TERMINAL_PROMPT, BatchMode) rather than
+ * the program one. A user who pins these has already said where the answer
+ * comes from; a user who does not still gets the closed prompt.
+ */
+export function buildEnvFromUnknown(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value))
+        return undefined;
+    const out = {};
+    for (const [key, raw] of Object.entries(value)) {
+        if (!ENV_KEY_RE.test(key))
+            continue;
+        if (key === 'PATH' || key === 'CI')
+            continue;
+        if (typeof raw !== 'string')
+            continue;
+        const entry = raw.trim();
+        if (entry === '')
+            continue;
+        out[key] = entry.slice(0, MAX_ENV_VALUE);
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
 }
 /**
  * Read the whole market state. Legacy `disabledSkins` (the pre-#60
@@ -246,6 +327,7 @@ export function readMarketState(profileDir) {
             }
         }
         const githubProxy = normalizeGithubProxy(state.githubProxy);
+        const brokenPlugins = brokenPluginsFromUnknown(state.brokenPlugins);
         return {
             disabled: new Set(disabled),
             groups,
@@ -257,11 +339,15 @@ export function readMarketState(profileDir) {
             // with no region would promise a notice about a choice nobody made.
             regionAuto: state.regionAuto === true && asRegion(state.region) !== null ? true : undefined,
             favorites: favoriteUrls(state.favorites),
+            blocked: blockedNames(state.blocked),
+            updateExempt: updateExemptNames(state.updateExempt),
             ...(githubProxy === null ? {} : { githubProxy }),
+            ...(brokenPlugins === undefined ? {} : { brokenPlugins }),
+            buildEnv: buildEnvFromUnknown(state.buildEnv),
         };
     }
     catch {
-        return { disabled: new Set(), groups: {}, groupOrder: [], notes: {}, favorites: [] };
+        return { disabled: new Set(), groups: {}, groupOrder: [], notes: {}, favorites: [], blocked: [], updateExempt: [] };
     }
 }
 /**
@@ -306,16 +392,23 @@ export function writeMarketState(profileDir, state) {
         ? state.regionAuto
         : onDisk.regionAuto;
     const favorites = state.favorites ?? onDisk.favorites ?? [];
+    const blocked = state.blocked ?? onDisk.blocked ?? [];
+    const updateExempt = state.updateExempt ?? onDisk.updateExempt ?? [];
     // This field does have a clear action ("restore automatic"). As with
     // regionAuto, omission preserves while an explicit undefined removes it.
     const githubProxy = Object.prototype.hasOwnProperty.call(state, 'githubProxy')
         ? state.githubProxy
         : onDisk.githubProxy;
+    const broken = Object.prototype.hasOwnProperty.call(state, 'brokenPlugins')
+        ? state.brokenPlugins
+        : onDisk.brokenPlugins;
     writeFileSync(stateFile(profileDir), JSON.stringify({
         disabled: [...state.disabled],
         groups: state.groups,
         groupOrder: state.groupOrder,
         ...(favorites.length > 0 ? { favorites } : {}),
+        ...(blocked.length > 0 ? { blocked } : {}),
+        ...(updateExempt.length > 0 ? { updateExempt } : {}),
         ...(Object.keys(notes).length > 0 ? { notes } : {}),
         // Omitted while unchosen, so "never picked" survives a round trip and
         // keeps deriving from the running build — but only when disk has not
@@ -326,6 +419,15 @@ export function writeMarketState(profileDir, state) {
         ...(region === undefined ? {} : { region }),
         ...(regionAuto === true ? { regionAuto: true } : {}),
         ...(githubProxy === undefined ? {} : { githubProxy }),
+        // Omission preserves, explicit undefined clears — the same contract as
+        // githubProxy above, and the one a repaired plugin needs: the entry
+        // exists only while the declaration is still missing.
+        ...(broken === undefined ? {} : { brokenPlugins: broken }),
+        ...(state.region === undefined ? {} : { region: state.region }),
+        ...(state.regionAuto === true ? { regionAuto: true } : {}),
+        // Omitted while not saved, so a card that was never touched keeps
+        // inheriting the composition's buildEnv on every boot.
+        ...(state.buildEnv === undefined ? {} : { buildEnv: state.buildEnv }),
     }));
 }
 /** Plugins the user switched off; skipped by the boot re-mount. */

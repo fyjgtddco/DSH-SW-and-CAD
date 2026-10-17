@@ -6,10 +6,28 @@
  */
 import { Service } from '@deepseek-ai/cordis';
 import { credentialRef } from '@deepseek-ai/dsh-credentials';
-import { credentialExpiresAtMs, isExpired, isRefreshable, normalizeBuddyEdition, } from './buddy.js';
+import { credentialExpiresAtMs, isExpired, isRefreshable, } from './buddy.js';
 import { RefreshTokenExpiredError, fetchModels, refreshToken, runBuddyLoginFlow, } from './buddy-oauth.js';
 import { RefreshScheduler } from './refresh.js';
-/** Buddy 登录结果存储所用的凭据引用。 */
+import { CODEBUDDY } from './product.js';
+import { refreshAccountWithReconcile, syncAccountExpiry, } from './expiry-sync.js';
+/**
+ * CodeBuddy 系凭据 → 账号池有效期的提取器。
+ *
+ * `BuddyAuth` 一个类服务两个产品（buddy / workbuddy），故 tag 取
+ * `this.product.id`，日志里能区分是哪个面板。
+ */
+const BUDDY_EXPIRY_ACCESSORS = {
+    expiresAtOf: credentialExpiresAtMs,
+    refreshableOf: isRefreshable,
+    identityOf: (credential) => credential.access_token ?? '',
+};
+/**
+ * CodeBuddy 的登录结果存储所用的凭据引用。
+ *
+ * 等价于 `CODEBUDDY.defaultCredentialRef`，保留此导出仅为兼容既有导入方；
+ * 新代码请改用 `BuddyAuth` 实例的 `credentialRefName` 字段（随产品变化）。
+ */
 export const BUDDY_CREDENTIAL_REF = 'BUDDY_ACCESS_TOKEN';
 /** 从存储值解析凭据 JSON；解析失败返回 undefined。 */
 function parseCredential(value) {
@@ -26,6 +44,14 @@ function parseCredential(value) {
 /** Buddy 登录服务：轮询式登录 + refresh_token 静默续期。 */
 export class BuddyAuth extends Service {
     options;
+    /** 本实例所属的产品配置（CodeBuddy 或 WorkBuddy）。 */
+    product;
+    /**
+     * 本实例默认读写的凭据 ref 名称。
+     * CodeBuddy 为 `BUDDY_ACCESS_TOKEN`，WorkBuddy 为 `WORKBUDDY_ACCESS_TOKEN`；
+     * 两个产品各自读写自己的 ref，凭据互不可见。
+     */
+    credentialRefName;
     scheduler = new RefreshScheduler(() => this.refresh(), (error) => {
         if (error instanceof RefreshTokenExpiredError) {
             // 失效：停止重试，并向 status() 暴露 refreshable: false 与重新登录提示。
@@ -40,8 +66,17 @@ export class BuddyAuth extends Service {
     /** 登录会话是否仍处于活跃状态；logout()/stop() 置 false，防止在途刷新回写已登出凭据。 */
     active = true;
     constructor(ctx, options = {}) {
-        super(ctx, 'buddyAuth');
+        // 默认 CodeBuddy，保证既有行为完全不变。
+        const product = options.product ?? CODEBUDDY;
+        // 服务名必须随产品区分：cordis 的 Service 在构造时按名称注册，同名第二次
+        // 注册会抛 `service "buddyAuth" has been registered at <root>`，而
+        // CodeBuddy 与 WorkBuddy 需要同时存在两个实例。按产品 id 派生即可得到
+        // 稳定且互不冲突的两个名字：buddy → `buddyAuth`（与改造前完全一致）、
+        // workbuddy → `workbuddyAuth`；显式传入 serviceName 可覆盖。
+        super(ctx, options.serviceName ?? `${product.id}Auth`);
         this.options = options;
+        this.product = product;
+        this.credentialRefName = this.product.defaultCredentialRef;
     }
     /** 标记 refresh_token 已失效：停止重试，并向 status() 暴露 refreshable: false 与重新登录提示。 */
     markRefreshTokenInvalid() {
@@ -51,10 +86,13 @@ export class BuddyAuth extends Service {
     /** 运行登录流程并持久化凭据。 */
     async login(flowOptions = {}) {
         this.active = true;
-        const ref = flowOptions.refName ? credentialRef(flowOptions.refName) : credentialRef(BUDDY_CREDENTIAL_REF);
+        const ref = flowOptions.refName ? credentialRef(flowOptions.refName) : credentialRef(this.credentialRefName);
         const flow = await runBuddyLoginFlow({
             ...this.options.fetcher !== undefined ? { fetcher: this.options.fetcher } : {},
             ...flowOptions,
+            // 产品配置决定 auth/state 的 platform 与登录 URL 附加参数：调用方显式传入优先，
+            // 否则用本实例的产品（WorkBuddy 实例不会退回 CodeBuddy）。
+            product: flowOptions.product ?? this.product,
         });
         await this.ctx.credentials.set(ref, flow.access);
         this.refreshTokenInvalid = false;
@@ -65,15 +103,13 @@ export class BuddyAuth extends Service {
         if (flowOptions.accountId && flowOptions.pool) {
             await flowOptions.pool.addAccount({
                 id: flowOptions.accountId,
-                provider: 'buddy',
+                provider: this.product.id,
                 nickname: flowOptions.accountId,
                 enabled: true,
-                credentialRef: flowOptions.refName ?? BUDDY_CREDENTIAL_REF,
+                credentialRef: flowOptions.refName ?? this.credentialRefName,
                 createdAt: Date.now(),
                 expiresAt: credential ? credentialExpiresAtMs(credential) : undefined,
                 refreshable: Boolean(credential) && isRefreshable(credential),
-                // 记录站点归属（cn/intl），供账号列表展示与刷新路由核对。
-                ...credential?.edition !== undefined ? { edition: credential.edition } : {},
             });
         }
         return {
@@ -101,26 +137,23 @@ export class BuddyAuth extends Service {
                 nickname: credential?.nickname ?? accountId,
                 expiresAt: credential ? credentialExpiresAtMs(credential) : undefined,
                 refreshable: Boolean(credential) && isRefreshable(credential),
-                ...credential?.edition !== undefined ? { edition: credential.edition } : {},
             });
         }
     }
     /** 报告凭据是否已配置、过期时间、是否可刷新以及最近刷新错误。 */
     async status() {
-        const ref = credentialRef(BUDDY_CREDENTIAL_REF);
+        const ref = credentialRef(this.credentialRefName);
         const info = await this.ctx.credentials.describe(ref);
         if (!info.configured)
             return { configured: false, refreshable: false };
         let expiresAt;
         let refreshable = false;
-        let edition;
         const resolved = await this.ctx.credentials.resolve(ref);
         if (resolved) {
             const credential = parseCredential(resolved.value);
             if (credential) {
                 expiresAt = credentialExpiresAtMs(credential);
                 refreshable = isRefreshable(credential) && !this.refreshTokenInvalid;
-                edition = normalizeBuddyEdition(credential.edition);
             }
         }
         return {
@@ -128,27 +161,12 @@ export class BuddyAuth extends Service {
             source: info.source,
             expiresAt,
             refreshable,
-            ...edition === undefined ? {} : { edition },
             ...this.lastRefreshError === undefined ? {} : { refreshError: this.lastRefreshError },
         };
     }
-    /**
-     * 静默续期。
-     *
-     * 优先刷新**账号池中当前生效的那个账号**：纯账号池部署下只有
-     * `BUDDY_ACCOUNT_*` 凭据，单凭据 ref（`BUDDY_ACCESS_TOKEN`）并不存在，
-     * 旧实现会直接抛「未配置凭据，请先登录」，导致池内 token 过期后无法续期。
-     * 池内没有可刷新账号时回退到单凭据 ref。
-     *
-     * @param pool - 账号池；提供时优先按池内账号续期。
-     */
-    async refresh(pool) {
-        if (pool) {
-            const refreshed = await this.refreshPoolAccount(pool);
-            if (refreshed)
-                return;
-        }
-        const ref = credentialRef(BUDDY_CREDENTIAL_REF);
+    /** 静默续期：refresh_token 换取；无 refresh_token 时明确报错（由命令提示重新登录）。 */
+    async refresh() {
+        const ref = credentialRef(this.credentialRefName);
         const resolved = await this.ctx.credentials.resolve(ref);
         if (!resolved)
             throw new Error('未配置凭据，请先登录');
@@ -159,7 +177,17 @@ export class BuddyAuth extends Service {
             throw new RefreshTokenExpiredError('无 refresh_token，请重新登录');
         }
         try {
-            await this.refreshInto(ref, credential);
+            // 第 4 个参数是本实例的产品：WorkBuddy 续期时必须带自己的 UA，
+            // 否则会以 CodeBuddy 的身份标识请求刷新接口。
+            const refreshed = await this.refreshCredential(credential);
+            // 登出竞态保护：在途刷新期间已 logout()/stop() 时，跳过凭据回写与调度武装，
+            // 避免已登出的凭据被在途刷新复活。
+            if (!this.active)
+                return;
+            await this.ctx.credentials.set(ref, JSON.stringify(refreshed));
+            this.refreshTokenInvalid = false;
+            this.lastRefreshError = undefined;
+            this.scheduleRefresh();
         }
         catch (error) {
             // 手动 refresh()（或 llm-adapter 触发）遇 refresh_token 失效同样更新状态，
@@ -170,46 +198,14 @@ export class BuddyAuth extends Service {
         }
     }
     /**
-     * 刷新账号池中"下一个可用账号"的凭据，并写回该账号自身的 credentialRef。
+     * 用给定凭据换新令牌并合并字段（不触碰存储、调度器与错误状态）。
      *
-     * @returns 是否刷新了某个池内账号（false 表示池内无可用/可刷新账号）。
+     * 抽出来供 {@link refresh} 与 {@link refreshAccountCredential} 共用，
+     * 避免两处各写一遍「换 token → 合并字段」而逐渐分叉。
      */
-    async refreshPoolAccount(pool) {
-        const available = await pool.getAvailableAccount('buddy', '');
-        if (!available)
-            return false;
-        const credential = available.credential;
-        if (!isRefreshable(credential))
-            return false;
-        const ref = credentialRef(available.entry.credentialRef);
-        try {
-            await this.refreshInto(ref, credential);
-            const expiresAt = credentialExpiresAtMs(credential);
-            await pool.updateAccount(available.entry.id, {
-                refreshable: true,
-                ...expiresAt === undefined ? {} : { expiresAt },
-            });
-        }
-        catch (error) {
-            if (error instanceof RefreshTokenExpiredError) {
-                this.markRefreshTokenInvalid();
-                try {
-                    await pool.updateAccount(available.entry.id, { refreshable: false });
-                }
-                catch { /* 忽略池更新失败，不掩盖原始错误 */ }
-            }
-            throw error;
-        }
-        return true;
-    }
-    /** 用 refresh_token 换取新令牌并写回指定 ref（含登出竞态保护）。 */
-    async refreshInto(ref, credential) {
-        const token = await refreshToken(credential, this.fetchImpl);
-        // 登出竞态保护：在途刷新期间已 logout()/stop() 时，跳过凭据回写与调度武装，
-        // 避免已登出的凭据被在途刷新复活。
-        if (!this.active)
-            return;
-        const refreshed = {
+    async refreshCredential(credential) {
+        const token = await refreshToken(credential, this.fetchImpl, undefined, this.product);
+        return {
             ...credential,
             access_token: token.accessToken,
             refresh_token: token.refreshToken,
@@ -220,20 +216,67 @@ export class BuddyAuth extends Service {
             // 后端未返回 domain 时保留原值。
             ...token.domain.length > 0 ? { domain: token.domain } : {},
         };
-        await this.ctx.credentials.set(ref, JSON.stringify(refreshed));
-        this.refreshTokenInvalid = false;
-        this.lastRefreshError = undefined;
-        this.scheduleRefresh();
     }
     /**
-     * 批量续期所有 buddy 账号。
-     * 遍历 pool 中 enabled + refreshable 的 buddy 账号，逐一续期。
-     * 单账号失败不影响其他账号。
+     * 按凭据 ref 续期**指定账号**的凭据。
+     *
+     * 与 {@link refresh} 的区别（这是修复既有缺陷的关键）：
+     * - `refresh()` 读写的是本实例的**默认单凭据 ref**（如 `BUDDY_ACCESS_TOKEN`），
+     *   而 Jet Hub 的账号卡片对应的是 `BUDDY_ACCOUNT_XXX` ——
+     *   用 `refresh()` 去刷账号池里的账号，实际刷的是另一个凭据；
+     * - 本方法也**不触碰** `refreshTokenInvalid` / `lastRefreshError` / 调度器：
+     *   那些状态属于「单凭据路径」，被多账号操作污染会让 UI 显示错误的失效提示。
+     *
+     * ⚠️ **必须回写账号池的 `expiresAt`**（issue !IKIRTT）：UI 卡片读的是池值，
+     * 只更新凭据会让「已过期」的红字在续期成功后依然挂着，用户无处自救。
+     */
+    async refreshAccountCredential(refName, pool, accountId) {
+        const ref = credentialRef(refName);
+        const resolved = await this.ctx.credentials.resolve(ref);
+        if (!resolved)
+            throw new Error('凭据未配置');
+        const credential = parseCredential(resolved.value);
+        if (!credential)
+            throw new Error('凭据解析失败');
+        if (!isRefreshable(credential)) {
+            throw new RefreshTokenExpiredError('无 refresh_token，请重新登录');
+        }
+        const refreshed = await this.refreshCredential(credential);
+        await this.ctx.credentials.set(ref, JSON.stringify(refreshed));
+        await syncAccountExpiry({
+            pool,
+            provider: this.product.id,
+            credential: refreshed,
+            accessors: BUDDY_EXPIRY_ACCESSORS,
+            accountId,
+            tag: `[${this.product.id}]`,
+            warn: (message) => this.ctx.logger?.warn?.(message),
+        });
+    }
+    /**
+     * 批量续期本产品的所有账号。
+     *
+     * **包含已停用账号**（只按 `refreshable` 过滤）。
+     *
+     * 为什么不能跳过停用账号（真实缺陷）：停用只应影响「账号池的自动选号」，
+     * 不该让凭据烂掉。早期实现有 `if (!entry.enabled ...) continue`，于是停用
+     * 一段时间后 refresh_token 过期，用户重新启用时拿到的是一个死凭据 ——
+     * 表现为「账号显示凭证过期」且**无法自动恢复**，只能重新登录。
+     * 更糟的是停用账号仍会出现在 Jet Hub 里并参与积分领取，于是点「一键领取」
+     * 时用过期凭据打腾讯接口，服务端回 HTML 错误页 → 前端报
+     * `Unexpected token '<'`。续期不该依赖「是否参与自动选号」。
+     *
+     * 单账号失败不影响其他账号，但失败**必须留日志**：静默的实现会让账号
+     * 在 UI 上永远显示「可续期」却刷不动，用户与开发者都拿不到线索。
+     *
+     * ⚠️ **lead-time 过滤**（issue !IKIRTT）：距过期不足 1 小时才发续期请求，
+     * 跳过的账号只做有效期对账。详见 `refreshAccountWithReconcile`。
      */
     async refreshAll(pool) {
-        const accounts = await pool.listAccounts('buddy');
+        const accounts = await pool.listAccounts(this.product.id);
         for (const entry of accounts) {
-            if (!entry.enabled || !entry.refreshable)
+            // 只跳过「不可续期」的账号；enabled 与续期无关（见方法注释）。
+            if (!entry.refreshable)
                 continue;
             try {
                 const ref = credentialRef(entry.credentialRef);
@@ -247,22 +290,17 @@ export class BuddyAuth extends Service {
                     await pool.updateAccount(entry.id, { refreshable: false });
                     continue;
                 }
-                const token = await refreshToken(credential, this.fetchImpl);
-                const refreshed = {
-                    ...credential,
-                    access_token: token.accessToken,
-                    refresh_token: token.refreshToken,
-                    expires_at: token.expiresAt,
-                    refresh_expires_at: token.refreshExpiresAt,
-                    token_type: token.tokenType,
-                    scope: token.scope,
-                    ...token.domain.length > 0 ? { domain: token.domain } : {},
-                };
-                await this.ctx.credentials.set(ref, JSON.stringify(refreshed));
-                const expiresAt = credentialExpiresAtMs(refreshed);
-                await pool.updateAccount(entry.id, {
-                    expiresAt: expiresAt ?? undefined,
-                    refreshable: isRefreshable(refreshed),
+                await refreshAccountWithReconcile({
+                    pool,
+                    provider: this.product.id,
+                    tag: `[${this.product.id}]`,
+                    accountId: entry.id,
+                    credential,
+                    accessors: BUDDY_EXPIRY_ACCESSORS,
+                    current: entry,
+                    refresh: (c) => this.refreshCredential(c),
+                    save: (c) => this.ctx.credentials.set(ref, JSON.stringify(c)),
+                    warn: (message) => this.ctx.logger?.warn?.(message),
                 });
             }
             catch (error) {
@@ -273,6 +311,12 @@ export class BuddyAuth extends Service {
                     catch {
                         // 忽略 updateAccount 本身的错误
                     }
+                    this.ctx.logger?.warn?.(`[${this.product.id}] 账号 ${entry.id} 的 refresh_token 已失效，`
+                        + '已标记为不可续期（需重新登录）');
+                }
+                else {
+                    this.ctx.logger?.warn?.(`[${this.product.id}] 账号 ${entry.id} 续期失败：`
+                        + `${error instanceof Error ? error.message : String(error)}`);
                 }
                 // 单账号失败不中断循环
             }
@@ -283,7 +327,7 @@ export class BuddyAuth extends Service {
         // 先置 inactive，再清凭据：在途刷新完成后不得回写/重新武装调度。
         this.active = false;
         this.scheduler.stop();
-        await this.ctx.credentials.unset(credentialRef(BUDDY_CREDENTIAL_REF));
+        await this.ctx.credentials.unset(credentialRef(this.credentialRefName));
     }
     /** 停止刷新调度（不清理凭据）。 */
     stop() {
@@ -292,7 +336,7 @@ export class BuddyAuth extends Service {
     }
     /** 启动时若已有可刷新凭据则安排续期（由 apply 调用）。 */
     scheduleRefresh() {
-        void this.ctx.credentials.resolve(credentialRef(BUDDY_CREDENTIAL_REF)).then((resolved) => {
+        void this.ctx.credentials.resolve(credentialRef(this.credentialRefName)).then((resolved) => {
             if (!resolved)
                 return;
             const credential = parseCredential(resolved.value);
@@ -305,7 +349,7 @@ export class BuddyAuth extends Service {
     }
     /** 从存储重载凭据，返回是否已过期（供 UI 判断是否需要提示重新登录）。 */
     async checkExpired() {
-        const resolved = await this.ctx.credentials.resolve(credentialRef(BUDDY_CREDENTIAL_REF));
+        const resolved = await this.ctx.credentials.resolve(credentialRef(this.credentialRefName));
         if (!resolved)
             return true;
         const credential = parseCredential(resolved.value);
@@ -316,25 +360,67 @@ export class BuddyAuth extends Service {
      * 失败或未登录时返回空数组（调用方回退到内置列表）。
      *
      * 优先使用账号池中的可用账号；无账号池或池为空时回退到固定凭据 ref。
+     *
+     * **关键**：两处调用都必须把 `this.product` 传给 `fetchModels`，否则
+     * WorkBuddy 实例（Task 7 的 `fetchRemoteModels: () => workbuddy.fetchModels(pool)`）
+     * 会以 `X-Product-Code: codebuddy` + CodeBuddy 的 UA 请求 /v3/config，
+     * 即携带另一个产品的身份标识。
      */
     async fetchModels(pool) {
         // 优先账号池
         if (pool) {
-            const available = await pool.getAvailableAccount('buddy', '');
+            const available = await pool.getAvailableAccount(this.product.id, '');
             if (available)
-                return fetchModels(available.credential, this.fetchImpl);
+                return fetchModels(available.credential, this.fetchImpl, undefined, this.product);
         }
-        const resolved = await this.ctx.credentials.resolve(credentialRef(BUDDY_CREDENTIAL_REF));
+        const resolved = await this.ctx.credentials.resolve(credentialRef(this.credentialRefName));
         if (!resolved)
             return [];
         const credential = parseCredential(resolved.value);
         if (!credential)
             return [];
-        return fetchModels(credential, this.fetchImpl);
+        return fetchModels(credential, this.fetchImpl, undefined, this.product);
     }
     /** 注入的 fetch（测试用）；默认为全局 fetch。 */
     get fetchImpl() {
         return this.options.fetcher ?? fetch;
     }
+}
+/**
+ * 构造腾讯系（buddy / workbuddy）适配器的 `refresh` 回调。
+ *
+ * ⚠️ **必须刷新 `resolveCredential` 实际用到的那一个账号**，而不是
+ * {@link BuddyAuth.refresh} 读写的默认单凭据 ref（`BUDDY_ACCESS_TOKEN` /
+ * `WORKBUDDY_ACCESS_TOKEN`）。错配的后果是**整轮不可恢复的失败**
+ * （真实缺陷，2026-09-26 由用户报障定位：账号池里 5 个 workbuddy 账号、
+ * 凭据全部有效，却一直报「未配置凭据，请先登录」）：
+ *
+ * 1. Jet Hub 的登录入口只写 `WORKBUDDY_ACCOUNT_XXX`，**从不写**那个固定
+ *    ref —— 于是适配器在 `buddy-adapter.ts` 的 401/403 分支调 `refresh()`
+ *    时，本类 `refresh()` 里的 `resolve` 恒为 null，抛
+ *    「未配置凭据，请先登录」。该文案**完全是误导**：账号池里凭据齐全。
+ * 2. 那个 401/403 分支在刷新后即返回（修复前），**不走**账号轮换 ——
+ *    池里其余可用账号一个也用不上。
+ * 3. 刷新抛错前没有写回任何凭据 → 下一轮仍取池首账号 → 再次 401 →
+ *    再次同一条死路，表现为「中断后继续 goal 永远复现同一错误」的
+ *    **自锁**，重试与重启都无效。
+ *
+ * 池内无账号时才回退到 {@link BuddyAuth.refresh}（单凭据路径，供未迁移的
+ * 老数据）。与 LobsterAI / Qoder / TRAE 的既有实现同形。
+ */
+export function createPoolRefresh(pool, productId, auth) {
+    return async () => {
+        const available = await pool.getAvailableAccount(productId, '');
+        // ⚠️ 必须传 `pool` + `entry.id`（issue !IKIRTT）：这条是**发消息途中**按需续期
+        // 的路径（比账号卡片点「刷新」触发得频繁得多），不回写有效期就会让 UI 继续
+        // 挂着「已过期」—— 早先七个 provider 的 `refreshAccountCredential` 没有
+        // 回写能力时这里也无从传起，现在补全。
+        if (available) {
+            await auth.refreshAccountCredential(available.entry.credentialRef, pool, available.entry.id);
+        }
+        else {
+            await auth.refresh();
+        }
+    };
 }
 //# sourceMappingURL=buddy-auth.js.map

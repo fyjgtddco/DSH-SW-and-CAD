@@ -120,7 +120,8 @@ export declare function githubTargetAtCommit(spec: string, sha: string): string 
  *
  * @param name - installed package name.
  * @param spec - the dependency spec from package.json, or the install target.
- * @returns the stable key, or null when the spec is not github-hosted.
+ * @returns the stable key, or null when the spec is not a git source pnpm
+ *   installs as one (an npm name, a local path, the scp-like `git@host:` form).
  */
 export declare function gitAllowBuildsKey(name: string, spec: string): string | null;
 /**
@@ -143,6 +144,7 @@ export declare function gitAllowBuildsKey(name: string, spec: string): string | 
  * @param sha - the commit the install will actually fetch.
  * @returns the key, or null when the spec is not github-hosted.
  */
+export declare function codeloadAllowBuildsKey(name: string, spec: string, sha: string): string | null;
 /**
  * The pinned allowBuilds key for a NON-GitHub git source — the other half of
  * the pair `codeloadAllowBuildsKey` gives GitHub, for the same reason (#285):
@@ -158,7 +160,6 @@ export declare function gitAllowBuildsKey(name: string, spec: string): string | 
  * stable key and never instead of it.
  */
 export declare function pinnedGitAllowBuildsKey(name: string, spec: string, sha: string): string | null;
-export declare function codeloadAllowBuildsKey(name: string, spec: string, sha: string): string | null;
 /**
  * The pnpm install target for a registry entry. Repo-verified npm packages
  * win, followed by author-supplied prebuilt GitHub Release tarballs; both avoid

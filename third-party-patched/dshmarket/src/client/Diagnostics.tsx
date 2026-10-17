@@ -104,6 +104,14 @@ interface OrderConflict {
   reason: string
 }
 
+/** Mirrors ResidualDirectory in src/check.ts. */
+interface ResidualDirectory {
+  name: string
+  path: string
+  kind: 'incomplete-package' | 'tmp-directory'
+  declared: boolean
+}
+
 /** Mirrors CheckReport in src/check.ts. */
 interface CheckReport {
   profile: string
@@ -121,6 +129,12 @@ interface CheckReport {
   duplicateNames?: Array<{ name: string; layers: string[]; count: number }>
   /** #98 opt: LOOT-style suggested community order satisfying every rule. */
   suggestedOrder?: { ok: true; order: string[] } | { ok: false; cycle: string[] } | null
+  /**
+   * Leftover directories: an incomplete package (no readable `package.json`)
+   * and pnpm's `<name>_tmp_<pid>_<n>` staging directories (#663). Not a boot
+   * failure — informational, and the only place that names what is on disk.
+   */
+  residuals?: ResidualDirectory[]
 }
 
 /**
@@ -798,6 +812,29 @@ export function Diagnostics(props: { t: Translate }) {
               <code className={css.diagVal}>{orphan.id}</code>
               <span className={css.nm}>{orphan.layer}</span>
               <span className={css.spec}>{orphan.reason}</span>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* Leftovers (#663). Informational: nothing here stops a boot, and the
+          user cannot see any of it from the profile's package.json. */}
+      <Section
+        title={t('checkResiduals')}
+        count={report.residuals?.length ?? 0}
+        empty={t('checkResidualsEmpty')}
+        problem={false}
+        overview={report.residuals?.[0]?.path}
+      >
+        <p className={css.panelNote}>{t('checkResidualsHint')}</p>
+        <div className={css.diagList}>
+          {(report.residuals ?? []).map(residual => (
+            <div key={residual.path} className={css.diagRow}>
+              <span className={css.nm}>{residual.name}</span>
+              <span className={css.spec}>
+                {t(residual.kind === 'tmp-directory' ? 'checkResidualTmp' : 'checkResidualIncomplete')}
+              </span>
+              <code className={css.diagVal}>{residual.path}</code>
             </div>
           ))}
         </div>

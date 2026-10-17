@@ -2493,13 +2493,130 @@ def _image_ref_hint(task_desc, state=None):
     }
 
 
+def _mode_confirm_message(task_desc, state=None):
+    r"""【模式二新流程】第一步的题面：确认模式 + 并行策略 + 是否 AI 自主。
+
+    ══ 为什么必须有这一步（用户需求原文）════════════════════════════════════
+    用户要求：
+      「第一步是变成 AI 在收到用户指令的时候，流程大概变为确认模式
+        （模式二：大型机械组装），先问是并行还是单行，问是是否为 AI 自主设计
+        （即前期三大问题中的后俩个问题），然后确认之后，直接开一个子代理
+        去通过这个步骤（称为总计子代理）」
+
+    也就是说：**原流程的"第一步"（多子代理并行建零件）及其后面全部后移一位**，
+    新的第一步就是本函数返回的内容 —— 确认模式 + 固定两问。
+
+    ⚠️ 历史教训：本模块曾只把"题数校验"接进 provide_context，却**没有改 init**
+    —— 于是 init 仍返回"第 0 题参数需求强度"，用户看到的行为与改造前完全一样
+    （实测反馈："问需求也是和之前的一模一样"）。因此这里必须是 init 的返回内容。
+    """
+    nl = chr(10)
+    return nl.join([
+        "=== 设计任务确认（第 1 步 / 共 3 步：模式与策略）===",
+        "任务描述: %s" % (task_desc or ""),
+        "",
+        "【模式确认】",
+        "  本次按【模式二 · 大型复杂器械/多零件装配体】流程执行：",
+        "  主对话（大屋）编排多个子代理（小屋），每个小屋独立建模；",
+        "  由【总计子代理】先按十阶段流水线分析，并决定本轮开几个子代理。",
+        "  （零件数量不再固定为 3 个 —— 由总计子代理的分析结论决定。）",
+        "",
+        "请依次用系统问题询问用户以下【两项固定问题】（题面由代码固定，不可改写）：",
+        "  ① 并行策略（D / E）",
+        "       D = 部分小屋并行（按波次分批启动）",
+        "       E = 单小屋串联（一次一个房间，完成后开下一个）",
+        "  ② 搭建方式（A / B / C）—— 即『是否 AI 自主设计』",
+        "       A = 完全自主搭建（AI 自主决策，按门禁波次调度）",
+        "       B = 部分自主搭建（关键节点询问）",
+        "       C = 步步确认（每个零件参数表逐件确认后再建模）",
+        "",
+        "⚠️ 这两问是【两个独立问题】：可以先问并行策略、再问搭建方式。",
+    ])
+
+
+def _extract_choice_parallel(text):
+    r"""从用户对第一步的自由回答里解析出 (搭建方式 A/B/C, 并行策略 D/E)。
+
+    宽松匹配（用户在自然语言里写了 A/D 等字母即可），解析不出就返回 None，
+    由调用方决定是"继续（后续 select 再兜底校验）"还是提示。
+    注意：**不在此处 fail-closed** —— 真正的强制点在 select 的参数校验，
+    这里只做"尽量预填"，避免把流程卡死。
+    """
+    import re as _re
+    t = str(text or "")
+    choice = None
+    parallel = None
+    # 搭建方式：A/B/C（避免误匹配英文单词里的字母，要求独立出现）
+    for m in _re.finditer(r"(?:^|[^A-Za-z0-9])([ABCabc])(?![A-Za-z0-9])", t):
+        c = m.group(1).upper()
+        if c in ("A", "B", "C"):
+            choice = c
+            break
+    # 并行策略：D/E
+    for m in _re.finditer(r"(?:^|[^A-Za-z0-9])([DEde])(?![A-Za-z0-9])", t):
+        c = m.group(1).upper()
+        if c in ("D", "E"):
+            parallel = c
+            break
+    # 中文兜底
+    if parallel is None:
+        if "并行" in t and "串" not in t:
+            parallel = "D"
+        elif "串行" in t or "单小屋" in t or "串联" in t:
+            parallel = "E"
+    if choice is None:
+        if "完全自主" in t:
+            choice = "A"
+        elif "部分自主" in t:
+            choice = "B"
+        elif "步步确认" in t or "逐件确认" in t:
+            choice = "C"
+    return choice, parallel
+
+
+def _ask_depth_question(task_desc):
+    r"""第 2 步：强需求 / 弱需求（原第 0 题，但在新流程里排到模式确认之后）。"""
+    nl = chr(10)
+    return nl.join([
+        "=== 设计任务确认（第 2 步 / 共 3 步：参数需求强度）===",
+        "任务描述: %s" % (task_desc or ""),
+        "",
+        "【参数需求强度】本次设计是否需要严格把关参数"
+        "（载荷/尺寸/公差/材料都要有据可依）？",
+        "  可选：",
+        "    · 强需求：需要严格校核，参数要有设计依据（提问数允许 10 ~ 50 题）",
+        "    · 不强：先出大致结构即可，细节由你按经验定（提问数允许 5 ~ 10 题）",
+        "",
+        "⚠️ 题数区间由代码硬性校验（mode2_flow.validate_question_budget）：",
+        "   强需求 10~50、弱需求 5~10（**可以恰好等于上下界**），超界或不足都会被拒绝。",
+        "⚠️ 并且【取消了一股脑全问】：改为 AI 分析到需要时才按需提问。",
+    ])
+
+
+
 def cmd_init(task_desc):
-    """【问题2 修复】门禁第一步只问 1 题（参数需求强度），不再一次抛 17 题。
+    r"""【模式二新流程 · 第一步】确认模式 + 固定两问（并行策略 / 是否 AI 自主）。
+
+    ══ 流程已重排（用户需求）════════════════════════════════════════════════
+    旧的「第一步」= 多子代理并行建零件 —— 现在**后移一位**成为第二步。
+    新的第一步 = 本函数返回的内容：
+        ① 确认模式（模式二 · 大型机械组装）
+        ② 问「并行还是串行」（D/E）
+        ③ 问「是否 AI 自主设计」（A/B/C）—— 即"前期三大问题"的后两个
+
+    随后：
+        第 2 步 → 强需求 / 弱需求（题数区间 10~50 / 5~10）
+        第 3 步 → 启动【总计子代理】按十阶段流水线分析，AI 按需提问
+        第二步（原第一步）→ 多子代理并行建零件（数量由总计子代理决定）
+
+    ⚠️ 实测教训：只把题数校验接进 provide_context、却没改 init，
+       用户看到的『第一步』仍是"参数需求强度"，反馈"和之前一模一样"。
+       所以**第一步必须在 init 的返回值里**，不能只写文档。
 
     ── 【C4 修复】对"进行中的任务"加保护，防止误调 init 把流程打回起点 ──
-    测试反馈原文：误调一次 init 把 step 打回 depth_asked，
-      导致 17 题被重复问、且再也回不到总装确认态（因为 confirm-assembly
-      要求 step==user_selected，而 step 已被改成 depth_asked）→ 流程卡死。
+    测试反馈原文：误调一次 init 把 step 打回起点，
+      导致问题被重复问、且再也回不到总装确认态（因为 confirm-assembly
+      要求 step==user_selected，而 step 已被改成提问态）→ 流程卡死。
     修复策略：
       · 若当前任务已走过 select（step 属于 user_selected/mechanics_done 等
         "已推进"状态），或已有房间记录 → 判定为"进行中"。
@@ -2598,6 +2715,58 @@ def cmd_init(task_desc):
     #   此时 _in_progress 判定不成立 → 新任务被放行 → 两个任务同时抢 SW API。
     # 这是一条真实的缺口（测试用例 TEST4 暴露）。
     # 修复：只要有活着的房间且未加 --force，一律拒绝 init，并明确告知是谁在跑。
+    #
+    # ══ ★【实测缺陷 · 2026-10-13】僵尸房间会把新流程永久挡在门外 ═══════════
+    # 现场：安装副本里残留 4 个旧流程房间（结构件/传动机构/壳体机架/支撑结构），
+    #   心跳约 486s、**无任何产物、无子代理**，却因 SW_STALE_GRACE=600（10 分钟
+    #   宽限期）仍被 residue-check 判为 running_unverified → _alive_live 非空
+    #   → init 被 INIT_BLOCKED_ALIVE_SUBAGENTS 拒绝。
+    # 后果（用户实测反馈）："总计子代理没用出来"，AI 无法进入新流程，
+    #   只能退回旧路径 —— 表现得"改造完全没生效"。
+    #
+    # 判定修正：只有【真的可能还在干活】的房间才算活。判据（三选一即算活）：
+    #   ① 有子代理登记（subagents 里能查到该房间）；
+    #   ② 有产物落盘（该房间最近有 DSH_* 文件）；
+    #   ③ 心跳非常新鲜（< 60s，说明刚刚还在上报）。
+    # 三者都不满足 → 判为僵尸，允许自动清理并放行 init（这正是它该走的路）。
+    def _room_maybe_working(x):
+        try:
+            room = x.get("room") or ""
+            detail = str(x.get("detail") or "")
+            # ① 有子代理登记
+            _subs = state.get("subagents") or {}
+            if room and room in _subs:
+                return True
+            # ② 有产物（detail 里会写 产物=True/False）
+            if "产物=True" in detail:
+                return True
+            # ③ 心跳非常新鲜（detail 形如 心跳=12.3s）
+            import re as _re
+            _m = _re.search(r"心跳=([\d.]+)s", detail)
+            if _m:
+                try:
+                    if float(_m.group(1)) < 60.0:
+                        return True
+                except Exception:
+                    pass
+            return False
+        except Exception:
+            return True      # 判定异常时保守认为"可能在工作"，不误杀
+
+    _alive_real = [x for x in _alive_live if _room_maybe_working(x)]
+    _zombies = [x for x in _alive_live if x not in _alive_real]
+
+    if _zombies and not _force_now:
+        # 全是僵尸 → 自动清理后放行；混合 → 只清僵尸、保留真活的
+        try:
+            _residue_check(auto_clean=True)
+            _residue_cleaned = True
+            state = load_state()
+            _step_now = str(state.get("step") or "")
+        except Exception:
+            pass
+        _alive_live = _alive_real
+
     if _alive_live and not _force_now:
         return {
             "ok": False,
@@ -2605,6 +2774,8 @@ def cmd_init(task_desc):
             "step": _step_now,
             "alive_subagents": [x.get("detail") or x.get("room") for x in _alive_live],
             "alive_count": len(_alive_live),
+            "zombies_cleaned": ([x.get("room") for x in _zombies]
+                                if _zombies else []),
             "error": ("【开始前残留检测】检测到 %d 个仍在活动的子对话/房间，"
                       "拒绝为同一工作区开启新任务。" % len(_alive_live)),
             "message": ("上一轮任务的房间仍在运行（有新鲜心跳/登记），"
@@ -2764,7 +2935,7 @@ def cmd_init(task_desc):
             _reset_mode_rooms()
         except Exception:
             pass
-    state["step"] = "depth_asked"
+    state["step"] = "mode_confirm_asked"
     state["task"] = task_desc
     state["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     # ── 【FL-02 修复】记录本次流程的起始时刻，供 select 做时序校验 ────────
@@ -2797,11 +2968,19 @@ def cmd_init(task_desc):
             os.remove(_mk)
     except Exception:
         pass
-    return {"ok": True, "step": "depth_asked", "task": task_desc,
-            # ── 【固定两问】此处只登记参数深度题；A/B/C 与 D/E 在
-            #   provide_context 末段以固定两问给出（见 choice_contract）。
-            "message": _ask_questions(task_desc, depth="ask",
-                                      context=(state.get("context") or "")),
+    return {"ok": True, "step": "mode_confirm_asked", "task": task_desc,
+            # ── 【模式二新流程 · 第一步】确认模式 + 并行策略 + 是否 AI 自主 ──
+            # 这是"流程重排"的落点：init 直接给出**新的第一步**，
+            # 而不是旧的"第 0 题参数需求强度"（那已后移到第 2 步）。
+            "first_step": "mode_confirm",
+            "message": _mode_confirm_message(task_desc, state),
+            "flow_order": [
+                "1. 确认模式（模式二）+ 并行策略 D/E + 是否 AI 自主 A/B/C  ← 本次",
+                "2. 强需求/弱需求（题数区间：强 10~50、弱 5~10）",
+                "3. 总计子代理按十阶段分析（AI 按需提问）",
+                "4. 多子代理并行建零件（数量由总计子代理决定）",
+                "5. 总装与验证 → 出图",
+            ],
             # ── 【残留检测】把"开始前清掉了什么"透明地报给用户 ──────────
             "residue_cleaned": bool(_residue_cleaned or _need_reset),
             "residue_actions": ((_residue or {}).get("actions") or []) if _residue_cleaned else (
@@ -2922,7 +3101,38 @@ def cmd_provide_context(context_text):
     step = state.get("step")
     nl = chr(10)
 
-    # ── 第一段：判定参数需求深度，返回第二段问题 ──────────────────────
+    # ── 第 1 段（模式二新流程的第一步）：收模式确认 + 并行策略 + 是否 AI 自主 ──
+    # 用户要求的第一步：确认模式 → 问并行/串行 → 问是否 AI 自主。
+    # 收到回答后，再进入第 2 步（强/弱需求），因此这里只做"记录 + 追问"。
+    if step == "mode_confirm_asked":
+        _choice_pre, _parallel_pre = _extract_choice_parallel(context_text)
+        state["mode_confirmed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        state["mode_confirm_answer"] = context_text or ""
+        state["mode2_confirmed"] = True
+        if _choice_pre:
+            state["prefill_choice"] = _choice_pre
+        if _parallel_pre:
+            state["prefill_parallel"] = _parallel_pre
+        # 第 1 步的提问时刻 → 满足 select 的 FL-02 时序校验（depth_asked_ts）
+        state["depth_asked_ts"] = time.time()
+        state["step"] = "depth_asked"
+        save_state(state)
+        return {
+            "ok": True,
+            "step": "depth_asked",
+            "mode_confirmed": True,
+            "parsed": {"choice": _choice_pre, "parallel": _parallel_pre},
+            "message": _ask_depth_question(state.get("task")),
+            "next_command": ("请把上面的【参数需求强度】问给用户；用户回答后再次调用：\n"
+                             "  python \"<工程模式根目录>\\tools\\workflow_gate.py\" "
+                             "provide_context \"<强需求/弱需求的回答原文>\"\n"
+                             "⚠️ 是命令行脚本，不是 DSH 工具（BUG-03）。"),
+            "note": ("已确认模式二。解析到的预选项："
+                     "搭建方式=%s、并行策略=%s（若未解析出，select 时再显式给出即可）。"
+                     % (_choice_pre or "未识别", _parallel_pre or "未识别")),
+        }
+
+    # ── 第 2 段：判定参数需求深度，给出题数预算 + 按需提问指引 ──────────
     if step == "depth_asked":
         # ── 【问题1 修复】第0题由模型用系统问题问；此处据其回答定深度 ──
         depth = resolve_depth(context_text)
@@ -2942,8 +3152,13 @@ def cmd_provide_context(context_text):
         _spec2 = (question_spec_for(state.get("task"), state.get("context"))
                   if depth == "full"
                   else question_spec_lite(state.get("task"), state.get("context")))
-        # ── 【固定两问】末段一并给出 A/B/C 与 D/E 的固定问题 ────────────
-        _fixed_qs = _cc.questions_payload() if _cc is not None else _choice_qs_fallback()
+        # ── ★【已移除 · 流程重排】────────────────────────────────────────
+        # 原代码在此处产 `_fixed_qs`（A/B/C 搭建方式 + D/E 并行策略），
+        # 与 init 的 `_mode_confirm_message` **重复** → 用户被问了两遍
+        #   （实测反馈："A，B，C，D，E这俩个问题合集问了俩次，疑似是旧问题
+        #     没有删完"）。A/B/C + D/E 现在是【第 1 步 init 的职责】，
+        # 本段（第 3 步）不得再输出它们。故删除该行，保留说明以防回归。
+        #   _fixed_qs = _cc.questions_payload() if _cc is not None else _choice_qs_fallback()
 
         # ══ 【模式二新流程】把"题数"从写死的份数改为【区间 + 按需提问】══════
         # 用户口径：
@@ -2998,29 +3213,47 @@ def cmd_provide_context(context_text):
                          "禁止用正文文字代替提问。" % total),
             },
             "message": nl.join([
-                "已识别参数需求强度: 【%s】→ 接下来问 %d 题。"
-                % ("强需求" if depth == "full" else "不强", total),
+                "已识别参数需求强度: 【%s】→ 提问数必须落在 %d ~ %d 题之间。"
+                % ("强需求" if depth == "full" else "不强",
+                   (_budget["min"] if _budget else 10),
+                   (_budget["max"] if _budget else 50)),
                 "",
-                _ask_questions(state["task"], depth=depth,
-                               context=state.get("context")),
-            ] + ([
+                "─" * 62,
+                "【模式二新流程 · 第 3 步：启动总计子代理（不要再一股脑问题）】",
+                "─" * 62,
                 "",
-                "─" * 60,
-                "【模式二新流程 · 题数硬约束（代码强制）】",
-                "  · %s：允许 %d ~ %d 题（可以恰好等于上下界）。"
-                % (_budget["label"], _budget["min"], _budget["max"]),
-                "  · 取消「一股脑全问」：不得在分析之前把题全部抛出。",
-                "  · 改为【按需提问】：每道题必须先 begin_stage 该阶段，",
-                "    再调 mode2_flow.py ask \"<问题>\" --stage <阶段> --reason <为什么现在要问>。",
-                "  · 超上限直接拒绝；收尾时未达下限同样拒绝交付。",
-            ] if _budget else [
+                "★ 用户要求：『取消之前的一股脑全部问，交由 AI 在分析机械时，",
+                "  思考到那里，然后就问对应的问题』。因此：",
                 "",
-                "⚠️ 题数硬约束模块不可用：%s" % _m2err,
-            ])),
-            "next_command": ("请把上述 %d 题问给用户；用户回答后再次调用：\n"
+                "  1) 先启动【总计子代理】，让它按【十阶段流水线】分析本任务：",
+                "       TaskUnderstanding → FunctionalDecomposition → PhysicsReasoning",
+                "       → PrincipleSynthesis → MechanismSynthesis → RecursivePartReasoning",
+                "       → PartSynthesis → EngineeringValidation → DesignIteration",
+                "       → ExplainableDesignOutput",
+                "     推进阶段（必须按序，跳阶段会被拒）：",
+                "       python mode2_flow.py begin-stage TaskUnderstanding",
+                "",
+                "  2) 分析到【确实缺某个信息】时，才登记并提问（不允许开头就把题抛完）：",
+                "       python mode2_flow.py ask \"<问题>\" --stage <当前阶段> --reason \"<为什么现在要问>\"",
+                "     硬性约束：① 该阶段必须先 begin-stage；② 必须写理由；③ 总题数不超上界。",
+                "",
+                "  3) 总计子代理分析完后，用 set-subagent-plan 登记【本轮开几个子代理】：",
+                "       python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
+                "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
+                "     数量不再固定为 3 —— 由它按分析结论决定。",
+                "",
+                "  4) 同时固定增设【总理子代理】（统一尺寸、校验相邻一致性、汇总 docx）。",
+                "",
+                "查看进度：python workflow_gate.py stage-status",
+                "查看题数：python workflow_gate.py mode2 questions --final",
+            ]),
+            "question_budget": _budget,
+            "next_command": ("请按上面的【按需提问】流程推进：先启动总计子代理，"
+                             "分析到确实缺信息时再用 mode2_flow.py ask 提问。\n"
+                             "全部提问完成后，把用户回答汇总后调用：\n"
                              "  python \"<工程模式根目录>\\tools\\workflow_gate.py\" "
-                             "provide_context \"<第二段全部回答原文>\"\n"
-                             "⚠️ 是命令行脚本，不是 DSH 工具（BUG-03）。" % total),
+                             "provide_context \"<全部回答原文>\"\n"
+                             "⚠️ 是命令行脚本，不是 DSH 工具（BUG-03）。"),
             # ── 【模式二新流程】把下一步（总计子代理）也一并交代清楚 ────────
             "next_after_mechanics": (
                 "力学估算通过后，**第一步改为确认模式 + 固定两问（并行/单行、是否AI自主）**，"
@@ -3092,29 +3325,31 @@ def cmd_provide_context(context_text):
             "      并会在每个零件的参数表中标注。若后续发现参数不够，可随时补充，",
             "      C 模式（步步确认）下每个零件的参数表都会重新展示供你复核。",
         ])
-    # ── 【固定两问】A/B/C 与 D/E 由代码固定，模型必须原样询问 ────────────
-    # 这两问是【两个独立问题】：分两次问、或一次问两题都合法。
-    # 旧规则用 max_per_call=1 强制"每次只问一题"，把正常的
-    #   "连着问两次"也纳入题数校验，经常误判违规 —— 已按用户要求移除。
-    _fixed_qs = _cc.questions_payload() if _cc is not None else [
-        {"id": "build_mode", "question": "请选择搭建方式（A/B/C）",
-         "options": [{"label": "A"}, {"label": "B"}, {"label": "C"}]},
-        {"id": "parallel_mode", "question": "请选择并行策略（D/E）",
-         "options": [{"label": "D"}, {"label": "E"}]},
-    ]
+    # ── ★【已移除 · 流程重排】────────────────────────────────────────────
+    # 原代码在此处再次产出 A/B/C + D/E（mandatory_questions）。
+    # 但流程重排后，这两问已是【第 1 步 init】的职责：
+    #     init → _mode_confirm_message() 已问 A/B/C + D/E
+    #     provide_context #1 → 收答案
+    #     provide_context #2 → 强/弱需求
+    #     provide_context #3 → 总计子代理 + 按需提问（本段）
+    # 若此处再问一遍，用户会被问【两次】——
+    #   实测反馈："A，B，C，D，E这俩个问题合集问了俩次，疑似是旧问题没有删完"。
+    # 因此不再输出 mandatory_questions；改为回传"已收集到的选择"，
+    # 供调用方核对（若第 1 步没解析出来，这里提示用 select 显式给出）。
+    _collected_choice = state.get("prefill_choice")
+    _collected_parallel = state.get("prefill_parallel")
     return {"ok": True, "step": "mechanics_done", "task": state["task"],
             "param_depth": depth, "mechanics": m,
-            # ── 【固定两问】机器契约：问题与选项由代码固定 ──────────────
-            "mandatory_questions": _fixed_qs,
-            "mandatory_contract": {
+            # ── 【流程重排】A/B/C + D/E 已在第 1 步问过，此处只回传已收集值 ──
+            "choice_already_asked": True,
+            "collected_choice": _collected_choice,
+            "collected_parallel": _collected_parallel,
+            "choice_contract": {
                 "enforced": bool(_cc is not None),
-                "stage": "choice",
-                "mode": "by-question-id",
-                "required_questions": 2,
-                "must_use": "ask_user_question",
-                "rule": ("必须用系统问题询问【搭建方式 A/B/C】与【并行策略 D/E】；"
-                         "这两问是两个独立问题 —— 分两次问或一次问两题都可以，",
-                         "不存在\"合并即违规\"的判定。"),
+                "asked_at": "step1_mode_confirm",
+                "note": ("搭建方式 A/B/C 与并行策略 D/E 已在第 1 步（init）询问并收集；"
+                         "本步【不再重复提问】。若上一步未解析出，"
+                         "请在 select 时显式给出（如 select B,D）。"),
             },
             # 【BUG-07】把落盘路径与数值契约显式回传，便于自动化校验一致性
             "load_case_file": state.get("load_case_file"),
@@ -3923,6 +4158,41 @@ def cmd_select(choice, parallel=None, unknown=None):
     _po_written = write_part_ownership(state)
     _po_manifest = _po_written.get("manifest") if _po_written.get("ok") else None
 
+    # ══ ★【强制点】未登记子代理编制 → 拒绝放行创建小屋 ═══════════════════════
+    # 用户要求：「取消在第二段多个子代理固定三个，第二次该建多少个子代理
+    #           交由总计子代理分析应该开多少个」+「固定开一个总理子代理」。
+    # 若此处放行，就会用**代码默认房间表**（旧的 5 房间）继续，
+    #   总计子代理永远不启动 —— 实测就是"总计子代理没用出来"。
+    # 因此编制必须成为【前置条件】：没登记就拒绝，并给出可执行的下一步。
+    if _m2_block and not _m2_block.get("subagent_plan_ready"):
+        return {
+            "ok": False,
+            "gate": "MODE2_SUBAGENT_PLAN_REQUIRED",
+            "step": "mechanics_done",
+            "error": ("【模式二强制】尚未由【%s】登记子代理编制，"
+                      "拒绝放行创建建模小屋。" % (_m2mod.SUBPLAN_AUTHORITY
+                                                  if _m2mod else "总计子代理")),
+            "why": ("子代理数量不再固定 —— 必须由总计子代理先按十阶段流水线分析，"
+                    "再登记本轮要开几个房间、每个房间负责哪些零件。"
+                    "否则会退回代码默认房间表，改造等于没生效。"),
+            "subagent_plan": _m2_block,
+            "stages": (list(_m2mod.STAGES) if _m2mod else []),
+            "how": [
+                "1) 先启动【总计子代理】，按十阶段按序分析（跳阶段会被拒）：",
+                "     python mode2_flow.py begin-stage TaskUnderstanding",
+                "2) 分析到确实缺信息时才提问（不允许开头一股脑抛题）：",
+                "     python mode2_flow.py ask \"<问题>\" --stage <阶段> --reason \"<为什么现在问>\"",
+                "3) 分析完登记编制（decided_by 必须是『总计子代理』）：",
+                "     python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
+                "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
+                "4) 再回来执行 select（会自动追加固定的【总理子代理】）。",
+            ],
+            "plan_file": _m2_block.get("plan_file"),
+            "next_command": ("完成上述 1~3 步后，重新执行：\n"
+                             "  python \"<工程模式根目录>\\tools\\workflow_gate.py\" "
+                             "select %s,%s" % (choice, parallel)),
+        }
+
     return {
         "ok": True, "step": "user_selected", "choice": choice,
         "choice_label": config["label"], "parallel_mode": parallel,
@@ -3978,8 +4248,18 @@ def cmd_select(choice, parallel=None, unknown=None):
         #     汇总 docx；不一致交父代理干涉；
         #   · 建模小屋必须向总理上报三道防线凭据链接/尺寸/名称/相邻配合件。
         "subagent_plan": _m2_block,
-        # 未登记编制时把"下一步该干什么"显式摆出来（不阻断第一波，
-        # 但交付总闸会拦住 —— 见 mode2_flow.pre_delivery_check）
+        # ══ ★【实测缺陷修复 · 2026-10-13】未登记编制必须【真正拒绝】═══════
+        # 原实现只把 subagent_plan_required 置 true，注释写着"不阻断第一波，
+        #   但交付总闸会拦住" —— 这是**错的设计**，实测后果：
+        #     用户走完 init→provide_context×3 后直接 select，
+        #     select 返回 ok=true 并生成**旧的 5 个房间**
+        #     （结构件/传动机构/壳体机架/总装与验证/工程图输出），
+        #     流程当场跳到"建零件"阶段 → 总计子代理**永远不会被启动**，
+        #     十阶段分析、按需提问、编制登记全部落空。
+        #     用户实测反馈："总计子代理没用出来…其他的步骤都没有生效"。
+        # 正确做法：编制是**前置条件**，未登记就不得放行创建小屋
+        #   （fail-closed）。这样 AI 只能先跑总计子代理，
+        #   强制路径才真正成立。交付总闸的检查保留为第二道保险。
         "subagent_plan_required": bool(
             _m2_block and not _m2_block.get("subagent_plan_ready")),
         "prime_room": _prime_room,
@@ -4484,9 +4764,38 @@ def cmd_status():
             "ready": state.get("step") == "user_selected"}
 
 def cmd_reset():
+    r"""清空本轮流程状态。
+
+    ══ ★【实测缺陷修复 · 2026-10-13】reset 必须连 mode_state 的房间一起清 ══
+    原实现只重置 workflow_state（step/choice/…），**完全没碰 mode_state.json**。
+    实测后果（用户现场）：
+      · mode_state 里残留 9 个旧房间（结构件/验证房/物理深挖房/流程深挖房…），
+        其中若干标 active 但无子代理登记 → 被判定为【僵尸任务残留】；
+      · 于是 `reset` 之后 `init` **仍然被 ZOMBIE_DETECTED 拒绝**，
+        用户以为"重置了"，实际房间还在，新流程永远进不去；
+      · 这正是"旧问题没有删完"的根源。
+    修复：reset 同步调 mode_gate.py rooms-reset 清空房间/子代理/锁，
+      让 reset 真正回到"干净可开新任务"的状态。
+    """
     state = _fresh_state()
     save_state(state)
-    return {"ok": True, "step": "idle"}
+    _rooms_cleared = None
+    try:
+        import subprocess as _sp
+        _p = _sp.run([sys.executable, MODE_GATE_PATH, "rooms-reset"],
+                     capture_output=True, text=True, encoding="utf-8",
+                     errors="replace", timeout=20,
+                     creationflags=0x08000000 if sys.platform == "win32" else 0)
+        try:
+            _rooms_cleared = json.loads(_p.stdout or "{}").get("cleared_before")
+        except Exception:
+            _rooms_cleared = None
+    except Exception as _e:
+        _rooms_cleared = {"error": repr(_e)}
+    return {"ok": True, "step": "idle",
+            "mode_state_cleared": _rooms_cleared,
+            "note": ("已同时清空 mode_state 的房间/子代理/锁（原先只清 workflow_state，"
+                     "导致 reset 后仍被僵尸房间挡住 init）。")}
 
 def cmd_check():
     state = load_state()

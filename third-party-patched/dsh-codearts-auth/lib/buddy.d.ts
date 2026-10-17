@@ -37,8 +37,20 @@ export declare const CONFIG_PATH = "/v3/config";
 export declare const LOGIN_TIMEOUT_MS: number;
 /** 轮询间隔（1 秒，对齐 IDE 的 setTimeout(o,1e3)）。 */
 export declare const POLL_INTERVAL_MS = 1000;
-/** auth/state 请求超时（5 秒，对齐 IDE 的 timeout:5e3）。 */
-export declare const STATE_REQUEST_TIMEOUT_MS = 5000;
+/**
+ * auth/state 请求超时（10 秒）。
+ *
+ * ⚠️ 原为 5 秒（对齐 IDE 的 `timeout:5e3`），实测**不够**：Jet Hub 对
+ * WorkBuddy（国际版）点「+ 新建账号」时，本请求发往 `www.workbuddy.ai`，
+ * 用 Node 的 `fetch`（undici，与本插件运行时一致）连测 6 次稳定耗时
+ * **5860–7525 ms**，即每一次都会撞上 5 秒超时，用户侧表现为
+ * 「无法获取 WorkBuddy (国际版) 登录地址（Host 网络请求失败）」。
+ * 放宽到 10 秒后覆盖上述区间并留出余量。
+ *
+ * 该常量由 buddy / workbuddy 共用：放宽只影响「失败时多等 5 秒」，
+ * 不会拖慢 CodeBuddy（`copilot.tencent.com` 实测数百毫秒即返回）。
+ */
+export declare const STATE_REQUEST_TIMEOUT_MS = 10000;
 /** 其余控制面请求超时（token/account/refresh/config）。 */
 export declare const REQUEST_TIMEOUT_MS = 60000;
 /** token 尚未就绪（loopGetToken 中 continue 轮询）。 */
@@ -69,38 +81,6 @@ export declare const BUDDY_DEPLOYMENT_TYPE = "SaaS";
 export declare const AUTH_REFRESH_SOURCE = "ide-main";
 /** API 端点的裸域名（X-Domain 头的值）。 */
 export declare const API_DOMAIN = "copilot.tencent.com";
-/** 站点标识：`cn` = 国内站（copilot.tencent.com）；`intl` = 国际站（www.workbuddy.ai）。 */
-export type BuddyEdition = 'cn' | 'intl';
-/** 单个站点的上游参数。 */
-export interface BuddySiteProfile {
-    /** 站点标识（持久化到凭据的 edition 字段）。 */
-    key: BuddyEdition;
-    /** 控制台/UI 展示名。 */
-    label: string;
-    /** API 基础地址（无尾斜杠）。 */
-    base: string;
-    /** 裸域名（X-Domain 头的兜底值）。 */
-    host: string;
-    /** Origin / Referer 伪装来源（各站 Web 控制台）。 */
-    origin: string;
-    /** auth/state 的 platform 参数。 */
-    platform: string;
-    /** 登录命令等待授权完成的超时。 */
-    loginTimeoutMs: number;
-}
-/** 国内站 copilot.tencent.com。 */
-export declare const BUDDY_SITE_CN: BuddySiteProfile;
-/** 国际站 www.workbuddy.ai。 */
-export declare const BUDDY_SITE_INTL: BuddySiteProfile;
-/**
- * 归一化站点标识；空值/未知值回退国内站（与旧凭据兼容）。
- * 接受别名 international / global / workbuddy.ai。
- */
-export declare function normalizeBuddyEdition(value: unknown): BuddyEdition;
-/** 取得站点 Profile；未知/空值回退国内站。 */
-export declare function buddySiteProfile(edition: unknown): BuddySiteProfile;
-/** chat/completions 的完整 URL（按凭据所属站点路由）。 */
-export declare function buddyChatUrl(edition: unknown): string;
 /**
  * 持久化的 CodeBuddy 凭据。
  *
@@ -131,13 +111,6 @@ export interface BuddyCredential {
     enterprise_id?: string;
     /** 账户类型（"personal" / "enterprise"）。 */
     account_type?: string;
-    /**
-     * 站点标识：`cn`（国内站，默认）| `intl`（国际站 www.workbuddy.ai）。
-     *
-     * 缺失/未知值一律按国内站处理，因此旧凭据无需迁移即可继续使用。
-     * 刷新令牌、拉取模型与对话请求都据此路由到对应上游。
-     */
-    edition?: string;
 }
 /** auth/token 与 auth/token/refresh 响应的令牌数据。 */
 export interface BuddyToken {
@@ -180,13 +153,6 @@ export declare function jwtNickname(token: string): string;
 export declare function isExpired(credential: BuddyCredential): boolean;
 /** 凭据是否携带可静默续期的 refresh_token。 */
 export declare function isRefreshable(credential: BuddyCredential): boolean;
-/**
- * 取生效的 X-Domain：凭据自带的 domain 优先，缺失或空串时回退站点域名。
- *
- * 必须按**长度**判断而非 `??`/`||` 混用：后端在部分响应里把 domain 返回为
- * 空串，`'' ?? fallback` 仍得到 `''`，会让 X-Domain 变成非法空值。
- */
-export declare function domainOrDefault(credential: BuddyCredential): string;
 /** 构造基础请求头（X-Domain + User-Agent + 可选企业头）。 */
 export declare function credentialRequestHeaders(credential: BuddyCredential): Record<string, string>;
 /** 构造带 Bearer 令牌的认证请求头。 */
@@ -216,7 +182,7 @@ export declare function parseAccountData(data: unknown): BuddyAccount;
  * account.nickname → JWT.nickname → JWT.preferred_username。
  * 过期时间同理：token.expiresAt 为空时由 credentialExpiresAtMs 从 JWT exp 兜底。
  */
-export declare function buildCredential(token: BuddyToken, account: BuddyAccount, edition?: unknown): BuddyCredential;
+export declare function buildCredential(token: BuddyToken, account: BuddyAccount): BuddyCredential;
 /** 模型 ID → 人类可读显示名称；未知模型回退为 ID 本身。 */
 export declare function displayNameForModel(id: string): string;
 /** /v3/config 解析出的单个模型：id、展示名与远端声明的能力。 */
@@ -225,21 +191,135 @@ export interface BuddyRemoteModel {
     name: string;
     /** 上下文窗口（data.models[].maxInputTokens，模型自身配置）；远端未下发时缺省。 */
     contextWindow?: number;
+    /**
+     * 单次请求输出上限（data.models[].maxOutputTokens）。
+     *
+     * ⚠️ 这是**必须消费**的权威字段，不是仅供参考的元数据：适配器早期把它只当
+     * 「过滤补全模型」的判据（见 isChatModel），却从不下发到请求体，导致所有
+     * buddy / workbuddy 模型都退化成网关默认输出上限（实测 32000），大文件写入
+     * 与长回答会被截断成 `finish_reason: 'length'`。
+     *
+     * 实测（2026-09-19）各端点取值不完全一致：
+     * - 中国版 scoped `/console/enterprises/personal/models` → deepseek-v4.1-flash = 128000
+     * - 中国版 `/v3/config` → deepseek-v4.1-flash = 131072
+     * - 国际版 `/v3/config` → deepseek-v4.1-flash = 128000
+     * 与 `maxInputTokens` 同策略：采信实际命中的那个端点，不做跨端点取大。
+     */
+    maxOutputTokens?: number;
     /** 是否接受图片输入（data.models[].supportsImages）。 */
     supportsImages?: boolean;
+    /**
+     * 计费倍率（`data.models[].credits`）。
+     *
+     * 真实形态是**字符串**且格式不固定：`"x0.29"` / `"x0.03 credits"` / `""`（空）。
+     * 归一化后存**纯文本**（如 `"x0.29"`），不存数字——因为它只是展示用，
+     * 且带 ` credits` 后缀与空串两种退化形态，转数字会引入无谓的解析失败分支。
+     * 远端未下发或解析不出时缺省。
+     */
+    creditsRate?: string;
+    /**
+     * 促销后的实际倍率（`data.modelPromotions.discount.discountedCredits`）。
+     *
+     * 与 `creditsRate` 是**同族但独立**的两个字段：促销是全局活动（按模型 id
+     * 索引），活动结束后服务端会把它改成 `"0x"` 或移除。存在且非 `0x` 时才带上。
+     */
+    discountedCreditsRate?: string;
     /** 可选思考等级（data.models[].reasoning.supportedEfforts）；无等级可选的模型缺省。 */
     reasoningEfforts?: string[];
     /** 默认思考等级（data.models[].reasoning.defaultEffort）。 */
     defaultReasoningEffort?: string;
+    /**
+     * 是否被**某个 agent 引用**（即服务端声明「该模型可在对话里选择」）。
+     *
+     * ⚠️ 用途：`reconcileWithFallback` 是**白名单式重建**，不在产品兜底表里的
+     * id 会被丢弃。而两个端点下发的 id 集合不同 —— 实测 `hy4-preview-f`
+     * （新用户限时免费变体）**只由 `/v3/config` 下发**且**被 craft/ask/plan 引用**，
+     * 却不在兜底表里，于是被丢弃，用户看不到那个免费变体。
+     *
+     * 故用本标志把「服务端说可选」的模型保留下来；未声明的内部别名
+     * （如 `default`）不会被误留。
+     */
+    agentReferenced?: boolean;
 }
 /**
- * 从 /v3/config 响应解析模型列表（craft agent 的 models）。
+ * 归一化 `data.models[].credits` 为可展示的倍率文本。
  *
- * 响应结构：{data: {agents: [{name: "craft", models: ["auto", "hy4-preview", ...]}, ...],
- *                     models: [{id, name, maxInputTokens, supportsImages, reasoning: {...}}]}}
- * craft agent 的 models 是字符串 id 列表；各模型的上下文窗口与能力从 data.models[]
- * 按 id 查找（权威来源，对齐 deveco-code-rust parse_models_from_config）。
- * 排除 "auto"（自动选择，非真实模型）。解析失败时返回空数组，调用方回退内置列表。
+ * 真实形态（2026-09-19 实测，**字符串**而非数字）：
+ * - `"x0.29"` / `"x1.62"` —— 常态（**x 在前**）
+ * - `"x0.03 credits"` —— 早期 scoped 端点会带 ` credits` 后缀
+ * - `""` / 字段缺失 —— 无倍率信息（如 `auto` / `codewise-*`）
+ *
+ * 返回 `"x0.29"` 这类**纯展示文本**（统一成 `x` 前缀，与官方 UI 一致）。
+ * 解析不出时返回 undefined，**不回退成 `x1`**：编造倍率比不显示更糟。
+ */
+export declare function normalizeCreditsRate(value: unknown): string | undefined;
+/**
+ * 归一化 `modelPromotions[].discount.discountedCredits`。
+ *
+ * ⚠️ 与 {@link normalizeCreditsRate} **形态相反**：实测促销值是 `"0.50x"`
+ * （**x 在后**），而模型的 `credits` 是 `"x0.29"`（x 在前）。两者是同一后端
+ * 的两套写法，不能共用一个正则 —— 早期版本只认前缀，导致**促销价全部解析
+ * 失败且静默丢失**（单测直接暴露了这一点）。
+ *
+ * 另有一种已结束占位值 `"0x"`，归一化后是 `x0`，由调用方排除。
+ */
+export declare function normalizeDiscountedRate(value: unknown): string | undefined;
+/**
+ * 从 `data.modelPromotions` 提取「模型 id → **此刻生效的**促销价」映射。
+ *
+ * 真实结构（**数组**，不是对象；每项按 `modelIds` 关联，不是全局）：
+ * ```json
+ * [{ "kind": "discount", "enabled": true, "priority": 100,
+ *    "discount": { "discountedCredits": "0.50x", "displayMode": "strikethrough", "factor": 0.5 },
+ *    "badge": { "color": "#1E90FF", "label": "夜间折扣" },
+ *    "schedule": { "daily": [{ "start": "23:00", "end": "7:50" }], "timezone": "Asia/Shanghai" },
+ *    "modelIds": ["glm-5.2"] }]
+ * ```
+ *
+ * 四个必须处理的退化情形：
+ * - **时段未到 / 已过**（`schedule`）—— 跳过，见 {@link promotionActiveNow}；
+ * - **有效期已过**（`validFrom`/`validUntil`，如 `hy3` 的限时免费）—— 跳过；
+ * - `enabled: false` —— 已停用，跳过；
+ * - 同一模型命中多条 —— 取 `priority` 最高者。
+ *
+ * ⚠️ **`factor: 0` 是「免费」而非「活动已结束」**：实测 `hy4-preview` 的夜间活动
+ * 是 `{discountedCredits: "0x", displayMode: "replace", factor: 0}` —— 它**真的免费**。
+ * 早期实现把 `0x` 当哨兵丢弃，于是「夜间免费」永远不显示（用户报障
+ * 「hy4 preview 夜间 0，现在显示 0.29」）。**真正的「已结束」由有效期表达**。
+ * 作为防御：**无任何时间窗口**的 `factor: 0` 仍按「已结束占位」跳过 ——
+ * 免费额度必然是限时的，没有窗口的 `0x` 更可能是遗留占位。
+ */
+export declare function parsePromotions(record: Record<string, unknown>, now?: Date): Map<string, string>;
+/**
+ * 组合计费倍率的展示文案：有促销时标出促销价，否则只显示原价。
+ *
+ * 形态：`"x0.17→x0.50"`；无促销时 `"x0.03"`。
+ *
+ * 用箭头而非「（促销 x…）」：这段文案会被拼进**模型切换菜单的名字**里
+ * （见 buddy-adapter 的 displayNameFor），菜单宽度有限，箭头更短且一眼
+ * 看出折扣幅度。
+ */
+export declare function formatCreditsRate(rate: string | undefined, discounted: string | undefined): string | undefined;
+/**
+ * 从 /v3/config 响应解析可用的对话模型。
+ *
+ * 响应结构：{data: {agents: [{name: "craft", models: ["auto", ...]}, ...],
+ *                     models: [{id, name, maxInputTokens, supportsImages, reasoning: {...}}],
+ *                     productFeaturesConfig?: {ModelTrialBanner: {banners: [{targetModelId}]}}}}
+ *
+ * 解析策略（顺序即优先级）：
+ * 1. **craft agent 引用的模型** —— 主对话模型，排在最前（中国版由它列出
+ *    hy4-preview / glm-5.3 等具体 id）。
+ * 2. **data.models 中剩余的可对话模型** —— 国际版的 craft 只引用 5 个抽象别名
+ *    （default-model/fast-model/…），其余可用模型（如 o4-mini）只出现在
+ *    data.models 里；若只取 craft，这些模型会在选择器中消失。
+ * 3. **试用模型**（productFeaturesConfig.ModelTrialBanner）—— 例如国际版的
+ *    hy4-preview：它既不在 craft 列表也不在 data.models，仅由试用横幅下发，
+ *    但实测可正常调用，故一并加入。
+ *
+ * 过滤规则：跳过 `auto`（自动选择，非真实模型）、非对话用途的模型
+ * （`text-to-image` 标签）与补全/NES 等专用模型（id 前缀 nes- / completion-）。
+ * 解析失败时返回空数组，调用方回退内置列表。
  */
 export declare function parseModelsFromConfig(body: unknown): BuddyRemoteModel[];
 //# sourceMappingURL=buddy.d.ts.map

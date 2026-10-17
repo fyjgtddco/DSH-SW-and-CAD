@@ -1,0 +1,170 @@
+{
+  "step": "user_selected",
+  "task": "校内比赛轨迹小车（3D打印）：在4500x4500mm场地内按给定路线快速行驶并完成多组180°/S形转弯；含车架、车轮、转向/传动机构、电子舱；要求速度快、转弯灵活、全部3D打印可制作",
+  "context": "强需求 ①场地：白色纸板/地胶，摩擦系数约0.55；②引导：连续黑线巡线，线宽18mm；③尺寸上限350mm；④3D打印材料PETG，喷嘴0.4mm；⑤电池7.4V 2S；⑥动力电机N20减速电机；⑦转向：后轮双电机差速；⑧轮胎：外购65mm橡胶轮；⑨目标车速2 m/s；⑩主控：Arduino Uno/Nano",
+  "mechanics_result": {
+    "load_estimate": "500 N",
+    "safety_factor": 3.5,
+    "safety_factor_base": 2.5,
+    "process": "FDM 增材制造",
+    "anisotropy_factor": 0.8,
+    "safety_factor_note": "FDM 各向异性折减系数 0.80：层间强度按层内的 80% 计入，故要求安全系数由 2.5 提高到 3.5。",
+    "material_recommend": "PETG",
+    "scenario": "通用工业场景",
+    "notes": "额定载荷来源: 默认基准值（用户未给出载荷，请务必复核）；动载系数 ×1.0（static）；设计寿命 30 年（默认 30 年（用户未给出寿命，请复核））；动作频次 200000 次/年（默认按间歇运行估算（请复核））",
+    "nominal_load_n": 500.0,
+    "design_load_n": 500.0,
+    "impact_factor": 1.0,
+    "load_type": "static",
+    "load_source": "默认基准值（用户未给出载荷，请务必复核）",
+    "user_load_n": null,
+    "design_life_years": 30.0,
+    "cycles_per_year": 200000.0,
+    "load_is_estimate": true,
+    "material_source": "用户回答/任务描述中的材料选择（3D 打印材料库）",
+    "material_spec": {
+      "id": "PETG",
+      "name": "PETG",
+      "youngs_modulus_mpa": 2000.0,
+      "poissons_ratio": 0.37,
+      "yield_strength_mpa": 40.0,
+      "uts_mpa": 50.0,
+      "density_kg_m3": 1270.0,
+      "source": "workflow_gate.infer_material"
+    },
+    "task_type": "vehicle",
+    "task_type_label": "轮式车辆 / 小车",
+    "consistency_contract": "physics 载荷工况的 magnitude_n 必须等于 nominal_load_n（设计校核另乘 impact_factor，不得直接写 design_load_n 当额定值）"
+  },
+  "user_choice": "A",
+  "choice_detail": {
+    "label": "完全自主搭建",
+    "strategy": "parallel",
+    "detail": "full",
+    "desc": "AI自主决策"
+  },
+  "parallel_mode": "D",
+  "subagent_config": {
+    "rooms": [
+      [
+        "structure",
+        "structural"
+      ],
+      [
+        "transmission",
+        "structural"
+      ],
+      [
+        "electronics",
+        "structural"
+      ],
+      [
+        "总装与验证",
+        "assembly"
+      ],
+      [
+        "工程图输出",
+        "drafting"
+      ],
+      [
+        "总理子代理",
+        "prime"
+      ]
+    ],
+    "strategy": {
+      "parallel": true,
+      "ask_user_at": [],
+      "detail_level": "full",
+      "confirmation_required": false,
+      "confirm_part_token_required": false,
+      "note": "完全自主：小屋可直接建模，无需逐零件人工确认；但必须在报告里输出带量化设计依据的【零件参数表】。"
+    },
+    "parallel_mode": "parallel",
+    "total_rooms": 6,
+    "retry_policy": {
+      "retry_limit_per_part": 3,
+      "on_exceed": [
+        "跳过该零件并 room-report failed",
+        "降级为简化几何（如圆角代替复杂曲面）",
+        "上报主对话请求人工介入"
+      ],
+      "room_timeout_min": 45,
+      "note": "【Bug-19】单零件重试上限 3 次；房间软超时 45 分钟。超限必须 room-report failed 并交主对话决策，禁止无限重试拖死整波。"
+    },
+    "save_dirs": {
+      "work_dir": "C:\\Users\\j1877\\Desktop\\test\\20261017_225442_D40E4010",
+      "parts_dir": "C:\\Users\\j1877\\Desktop\\test\\20261017_225442_D40E4010\\parts",
+      "drawings_dir": "C:\\Users\\j1877\\Desktop\\test\\20261017_225442_D40E4010\\drawings",
+      "instruction": "★ 零件(.sldprt/.sldasm)一律保存到 parts_dir=C:\\Users\\j1877\\Desktop\\test\\20261017_225442_D40E4010\\parts；工程图保存到 drawings_dir=C:\\Users\\j1877\\Desktop\\test\\20261017_225442_D40E4010\\drawings。必须用这里的【绝对路径】，不要用相对路径、也不要存到 work_dir 之外。"
+    },
+    "save_dir_hint": "C:\\Users\\j1877\\Desktop\\test\\20261017_225442_D40E4010\\parts",
+    "rooms_source": "总计子代理（mode2_flow.set-subagent-plan）",
+    "rooms_rationale": "partition by functional domain; wave1 three modeling rooms parallel, wave2 assembly, wave3 drawing",
+    "room_parts": {
+      "structure": [
+        "底盘平台",
+        "电机座",
+        "前轮从动支架",
+        "防撞保险杠"
+      ],
+      "transmission": [
+        "后轮毂",
+        "传动轴",
+        "电机座加强筋"
+      ],
+      "electronics": [
+        "电子舱围板",
+        "电池仓",
+        "传感器支架",
+        "走线槽"
+      ],
+      "总装与验证": [
+        "整车装配体"
+      ],
+      "工程图输出": [
+        "各零件工程图",
+        "装配图"
+      ]
+    },
+    "prime_room": {
+      "name": "总理子代理",
+      "type": "prime",
+      "why": "【固定角色】统一规划尺寸、校验相邻零件尺寸一致性、汇总全部零件数据为 docx 交付；不一致时升级父代理干涉。",
+      "duties": [
+        "① 统一规划关键尺寸（给各建模小屋下发同一套尺寸口径）",
+        "② 接收各建模小屋上报：三道防线凭据链接 / 尺寸 / 名称 / 相邻配合零件",
+        "③ 校验相邻零件尺寸是否一致（调 part_registry.check_adjacency_consistency）",
+        "④ 发现不一致 → 标记 escalate_to_parent=true，交父代理做干涉处理",
+        "⑤ 持久维护零件数据台账（part_registry），支持按零件反查关联",
+        "⑥ 全部完成后汇总导出 docx，交主对话"
+      ]
+    }
+  },
+  "created_at": "2026-10-17 22:54:42",
+  "session_started_ts": 1792248882.9845066,
+  "depth_asked_ts": 1792248938.7371202,
+  "context_asked_ts": 1792248938.7371209,
+  "mechanics_done_ts": 1792249228.1214716,
+  "task_id": "20261017_225442_D40E4010",
+  "work_dir": "C:\\Users\\j1877\\Desktop\\test\\20261017_225442_D40E4010",
+  "assembly_confirmed": false,
+  "assembly_inputs": null,
+  "finished_at": null,
+  "param_depth": "full",
+  "mode_confirmed_at": "2026-10-17 22:55:28",
+  "mode_confirm_answer": "D,A",
+  "mode2_confirmed": true,
+  "prefill_choice": "A",
+  "prefill_parallel": "D",
+  "depth_answer": "强需求",
+  "load_case_file": "C:\\Users\\j1877\\.dsh\\.agent-presets\\engineering\\tools\\load_cases\\gate_load_case.json",
+  "mode2_flow": {
+    "confirmed_at": "2026-10-17 23:06:54",
+    "mode": "② 大型复杂器械/多零件装配体",
+    "ai_autonomy": "A",
+    "parallel": "D",
+    "plan_file": "C:\\Users\\j1877\\Desktop\\test\\20261017_225442_D40E4010\\mode2_plan.json"
+  },
+  "residue_cleared_at": "2026-10-17 21:55:51",
+  "residue_cleared_from": "mechanics_done"
+}

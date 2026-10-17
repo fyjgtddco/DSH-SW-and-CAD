@@ -98,10 +98,42 @@ export declare function isUnpublishedHostPeer(pkg: string | undefined, profile: 
  * where it is not — there the bypass would be what installs the young
  * version, over a minimumReleaseAge the profile set on purpose — so the
  * install route declines it and falls back to the bare name instead.
+ *
+ * `marketFlags: false` says the host runs pnpm itself and takes no options
+ * from us (the official Desktop bridge, #732). The four recoveries below
+ * each decorate a command with an option, so on such a host they are skipped
+ * rather than sent and refused — and because their classifier messages say
+ * the market retried, the note appended at the end says it did not.
  */
 export declare function withHoistRecovery(run: PluginRunner, profile: string, pluginArgs: string[], profileDirectory?: string, options?: {
     releaseAgeBypass?: boolean;
+    marketFlags?: boolean;
 }): Promise<InstallResult>;
+/**
+ * The tail of the diagnostics file the dsh CLI pointed at, when it pointed at
+ * one (#672).
+ *
+ * `dsh plugin` writes pnpm's entire output to a file and prints only
+ * `dsh: pnpm failed; diagnostics: <path>`. For a failure the market cannot
+ * classify, that line is all it has — the reasons people reported (#244,
+ * #192, #138) were all "the UI shows one unhelpful line" for causes that
+ * were written down somewhere the UI never looked.
+ *
+ * Bounded on purpose: absolute paths only, a regular file, and at most the
+ * last {@link DIAGNOSTICS_TAIL_BYTES}. The path comes from our own child, but
+ * the market only ever needs the end of a log, and reading an arbitrary
+ * amount of an arbitrary file is not worth anything it could add.
+ *
+ * @returns the path and the text, or null when the output names no readable
+ *   diagnostics file.
+ */
+export declare function diagnosticsTail(result: {
+    stdout: string;
+    stderr: string;
+}): {
+    path: string;
+    text: string;
+} | null;
 /**
  * Whether pnpm never started at all, so the profile cannot have been touched.
  *
@@ -164,7 +196,7 @@ export declare function retargetCollections(run: PluginRunner, profile: string, 
  * profile at all, which is a broken plugin-command channel rather than
  * anything wrong with the plugin (#258).
  */
-export declare function validateAddedPlugins(run: PluginRunner, profile: string, before: Set<string>, explicitDir?: string): Promise<{
+export declare function validateAddedPlugins(run: PluginRunner, profile: string, before: Set<string>, explicitDir?: string, hostDirectory?: string | null): Promise<{
     added: string[];
     keep: string[];
     removedBroken: string[];
@@ -174,6 +206,48 @@ export declare function validateAddedPlugins(run: PluginRunner, profile: string,
         owner: string;
     }[];
 }>;
+/**
+ * The node_modules root of the DSH host deployment `directory` belongs to.
+ *
+ * CLI layouts install the host as `<prefix>/node_modules/@deepseek-ai/dsh`,
+ * so the shared root is two dirname steps up; a flat Desktop layout keeps
+ * the host package at the deployment root (#662's
+ * `<desktop-app>\dependencies\dsh`), with its pnpm-managed node_modules
+ * directly beside its package.json. `dshHostInfo()` already distinguishes
+ * the two — this is pure path arithmetic on whichever directory it returned.
+ */
+export declare function hostNodeModulesRoot(directory: string): string;
+/**
+ * Normalize a link target for path comparison: restore the UNC device form
+ * (`\\?\UNC\server\share` back to `\\server\share` — stripped of its prefix
+ * it is no longer absolute and resolve() would re-root it against the
+ * cwd), then remove the NT device prefixes `\\?\` and the subst-style
+ * `\??\` mklink stores. Measured on Node 24/win32: readlinkSync returns
+ * the plain absolute path, so these branches only matter for links created
+ * outside Node — but a comparison must not silently miss because of them.
+ */
+export declare function normalizedLinkTarget(target: string): string;
+/**
+ * Remove the host-side bridge link a confirmed uninstall leaves dangling
+ * (#662). The official boot projects profile packages into the host
+ * deployment's node_modules as links (Junction or SymbolicLink — lstat
+ * reports both as symlinks) and never reclaims them, and `dsh plugin
+ * remove` knows nothing about them, so without this the link outlives the
+ * package it pointed at and every tool that lstats its way through
+ * node_modules (rg first among them) fails on it.
+ *
+ * The gate is deliberately total: only `<host node_modules>/<name>` is ever
+ * touched, only when that entry is a link whose normalized target is
+ * exactly this profile's copy of `name`, and only when that copy is really
+ * gone — a live bridge for a package that is still installed must survive.
+ * A null `hostDirectory` (no host locatable — a plain `dsh web` from a
+ * global install) is a documented no-op.
+ *
+ * @returns whether a dangling bridge was removed. Never throws: the removal
+ * this cleans up after already succeeded, and a cleanup failure must not
+ * fail the uninstall that triggered it.
+ */
+export declare function removeDanglingHostBridge(name: string, profileDirectory: string, hostDirectory: string | null): boolean;
 /**
  * Group flat `{id, owner}` conflict hits by the installed plugin that owns
  * them. What the user has to decide is which PLUGINS to uninstall, not which
@@ -211,6 +285,25 @@ export declare function isStaleUpdate(check: {
  * node_modules yet (the fetcher rejects before materialization, #68).
  */
 export declare function parsePrepareNotAllowed(stdout: string, stderr: string): string | null;
+/**
+ * The allowBuilds key pnpm itself printed for a prepare refusal, when it
+ * printed one (#698).
+ *
+ * pnpm 11 ends ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED with the exact line to
+ * add — measured on 11.8.0 against the reported plugin:
+ *
+ *     For example:
+ *     allowBuilds:
+ *       @dsh-external/dsh-super-injector@https://codeload.github.com/…/tar.gz/<sha>: true
+ *
+ * For a TRANSITIVE git dependency that key is the only knowledge anyone has
+ * of its source: the package is in neither node_modules, package.json nor
+ * the catalog. pnpm 10 prints an `onlyBuiltDependencies` example with the
+ * bare name instead, and gets null here — the bare name is what it needs.
+ *
+ * @returns the key, or null when the output carries no allowBuilds example.
+ */
+export declare function parsePrepareKey(stdout: string, stderr: string): string | null;
 /**
  * Package names pnpm reported as having their build scripts ignored
  * ("Ignored build scripts: esbuild, koffi."). Empty when none.

@@ -4,10 +4,11 @@
  * update staleness detection. Every function takes the plugin runner as a
  * parameter so tests can substitute a recording fake.
  */
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { closeSync, existsSync, lstatSync, openSync, readlinkSync, readSync, rmSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { findDshInstallDir } from './dsh-install.js';
 import { classifyPnpmFailure, HOST_NAMESPACE_RE } from './pnpm-compat.js';
-import { conflictingEntryIds, dropFromManifest, hasDshManifest, hasLoadableEntry, pluginSubdirs, profileDir, readInstalled, readManifestDeps, readProfileBundles } from './profile.js';
+import { conflictingEntryIds, dropFromManifest, hasDshManifest, hasLoadableEntry, mergeDuplicateReleaseAgeExcludes, pluginSubdirs, profileDir, readInstalled, readManifestDeps, readProfileBundles, dropUnparseableBuildKeys } from './profile.js';
 import { logEvent } from './log.js';
 import { cleanOrphanedStore } from './store.js';
 /**
@@ -107,26 +108,85 @@ export function isUnpublishedHostPeer(pkg, profile, explicitDir) {
  * where it is not — there the bypass would be what installs the young
  * version, over a minimumReleaseAge the profile set on purpose — so the
  * install route declines it and falls back to the bare name instead.
+ *
+ * `marketFlags: false` says the host runs pnpm itself and takes no options
+ * from us (the official Desktop bridge, #732). The four recoveries below
+ * each decorate a command with an option, so on such a host they are skipped
+ * rather than sent and refused — and because their classifier messages say
+ * the market retried, the note appended at the end says it did not.
  */
 export async function withHoistRecovery(run, profile, pluginArgs, profileDirectory, options = {}) {
+    const marketFlags = options.marketFlags !== false;
+    /** The option a recovery step needed and this host does not accept (#732). */
+    let unavailableOption = null;
+    // Before the FIRST run, not after a failure: the shadowed duplicate rule
+    // (#732) hurts pnpm while it RESOLVES the dependency graph, so merging it
+    // first is what keeps the command from failing at all — and it costs one
+    // small file read. Every verb that resolves the graph is covered, not just
+    // add and remove: an `install` or an in-place `update` reads the same key.
+    const verb = pluginArgs.find(argument => !argument.startsWith('-'));
+    if (verb === 'add' || verb === 'remove' || verb === 'install' || verb === 'update') {
+        const merged = mergeDuplicateReleaseAgeExcludes(profile, profileDirectory);
+        if (merged.length > 0) {
+            logEvent('warn', 'install', `minimumReleaseAgeExclude held several rules for ${merged.join(', ')}, and pnpm honours only the FIRST per name (#732) — merged each package's rules into one, before running`);
+        }
+    }
     let result = await run(profile, pluginArgs);
     const ok = (r) => r.exitCode === 0 && !r.timedOut && !r.cancelled;
     if (!ok(result) && !result.cancelled) {
         const failure = classifyPnpmFailure(`${result.stderr}\n${result.stdout}`, result.exitCode);
-        if (failure?.code === 'hoist-pattern-diff') {
-            logEvent('warn', 'install', `modules dir was built by a different pnpm major — rebuilding (pnpm install) and retrying once`);
-            // --no-frozen-lockfile: the market runs pnpm with CI=true (TTY hangs),
-            // where a lockfile written by the old major would otherwise be refused.
-            const rebuild = await run(profile, ['install', '--no-frozen-lockfile']);
-            if (ok(rebuild))
+        if (failure?.code === 'unparseable-build-key') {
+            // The profile's own allowBuilds block is what fails, so no retry of the
+            // same command can pass until it is repaired (#698). Drop only the
+            // source-form keys this pnpm cannot parse — bare names stay, and on
+            // these versions a bare name is what authorizes a git dependency — then
+            // run the command once more.
+            const removed = dropUnparseableBuildKeys(profile, profileDirectory);
+            if (removed.length > 0) {
+                logEvent('warn', 'install', `this pnpm cannot parse git-source allowBuilds keys; removed ${removed.join(', ')} from pnpm-workspace.yaml and retrying once (#698)`);
                 result = await run(profile, pluginArgs);
+            }
+        }
+        else if (failure?.code === 'hoist-pattern-diff') {
+            if (!marketFlags) {
+                unavailableOption = '--no-frozen-lockfile';
+            }
+            else {
+                logEvent('warn', 'install', `modules dir was built by a different pnpm major — rebuilding (pnpm install) and retrying once`);
+                // --no-frozen-lockfile: the market runs pnpm with CI=true (TTY hangs),
+                // where a lockfile written by the old major would otherwise be refused.
+                const rebuild = await run(profile, ['install', '--no-frozen-lockfile']);
+                if (ok(rebuild))
+                    result = await run(profile, pluginArgs);
+            }
         }
         else if (failure?.code === 'release-age-violation'
-            && options.releaseAgeBypass !== false
-            && (pluginArgs[0] === 'add' || pluginArgs[0] === 'remove')
-            && !pluginArgs.includes(RELEASE_AGE_OVERRIDE)) {
-            logEvent('warn', 'install', `a too-young release blocks pnpm's lockfile verification (#39) — retrying once with ${RELEASE_AGE_OVERRIDE}`);
-            result = await run(profile, [pluginArgs[0], RELEASE_AGE_OVERRIDE, ...pluginArgs.slice(1)]);
+            && (pluginArgs[0] === 'add' || pluginArgs[0] === 'remove')) {
+            // The repair ran before this command, so a rewrite here means pnpm wrote
+            // one of the two broken shapes DURING it — appending a shadowed rule
+            // (#732) or extending a version union (#733). Either way the same
+            // rewrite fixes it, needs no option at all, and so also works on the
+            // desktop bridge that refuses options. Retry the SAME argv afterwards.
+            const mergedNow = mergeDuplicateReleaseAgeExcludes(profile, profileDirectory);
+            if (mergedNow.length > 0) {
+                logEvent('warn', 'install', `pnpm appended a second minimumReleaseAgeExclude rule for ${mergedNow.join(', ')} and honours only the first, shadowing its own entry (#732) — merged them into one and retrying once`);
+                result = await run(profile, pluginArgs);
+            }
+            else if (options.releaseAgeBypass === false) {
+                // The caller declined the bypass (#594), and the duplicates were not
+                // what failed: this violation is the profile's own policy doing its
+                // job, so the command stands as it is.
+            }
+            else if (!marketFlags) {
+                unavailableOption = RELEASE_AGE_OVERRIDE;
+            }
+            else if (pluginArgs.includes(RELEASE_AGE_OVERRIDE)) {
+                // Already carrying it (a caller's forced retry): nothing left to add.
+            }
+            else {
+                logEvent('warn', 'install', `a too-young release blocks pnpm's lockfile verification (#39) — retrying once with ${RELEASE_AGE_OVERRIDE}`);
+                result = await run(profile, [pluginArgs[0], RELEASE_AGE_OVERRIDE, ...pluginArgs.slice(1)]);
+            }
         }
         else if ((failure?.code === 'fetch-404' || failure?.code === 'no-matching-version')
             && isUnpublishedHostPeer(failure.pkg, profile, profileDirectory)
@@ -136,8 +196,13 @@ export async function withHoistRecovery(run, profile, pluginArgs, profileDirecto
             // and npm has never carried. Every fresh profile hits this, whatever
             // the plugin, so failing here would be failing for something the user
             // cannot fix and did not cause.
-            logEvent('warn', 'install', `${failure.pkg ?? 'a host package'} is a peer the runtime provides and npm does not carry (#289) — retrying once with ${AUTO_INSTALL_PEERS_OFF}`);
-            result = await run(profile, [pluginArgs[0], AUTO_INSTALL_PEERS_OFF, ...pluginArgs.slice(1)]);
+            if (!marketFlags) {
+                unavailableOption = AUTO_INSTALL_PEERS_OFF;
+            }
+            else {
+                logEvent('warn', 'install', `${failure.pkg ?? 'a host package'} is a peer the runtime provides and npm does not carry (#289) — retrying once with ${AUTO_INSTALL_PEERS_OFF}`);
+                result = await run(profile, [pluginArgs[0], AUTO_INSTALL_PEERS_OFF, ...pluginArgs.slice(1)]);
+            }
         }
         else if (failure?.code === 'transient-network'
             && (pluginArgs[0] === 'add' || pluginArgs[0] === 'remove')) {
@@ -153,8 +218,13 @@ export async function withHoistRecovery(run, profile, pluginArgs, profileDirecto
             // Large tarball / slow network: pnpm's default 60s per-request limit
             // aborted the download. A plain retry fails again at the same limit,
             // so retry once with a longer fetchTimeout.
-            logEvent('warn', 'install', `pnpm's per-request fetch timeout aborted a large download — retrying once with ${FETCH_TIMEOUT_OVERRIDE}`);
-            result = await run(profile, [pluginArgs[0], FETCH_TIMEOUT_OVERRIDE, ...pluginArgs.slice(1)]);
+            if (!marketFlags) {
+                unavailableOption = FETCH_TIMEOUT_OVERRIDE;
+            }
+            else {
+                logEvent('warn', 'install', `pnpm's per-request fetch timeout aborted a large download — retrying once with ${FETCH_TIMEOUT_OVERRIDE}`);
+                result = await run(profile, [pluginArgs[0], FETCH_TIMEOUT_OVERRIDE, ...pluginArgs.slice(1)]);
+            }
         }
     }
     if (!ok(result) && !result.cancelled) {
@@ -164,6 +234,7 @@ export async function withHoistRecovery(run, profile, pluginArgs, profileDirecto
         // construction: directories are only removed when their owning pid is
         // gone (the name carries it), so a live download is never touched.
         await cleanOrphanedStore(run, profile);
+        const diagnostics = diagnosticsTail(result);
         const failure = classifyPnpmFailure(`${result.stderr}\n${result.stdout}`, result.exitCode);
         if (failure !== null) {
             result = {
@@ -171,6 +242,13 @@ export async function withHoistRecovery(run, profile, pluginArgs, profileDirecto
                 stderr: failure.replaceOutput === true ? failure.message : `${result.stderr}\n\n${failure.message}`,
                 ...(failure.replaceOutput === true ? { stdout: '' } : {}),
             };
+        }
+        else if (diagnostics !== null) {
+            // The dsh CLI redirects the whole pnpm run into a file and leaves one
+            // line on stderr: `dsh: pnpm failed; diagnostics: <path>` (its own
+            // literal message). Everything a user or a report needs is in that
+            // file, so show its tail rather than the one line (#672).
+            result = { ...result, stderr: `${result.stderr}\n\n--- dsh diagnostics (${diagnostics.path}) ---\n${diagnostics.text}` };
         }
         else if (result.pnpmError !== undefined && result.pnpmError !== '') {
             // Nothing matched, but pnpm DID say what went wrong — in its ndjson
@@ -186,8 +264,66 @@ export async function withHoistRecovery(run, profile, pluginArgs, profileDirecto
             result = { ...result, stderr: `${result.stderr}\n\n${code}${result.pnpmError}` };
         }
     }
+    if (unavailableOption !== null && !ok(result) && !result.cancelled) {
+        // #732: this step was skipped because the host runs pnpm itself and takes
+        // no options from us — but the classified message above says the market
+        // retried. Say that it did not, or the user reads a retry that never
+        // happened and looks for the wrong cause.
+        result = {
+            ...result,
+            stderr: `${result.stderr}\n\n这台宿主（官方桌面端）自己执行安装，不接受市场附加的 pnpm 参数（${unavailableOption}），所以这一步没有自动重试。 / This host (the official desktop app) runs the install itself and takes no pnpm options from the market (${unavailableOption}), so that automatic retry could not be attempted.`,
+        };
+    }
     return result;
 }
+/**
+ * The tail of the diagnostics file the dsh CLI pointed at, when it pointed at
+ * one (#672).
+ *
+ * `dsh plugin` writes pnpm's entire output to a file and prints only
+ * `dsh: pnpm failed; diagnostics: <path>`. For a failure the market cannot
+ * classify, that line is all it has — the reasons people reported (#244,
+ * #192, #138) were all "the UI shows one unhelpful line" for causes that
+ * were written down somewhere the UI never looked.
+ *
+ * Bounded on purpose: absolute paths only, a regular file, and at most the
+ * last {@link DIAGNOSTICS_TAIL_BYTES}. The path comes from our own child, but
+ * the market only ever needs the end of a log, and reading an arbitrary
+ * amount of an arbitrary file is not worth anything it could add.
+ *
+ * @returns the path and the text, or null when the output names no readable
+ *   diagnostics file.
+ */
+export function diagnosticsTail(result) {
+    const match = /(?:^|\n)\s*dsh: [^\n]*diagnostics:\s*(\S+)\s*$/m.exec(result.stderr)
+        ?? /(?:^|\n)\s*dsh: [^\n]*diagnostics:\s*(\S+)\s*$/m.exec(result.stdout);
+    if (match === null)
+        return null;
+    const path = match[1];
+    if (!isAbsolute(path))
+        return null;
+    try {
+        if (!statSync(path).isFile())
+            return null;
+        const size = statSync(path).size;
+        const start = Math.max(0, size - DIAGNOSTICS_TAIL_BYTES);
+        const handle = openSync(path, 'r');
+        try {
+            const buffer = Buffer.alloc(Math.min(DIAGNOSTICS_TAIL_BYTES, size));
+            readSync(handle, buffer, 0, buffer.length, start);
+            const text = buffer.toString('utf8').trim();
+            return text === '' ? null : { path, text };
+        }
+        finally {
+            closeSync(handle);
+        }
+    }
+    catch {
+        return null;
+    }
+}
+/** How much of a diagnostics file is worth showing. */
+const DIAGNOSTICS_TAIL_BYTES = 8192;
 /**
  * Whether pnpm never started at all, so the profile cannot have been touched.
  *
@@ -295,7 +431,7 @@ export async function retargetCollections(run, profile, before, target, explicit
  * profile at all, which is a broken plugin-command channel rather than
  * anything wrong with the plugin (#258).
  */
-export async function validateAddedPlugins(run, profile, before, explicitDir) {
+export async function validateAddedPlugins(run, profile, before, explicitDir, hostDirectory) {
     const dir = profileDir(profile, explicitDir);
     const addedNow = Object.keys(readInstalled(profile, dir)).filter(n => !before.has(n));
     const keep = [];
@@ -310,7 +446,7 @@ export async function validateAddedPlugins(run, profile, before, explicitDir) {
         // ship no entry of their own (#103) and must not be uninstalled here.
         if (!hasDshManifest(packageDir) || !hasLoadableEntry(dir, n)) {
             removedBroken.push(n);
-            await removeAndReconcile(run, profile, dir, n);
+            await removeAndReconcile(run, profile, dir, n, hostDirectory);
             continue;
         }
         const clash = conflictingEntryIds(dir, n, existingBundles);
@@ -319,7 +455,7 @@ export async function validateAddedPlugins(run, profile, before, explicitDir) {
             conflicts.push(...clash.map(hit => ({ name: n, ...hit })));
             removedBroken.push(n);
             logEvent('error', 'install', `${n}: loader entry id conflict with ${clash[0].owner} (${clash.map(hit => hit.id).join(', ')}) — removing, it would break the next boot`);
-            await removeAndReconcile(run, profile, dir, n);
+            await removeAndReconcile(run, profile, dir, n, hostDirectory);
             continue;
         }
         keep.push(n);
@@ -344,11 +480,14 @@ export async function validateAddedPlugins(run, profile, before, explicitDir) {
  * @param profile - the profile name for manifest writes.
  * @param dir - the profile directory the validation reads.
  * @param name - the package being removed.
+ * @param hostDirectory - the DSH host deployment directory whose node_modules
+ * may hold a bridge link for this package (#662); resolved when omitted.
  */
-async function removeAndReconcile(run, profile, dir, name) {
+async function removeAndReconcile(run, profile, dir, name, hostDirectory = findDshInstallDir()) {
     const result = await run(profile, ['remove', name]);
     const gone = !existsSync(join(dir, 'node_modules', name, 'package.json'));
     if (gone) {
+        removeDanglingHostBridge(name, dir, hostDirectory);
         if (dropFromManifest(profile, name, dir)) {
             logEvent('error', 'install', `${name}: remove ${result.exitCode === 0 ? 'skipped the manifest reconcile' : `failed (exit ${String(result.exitCode)})`} but the package is gone from disk — dropped its dependency/bundle rows so the next boot stays loadable`);
         }
@@ -357,6 +496,99 @@ async function removeAndReconcile(run, profile, dir, name) {
     if (result.exitCode !== 0 || result.timedOut || result.cancelled) {
         logEvent('error', 'install', `${name}: remove failed (exit ${String(result.exitCode)})${result.timedOut ? ' timed out' : ''}${result.cancelled ? ' cancelled' : ''} and the package is still installed — its rows stay in the manifest; retry the uninstall`);
     }
+}
+/**
+ * The node_modules root of the DSH host deployment `directory` belongs to.
+ *
+ * CLI layouts install the host as `<prefix>/node_modules/@deepseek-ai/dsh`,
+ * so the shared root is two dirname steps up; a flat Desktop layout keeps
+ * the host package at the deployment root (#662's
+ * `<desktop-app>\dependencies\dsh`), with its pnpm-managed node_modules
+ * directly beside its package.json. `dshHostInfo()` already distinguishes
+ * the two — this is pure path arithmetic on whichever directory it returned.
+ */
+export function hostNodeModulesRoot(directory) {
+    const segments = directory.split(/[/\\]+/).filter(segment => segment !== '');
+    const n = segments.length;
+    if (n >= 3 && segments[n - 3].toLowerCase() === 'node_modules' && segments[n - 2].toLowerCase() === '@deepseek-ai') {
+        return resolve(dirname(dirname(directory)));
+    }
+    return resolve(directory, 'node_modules');
+}
+/**
+ * Normalize a link target for path comparison: restore the UNC device form
+ * (`\\?\UNC\server\share` back to `\\server\share` — stripped of its prefix
+ * it is no longer absolute and resolve() would re-root it against the
+ * cwd), then remove the NT device prefixes `\\?\` and the subst-style
+ * `\??\` mklink stores. Measured on Node 24/win32: readlinkSync returns
+ * the plain absolute path, so these branches only matter for links created
+ * outside Node — but a comparison must not silently miss because of them.
+ */
+export function normalizedLinkTarget(target) {
+    return target
+        .replace(/^\\\\\?\\UNC\\/, '\\\\')
+        .replace(/^(?:\\\\\?\\|\\\?\?\\)/, '');
+}
+/**
+ * Whether a link target names the profile's copy of a package. Junction
+ * targets keep the case they were created with, so the comparison is
+ * case-insensitive on win32, where the filesystem itself is.
+ */
+function pointsAtProfilePackage(target, expected) {
+    const left = resolve(normalizedLinkTarget(target));
+    const right = resolve(expected);
+    return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+/**
+ * Remove the host-side bridge link a confirmed uninstall leaves dangling
+ * (#662). The official boot projects profile packages into the host
+ * deployment's node_modules as links (Junction or SymbolicLink — lstat
+ * reports both as symlinks) and never reclaims them, and `dsh plugin
+ * remove` knows nothing about them, so without this the link outlives the
+ * package it pointed at and every tool that lstats its way through
+ * node_modules (rg first among them) fails on it.
+ *
+ * The gate is deliberately total: only `<host node_modules>/<name>` is ever
+ * touched, only when that entry is a link whose normalized target is
+ * exactly this profile's copy of `name`, and only when that copy is really
+ * gone — a live bridge for a package that is still installed must survive.
+ * A null `hostDirectory` (no host locatable — a plain `dsh web` from a
+ * global install) is a documented no-op.
+ *
+ * @returns whether a dangling bridge was removed. Never throws: the removal
+ * this cleans up after already succeeded, and a cleanup failure must not
+ * fail the uninstall that triggered it.
+ */
+export function removeDanglingHostBridge(name, profileDirectory, hostDirectory) {
+    if (hostDirectory === null)
+        return false;
+    const bridge = join(hostNodeModulesRoot(hostDirectory), name);
+    const unlinked = join(profileDirectory, 'node_modules', name);
+    try {
+        if (!lstatSync(bridge).isSymbolicLink())
+            return false;
+        // The gone-check mirrors removeAndReconcile's manifest truth: a package
+        // whose package.json is gone is uninstalled even if an empty directory
+        // lingered behind, and its bridge is exactly the dangling link #662 is
+        // about.
+        if (!pointsAtProfilePackage(readlinkSync(bridge), unlinked) || existsSync(join(unlinked, 'package.json')))
+            return false;
+        // No `recursive`: rmSync on a link unlinks the link itself only
+        // (measured on win32/Node 24 for live and dangling junctions and dir
+        // symlinks), and leaving it off keeps a race that swaps the link for a
+        // real directory from ever deleting that directory's tree.
+        rmSync(bridge, { force: true });
+    }
+    catch (error) {
+        // ENOENT is the ordinary "no bridge there" answer (and a lost race
+        // while unlinking); anything else is worth a line in the log.
+        if (error.code !== 'ENOENT') {
+            logEvent('warn', 'uninstall', `${name}: host bridge cleanup skipped — ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return false;
+    }
+    logEvent('info', 'uninstall', `${name}: removed the dangling host bridge the boot projection left at ${bridge}`);
+    return true;
 }
 /**
  * Group flat `{id, owner}` conflict hits by the installed plugin that owns
@@ -410,6 +642,30 @@ export function parsePrepareNotAllowed(stdout, stderr) {
     const raw = m[1].trim();
     const at = raw.lastIndexOf('@');
     return at > 0 ? raw.slice(0, at) : raw;
+}
+/**
+ * The allowBuilds key pnpm itself printed for a prepare refusal, when it
+ * printed one (#698).
+ *
+ * pnpm 11 ends ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED with the exact line to
+ * add — measured on 11.8.0 against the reported plugin:
+ *
+ *     For example:
+ *     allowBuilds:
+ *       @dsh-external/dsh-super-injector@https://codeload.github.com/…/tar.gz/<sha>: true
+ *
+ * For a TRANSITIVE git dependency that key is the only knowledge anyone has
+ * of its source: the package is in neither node_modules, package.json nor
+ * the catalog. pnpm 10 prints an `onlyBuiltDependencies` example with the
+ * bare name instead, and gets null here — the bare name is what it needs.
+ *
+ * @returns the key, or null when the output carries no allowBuilds example.
+ */
+export function parsePrepareKey(stdout, stderr) {
+    // ndjson carries this inside a JSON string: quotes and newlines escaped.
+    const text = `${stdout}\n${stderr}`.replace(/\\"/g, '"').replace(/\\n/g, '\n');
+    const m = /For example:\s*\n\s*allowBuilds:\s*\n[ \t]+("?)([^\s"]+)\1:\s*true/.exec(text);
+    return m === null ? null : m[2];
 }
 /**
  * Package names pnpm reported as having their build scripts ignored

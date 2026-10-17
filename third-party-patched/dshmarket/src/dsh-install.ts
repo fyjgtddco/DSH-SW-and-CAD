@@ -55,6 +55,48 @@ function desktopDirectories(): string[] {
   return APPLICATION_ROOTS.map(root => join(resourcesPath, root))
 }
 
+/**
+ * Directories that can hold the DSH installation's OWN bundle layer — the
+ * Desktop shell's package root and its `cordis.patch.yml`.
+ *
+ * The shell applies that file itself rather than declaring it through
+ * `dsh.profile.bundles`: dsh-plugin-desktop's launcher loads it by hand and
+ * splices it in directly behind the `@deepseek-ai/dsh-web-app` layer
+ * (`src/profile.ts`, `DESKTOP_PATCH_PATH`), which is where the rows
+ * `desktop-shell`, `desktop-notifications`, `desktop-terminal` and the rest
+ * come from at all.
+ *
+ * Its package root is NOT where {@link findDshInstallDir} points. On the
+ * official Desktop the market's `desktopProfiles` branch hands the analysis no
+ * install dir at all, and the directory the lookup does answer with is
+ * `node_modules/@deepseek-ai/dsh` — whose own manifest declares no bundle
+ * patch. So the application root is offered from the two directions the host
+ * lookup already knows, and the caller reads each candidate's own manifest:
+ *
+ *  - the located install package's ancestors:
+ *    `<app>/node_modules/@deepseek-ai/dsh` walks up to `<app>`;
+ *  - Electron's resources directory under each application-root name — which
+ *    is the same directory {@link findDshInstallDir} probes for the in-box
+ *    bundles, one level up.
+ *
+ * This is the layering #405 fixed one level down: the in-box bundles are read
+ * from that application root, and the shell's own overlay file lives beside
+ * them.
+ *
+ * @param dshInstallDir - install directory to walk up from, when one is known.
+ * @returns candidate directories, most specific first, duplicates removed.
+ */
+export function desktopApplicationRoots(dshInstallDir: string | null): string[] {
+  const roots = new Set<string>()
+  if (dshInstallDir !== null) {
+    // `entryDirectories` starts at the entry's OWN directory, so the package
+    // manifest is what turns the install directory into that starting point.
+    for (const directory of entryDirectories(join(dshInstallDir, 'package.json'))) roots.add(directory)
+  }
+  for (const directory of desktopDirectories()) roots.add(directory)
+  return [...roots]
+}
+
 function declaredVersion(manifest: { version?: unknown } | null): string {
   return typeof manifest?.version === 'string' && manifest.version !== '' ? manifest.version : 'unknown'
 }

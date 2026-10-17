@@ -284,6 +284,21 @@ export function readInstalledVersion(profile: string, name: string, explicitDir?
   }
 }
 
+/**
+ * The `name` in the package.json of the directory a dependency is installed
+ * under, or null. DSH Desktop requires it to equal the dependency key (#694).
+ */
+export function readInstalledPackageName(profile: string, name: string, explicitDir?: string): string | null {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(profileDir(profile, explicitDir), 'node_modules', name, 'package.json'), 'utf8'),
+    ) as { name?: unknown }
+    return typeof manifest.name === 'string' ? manifest.name : null
+  } catch {
+    return null
+  }
+}
+
 /** The installed package manifest, or null when absent or malformed. */
 export function readInstalledManifest(profile: string, name: string, explicitDir?: string): unknown | null {
   try {
@@ -1059,23 +1074,12 @@ function quoteYamlKey(key: string): string {
   return key
 }
 
-/**
- * Allow the given packages' build scripts in the profile's
- * pnpm-workspace.yaml `allowBuilds` block (the key dsh profiles use),
- * merging with existing entries and leaving the rest of the yaml intact.
- * (#6 by @qichuang321.)
- * @returns every package now allowed.
- */
-export function setAllowBuilds(profile: string, packages: string[], explicitDir?: string): string[] {
-  const file = join(profileDir(profile, explicitDir), 'pnpm-workspace.yaml')
-  let yaml = ''
-  try { yaml = readFileSync(file, 'utf8') } catch { /* created below */ }
-  // `\r?\n`, not `\n`: a CRLF pnpm-workspace.yaml (every Windows editor, and
-  // git with core.autocrlf=true) put a `\r` between `allowBuilds:` and the
-  // newline, so the old pattern never matched an EXISTING block and appended
-  // a second one. Two top-level `allowBuilds:` keys is invalid YAML, and pnpm
-  // then refuses every install in that profile — not just the one that
-  // triggered it (#231 by @MichengAI).
+/** The allowBuilds block(s) of a pnpm-workspace.yaml, read into one map. */
+function readAllowBuildsMap(yaml: string): {
+  map: Record<string, string>
+  blockRe: RegExp
+  blockMatch: RegExpMatchArray | null
+} {
   const blockRe = /allowBuilds:[ \t]*\r?\n((?:[ \t]+[^\r\n]*\r?\n?)*)/g
   const map: Record<string, string> = {}
   // Every block, not just the first: a profile already broken by the bug
@@ -1105,39 +1109,17 @@ export function setAllowBuilds(profile: string, packages: string[], explicitDir?
       map[key] = m[2] ?? 'true'
     }
   }
-  // What may be written, and nothing else. The allowlist is not a host
-  // trust boundary — every key here is derived from the profile's OWN
-  // manifest or the curated catalog — it is what stops a caller writing
-  // arbitrary text into a file pnpm parses, so each form is spelled out
-  // exactly rather than loosened into "anything with a URL in it".
-  //
-  // A path segment must start with something other than a dot, which is how
-  // `..` traversal would otherwise enter a shape that looks like a repo.
-  const SEG = '[A-Za-z0-9_-][A-Za-z0-9_.-]*'
-  const NAME = '[A-Za-z0-9@/_.-]+'
-  const SHA = '[0-9a-f]{40}'
-  // The stable clone-URL key: github's (#68) and, since #637, every other
-  // host's — pnpm keys a git dependency by the remote it would clone, whoever
-  // serves it. Optionally pinned to a commit, which is the form pnpm 11.8.0
-  // names for a plain remote. https only: the market installs from https
-  // remotes, and an http key would authorize a source it never writes.
-  const GIT_KEY_RE = new RegExp(
-    `^${NAME}@git\\+https://[A-Za-z0-9_.-]+(?::\\d{1,5})?/${SEG}(?:/${SEG})*\\.git(?:#${SHA})?$`,
-  )
-  // The commit-pinned download a host serves, which is what pnpm below 11.21
-  // matches instead (#285): codeload for github, the project archive for
-  // gitlab.com and bitbucket.org (#637). Each branch names its host and its
-  // exact path shape.
-  const ARCHIVE_KEY_RE = new RegExp(
-    `^${NAME}@https://(?:`
-    + `codeload\\.github\\.com/${SEG}/${SEG}/tar\\.gz/${SHA}`
-    + `|bitbucket\\.org/${SEG}/${SEG}/get/${SHA}\\.tar\\.gz`
-    + `|gitlab\\.com/${SEG}(?:/${SEG})+/-/archive/${SHA}/${SEG}-${SHA}\\.tar\\.gz`
-    + ')$',
-  )
-  for (const pkg of packages) {
-    if (/^[A-Za-z0-9@/_.-]+$/.test(pkg) || GIT_KEY_RE.test(pkg) || ARCHIVE_KEY_RE.test(pkg)) map[pkg] = 'true'
-  }
+  return { map, blockRe, blockMatch }
+}
+
+/** Write `map` back as the file's single allowBuilds block, in its own line endings. */
+function writeAllowBuildsMap(
+  file: string,
+  yaml: string,
+  map: Record<string, string>,
+  blockRe: RegExp,
+  blockMatch: RegExpMatchArray | null,
+): void {
   // Write back in the file's OWN line ending. Rewriting a CRLF workspace
   // file with LF would leave it mixed, which is the same class of mess this
   // fix exists to clean up.
@@ -1155,5 +1137,249 @@ export function setAllowBuilds(profile: string, packages: string[], explicitDir?
     next = yaml.replace(blockRe, () => (seen++ === 0 ? blockText : ''))
   }
   writeFileSync(file, next)
+}
+
+/**
+ * Allow the given packages' build scripts in the profile's
+ * pnpm-workspace.yaml `allowBuilds` block (the key dsh profiles use),
+ * merging with existing entries and leaving the rest of the yaml intact.
+ * (#6 by @qichuang321.)
+ * @returns every package now allowed.
+ */
+export function setAllowBuilds(profile: string, packages: string[], explicitDir?: string): string[] {
+  const file = join(profileDir(profile, explicitDir), 'pnpm-workspace.yaml')
+  let yaml = ''
+  try { yaml = readFileSync(file, 'utf8') } catch { /* created below */ }
+  // `\r?\n`, not `\n`: a CRLF pnpm-workspace.yaml (every Windows editor, and
+  // git with core.autocrlf=true) put a `\r` between `allowBuilds:` and the
+  // newline, so the old pattern never matched an EXISTING block and appended
+  // a second one. Two top-level `allowBuilds:` keys is invalid YAML, and pnpm
+  // then refuses every install in that profile — not just the one that
+  // triggered it (#231 by @MichengAI).
+  const { map, blockRe, blockMatch } = readAllowBuildsMap(yaml)
+  // What may be written, and nothing else. The allowlist is not a host
+  // trust boundary — every key here is derived from the profile's OWN
+  // manifest or the curated catalog — it is what stops a caller writing
+  // arbitrary text into a file pnpm parses, so each form is spelled out
+  // exactly rather than loosened into "anything with a URL in it".
+  //
+  // A path segment must start with something other than a dot, which is how
+  // `..` traversal would otherwise enter a shape that looks like a repo.
+  const SEG = '[A-Za-z0-9_-][A-Za-z0-9_.-]*'
+  const NAME = '[A-Za-z0-9@/_.-]+'
+  const SHA = '[0-9a-f]{40}'
+  // The stable clone-URL key: github's (#68) and, since #637, every other
+  // host's — pnpm keys a git dependency by the remote it would clone, whoever
+  // serves it. Optionally pinned to a commit, which is the form pnpm 11.8.0
+  // names for a plain remote. https only: the market installs from https
+  // remotes, and an http key would authorize a source it never writes.
+  //
+  // The `.git` suffix is optional because pnpm keys the remote exactly as it
+  // was spelled: measured on 12.4.1, a remote installed without `.git`
+  // authorizes under `name@git+…/repo` and NOT under `…/repo.git`, so
+  // requiring the suffix dropped a correctly derived key on its way out, and
+  // appending it would have written one pnpm never reads.
+  const GIT_KEY_RE = new RegExp(
+    `^${NAME}@git\\+https://[A-Za-z0-9_.-]+(?::\\d{1,5})?/${SEG}(?:/${SEG})*(?:\\.git)?(?:#${SHA})?$`,
+  )
+  // The commit-pinned download a host serves, which is what pnpm below 11.21
+  // matches instead (#285): codeload for github, the project archive for
+  // gitlab.com and bitbucket.org (#637). Each branch names its host and its
+  // exact path shape.
+  const ARCHIVE_KEY_RE = new RegExp(
+    `^${NAME}@https://(?:`
+    + `codeload\\.github\\.com/${SEG}/${SEG}/tar\\.gz/${SHA}`
+    + `|bitbucket\\.org/${SEG}/${SEG}/get/${SHA}\\.tar\\.gz`
+    + `|gitlab\\.com/${SEG}(?:/${SEG})+/-/archive/${SHA}/${SEG}-${SHA}\\.tar\\.gz`
+    + ')$',
+  )
+  for (const pkg of packages) {
+    if (/^[A-Za-z0-9@/_.-]+$/.test(pkg) || GIT_KEY_RE.test(pkg) || ARCHIVE_KEY_RE.test(pkg)) map[pkg] = 'true'
+  }
+  writeAllowBuildsMap(file, yaml, map, blockRe, blockMatch)
   return Object.keys(map)
+}
+
+/**
+ * Remove the allowBuilds keys pnpm cannot parse as a version range, and say
+ * which (#698).
+ *
+ * pnpm reads an allowBuilds key as `name@<version union>`, and on 10.26 to
+ * the latest 10.x and on 11.0 to 11.5 a git or archive source there —
+ * `name@git+https://…`, `name@https://codeload…` — is rejected as
+ * "Invalid versions union … Use exact versions only". Not the one entry: the
+ * whole workspace file, so EVERY later pnpm command in the profile fails,
+ * including installs that have nothing to do with it. Measured on 9.15,
+ * 10.0 through 10.29, 11.0 through 11.8, 11.21 and 12.4; 10.25 and below
+ * ignore allowBuilds and 11.6 and above accept these keys.
+ *
+ * Those are exactly the keys the market writes for a git source (#68, #285,
+ * #637), because the pnpm versions that need them to authorize anything
+ * read them fine. On the versions in between, a bare name is what
+ * authorizes a git dependency — measured on 10.29 — and it is kept.
+ *
+ * @returns the keys removed; empty when nothing matched, in which case the
+ *   file is left untouched.
+ */
+export function dropUnparseableBuildKeys(profile: string, explicitDir?: string): string[] {
+  const file = join(profileDir(profile, explicitDir), 'pnpm-workspace.yaml')
+  let yaml: string
+  try { yaml = readFileSync(file, 'utf8') } catch { return [] }
+  const { map, blockRe, blockMatch } = readAllowBuildsMap(yaml)
+  // A key is a source rather than a version when what follows the name's own
+  // `@` starts a URL scheme. Scoped names begin with `@`, so the separator is
+  // the first `@` after position 0.
+  const removed = Object.keys(map).filter(key => {
+    const at = key.indexOf('@', 1)
+    return at > 0 && /^(?:git\+|https?:)/.test(key.slice(at + 1))
+  })
+  if (removed.length === 0) return []
+  for (const key of removed) delete map[key]
+  writeAllowBuildsMap(file, yaml, map, blockRe, blockMatch)
+  return removed
+}
+
+/** One `minimumReleaseAgeExclude` entry, split into its name and its versions. */
+interface ReleaseAgeExcludeRule {
+  name: string
+  /** The version union exactly as written, or null when the entry names no version. */
+  selector: string | null
+}
+
+/**
+ * Split `name@1.2.3 || 1.4.0` into its package name and selector.
+ *
+ * A scoped name begins with `@`, so the separator is the first `@` AFTER
+ * position 0; an entry with no `@` at all excludes every version of that
+ * name. Anything this cannot read exactly returns null, and the caller then
+ * leaves the file alone rather than rewriting a line it misread.
+ */
+function splitReleaseAgeExclude(entry: string): ReleaseAgeExcludeRule | null {
+  let text = entry.trim()
+  if (text.length >= 2
+    && (text[0] === "'" && text[text.length - 1] === "'" || text[0] === '"' && text[text.length - 1] === '"')) {
+    text = text.slice(1, -1)
+  }
+  const at = text.indexOf('@', text.startsWith('@') ? 1 : 0)
+  if (at === -1) return text === '' ? null : { name: text, selector: null }
+  const name = text.slice(0, at)
+  const selector = text.slice(at + 1).trim()
+  if (name === '' || selector === '') return null
+  return { name, selector }
+}
+
+/**
+ * Make a profile's `minimumReleaseAgeExclude` readable again (#732).
+ *
+ * pnpm appends a second rule for a package that already has one, while its
+ * `evaluateVersionPolicy` honours only the FIRST rule per package name — so
+ * its own new entry is dead, the young version stays unexcluded, and every
+ * later command in that profile fails lockfile verification with
+ * ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION, including commands that have nothing
+ * to do with that package.
+ *
+ * (#733 reported a separate, unexplained 80 GiB allocation abort on pnpm
+ * 12.4.1 that its author first tied to the union spelling. Review on that
+ * issue — and the reporter's own follow-up, which could no longer reproduce it
+ * — settled that `name@a || b` is a documented pnpm form, that the validator's
+ * "Use exact versions only" is about ranges and name patterns, and that the
+ * abort is not this market's to fix. Do not "repair" a union into a bare name
+ * on the strength of it: see below.)
+ *
+ * pnpm WRITES this key itself, and one of the forms it writes is what breaks a
+ * profile (#732): pnpm 11.7.0 APPENDS a second rule for a package that already
+ * has one, while its `evaluateVersionPolicy` honours only the FIRST rule per
+ * package name. Its own new entry is therefore dead, the young version stays
+ * unexcluded, and every later command in that profile fails lockfile
+ * verification with ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION — installs, updates
+ * and uninstalls alike, including ones that have nothing to do with that
+ * package. Merging the same-name rules into one makes the file readable again.
+ *
+ * The merge keeps the UNION of the versions the file already lists
+ * (`name@1.2.3 || 1.4.0`), which is a documented pnpm spelling. What this
+ * deliberately does NOT do is collapse a version list to a bare package name:
+ * a bare name exempts EVERY version of that package from the cooldown, which
+ * is wider than what the file says, and the market pins exact versions
+ * precisely so a fresh install cannot silently land on an older release
+ * (#594). A form the file cannot be read exactly from is left alone.
+ *
+ * @returns the package names whose rules were merged; empty when the file
+ *   needed no repair or could not be repaired, in which case it is left
+ *   byte-for-byte as it was.
+ */
+export function mergeDuplicateReleaseAgeExcludes(profile: string, explicitDir?: string): string[] {
+  const file = join(profileDir(profile, explicitDir), 'pnpm-workspace.yaml')
+  let yaml: string
+  try { yaml = readFileSync(file, 'utf8') } catch { return [] }
+  // Block form only: `minimumReleaseAgeExclude:` then `- <entry>` lines.
+  const blockRe = /^minimumReleaseAgeExclude:[ \t]*\r?\n((?:[ \t]+-[^\r\n]*\r?\n?)*)/m
+  const block = blockRe.exec(yaml)
+  if (block === null) return []
+  const eol = /\r\n/.test(yaml) ? '\r\n' : '\n'
+  const indentMatch = /^([ \t]+)-/.exec(block[1])
+  const indent = indentMatch === null ? '  ' : indentMatch[1]
+  const entries: { rule: ReleaseAgeExcludeRule; quoted: boolean; line: string }[] = []
+  for (const line of block[1].split(/\r?\n/)) {
+    if (line.trim() === '') continue
+    const m = /^[ \t]+-[ \t]*(.*?)[ \t]*$/.exec(line)
+    // A `#` on the line is a comment this cannot re-emit without losing it.
+    if (m === null || m[1].includes('#')) return []
+    const rule = splitReleaseAgeExclude(m[1])
+    if (rule === null) return []
+    entries.push({ rule, quoted: /^['"]/.test(m[1]), line })
+  }
+  const byName = new Map<string, {
+    selectors: Set<string>
+    originals: string[]
+    lines: string[]
+    allVersions: boolean
+    quoted: boolean
+    count: number
+  }>()
+  const order: string[] = []
+  for (const { rule, quoted, line } of entries) {
+    let group = byName.get(rule.name)
+    if (group === undefined) {
+      group = { selectors: new Set(), originals: [], lines: [], allVersions: false, quoted: false, count: 0 }
+      byName.set(rule.name, group)
+      order.push(rule.name)
+    }
+    group.count += 1
+    group.quoted = group.quoted || quoted
+    group.originals.push(rule.selector ?? '')
+    group.lines.push(line)
+    if (rule.selector === null) group.allVersions = true
+    else group.selectors.add(rule.selector)
+  }
+  /** The one line this package's entry is written as. */
+  const produced = (name: string): string => {
+    const group = byName.get(name)
+    if (group === undefined) return ''
+    // A bare name already covers every version, so it stays bare and nothing
+    // is widened; one rule stays exactly as it was written, union included.
+    // Several rules for one name are the #732 breakage — only the first is
+    // ever read — so they become one, as the union of the versions the file
+    // already lists.
+    const text = group.allVersions
+      ? name
+      : group.count === 1
+        ? `${name}@${group.originals[0] ?? ''}`
+        : `${name}@${[...group.selectors].join(' || ')}`
+    // `@` cannot start a plain scalar in YAML, so a scoped name is written
+    // quoted — the way pnpm itself writes one.
+    const quoted = group.quoted || text.startsWith('@')
+    return `${indent}- ${quoted ? `'${text.replaceAll("'", "''")}'` : text}`
+  }
+  const rewritten = order.filter(name => {
+    const group = byName.get(name)
+    if (group === undefined) return false
+    return group.count > 1 || group.lines[0] !== produced(name)
+  })
+  if (rewritten.length === 0) return []
+  const lines = order.map(produced)
+  const blockText = `minimumReleaseAgeExclude:${eol}${lines.join(eol)}${eol}`
+  // A function replacement: `$&` and friends in a string replacement would
+  // be read as capture references.
+  writeFileSync(file, yaml.replace(blockRe, () => blockText))
+  return rewritten
 }

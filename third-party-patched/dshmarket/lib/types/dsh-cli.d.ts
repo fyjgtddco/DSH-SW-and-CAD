@@ -79,39 +79,17 @@ export declare function proxyEnvForPnpm(env?: NodeJS.ProcessEnv, region?: Region
  */
 export declare function toolSearchDirs(platform?: string, env?: NodeJS.ProcessEnv, home?: string): string[];
 /**
- * Stop git asking for credentials down a channel nobody is listening on
- * (#587).
+ * `core.sshCommand` from the user's git configuration, or null.
  *
- * `CI=true` below is the same defence one layer up, and pnpm reads it. git
- * does not — it has its own switch, and it was not set. The gap only opens
- * when a spec reaches pnpm's git fetcher instead of the codeload tarball
- * path `accelerate.ts` describes: `github:owner/repo#path:/sub` is one, and
- * pnpm really does shell out to `git` for it, trying HTTPS first.
+ * The third place an ssh identity hides, and the one the environment cannot
+ * show: `git config --get` answers it. Memoized for the process — a user
+ * does not reconfigure git mid-install, and this runs on every spawn.
  *
- * git's credential prompt opens the controlling terminal, not stdin. There
- * is no terminal here, so the question is never seen and never answered:
- * the reporter caught `git.exe` alive for eight minutes having burned 0.05s
- * of CPU, and only the fifteen-minute install timeout ended it. Refusing
- * the prompt turns that into a fast, readable failure.
- *
- * It is a default, not an override: a value the caller set wins, and blank
- * counts as unset because an empty `GIT_TERMINAL_PROMPT` is not a setting
- * git can parse either. Credential helpers and `GIT_ASKPASS` are untouched
- * and still answer first — this closes only the terminal fallback, which is
- * precisely the branch that cannot work from a spawned child.
- *
- * Scope, stated plainly because it is narrower than the issue title
- * suggests: this is the HTTPS half. pnpm falls back to `git@github.com:`
- * when HTTPS fails, and the ssh side needs `GIT_SSH_COMMAND`, which
- * overrides `core.sshCommand` and `GIT_SSH` — the two ordinary ways to
- * choose an identity — and whose `BatchMode=yes` would disable
- * `SSH_ASKPASS`, breaking key-passphrase installs that work today. That
- * half needs a policy decision, so it is not made here. Note also that on
- * POSIX `runDshPlugin` spawns detached, so the subtree has no controlling
- * terminal and the prompt already dies instantly; the hang the issue
- * reports needs Windows, where the spawn is not detached.
+ * @returns the configured command, or null when git has none (including
+ *   when git is absent — an unreadable answer is not a choice).
  */
-export declare function gitEnvForPnpm(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
+export declare function probeCoreSshCommand(env?: NodeJS.ProcessEnv): string | null;
+export declare function gitEnvForPnpm(env?: NodeJS.ProcessEnv, coreSshCommand?: string | null): NodeJS.ProcessEnv;
 /**
  * Every `--config.<key>=<value>` override in the argv, repeated as the
  * `PNPM_CONFIG_<KEY>` environment variable that pnpm 12 still reads.
@@ -129,6 +107,13 @@ export declare function gitEnvForPnpm(env?: NodeJS.ProcessEnv): NodeJS.ProcessEn
  * for the release-age one) cannot silently drop the variable.
  */
 export declare function pnpmConfigEnvForArgs(pluginArgs: readonly string[]): NodeJS.ProcessEnv;
+/**
+ * Point every future child spawn at the configured build environment.
+ * @param source - Live source of the config's `buildEnv` object, re-read on
+ * every spawn so a settings change reaches the next child immediately.
+ * @returns the previous source, so a caller can restore it on teardown.
+ */
+export declare function setBuildEnvSource(source: () => Readonly<Record<string, string>>): () => Readonly<Record<string, string>>;
 /**
  * Windows npm/corepack/pnpm are `.cmd` shims. Node's `spawn` without a shell
  * cannot start them (ENOENT / EINVAL). Same pattern as dsh's `plugin` forwarder.
@@ -219,6 +204,19 @@ export interface PluginCommandRuntime {
     cancelActive(): boolean;
     /** Whether this host can execute an immutable rollback add target. */
     supportsExactRollbackTarget?(target: string): boolean;
+    /**
+     * Whether this runtime runs pnpm itself and therefore accepts the market's
+     * own arguments — `--config.*` overrides, `--force`, `--no-frozen-lockfile`.
+     *
+     * The official Electron profile does not (#732): its in-process manager
+     * takes exactly `add <target>` or `remove <target>` and answers any other
+     * argv with exit 127. Every recovery step that decorates a command with an
+     * option is impossible there, and sending it anyway turned a pnpm failure
+     * into "this desktop operation is not supported" — a message about an
+     * operation that is in fact supported, which sent the reporter looking for
+     * a broken profile instead of the option. Absent means "accepts".
+     */
+    acceptsMarketPnpmFlags?: boolean;
 }
 /** One running package operation, however it was started. */
 export interface DesktopPnpmHandleLike {

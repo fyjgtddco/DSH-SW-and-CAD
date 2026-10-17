@@ -101,47 +101,72 @@ Windows PowerShell **5.1** 的 `Get-Content` 默认按系统 ANSI 代码页（�
 
 **Mode 2（大型复杂器械装配）任务，必须在主对话中用 pwsh 调用以下命令：**
 
-### 第 1 步：`init`（两段式 · 第 1 段）
+> ══ ★【流程已重排 · 2026-10-13】第一步不再是"参数需求强度" ★ ══════════
+> 用户明确要求：**第一步 = 确认模式 + 问并行/串行 + 问是否 AI 自主设计**；
+> 参数需求强度题**后移为第 2 步**；第 3 步启动【总计子代理】按十阶段流水线分析，
+> 由 AI **按需提问**（不再一股脑全问）。原"第一步（多子代理并行建零件）"整体后移。
+>
+> ⚠️ 如果你（AI）按旧顺序问"参数需求强度"，用户会看到**和改造前一模一样**的行为 ——
+>    这正是本次改造要消除的。**必须以 `init` 命令的返回为准**，见下方第 1 步。
+
+### 第 1 步：`init`（确认模式 + 两个固定问题）
 
 ```powershell
 python "<工程模式根目录>\tools\workflow_gate.py" init "<设计任务描述>"
 ```
 
-- **作用**: 返回 **第 0 题（唯一一题）** —— 参数需求强度，**必须原样呈现给用户**
-- 第 0 题：
-  1. 【参数需求强度】本次设计是否需要严格把关参数（载荷/尺寸/公差/材料都要有据可依）？
-     - 选项1：**强需求**：需要严格校核，参数要有设计依据（追问详细信息）
-     - 选项2：**不强**：先出大致结构即可，细节由你按经验定（只问关键几项）
-- **MUST wait for user to answer this question before proceeding!**
+- **作用**: 返回 **新流程的第一步** —— 确认模式 + 两个固定问题，**必须原样呈现给用户**
+- 返回内容包含（以命令输出为准，勿自行改写）：
+  1. 【模式确认】按**模式二 · 大型复杂器械/多零件装配体**执行
+  2. **① 并行策略（D / E）**
+     - D = 部分小屋并行（按波次分批启动）
+     - E = 单小屋串联（一次一个房间）
+  3. **② 搭建方式（A / B / C）** —— 即「**是否 AI 自主设计**」
+     - A = 完全自主搭建（AI 自主决策）
+     - B = 部分自主搭建（关键节点询问）
+     - C = 步步确认（每个零件参数表逐件确认）
+- 返回里还有 `flow_order` 字段，列出完整 5 步顺序，可直接呈现给用户。
+- **MUST 等用户回答这两个问题后才能进入第 2 步！**
 
-> ⚠️ **代码是唯一事实来源**：题目内容由 `workflow_gate.py` 的 `QUESTION_SPEC` /
-> `question_spec_lite()` 生成，本文件不再硬编码题目列表。
-> 若命令返回的题目与此处描述不一致，**以命令返回为准**。
+### 第 2 步：`provide_context` #1（收模式确认 → 返回参数需求强度题）
 
-### 第 2 步：`provide_context`（第 2 段发题 + 力学估算）
-
-**本命令会被调用两次，靠状态机 step 自动区分：**
-
-**第 1 次**（参数 = 用户对第 0 题的回答原文）
 ```powershell
-python "<工程模式根目录>\tools\workflow_gate.py" provide_context "<第0题回答原文>"
+python "<工程模式根目录>\tools\workflow_gate.py" provide_context "<用户对并行策略/搭建方式的回答原文>"
 ```
-- 判定参数需求强度并返回**第二段问题**：
+
+- 作用: 记录模式确认结果（并尽力解析出 D/E 与 A/B/C 预选项），
+  返回**第 2 步的问题：参数需求强度**（强需求 / 不强）。
+- **MUST 把返回的问题原样呈现给用户，等用户作答！**
+
+### 第 3 步：`provide_context` #2（定题数区间 → 启动总计子代理）
+
+```powershell
+python "<工程模式根目录>\tools\workflow_gate.py" provide_context "<用户对参数需求强度的回答原文>"
+```
+
+- 判定参数需求强度并返回**按需提问指引**：
   - 回答含「强需求 / 严格校核」→ **强需求**：题数须落在 **10 ~ 50** 之间
   - 回答含「不强 / 精简」或含糊 → **弱需求**：题数须落在 **5 ~ 10** 之间
   - ⚠️ **旧口径（强需求固定 17 题 / 弱需求固定 5 题）已废除**：
     现在题库只作【候选池】，实际问几题由 AI 按十阶段分析进度**按需决定**，
     但必须落在上述区间内（见 3.5.1 / 3.5.2）。
-- **MUST 把第二段问题原样呈现给用户，等用户完整作答！**
+- ★ 返回内容会要求你**先启动总计子代理**按十阶段分析，**分析到缺信息时才提问**
+  （不允许开头就把候选题目全部抛出）。命令返回里有完整的十阶段清单与调用示例。
+- **MUST 按返回指引执行：先 begin-stage，再按需 ask；不要一股脑问题！**
 
-**第 2 次**（参数 = 用户对第二段全部问题的回答原文）
+### 第 4 步：力学估算（`provide_context` #3）
+
 ```powershell
-python "<工程模式根目录>\tools\workflow_gate.py" provide_context "<第二段回答原文>"
+python "<工程模式根目录>\tools\workflow_gate.py" provide_context "<全部提问回答原文>"
 ```
 - 执行力学估算，返回 A/B/C 搭建方式 + D/E 并行策略选项
 - **MUST wait for user to choose A/B/C and D/E!**
 
-> 📌 状态流转：`depth_asked` →（传第0题答案）→ `context_asked` →（传第二段答案）→ `mechanics_done`。
+> 📌 状态流转（**新流程，2026-10-13 重排**）：
+> `mode_confirm_asked`（确认模式+D/E+A/B/C）
+>   →（传模式确认答案）→ `depth_asked`（强/弱需求）
+>   →（传强度答案）→ `context_asked`（总计子代理十阶段 + 按需提问）
+>   →（传全部提问答案）→ `mechanics_done`（力学估算 + A/B/C、D/E 选项）。
 > 不要跳步；`step` 不对时命令会直接报错拒绝。
 
 > 📌 **【BUG-01/07 修复】载荷数值口径**
@@ -353,7 +378,11 @@ python "<根>\tools\workflow_gate.py" pre-delivery
   - ✅ 正确：`python "<工程模式根目录>\tools\workflow_gate.py" init "<任务>"`
   - ❌ 错误：凭印象调用任意门禁类 DSH 工具（**本环境不存在，必然失败**）
 - 子命令名用**下划线**：`init` / `provide_context` / `select` / `confirm-assembly`
-- **`provide_context` 必须调用两次**：第一次传第0题答案，第二次传第二段答案
+- **`provide_context` 必须调用三次**（新流程）：
+  ① 传「并行策略 D/E + 是否 AI 自主 A/B/C」的答案；
+  ② 传「参数需求强度（强/不强）」的答案；
+  ③ 传「全部按需提问」的答案（此时才出力学估算）。
+  ⚠️ 顺序不能颠倒：模式确认在前、强度在后（2026-10-13 重排）。
 - **`select` 支持 `C,E` / `C E` / `"C, E"` / `--choice C --parallel E` 等写法**（BUG-03）
 - 所有门禁步骤必须在主对话完成，不要进子代理
 - 严禁跳过门禁直接开始设计
@@ -371,19 +400,23 @@ User: "Design a planetary reducer"
 AI must (all in MAIN conversation, NOT in subagent):
 1. Output: [MODE SELECTED] Mode 2
 2. 执行 `python "<工程模式根目录>\tools\workflow_gate.py" init "Design a planetary reducer"`
-   → 返回**第 0 题：参数需求强度**
-   → **把这一题呈现给用户，必须等用户回答！**
-3. 用户回答第 0 题后，执行
-   `... workflow_gate.py provide_context "<第0题答案>"`
-   → 返回第二段问题（强需求=17题 / 不强=精简5题）
-   → **把第二段问题呈现给用户，等用户完整作答！**
-4. 用户答完第二段后，**再次**执行
-   `... workflow_gate.py provide_context "<第二段答案>"`
-   → 返回力学估算 + A/B/C + D/E 选项，等用户选择
-   → 同时落盘 `tools/load_cases/gate_load_case.json`（physics 校核必须用这一份数值）
-5. 执行 `... workflow_gate.py select C,E`（choice=用户选择的 A/B/C，并行=D/E）
-6. 创建全部 5 个小屋（结构件→传动机构→壳体机架→总装与验证→工程图输出），串行模式逐个创建
-7. 每个小屋完成后用 interrupt_agent 清理，再创建下一个
+   → 返回**第 1 步：确认模式 + ① 并行策略 D/E + ② 是否 AI 自主 A/B/C**
+   → **把这两问呈现给用户，必须等用户回答！**
+3. 用户回答后，执行
+   `... workflow_gate.py provide_context "<并行策略+搭建方式的答案>"`
+   → 返回**第 2 步：参数需求强度（强需求 / 不强）**
+   → **把这一题呈现给用户，等用户作答！**
+4. 用户答完参数强度后，**再次**执行
+   `... workflow_gate.py provide_context "<参数强度的答案>"`
+   → 返回**第 3 步：启动总计子代理（十阶段流水线）+ 按需提问指引**
+   → 题数区间：强需求 10~50 / 弱需求 5~10（**不再一股脑全问**）
+   → 按指引先 `mode2_flow.py begin-stage <阶段>`，分析到缺信息时再 `ask`
+5. 提问完成后执行
+   `... workflow_gate.py provide_context "<全部提问的答案>"`
+   → 返回力学估算 + 落盘 `tools/load_cases/gate_load_case.json`
+6. 执行 `... workflow_gate.py select C,E`（choice=用户选择的 A/B/C，并行=D/E）
+7. 创建全部 5 个小屋（结构件→传动机构→壳体机架→总装与验证→工程图输出），串行模式逐个创建
+8. 每个小屋完成后用 interrupt_agent 清理，再创建下一个
 
 **IMPORTANT: All workflow_gate steps must be done in MAIN conversation first!**
 Subagents are ONLY for actual modeling work, NOT for asking questions.

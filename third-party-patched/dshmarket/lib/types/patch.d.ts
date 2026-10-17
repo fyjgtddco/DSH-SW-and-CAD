@@ -104,6 +104,27 @@ export declare function rowIdsForPackage(host: PatchHost, profileDirectory: stri
  */
 export declare function carrierDisableIds(profileDirectory: string, packageName: string): string[];
 /**
+ * The ids a package's bundle patch touches WITHOUT inserting them itself.
+ *
+ * `insert:` rows are the package's own — that split is what `rowIdsForPackage`
+ * relies on (#147: a bundle patch also carries rows that merely reconfigure
+ * other plugins, and writing `disabled: true` onto those took down the
+ * neighbour). Every other row is a statement about a DIFFERENT plugin.
+ *
+ * It answers one question for the toggle route (#696 B): may this bundle leave
+ * `dsh.profile.bundles` when the user turns it off? Leaving takes its whole
+ * patch with it, which is exactly right when the patch speaks only for itself
+ * and wrong when it configures a neighbour — the shape #147 and the
+ * fixture-cross e2e exist to protect, where the neighbour must keep running
+ * and the bundle must keep re-enabling.
+ *
+ * Reads both patch sources like carrierDisableIds: the declared
+ * `dsh.bundle.patch` and the conventional root cordis.patch.yml. Ownership is
+ * judged per file, because a package may ship both and only the file's own
+ * `insert:` block says which ids it brings in.
+ */
+export declare function foreignRowIds(profileDirectory: string, packageName: string): string[];
+/**
  * Per-package patch-layer flags for the installed list: names whose rows the
  * user patch layer disables / force-enables. These cover toggles made
  * OUTSIDE the market (hand-edited cordis.patch.yml, dsh-web-plugin-manager,

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Engineering Mode",
+    "description": "Sub-agent three-panel workspace for DSH Engineering Mode: main conversation + channel list + live workspace. Active only under the engineering preset; can be disabled in Settings."
+  }
+}

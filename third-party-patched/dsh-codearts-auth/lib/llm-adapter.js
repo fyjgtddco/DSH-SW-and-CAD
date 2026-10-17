@@ -1,27 +1,38 @@
 import { attributionHeaders, CONTEXT_WINDOW_EXCEEDED_CODE, isContextWindowExceededError, isQuotaExceededError, LlmAdapter, LlmError, QUOTA_EXCEEDED_CODE, } from '@deepseek-ai/dsh-llm';
 import { ToolCallId } from '@deepseek-ai/dsh-llm';
+import { providerCatalogVisible } from './account-pool.js';
+import { settingsNamespaceFor } from './settings-compat.js';
+import { isCodeArtsBenefitModel } from './models.js';
+import { normalizeHarnessMessages } from './message-shape.js';
 import { signRequestHuawei } from './sign.js';
-import { isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, resolveToolPairing } from './sse.js';
+import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js';
 export const CHAT_API_BASE = 'https://snap-access.cn-north-4.myhuaweicloud.com/api/v2';
 export const PROVIDER = 'codearts';
 // DeepSeek V4（CodeArts Agent 模型列表新增，UI 标注"每日 1000 万免费 Tokens"福利）：
-// e2e 实测（2026-08-20，对齐 deveco-code 62834ff6）后端实际注册的模型 ID：
-// - deepseek-v4-flash（无日期后缀）✅ 可直接收发消息
-// - deepseek-v4-flash-0731（IDE 列表显示的带日期后缀 ID）❌ 后端返回
-//   InferHub.002002009.404 "The model is not registered"——后端未注册此 ID
-// - deepseek-v4-pro ✅ 可直接收发消息
-// 结论：IDE 模型列表显示的 flash ID 与后端实际注册 ID 不一致，使用无后缀的 deepseek-v4-flash。
+//
+// 修正（2026-09-23，对齐 deveco-code-rust fb1b4a2）：早期注释称
+// 「deepseek-v4-flash-0731 后端未注册」，该结论**有误** —— 实测它返回 404 的
+// 真实原因是**缺少 `maas_type: benefit` 头**；带上该头即成功。带日期后缀与
+// 无后缀是后端上两个不同的模型，均有注册，不能互相替代：
+//   - deepseek-v4-flash-0731 / deepseek-v4-pro-0813 → benefit 模型（需 maas_type）
+//   - deepseek-v4-flash / deepseek-v4-pro（无后缀）  → 非 benefit（带该头会
+//     `unsupported model`）
+// gateway/config 返回的是 benefit 那组，故下方静态表保留无后缀形态
+// （无后缀始终可用，不依赖 benefit 头），而 deepseek-v4.1-flash 只有 benefit 形态。
 const DEFAULT_MODELS = [
     'GLM-5.2', 'GLM-5.1', 'GLM-5',
     'glm-5.3-flash',
     'openpangu-2.0-flash', 'openpangu-2.0-pro',
     'deepseek-v4-flash', 'deepseek-v4-pro',
+    'deepseek-v4.1-flash',
 ];
 /**
  * 模型上下文窗口（最大合并请求+响应 token 数）。
  * - GLM-5.2：202752（对齐 CodeArts Agent IDE 模型卡标注）。
  * - glm-5.3-flash：1048576（1M，逆向自 IDE gateway/config，对齐 deveco-code-rust 90aeb17d）。
  * - deepseek-v4-flash / deepseek-v4-pro：1048576（1M，UI 标注）。
+ * - deepseek-v4.1-flash：1000000（对齐 IDE 下发的 inferhub-provider 模型配置，
+ *   2026-09 kernel 日志；对齐 deveco-code-rust fb1b4a2）。
  * - 其余模型未公开上下文容量，留 undefined 让后端默认裁剪。
  */
 const CONTEXT_WINDOWS = new Map([
@@ -29,15 +40,8 @@ const CONTEXT_WINDOWS = new Map([
     ['glm-5.3-flash', 1_048_576],
     ['deepseek-v4-flash', 1048576],
     ['deepseek-v4-pro', 1048576],
+    ['deepseek-v4.1-flash', 1_000_000],
 ]);
-/**
- * glm-5.3-flash（CodeArts Agent 后端新增模型，2026-08 加入）是 benefit（免费额度）
- * 模型：chat 请求必须携带 `maas_type: benefit` 请求头且参与 SDK-HMAC-SHA256
- * 签名，否则后端返回 InferHub.002002009.404 "model is not registered"。
- * 逆向自 CodeArts Agent IDE mitmproxy 抓包（snap-access/api/v2/chat/completions），
- * 对齐 deveco-code-rust 90aeb17d（codearts.rs chat_stream signer + e2e 实测）。
- */
-const MAAS_TYPE_BENEFIT_MODELS = new Set(['glm-5.3-flash']);
 /**
  * 将消息内容载荷展平为纯文本字符串。Harness 消息
  * 以 OpenAI 风格的块数组形式携带内容（`[{type:'text',...}]`，且
@@ -63,15 +67,23 @@ function contentToText(content) {
  * `reasoning_content` field"）；工具结果（搭载在 harness 用户消息中）
  * 展开为独立的 `{role: 'tool'}` 消息，使模型能看到其调用的返回值。
  * 其余非文本块（图片）被丢弃，与端点接受的格式一致。
+ *
+ * ⚠️ 入口先做 **DSH 0.1.7 消息形状归一化**（见 `message-shape.ts`）：0.1.7 把工具
+ * 结果改为一等 `role:'tool'` 消息，若不归一化，下面的 `type === 'tool-result'`
+ * 判据恒不命中 → 工具调用被 `resolveToolPairing` 整体剔除。
  */
-function serializeMessages(messages) {
+export function serializeMessages(messages) {
+    const normalized = normalizeHarnessMessages(messages);
     const wire = [];
     // 剔除无法配对的工具调用/结果（详见 resolveToolPairing）：孤儿 tool_calls
     // 会让后端对之后每一条消息都返回 400，整个会话永久报废。
-    const { keepCallIds, keepResultIds } = resolveToolPairing(messages);
-    for (const message of messages) {
+    const { keepCallIds, keepResultIds } = resolveToolPairing(normalized);
+    for (const message of normalized) {
         if (message.role === 'assistant') {
-            const content = Array.isArray(message.content) ? message.content : [];
+            // 存量自愈：清洗历史里已持久化的行首 `course` / `课` 泄漏
+            // （见 `stripCourseLeakFromHistoryContent`）。只清 assistant ——
+            // 判据只对模型自己的输出成立，清洗用户输入等于篡改用户的话。
+            const content = stripCourseLeakFromHistoryContent(message.role, Array.isArray(message.content) ? message.content : []);
             const toolCalls = content
                 .filter((block) => typeof block === 'object' && block !== null && block.type === 'tool-call')
                 .filter(block => keepCallIds.has(String(block.id)))
@@ -753,14 +765,50 @@ export class CodeArtsAdapter extends LlmAdapter {
             // 拉取失败保持未定义，后续 listModels/resolveModel 仍回退静态列表
         }
     }
-    listModels(_provider) {
-        void this.ensureRemoteModels();
+    /**
+     * 完整模型目录（**不应用用户黑名单**）。
+     *
+     * 设置页必须渲染被关闭的模型（否则用户无法重新打开），而 `listModels` 会按
+     * 黑名单过滤掉它们 —— RPC 层只能凭裸 id 补回，展示名随之丢失
+     * （用户报障：「关闭的就没有显示倍率」）。CodeArts 目录虽无倍率，但同样
+     * 需要正确的 `name`（否则关闭项显示 `deepseek-v4-flash` 这类裸 id）。
+     */
+    listAllModels() {
         const source = this.remoteModels ?? DEFAULT_MODELS.map((id) => ({ id, name: id }));
-        // 屏蔽视觉（VL）多模态模型（id 含 -VL- 或以 -VL 结尾，如 Qwen3-VL-235B）：
-        // 这类模型上下文小（32768 tokens）、不支持工具调用（vLLM 未启用
-        // auto-tool-choice，发 tools 会 400），不适合当 agent 主模型，故从列表隐藏。
-        const visible = source.filter((m) => !/-VL-/i.test(m.id) && !/-VL$/i.test(m.id));
-        return Promise.resolve(visible.map((m) => ({ provider: PROVIDER, id: m.id, name: m.name, inputModalities: ['text'] })));
+        // 与 listModels 保持同一套「可见性」过滤（VL 多模态不参与），
+        // 唯一区别是不套用户黑名单。
+        return source
+            .filter((m) => !/-VL-/i.test(m.id) && !/-VL$/i.test(m.id))
+            .map((m) => ({ id: m.id, name: m.name }));
+    }
+    async listModels(_provider) {
+        // ⚠️ 没有任何已登录账号时返回空数组 → DSH 的 `buildModelCatalog` 把整个
+        // provider 分组隐藏（它显式 `.filter(group => group.models.length > 0)`）。
+        // ⚠️ 必须返回 `[]` 而**不能抛错**（抛错会被归入 catalog 的 `failures`，
+        // 界面上反而多出一条 provider 报错）。
+        //
+        // ⚠️ **CodeArts 不再有单凭据例外**：早期它额外把固定 ref
+        // `CODEARTS_ACCESS_TOKEN` 计入判据（单凭据模式），该模式已随
+        // `credentialRef` 回退解析一并移除 —— 六个 provider 现在判据完全一致，
+        // 都只看账号池。
+        //
+        // ⚠️ 门控放在 `ensureRemoteModels()` **之前**：没有已登录账号时连远端目录都
+        // 不必拉。
+        if (!await providerCatalogVisible(this.options.accountPool, PROVIDER))
+            return [];
+        // 必须 await：ensureRemoteModels 是异步的，早期实现用 `void` 丢弃 Promise，
+        // 冷缓存时远端目录尚未落地就走静态兜底表，模型选择器会短暂显示错误的
+        // 模型集合（Jet Hub 的模型开关也据此渲染，会造成"关掉的模型又冒出来"）。
+        await this.ensureRemoteModels();
+        const visible = this.listAllModels();
+        // 用户在 Jet Hub 关闭的模型（黑名单制：不在表里即默认打开）。
+        // 只影响此处对外播报的模型目录，不改变 resolveModel/stream 的路由能力
+        // ——与 DSH 对 listModels 的约定一致（目录是建议性的，缺省不构成拒绝）。
+        const disabled = this.options.accountPool?.disabledModelsFor(PROVIDER);
+        const listed = disabled === undefined || disabled.size === 0
+            ? visible
+            : visible.filter((m) => !disabled.has(m.id));
+        return listed.map((m) => ({ provider: PROVIDER, id: m.id, name: m.name, inputModalities: ['text'] }));
     }
     async resolveModel(provider, model, _signal) {
         await this.ensureRemoteModels();
@@ -779,11 +827,10 @@ export class CodeArtsAdapter extends LlmAdapter {
         };
     }
     async *stream(options) {
-        // 传入模型 id：账号池据此跳过该模型已限流的账号。
-        let credential = await this.options.resolveCredential(options.model);
+        let credential = await this.options.resolveCredential();
         if (credential === undefined || Date.parse(credential.expires_at) <= Date.now()) {
             await this.options.refresh();
-            credential = await this.options.resolveCredential(options.model);
+            credential = await this.options.resolveCredential();
         }
         if (credential === undefined || !credential.access_key_id || !credential.secret_access_key || !credential.security_token) {
             throw new LlmError('codearts: no usable credential; log in first', 'MISSING_CREDENTIAL');
@@ -875,12 +922,21 @@ export class CodeArtsAdapter extends LlmAdapter {
         const rateLimitTried = new Set();
         if (currentAccountId)
             rateLimitTried.add(currentAccountId);
+        // benefit（免费额度）模型判定在重试循环外先算好：它要读 benefit 集合缓存
+        // （`~/.cache/deveco/codearts_benefit_models.json`），不宜每轮重试都做 IO。
+        // 集合来自 gateway/config 的模型清单 ∪ 静态兜底（见 isCodeArtsBenefitModel），
+        // 使后端新增 benefit 模型时无需改代码即可自动识别。
+        const isBenefitModel = isCodeArtsBenefitModel(options.model);
         for (;;) {
-            // glm-5.3-flash 是 benefit（免费额度）模型，后端要求 maas_type: benefit
-            // 头参与 SDK-HMAC-SHA256 签名，否则返回 InferHub.002002009.404
-            // "model not registered"（逆向自 CodeArts Agent IDE 抓包，见
-            // MAAS_TYPE_BENEFIT_MODELS 注释）。
-            const extraSignedHeaders = MAAS_TYPE_BENEFIT_MODELS.has(options.model) ? { maas_type: 'benefit' } : undefined;
+            // benefit（免费额度）模型（glm-5.3-flash、deepseek-v4.1-flash 等）后端要求
+            // maas_type: benefit 头参与 SDK-HMAC-SHA256 签名，否则返回
+            // InferHub.002002009.404 "model is not registered"。
+            //
+            // 判定必须是**动态**的：早期只硬编码 glm-5.3-flash 一个模型，导致
+            // deepseek-v4.1-flash 等其它 benefit 模型调用失败（用户报障：
+            // 发消息后报 Insufficient Balance / QUOTA —— 缺该头时后端按非 benefit
+            // 通道处理该模型）。实证见 CODEARTS_BENEFIT_FALLBACK 注释。
+            const extraSignedHeaders = isBenefitModel ? { maas_type: 'benefit' } : undefined;
             const signed = await signRequestHuawei(credential.access_key_id, credential.secret_access_key, credential.security_token, 'POST', url, new TextEncoder().encode(body), extraSignedHeaders);
             const headers = new Headers(attributionHeaders());
             // 签名 map 中的额外头（如 maas_type）必须随请求发送——它们已参与
@@ -920,7 +976,7 @@ export class CodeArtsAdapter extends LlmAdapter {
                 if (isAuthError(response.status, errorText) && !authRefreshed) {
                     authRefreshed = true;
                     await this.options.refresh();
-                    credential = await this.options.resolveCredential(options.model);
+                    credential = await this.options.resolveCredential();
                     if (credential === undefined || !credential.access_key_id || !credential.secret_access_key || !credential.security_token) {
                         throw new LlmError('codearts: credential missing after refresh; log in again', 'MISSING_CREDENTIAL');
                     }
@@ -930,12 +986,8 @@ export class CodeArtsAdapter extends LlmAdapter {
                 // （外层 for(;;) 会在拿到新凭据后重新签名发请求）。用 tried 集合
                 // 保证每个账号只尝试一次，试完才判定"全部受限"——避免只试一个
                 // 就下结论，导致 UI 限流状态与实际判定不一致。
-                //
-                // 判定带上 HTTP 状态码：上游可能返回 429 但响应体为空/非限流措辞。
-                if (this.options.accountPool && isRateLimited(errorText, response.status)) {
-                    // parseRateLimitError 在无法解析具体时刻时会给出默认冷却，
-                    // 因此这里不再因解析失败而放弃切换账号。
-                    const parsed = parseRateLimitError(errorText, options.model, { status: response.status });
+                if (this.options.accountPool && isRateLimited(errorText)) {
+                    const parsed = parseRateLimitError(errorText, options.model);
                     if (parsed) {
                         if (currentAccountId) {
                             await this.options.accountPool.updateModelRateLimit(currentAccountId, parsed.modelId, parsed.resetTimeMs);
@@ -1011,9 +1063,83 @@ export class CodeArtsAdapter extends LlmAdapter {
         let nextIndex = 0;
         const toolCalls = new Map();
         const toolOrder = [];
+        /**
+         * `tool_call` 分片 index → 后端签发的真实 id。
+         *
+         * ⚠️ **本兜底不可省略**（真实缺陷，2026-09-29 定位）：OpenAI 兼容协议里
+         * `id` 只在**首个**分片出现，但实测华为侧偶发**完全不返回 `id`**（或返回空串）。
+         * 早期实现直接把 `call.id` 写进 `block.callId`，缺失时落成**空串** id，
+         * 于是 assistant 消息里留下 `{type:'tool-call', id:''}`：
+         *
+         * 1. `tool/call` 带着 `callId:''` 被持久化；
+         * 2. 该调用完成后写 `tool/result` 时，DSH 的格式 v4 校验
+         *    （`assertV4ToolResultMessage`）要求 `message.toolCallId === source.callId`
+         *    且**都非空**，于是抛
+         *    `format v4 tool/result at seq N requires toolCallId matching its tool source`；
+         * 3. 该轮直接失败，且**会话永久报废** —— 日志停在 `tool/call`，崩溃恢复
+         *    (`interruptedTurnClosers`) 按空 callId 合成修补结果时**再次**命中同一校验，
+         *    既写不进也修不好。
+         *
+         * 空 id 同样过不了 `SessionFormatError`（它判 `length === 0`），故判据必须是
+         * 「非空字符串」而不是「!== undefined」。
+         *
+         * 兄弟适配器（`openai-compat.ts` / `buddy-adapter.ts` / `lobsterai-adapter.ts` /
+         * `trae-adapter.ts`）**都**有这层 `toolIds` 兜底，只有本文件漏了 —— 这正是
+         * 该缺陷只在 `codearts` provider 复现的原因。
+         *
+         * ⚠️ 兜底 id 用 `call_${wireIndex}` 而非随机值：同一次响应内 index 唯一，
+         * 且它必须是**稳定**的 —— 后续分片每片都要得到同一个 id。
+         */
+        const toolIds = new Map();
         let buffer = '';
         let streamEnded = false;
         let finishReason;
+        /**
+         * 思考死循环检测（见 `createReasoningLoopDetector`）。命中后丢弃后续
+         * reasoning 增量，收尾时发截断后的 block，并让 finish 报 max-tokens。
+         *
+         * 本适配器有**两处** reasoning 出口，两处都必须喂入同一判据（漏一处
+         * 就等于漏一条路径）：① `emitDsmlFeed` 的 `reasoning` 聚合参数；
+         * ② `delta.reasoning_content` → `dsmlReasoningExtractor` → `thinking`。
+         */
+        const loopGuard = isReasoningLoopGuardEnabled() ? createReasoningLoopDetector() : undefined;
+        let loopDetected = false;
+        /**
+         * **正文**死循环检测（**独立实例**，见 `createReasoningLoopDetector`）。
+         *
+         * 真实缺陷（用户报障，2026-09-25）：唯一活动 session 出现**正文**循环，
+         * 而旧实现只在 reasoning 分支调 `observe` → 正文循环完全看不见。
+         *
+         * ⚠️ 两个实例不可合并：判据看尾部 3000 字符窗口的行去重率，两条通道
+         * 混进同一窗口会互相稀释，使守卫双双失效。
+         *
+         * ⚠️ 语义差异：实测正文循环的工具调用在循环正文**之后**到达且有效，
+         * 故正文守卫**只截断文本**，绝不 `reader.cancel()`、绝不改 finish reason。
+         *
+         * ⚠️ **本适配器刻意不做 `</think:hex>` 归位**（与其余四个适配器不同）：
+         * 实测那 28 处标签**全部出自 `workbuddy`**（`hy4-preview-f` 25 处、
+         * `workbuddy/deepseek-v4.1-flash` 3 处），codearts 一条都没有。
+         * 更关键的是，本适配器的正文出口带 **`visible` 回退**（正文为空且无工具
+         * 调用时用推理文本回填可见区）—— 若在此处把正文归位成空串，回退会立刻
+         * 把整段思考**复制回正文**，等于归位失效并放大问题。故此处只加守卫。
+         */
+        const proseLoopGuard = isReasoningLoopGuardEnabled() ? createReasoningLoopDetector() : undefined;
+        let proseLoopDetected = false;
+        /**
+         * 纯空白思考抑制器（见 `createBlankReasoningSuppressor`）。与 `blocks` /
+         * `loopGuard` 同生命周期：**每个 `stream()` 调用建一个实例**。
+         *
+         * ⚠️ **本适配器的两个 reasoning 出口必须共用这一个实例**：
+         * ① `emitDsmlFeed` 的 `reasoning` 参数、② `delta.reasoning_content` →
+         * `thinking`。两处都用 `blocks.find(kind === 'reasoning')` 找**同一个**
+         * reasoning 块 —— 若各持一个 helper，第二处就会从空态重新开始累积
+         * （明明已有非空白内容却被判为「至今仍空白」），`text()` 也随之错乱。
+         *
+         * 为什么必须延后建块：`BlockAssembler` 在**没有 `block-end`** 时同样会用
+         * `partial.text` 组装出块，故只在出口过滤挡不住空 Think 块 —— 必须从一开始
+         * 就不发任何 chunk（与「空名字 tool_call」同型修法）。
+         */
+        const suppressor = createBlankReasoningSuppressor();
         // DSML 提取器：从 delta.content 中识别模型以原生 DSML XML 风格
         // 写入的工具调用（deepseek-v4 等模型在工具模式不匹配时会直接
         // 输出 `<｜DSML｜tool_calls>...`），解析为结构化 tool-call，
@@ -1038,20 +1164,57 @@ export class CodeArtsAdapter extends LlmAdapter {
                     blocks.push(block);
                     yield { type: 'block-start', index: block.index, blockType: 'text' };
                 }
-                block.text += text;
-                yield { type: 'text-delta', index: block.index, text };
+                // 正文死循环守卫（见 `proseLoopGuard` 注释）。命中后只停止累积与发射，
+                // 绝不 `reader.cancel()`、绝不改 finish reason。
+                if (proseLoopGuard !== undefined) {
+                    if (proseLoopGuard.observe(text))
+                        proseLoopDetected = true;
+                }
+                if (!proseLoopDetected) {
+                    block.text += text;
+                    yield { type: 'text-delta', index: block.index, text };
+                }
             }
             if (reasoning.length > 0) {
-                let block = blocks.find(candidate => candidate.kind === 'reasoning');
-                if (block === undefined) {
-                    block = { index: nextIndex++, kind: 'reasoning', text: '' };
-                    blocks.push(block);
-                    yield { type: 'block-start', index: block.index, blockType: 'reasoning' };
+                // 死循环守卫：命中后不再累积、不再发射。
+                //
+                // ⚠️ 这里**只跳过发射**：真正的止损（`reader.cancel()` + `break`）在
+                // 本 chunk 的行循环**全部处理完之后**、外层 `for (;;)` 末尾执行（见下方
+                // ★ 止损块）—— 这样同一 chunk 里已到达的 usage / [DONE] 仍会被处理。
+                // 若在此处直接 `break`，本 chunk 剩余的行会被整块跳过。
+                // ⚠️ 也**不能用 `continue`**（Task 2 审查发现并已实测复现）：它会
+                // 连带跳过**同一帧内**位于本分支之后的处理（`usage` 记账、DSML
+                // tool-call 解析），导致 token 统计静默丢失。故用 `if (!loopDetected)`
+                // 守卫分支体。
+                if (loopGuard !== undefined) {
+                    if (loopGuard.observe(reasoning))
+                        loopDetected = true;
                 }
-                block.text += reasoning;
-                yield { type: 'reasoning-delta', index: block.index, text: reasoning };
+                if (!loopDetected) {
+                    // 纯空白思考：`emit === undefined` ⇒ 本片一个 chunk 都不发，
+                    // 于是既不建块、也不消耗 `nextIndex`（见 helper 注释）。
+                    const emit = suppressor.feed(reasoning);
+                    if (emit !== undefined) {
+                        let block = blocks.find(candidate => candidate.kind === 'reasoning');
+                        if (block === undefined) {
+                            block = { index: nextIndex++, kind: 'reasoning', text: '' };
+                            blocks.push(block);
+                            yield { type: 'block-start', index: block.index, blockType: 'reasoning' };
+                        }
+                        // ⚠️ **整块回写**（赋值，不是 `+=`）：helper 内部已累积全部文本，
+                        // 用 `+=` 会双写。本适配器两个出口共用同一 helper，故回写值恒为
+                        // 两处共同累积的完整文本。
+                        block.text = suppressor.text();
+                        yield { type: 'reasoning-delta', index: block.index, text: emit };
+                    }
+                }
             }
             for (const call of dsmlCalls) {
+                // 与 delta 路径同一条判据：名字不可用的调用**一个 chunk 都不产出**
+                // （否则 `BlockAssembler` 会组装出 `name:''` 的块并污染会话，
+                // 让下游端点以 400 code 11133 拒绝之后每一次请求）。
+                if (!hasUsableToolName(call.name))
+                    continue;
                 const wireIndex = toolCalls.size;
                 // DSML 语法没有 provider 签发的 call id，必须生成唯一 id：
                 // harness 的 tool/call ↔ tool/result 配对与 web UI 的工具行
@@ -1064,6 +1227,7 @@ export class CodeArtsAdapter extends LlmAdapter {
                     text: call.arguments,
                     name: call.name,
                     callId: ToolCallId(`dsml-${crypto.randomUUID().replace(/-/g, '')}`),
+                    announced: true,
                 };
                 toolCalls.set(wireIndex, block);
                 toolOrder.push(block.index);
@@ -1172,22 +1336,49 @@ export class CodeArtsAdapter extends LlmAdapter {
                         const { text, reasoning, toolCalls: reasoningDsmlCalls } = dsmlReasoningExtractor.feed(delta.reasoning_content);
                         const thinking = text + reasoning;
                         if (thinking.length > 0) {
-                            let block = blocks.find(candidate => candidate.kind === 'reasoning');
-                            if (block === undefined) {
-                                block = { index: nextIndex++, kind: 'reasoning', text: '' };
-                                blocks.push(block);
-                                yield { type: 'block-start', index: block.index, blockType: 'reasoning' };
+                            // 死循环守卫：与上面 `emitDsmlFeed` 的 `reasoning` 分支同一判据，
+                            // 两条出口都要接（漏一处就等于漏一条路径）。
+                            //
+                            // ⚠️ 守卫必须**同时包住** `block.text += thinking` 与 `yield`
+                            // 两行 —— 只拦 yield 的话，累积文本仍含循环内容，收尾的截断
+                            // 就失效了。这里**只跳过发射**：止损（`reader.cancel()` + `break`）
+                            // 在本 chunk 行循环处理完之后执行（见下方 ★ 止损块），故同帧的
+                            // usage 记账不受影响；**也不能用 `continue`**（会连带跳过本帧
+                            // 之后的 usage 记账）。
+                            if (loopGuard !== undefined) {
+                                if (loopGuard.observe(thinking))
+                                    loopDetected = true;
                             }
-                            block.text += thinking;
-                            yield { type: 'reasoning-delta', index: block.index, text: thinking };
+                            if (!loopDetected) {
+                                // 纯空白思考：`emit === undefined` ⇒ 本片一个 chunk 都不发。
+                                // ⚠️ 与出口①共用**同一个** `suppressor`：两处落在同一个
+                                // `blocks.find(kind === 'reasoning')` 块上，各自累积会错乱
+                                // （出口②会误判「整块迄今仍空白」而丢弃本已有内容的块）。
+                                const emit = suppressor.feed(thinking);
+                                if (emit !== undefined) {
+                                    let block = blocks.find(candidate => candidate.kind === 'reasoning');
+                                    if (block === undefined) {
+                                        block = { index: nextIndex++, kind: 'reasoning', text: '' };
+                                        blocks.push(block);
+                                        yield { type: 'block-start', index: block.index, blockType: 'reasoning' };
+                                    }
+                                    // ⚠️ **整块回写**（赋值，不是 `+=`）。
+                                    block.text = suppressor.text();
+                                    yield { type: 'reasoning-delta', index: block.index, text: emit };
+                                }
+                            }
                         }
                         for (const call of reasoningDsmlCalls) {
+                            // 同 delta 路径：名字不可用者一个 chunk 都不产出（见上）。
+                            if (!hasUsableToolName(call.name))
+                                continue;
                             const wireIndex = toolCalls.size;
                             const block = {
                                 index: nextIndex++,
                                 text: call.arguments,
                                 name: call.name,
                                 callId: ToolCallId(`dsml-${crypto.randomUUID().replace(/-/g, '')}`),
+                                announced: true,
                             };
                             toolCalls.set(wireIndex, block);
                             toolOrder.push(block.index);
@@ -1203,15 +1394,17 @@ export class CodeArtsAdapter extends LlmAdapter {
                     }
                     for (const call of delta?.tool_calls ?? []) {
                         const wireIndex = call.index ?? 0;
+                        // ⚠️ 只接受**非空** id 并记住它：后续分片可能新一轮又给空串/缺失，
+                        // 无条件覆盖会把首片拿到的真实 id 抹成空（与 `function.name` 同因）。
+                        if (typeof call.id === 'string' && call.id.length > 0)
+                            toolIds.set(wireIndex, call.id);
+                        const callId = toolIds.get(wireIndex) ?? `call_${wireIndex}`;
                         let block = toolCalls.get(wireIndex);
                         if (block === undefined) {
-                            block = { index: nextIndex++, text: '' };
+                            block = { index: nextIndex++, text: '', announced: false };
                             toolCalls.set(wireIndex, block);
-                            toolOrder.push(block.index);
-                            yield { type: 'block-start', index: block.index, blockType: 'tool-call' };
                         }
-                        if (call.id !== undefined)
-                            block.callId = call.id;
+                        block.callId = callId;
                         // 后续参数分片会带上空的 function.name（""），它不是 undefined，
                         // 直接覆盖会把首个分片解析出的真实工具名清空，导致
                         // `unknown tool ""`。只有非空名字才允许更新。
@@ -1220,10 +1413,29 @@ export class CodeArtsAdapter extends LlmAdapter {
                         }
                         const fragment = call.function?.arguments ?? '';
                         block.text += fragment;
+                        // ⚠️ **名称为空前不发射任何 chunk**（与 `openai-compat.ts` / `buddy-adapter.ts`
+                        // 同因同修）。只跳过收尾的 `block-end` 不够 —— `BlockAssembler`
+                        // 会把没有 block-end 的 partial 也组装成 `name:''`，污染会话后让
+                        // 腾讯系端点以 400 code 11133 拒绝之后每一次请求。
+                        if (!block.announced) {
+                            if (!hasUsableToolName(block.name))
+                                continue;
+                            block.announced = true;
+                            toolOrder.push(block.index);
+                            yield { type: 'block-start', index: block.index, blockType: 'tool-call' };
+                            yield {
+                                type: 'tool-call-delta',
+                                index: block.index,
+                                id: ToolCallId(callId),
+                                name: block.name,
+                                argumentsDelta: block.text,
+                            };
+                            continue;
+                        }
                         yield {
                             type: 'tool-call-delta',
                             index: block.index,
-                            id: ToolCallId(block.callId ?? ''),
+                            id: ToolCallId(callId),
                             ...block.name !== undefined ? { name: block.name } : {},
                             argumentsDelta: fragment,
                         };
@@ -1246,6 +1458,22 @@ export class CodeArtsAdapter extends LlmAdapter {
                             },
                         };
                     }
+                }
+                // ★ 止损（终审 C1）：命中死循环后**中止上游**，否则 128000 token 照烧。
+                // 原实现只跳过下行累积/发射，`for (;;)` 仍把流读到底 —— 实测上游
+                // 200 帧被读 200 帧（守卫在 ~2304 字符即命中，99.5% 的额度仍被消耗）。
+                //
+                // ⚠️ 位置：内层行循环**之后**、外层 `for (;;)` 末尾 —— 同一 chunk 里已到达
+                // 的 `usage` / `[DONE]` 因此仍会被处理，但命中后**立即**退出，不再读下一块。
+                //
+                // ⚠️ 只 cancel **reader**，绝不 abort `options.signal`：后者是调用方信号，
+                // abort 会被上层报成「用户取消」而非**标记为不完整**的 `max-tokens`
+                // （DSH 在 `max-tokens` 时**不自动重试**，由用户/上层决定是否继续）。
+                // ⚠️ `.catch(() => {})` 不可省：连接已断时 `cancel()` 会抛错，不吞掉会把
+                // 「正常止损」变成一次失败。
+                if (loopDetected) {
+                    await reader.cancel().catch(() => { });
+                    break;
                 }
             }
         }
@@ -1274,6 +1502,20 @@ export class CodeArtsAdapter extends LlmAdapter {
         // 内嵌工具块），正文由工具调用承担，不再把推理复制为可见文本。
         const textBlock = blocks.find(block => block.kind === 'text');
         const reasoningBlock = blocks.find(block => block.kind === 'reasoning');
+        // 命中死循环时只保留循环前的干净前缀（`cutAt`）。`block-end` 是
+        // **权威覆盖**（已由 `scripts/verify-blockend-override.ts` 实证）：
+        // 即便前面已 yield 了全部重复 delta，这里发截断后的 block 即可，无需撤回。
+        //
+        // ⚠️ 行首 `course` / `课` 泄漏清洗（`stripCourseLeak`）**在此处一次性完成**：
+        // `reasoningText` 同时供 `reasoningHasDsml` 判定、`visible` 回退与
+        // reasoning `block-end` 使用，故在此清洗可覆盖全部三处出口，
+        // 不会出现「正文干净而 Think 区仍脏」或反之的不一致。
+        const reasoningText = stripCourseLeakIfEnabled(loopDetected && loopGuard?.cutAt !== undefined
+            // ⚠️ 文本以 helper 为权威（`suppressor.text()`），**不用**
+            // `reasoningBlock.text` —— 两个出口共用同一 helper，以它为准才能保证
+            // 累积口径一致；`reasoningBlock` 仅用于取块 `index`。
+            ? suppressor.text().slice(0, loopGuard.cutAt)
+            : suppressor.text());
         // visible 回退：正文为空且无工具调用时，用推理文本填充可见区（GLM 端点
         // 偶尔把整个回答作为 reasoning_content 输出）。但若推理含 DSML 标签
         // （deepseek-v4 在推理中引用 DSML 语法讨论实现方案，非完整工具调用块），
@@ -1281,19 +1523,82 @@ export class CodeArtsAdapter extends LlmAdapter {
         // 终止或循环（实测 session-a69fa289 turn2 step26：推理仅含 DSML 闭合
         // 标签片段，visible 回退复制到正文后任务终止）。此时正文留空，推理仍
         // 在 Think 区域可见。
-        const reasoningHasDsml = reasoningBlock !== undefined && reasoningBlock.text.includes('｜DSML｜');
-        const visible = textBlock !== undefined && textBlock.text !== ''
-            ? textBlock.text
-            : reasoningBlock !== undefined && toolOrder.length === 0 && !reasoningHasDsml ? reasoningBlock.text : '';
+        //
+        // ⚠️ 回退必须用**截断后**的 `reasoningText`，不能用 `reasoningBlock.text`：
+        // 命中死循环时正文恰好为空且无工具调用，用原文会把病态循环全文复制进
+        // 正文块并持久化，下次重放又要重新吃一遍（正是本守卫要根除的问题）。
+        const reasoningHasDsml = reasoningText.includes('｜DSML｜');
+        // ⚠️ 正文出口也必须清洗 —— 不能只清 reasoning。
+        //
+        // 本适配器的 `visible` 有**两条来源**：正文块，或（正文为空且无工具调用时的）
+        // reasoning 回退。初版只对 reasoning 侧调了 `stripCourseLeakIfEnabled`，
+        // 正文侧直接取 `textBlock.text` 原值 —— 于是「正文块里带行首泄漏」这一路径
+        // 完全没被覆盖，`block-end` 发出去的仍是脏文本（同型缺陷见
+        // `buddy-adapter.ts` / `lobsterai-adapter.ts` / `trae-adapter.ts` 的
+        // text 出口，那几处均已清洗）。
+        //
+        // 清洗放在**取值处**而非 `block-end` 处：`visible` 同时供 text `block-end`
+        // 与下方回退判定使用，在此清洗可保证两条出口一致（不会出现「正文块干净、
+        // 回退脏」或反之）。`reasoningText` 已是清洗后的值，故回退分支无需再清。
+        // 正文死循环截断：只保留循环前的干净前缀。
+        // ⚠️ **不改 finish reason**：工具调用仍要被执行。
+        //
+        // ⚠️ 截断必须在 `visible` 回退**之前**应用：否则「正文命中循环 → 截断后为空
+        // → 回退又把推理文本复制进正文」会把病态循环原样搬到可见区。
+        const truncatedText = proseLoopDetected && proseLoopGuard?.cutAt !== undefined
+            ? (textBlock?.text ?? '').slice(0, proseLoopGuard.cutAt)
+            : undefined;
+        const visible = truncatedText !== undefined
+            ? stripCourseLeakIfEnabled(truncatedText)
+            : textBlock !== undefined && textBlock.text !== ''
+                ? stripCourseLeakIfEnabled(textBlock.text)
+                // ⚠️ `!loopDetected` 门禁**不可省**：命中思考死循环时若仍做该回退，
+                // `visible` 会变成那段**被截断的循环垃圾**，于是下面的
+                // `reasoningLoopIsSoleOutput` 判据恒为假 → 永远落回 max-tokens，
+                // 「有分辨力的错误提示」在 codearts 这条路径上**静默失效**。
+                // 且把循环垃圾回填进正文正是本守卫要根除的问题（见上方注释）。
+                : reasoningBlock !== undefined && toolOrder.length === 0 && !reasoningHasDsml && !loopDetected
+                    ? reasoningText
+                    : '';
+        /**
+         * 本次响应**实际会发出的 `block-end` 数量**（＝真正落进 assistant 消息的块数）。
+         *
+         * ⚠️ **不能写成 `blocks.length`**：`blocks` 里可能留着**不会发出**的条目 ——
+         * 纯空白思考块（已被 `suppressor` 压制，连 `block-start` 都没发）、
+         * 或被 `cutAt` / `course` 清洗成空串的块。用 `blocks.length` 会把
+         * 「零块响应」误判成「有块」，于是静默结束的缺陷原样保留。
+         *
+         * 故此处**在每个 `block-end` 的发射点自增**，与下面三段发射逻辑逐条对齐。
+         * 本适配器有**两个**容易算错的地方：
+         *
+         * 1. **正文块的条件含 `visible` 回退**：判据是
+         *    `textBlock !== undefined || visible !== ''`（不是只看 `textBlock`）。
+         *    `visible` 在「正文为空且无工具调用」时用推理文本填充 —— 此时
+         *    `textBlock` 可能是 `undefined`（正文一个 delta 都没收到），
+         *    但块**确实会发出**。只数 `textBlock` 会漏掉它、把一个非空响应
+         *    误判成零块。
+         * 2. **reasoning 块是双层条件**：外层 `trim() !== ''`、内层
+         *    `reasoningText !== ''`。只有两层都过才真的发 `block-end`。
+         */
+        let blockCount = 0;
         for (const index of toolOrder) {
             const block = [...toolCalls.values()].find(candidate => candidate.index === index);
+            // `toolOrder` 只收「名字已可用」的块，故此处名字必然可用；不回退成
+            // `?? ''` —— 那会把空名字块写进会话，正是本次修复要根除的污染路径。
+            if (!hasUsableToolName(block.name))
+                continue;
+            blockCount += 1;
             yield {
                 type: 'block-end',
                 index,
                 block: {
                     type: 'tool-call',
-                    id: ToolCallId(block.callId ?? ''),
-                    name: block.name ?? '',
+                    // ⚠️ 判据用 `||`（同时兜 undefined 与空串），**不可**退回成
+                    // `block.callId ?? ''`：空串 id 会被格式 v4 校验拒绝（它判
+                    // `length === 0`），落库即等于报废整条会话（见上方 `toolIds` 注释）。
+                    // 正常路径下 `block.callId` 已在建块时填好，此处仅为最后一道防线。
+                    id: ToolCallId(block.callId || `call_${index}`),
+                    name: block.name,
                     // 同上：空分片补 {}，残缺参数保持原样交由截断判定处理。
                     arguments: isTruncatedArguments(block.text)
                         ? block.text
@@ -1301,11 +1606,26 @@ export class CodeArtsAdapter extends LlmAdapter {
                 },
             };
         }
+        // ⚠️ 计数条件必须与上面的**发射**条件逐字一致（含 `|| visible !== ''`）：
+        // `visible` 回退会用推理文本回填正文，只数 `textBlock` 会把「有正文」误判成
+        // 零块、进而错报 EMPTY_RESPONSE。
+        //
+        // 就当前实现而言，`|| visible !== ''` 这一半在**计数**上是冗余的防御
+        // （`visible !== ''` 蕴含 reasoning 那块也非空，下一段的计数必命中，
+        // 故块数不会因此为 0）—— 已用变异测试证实。但在**发射**上它是必需的
+        // （去掉它会让 `llm-adapter.spec.ts` 的 visible 回退用例失败）。
         if (textBlock !== undefined || visible !== '') {
+            blockCount += 1;
             yield { type: 'block-end', index: textBlock?.index ?? nextIndex, block: { type: 'text', text: visible } };
         }
-        if (reasoningBlock !== undefined && reasoningBlock.text !== '') {
-            yield { type: 'block-end', index: reasoningBlock.index, block: { type: 'reasoning', text: reasoningBlock.text } };
+        // ⚠️ 判据收紧为 `trim() !== ''`：纯空白思考不得被算作「有 reasoning 产出」。
+        // 文本改用上面的 `reasoningText`（源自 `suppressor.text()`，已应用 cutAt
+        // 截断与 course 清洗），保证与 `visible` 回退、`reasoningHasDsml` 同一口径。
+        if (reasoningBlock !== undefined && reasoningBlock.text.trim() !== '') {
+            if (reasoningText !== '') {
+                blockCount += 1;
+                yield { type: 'block-end', index: reasoningBlock.index, block: { type: 'reasoning', text: reasoningText } };
+            }
         }
         // finish_reason 映射顺序很关键：'length'（输出被 max_tokens 截断）必须优先于
         // 工具调用检查。若先看 toolOrder.length > 0，截断的工具调用会被报告为
@@ -1313,12 +1633,47 @@ export class CodeArtsAdapter extends LlmAdapter {
         // 把截断参数持久化进会话历史——web 加载历史时 presenter 解析也会失败
         // （"Unterminated string in JSON"）。报告 max-tokens 后，dsh 会丢弃不完整的
         // 工具调用并触发 max-tokens 续写（分批生成），避免脏数据与错误执行。
-        const reason = finishReason === 'length'
-            ? { kind: 'max-tokens' }
-            : finishReason === 'tool_calls' || toolOrder.length > 0
-                ? { kind: 'tool-calls' }
-                : { kind: 'stop' };
-        yield { type: 'finish', reason };
+        //
+        // 另：丢弃了无名 tool-call 且没有留下任何可用调用时，同样报 max-tokens 而
+        // 非 stop —— 否则模型本意调工具、harness 却认为「正常答完了」，
+        // 又是一次无报错中断（与 `openai-compat.ts` 同因同修）。
+        const droppedUnnamedCalls = [...toolCalls.values()].some(block => !block.announced);
+        /**
+         * 思考死循环是否**是唯一的产出**（无可见正文、无工具调用）。
+         *
+         * ⚠️ 与 `buddy-adapter.ts` / `openai-compat.ts` 同因同修（Gitee !IKIZNK）：
+         * 只有该步没有可见产出时才报 `error` —— `error` 路径**不落
+         * `assistant/message`**（实测 219 会话里 222 例），有可见内容时报它会把内容
+         * 整块丢掉。
+         *
+         * ⚠️ 判据用 `visible`（＝真正会发出去的正文块文本）而**不是** `textBlock`：
+         * 本适配器有「正文为空且无工具调用时用推理文本回填正文」的回退（见下方
+         * `visible` 的定义），该回退会让正文块非空 —— 只看 `textBlock` 会误判成
+         * 「没有可见产出」，于是报 error 把那块回填文本静默丢掉。
+         * 为配合本判据，回退分支也已加上 `!loopDetected` 门禁（见下方注释）。
+         */
+        const reasoningLoopIsSoleOutput = loopDetected
+            && visible === ''
+            && toolOrder.length === 0;
+        const reason = reasoningLoopIsSoleOutput
+            // 思考死循环且无可见产出：报**有分辨力的 error**（见 REASONING_LOOP_CODE）。
+            // ⚠️ 不能报 max-tokens —— UI 对它的固定文案是「已达到输出 token 上限」，
+            // 把「检测到死循环」误导成「额度用满」（真实缺陷，Gitee !IKIZNK）。
+            ? { kind: 'error', failure: reasoningLoopFailure(loopGuard?.diagnostics, options.maxTokens, 'reasoning') }
+            // 循环命中但另有可见产出：只能报 max-tokens（保住内容），不能报 error。
+            : loopDetected
+                ? { kind: 'max-tokens' }
+                : finishReason === 'length'
+                    || (droppedUnnamedCalls && toolOrder.length === 0)
+                    ? { kind: 'max-tokens' }
+                    : finishReason === 'tool_calls' || toolOrder.length > 0
+                        ? { kind: 'tool-calls' }
+                        : { kind: 'stop' };
+        // 零内容块响应（例如本次只收到过那个被压制的空白 reasoning）否则会以
+        // `stop` 收场 —— 那是 DSH `EMPTY_RESPONSE` 契约明令禁止的静默结束。
+        // ⚠️ 传入的是**上面已算好的** `reason`（含 loopDetected / length /
+        // 无名 tool-call 等全部既存判据）；helper 只在 `kind === 'stop'` 时改写。
+        yield { type: 'finish', reason: resolveEmptyResponseReason(reason, blockCount) };
     }
     /**
      * 查询某个会话的 CodeArts 并发队列状态。该端点
@@ -1367,96 +1722,98 @@ export class CodeArtsAdapter extends LlmAdapter {
 /** 在 ctx.llm 上注册 codearts 提供商路由和适配器。 */
 export function registerCodeArtsLlm(ctx, options) {
     ctx.llm.registerConfigurableProviders([
-        { provider: PROVIDER, displayName: 'CodeArts Agent', settingsNs: 'llm-codearts', settingsPath: [] },
+        {
+            provider: PROVIDER,
+            displayName: 'CodeArts Agent',
+            // 0.1.7 起 settings 命名空间只能是 profile 条目 id（见 settingsNamespaceFor）。
+            settingsNs: settingsNamespaceFor(ctx, 'llm-codearts'),
+            settingsPath: [],
+        },
     ]);
-    ctx.llm.registerAdapter([PROVIDER], new CodeArtsAdapter(options));
+    const adapter = new CodeArtsAdapter(options);
+    ctx.llm.registerAdapter([PROVIDER], adapter);
+    // 返回实例：Jet Hub「显示列表」需要 `listAllModels()`（不受黑名单影响、
+    // 带最终展示名）。`ctx.llm` 不透传自定义方法，须由调用方持有引用。
+    return adapter;
 }
 /**
- * 判断响应是否属于频率限制。
+ * CodeBuddy 系（buddy / workbuddy）表示「用量超出频率限制」的业务码。
  *
- * 除响应体措辞外还要看 **HTTP 状态码**：上游（尤其国际站/CDN 边缘节点）在
- * 限流时可能返回 429 但响应体为空或只有一句 `Too Many Requests`——只匹配
- * 文本会漏判，导致本该切账号的请求直接按普通错误抛出。
- *
- * @param body - 响应体文本（可能为空）。
- * @param status - HTTP 状态码；429 一律视为限流。
+ * 判据优先用结构化业务码而非文案：**它与语言无关**，且不受服务端改文案影响。
+ * 国际版与国内版用的是同一个码（实测均为 6004），只有 msg 文案分中英文。
  */
-export function isRateLimited(body, status) {
-    if (status === 429)
-        return true;
-    return /频率限制|rate.?limit|使用量已超出|频率超出|重置|too many requests|frequency limit/i.test(body);
-}
-/** 无法从错误消息解析重置时间时的默认冷却时长（60 秒，对齐 workbuddy-gateway）。 */
-export const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 60_000;
-/** 国内站中文限流措辞：「将在 2026-09-11 18:08:17 UTC+8 重置」。 */
-const RESET_TIME_CN_RE = /将在\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s*(UTC[+-]\d+(?::\d{2})?)?/;
+const RATE_LIMIT_BUSINESS_CODE = 6004;
 /**
- * 兜底：匹配任意「日期 + 时间(可选 UTC 偏移)」。
+ * 限流文案的**自然语言兜底**判据。
  *
- * 用于国际站等英文限流消息，例如
- * `Your usage has exceeded the rate limit. It will reset at 2026-09-05 01:57:00 UTC+8.`
- * 必须先匹配中文措辞，再退回本正则——否则英文消息解析不出重置时间，
- * 会被静默降级成默认冷却（把真实的重置时刻丢掉）。
+ * 为什么需要兜底：并非所有限流错误都带得上结构化 code —— SSE 流内错误、
+ * 网关返回的裸文本、以及 CodeArts（华为云）的中文错误都只有文案可判。
+ *
+ * ⚠️ **中英文都必须列全**。历史缺陷（用户报障，仅国际版暴露）：此处早期只有
+ * 中文词（频率限制 / 使用量已超出 / 频率超出 / 重置），而国际版 WorkBuddy
+ * （www.workbuddy.ai）返回的是英文
+ * `usage exceeds frequency limit ... your usage will reset at <时间> UTC+8`。
+ * 结果 `isRateLimited` 恒为 false → 适配器**跳过整个账号切换分支**，直接抛出
+ * 原始 6004 JSON；错误码也因 HTTP 400 退化成 INVALID_REQUEST 而非
+ * QUOTA_EXCEEDED。国内版返回中文文案，所以该缺陷只在国际版复现。
+ *
+ * `too many requests` 是标准 OpenAI 429 措辞，一并纳入。
  */
-const RESET_TIME_GENERIC_RE = /(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\s*(UTC[+-]\d+(?::\d{2})?))?/;
+const RATE_LIMIT_PATTERN = /频率限制|频率超出|使用量已超出|重置|rate.?limit|frequency limit|usage exceeds|too many requests/i;
 /**
- * 解析「日期 时间 (可选 UTC 偏移)」为毫秒时间戳。
+ * 结构化判定：响应体是可解析 JSON 且 `code` 为该业务码。
  *
- * 时区必须按消息**实际声明**的偏移换算，不能硬编码 UTC+8：国内站下发
- * `UTC+8`，但国际站可能下发 `UTC+0` 等其它偏移，硬编码会算错若干小时。
- * 未声明偏移时按 UTC+8 处理（历史行为）。
+ * 不采用「全文包含 6004」的写法：`requestId` 是 UUID，任意数字子串都可能
+ * 偶然出现，文本匹配会产生假阳性；这里只认 JSON 顶层的 `code` 字段。
+ * 兼容 `"6004"`（字符串）与 `6004`（数字）两种编码。
  */
-function parseDateTimeWithOffset(date, clock, zone) {
-    let offsetMinutes = 8 * 60;
-    if (zone !== undefined && zone.length > 0) {
-        // 形如 UTC+8 / UTC+08:00 / UTC-5
-        const match = /^UTC([+-])(\d{1,2})(?::(\d{2}))?$/.exec(zone);
-        if (match) {
-            const sign = match[1] === '-' ? -1 : 1;
-            const hours = Number(match[2]);
-            const minutes = Number(match[3] ?? '0');
-            offsetMinutes = sign * (hours * 60 + minutes);
-        }
-    }
-    const wall = Date.parse(`${date}T${clock}Z`);
-    if (Number.isNaN(wall))
-        return null;
-    // 声明的挂钟时间处于 UTC+offset，故真实 UTC = 挂钟 - offset。
-    return wall - offsetMinutes * 60_000;
-}
-/**
- * 从限流错误中提取重置时间。
- *
- * 支持国内站中文措辞与国际站英文措辞，并按消息声明的时区偏移换算。
- * 响应体不是 JSON（如 CDN 返回 HTML）时不再直接放弃——转为文本继续匹配，
- * 保证切换逻辑仍能拿到一个（哪怕是默认的）冷却时刻。
- *
- * @returns 解析出的模型 id 与重置毫秒时间戳；完全无法识别时返回 null。
- */
-export function parseRateLimitError(body, currentModel, options = {}) {
-    const now = options.now ?? Date.now();
-    // 非 JSON 体（HTML 错误页等）也要能匹配，因此失败时不提前返回。
-    let message = body;
+function hasRateLimitBusinessCode(body) {
     try {
         const data = JSON.parse(body);
-        const candidates = [data.msg, data.message, data.error?.message];
-        const text = candidates.find((v) => typeof v === 'string' && v.length > 0);
-        if (text !== undefined)
-            message = text;
+        const code = data.code;
+        return code === RATE_LIMIT_BUSINESS_CODE || code === String(RATE_LIMIT_BUSINESS_CODE);
     }
     catch {
-        // 保留原始 body 作为待匹配文本
+        // 非 JSON：交给文案兜底
+        return false;
     }
-    const match = RESET_TIME_CN_RE.exec(message) ?? RESET_TIME_GENERIC_RE.exec(message);
-    if (match) {
-        const resetTimeMs = parseDateTimeWithOffset(match[1], match[2], match[3]);
-        if (resetTimeMs !== null)
-            return { modelId: currentModel, resetTimeMs };
+}
+/** 判断错误文本是否为频率限制错误 */
+export function isRateLimited(body) {
+    return hasRateLimitBusinessCode(body) || RATE_LIMIT_PATTERN.test(body);
+}
+/**
+ * 重置时间的两种句式（中文 / 英文），并**捕获实际时区**而非硬编码 UTC+8。
+ *
+ * 中文（buddy 国内版）："您的使用量已超出频率限制，将在 2026-09-11 18:08:17 UTC+8 重置"
+ * 英文（workbuddy 国际版）："... your usage will reset at 2026-09-17 09:09:36 UTC+8, alternatively, ..."
+ *
+ * 早期只列了中文句式，导致国际版即使判定为限流也只能走「1 小时后重试」的
+ * 兜底，丢掉服务端给出的真实重置时刻（UI 限流徽章因此显示错误时间）。
+ */
+const RESET_TIME_PATTERN = /(?:将在|reset at)\s+([\d-]+\s+[\d:]+)\s+(UTC[+-]\d+(?::\d+)?)/i;
+/** 从限流错误中提取重置时间 */
+export function parseRateLimitError(body, currentModel) {
+    try {
+        const data = JSON.parse(body);
+        const msg = typeof data.msg === 'string' ? data.msg : '';
+        const resetMatch = RESET_TIME_PATTERN.exec(msg);
+        if (resetMatch) {
+            // 用捕获到的真实时区拼接（不再写死 UTC+8），Date.parse 能正确解析该写法。
+            const resetMs = Date.parse(`${resetMatch[1]} ${resetMatch[2]}`);
+            if (!Number.isNaN(resetMs)) {
+                return { modelId: currentModel, resetTimeMs: resetMs };
+            }
+        }
+        // 标准 OpenAI 429 格式，或带业务码但文案无法解析出时间
+        if (isRateLimited(body)) {
+            // fallback: 1小时后重试
+            return { modelId: currentModel, resetTimeMs: Date.now() + 3_600_000 };
+        }
+        return null;
     }
-    // 能判定为限流但解析不出时刻：给一个短的默认冷却，交由调用方继续切换账号。
-    if (isRateLimited(body, options.status)) {
-        return { modelId: currentModel, resetTimeMs: now + DEFAULT_RATE_LIMIT_COOLDOWN_MS };
+    catch {
+        return null;
     }
-    return null;
 }
 //# sourceMappingURL=llm-adapter.js.map

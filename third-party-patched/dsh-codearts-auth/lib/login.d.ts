@@ -57,6 +57,38 @@ export declare function startOAuthCallbackServer(ticketId: string, pkce: PkcePai
     server: ReturnType<typeof createServer>;
     result: Promise<LoginFlowResult>;
 }>;
-/** 运行完整的新式 IAM OAuth 登录流程（默认登录方式）。 */
+/**
+ * 已启动但尚未完成的 OAuth 登录流程。
+ *
+ * 拆出这一层是为了支持**两步式登录**（Jet Hub 的「+ 新建账号」）：
+ * 调用方先拿到 `loginUrl` 立刻打开窗口，再自行 await `result`。
+ *
+ * 为什么必须拆：浏览器只在用户点击后的短暂窗口（transient activation，
+ * 约 5 秒）内允许 `window.open`。若把「起服务器 → 打开浏览器 → 等用户授权」
+ * 整个流程做成一次阻塞调用，调用方拿到 URL 时手势早已过期，`window.open`
+ * 会被弹窗拦截器拒绝。
+ */
+export interface StartedOAuthFlow {
+    /** 展示给用户的登录 URL。 */
+    loginUrl: string;
+    /** 用户完成授权（或超时/失败）后落定的结果。 */
+    result: Promise<LoginFlowResult>;
+    /** 关闭回调服务器；**幂等**，可重复调用。 */
+    close: () => Promise<void>;
+}
+/**
+ * 启动 OAuth 登录流程并**立即返回**登录 URL（不打开浏览器、不等用户）。
+ *
+ * `result` 已内置超时：两步式路径没有外层 try/finally 兜底，
+ * 若超时不在此处生效，回调服务器会一直挂着。
+ * 结果一旦落定就自动关闭服务器，避免两步式路径泄漏监听端口。
+ */
+export declare function startOAuthFlow(options?: LoginFlowOptions): Promise<StartedOAuthFlow>;
+/**
+ * 运行完整的新式 IAM OAuth 登录流程（默认登录方式）。
+ *
+ * 阻塞语义：打开浏览器并等待用户完成授权后才返回。
+ * 需要「立即拿到 URL」的场景（Jet Hub 两步式登录）请用 {@link startOAuthFlow}。
+ */
 export declare function runOAuthFlow(options?: LoginFlowOptions): Promise<LoginFlowResult>;
 //# sourceMappingURL=login.d.ts.map

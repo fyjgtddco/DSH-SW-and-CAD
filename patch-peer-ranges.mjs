@@ -21,15 +21,21 @@
  *   node patch-peer-ranges.mjs <path/to/package.json> <runtimeVersion> [--check]
  *     --check  report only, write nothing
  *
- * NOTE  `^0.2.0` does NOT match `0.2.0-rc.2` (a prerelease sorts below its
- *       release), so the appended range must name the prerelease itself.
- *       Verified with the semver build DSH ships.
+ * NOTE  DSH's own gate (dsh-app-boot/lib/index.js:277) calls
+ *       semver.satisfies(runtime, range, { includePrerelease: true }), so
+ *       prerelease-aware matching IS in effect there: '^0.2.0' does match
+ *       '0.2.1-rc.2' inside DSH. Verified against the semver DSH ships.
+ *       This script applies the same includePrerelease semantics (line ~69),
+ *       so its verdict matches what DSH will actually decide.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
+// 0.2.1 起 semver 打进 app.asar（Z:\DSH\resources\app.asar\dsh\node_modules\semver），
+// 普通文件系统 API 打不开 asar，所以这里按"能直接 require 的实体包"顺序回落。
 const SEMVER_CANDIDATES = [
+  'C:\\Users\\j1877\\.dsh\\profiles\\desktop\\node_modules\\@deepseek-ai\\schemastery\\node_modules\\semver',
   'Z:\\DSH\\resources\\runtime\\pnpm\\dist\\node_modules\\semver',
   'C:\\Program Files\\nodejs\\node_modules\\npm\\node_modules\\semver',
 ];
