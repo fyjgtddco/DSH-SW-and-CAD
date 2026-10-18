@@ -783,7 +783,12 @@ def cmd_conn_probe(target=None, with_com=True, resolve_paths=False):
     except Exception as e:
         return {"ok": False, "error": "conn_state.py 不可用: %r" % (e,)}
     try:
-        if target in ("sw", "cad"):
+        # 【连接区扩展】单目标探测覆盖 abaqus / webots（原来只有 sw/cad 走
+        #   单目标分支，其余一律 probe_all —— 点 Webots 的「连接」会把 SW/CAD
+        #   也一起重探一遍，慢且会触发不必要的 COM Dispatch）。
+        _single = tuple(getattr(_cs, "KNOWN_TARGETS",
+                                ("sw", "cad", "abaqus", "webots")))
+        if target in _single or (target or "").startswith("placeholder"):
             st = _cs.probe_target(target, with_com=with_com)
         else:
             st = _cs.probe_all(with_com=with_com, resolve_paths=True)
@@ -882,8 +887,8 @@ def cmd_conn_launch(target, exe=None, connect=True, wait_window=120):
     #   旧名 'nx' 由 _norm_target 映射到 'webots'，因此这里显式放行 'nx'。
     _ok_targets = tuple(getattr(_cs, "KNOWN_TARGETS",
                                 ("sw", "cad", "abaqus", "webots")))
-    if t == "nx":
-        t = "webots"
+    # 【NX → Webots 改造】旧名 nx → webots（与 conn_state._norm_target 同一映射）
+    t = {"nx": "webots"}.get(t, t)
     if t not in _ok_targets:
         return {"ok": False, "error": "target 必须是 %s 之一"
                                        % " / ".join(repr(x) for x in _ok_targets)}
@@ -909,8 +914,7 @@ def cmd_conn_log(target):
     # 与 cmd_conn_launch 同一套白名单（含 'nx' → 'webots' 兼容映射）
     _ok_targets = tuple(getattr(_cs, "KNOWN_TARGETS",
                                 ("sw", "cad", "abaqus", "webots")))
-    if t == "nx":
-        t = "webots"
+    t = {"nx": "webots"}.get(t, t)
     if t not in _ok_targets:
         return {"ok": False, "error": "target 必须是 %s 之一"
                                        % " / ".join(repr(x) for x in _ok_targets)}

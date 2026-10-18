@@ -10022,6 +10022,48 @@ def new_assembly(sw=None, template=None):
     return SWModel.new_assembly(sw, template)
 
 
+def _slworks_pids():
+    """返回当前 SLDWORKS.exe 的 PID 列表（零副作用，只读 tasklist）。
+
+    为什么单独抽出来：close-all 需要【轮询确认进程真的退出】，
+      不能只看 taskkill 的返回码（它是异步信号，见 close_all_and_exit 注释）。
+    解析失败时返回空列表 —— 调用方会把它当"没有残留进程"。
+    这一点是刻意的：探测能力缺失时，宁可放过也不要谎报"还有进程"，
+      否则 close-all 会永远返回失败，把正常流程卡死。
+    """
+    import subprocess as _sp
+    pids = []
+    try:
+        _r = _sp.run(
+            ["tasklist", "/FI", "IMAGENAME eq SLDWORKS.exe",
+             "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=10)
+        _txt = (_r.stdout or "")
+        if "SLDWORKS" in _txt.upper():
+            import csv as _csv
+            import io as _io
+            for _row in _csv.reader(_io.StringIO(_txt)):
+                if not _row:
+                    continue
+                _nm = (_row[0] or "").strip().strip('"')
+                if _nm.upper() != "SLDWORKS.EXE":
+                    continue
+                # CSV 列数因语言/系统/内存列格式而异 → 取第 2 列，
+                # 不是纯数字时再扫后面几列（兼容 "12,345 K" 这类内存列）。
+                _pid = None
+                for _cell in _row[1:]:
+                    _c = str(_cell).strip().strip('"')
+                    if _c.isdigit():
+                        _pid = int(_c)
+                        break
+                if _pid is not None:
+                    pids.append(_pid)
+    except Exception:
+        return []
+    return pids
+
+
 def close_all_and_exit(sw):
     """安全关闭所有文档并退出 SolidWorks。
 
@@ -10056,20 +10098,62 @@ def close_all_and_exit(sw):
     _gc.collect()
 
     # 第四步：taskkill 后备（Bug-5 修复: Quit() 经常抛异常，堆积文档）
-    # 通过进程名查找 SW 实例并强制终止
+    #
+    # taskkill 是异步信号：发完要轮询进程表确认真的退出，不能只看返回码。
+    # 否则调用方会拿 ok=true 去开新实例，撞上还没退出的旧实例（单实例程序）。
+    _t0 = None
+    try:
+        import time as _tm
+        _t0 = _tm.time()
+    except Exception:
+        pass
     try:
         import subprocess as _sp
-        result = _sp.run(
+        _result = _sp.run(
             ["taskkill", "/F", "/IM", "SLDWORKS.exe"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=10,
         )
-        if result.returncode == 0:
-            return {"ok": True, "method": "taskkill_slworks"}
-        # taskkill 未找到进程也视为成功（可能已关闭）
-        return {"ok": True, "method": "close_all_documents_gc_cleanup"}
+        _killed = (_result.returncode == 0)
     except Exception:
-        return {"ok": True, "method": "close_all_documents_gc_cleanup",
-                "note": "taskkill 不可用，依赖 GC 回收"}
+        _killed = False
 
-    return {"ok": True, "method": "close_all_documents_gc_cleanup"}
+    # 轮询等待进程真正消失（关键：不是"信号发出去了"，而是"进程没了"）
+    _exited = False
+    _waited = 0.0
+    _remaining = []
+    try:
+        import time as _tm2
+        _deadline = _tm2.time() + 15.0
+        while _tm2.time() < _deadline:
+            _remaining = _slworks_pids()
+            if not _remaining:
+                _exited = True
+                break
+            _tm2.sleep(0.4)
+        if _t0 is not None:
+            _waited = round(_tm2.time() - _t0, 2)
+    except Exception:
+        # 探测失败（无 tasklist 等）→ 不谎报已退出，交给调用方判断
+        _exited = False
+
+    out = {
+        "ok": bool(_exited),
+        "method": ("taskkill_slworks" if _killed
+                   else "close_all_documents_gc_cleanup"),
+        # 明确回传"进程是否真的退出"，避免调用方拿 ok 当"已可开新实例"
+        "exited": bool(_exited),
+        "waited_sec": _waited,
+        "remaining_pids": _remaining,
+    }
+    if not _exited:
+        out["ok"] = False
+        out["error"] = (
+            "close-all 已发出终止信号，但 %s 秒后仍有 SLDWORKS.exe 残留"
+            "（PID: %s）。请等待后再试，或手动结束这些进程。"
+            % (int(_waited or 0),
+               ", ".join(str(x) for x in _remaining) or "?"))
+        out["hint"] = "SW 是单实例程序：残留旧实例会让新实例把请求转给它，导致锁状态错乱。"
+    elif _waited >= 1.0:
+        out["note"] = "已等待 %.1f 秒确认进程完全退出（taskkill 是异步的）。" % _waited
+    return out

@@ -90,6 +90,12 @@ def _m2_work_dir(state=None):
         pass
     return None
 
+# 任务交付目录在 state 里的键名（work_dir）。
+# 这个常量被 _m2_work_dir / prepare_task_workdir / select 等多处引用，
+# 一旦缺失会 NameError，并导致 mode2 计划文件落到错误目录、
+# 编制 task_id 取不到、room-start 被 SUBAGENT_PLAN_STALE 误拦。
+WORKDIR_STATE_KEY = "work_dir"
+
 CHOICES = {
     "A": {"label": "完全自主搭建", "strategy": "parallel", "detail": "full", "desc": "AI自主决策"},
     "B": {"label": "部分自主搭建", "strategy": "hybrid", "detail": "key_points", "desc": "关键节点询问"},
@@ -327,7 +333,6 @@ def _extract_life_years(text):
 
 # ══ 【Bug-03/04/05/11 修复】任务类型模板 + 材料推断 ═══════════════════════════
 # 原缺陷：
-#   · QUESTION_SPEC 与 _room_parts_scope() 全是"机械臂"口径
 #     （Q1 机构类型=6轴关节臂 / Q2 臂长=大臂300+小臂250 / Q4 末端执行器=夹爪，
 #      房间零件范围=大臂/小臂/关节/齿条）。实测做"竞速小车"时 17 题与零件范围
 #     语义完全错位，必须人工把 17 题与 4 个房间的零件范围全部改写。
@@ -498,7 +503,7 @@ TASK_TYPE_TEMPLATES = {
             ("夹爪", 4), ("末端执行器", 4), ("云台", 3), ("直角坐标", 3),
             ("臂长", 5), ("法兰盘", 3), ("六轴", 4), ("robot arm", 5),
         ),
-        "questions": None,   # None = 用通用 QUESTION_SPEC（原机械臂口径）
+        "questions": None,
         "lite_ids": ("mech_type", "arm_lengths", "load_magnitude",
                      "load_type", "open_extra"),
         "room_scope": {
@@ -552,1523 +557,10 @@ def task_template(task, context=None):
     return key, TASK_TYPE_TEMPLATES.get(key) or TASK_TYPE_TEMPLATES["generic"]
 
 
-def question_spec_for(task, context=None):
-    """【Bug-03 修复】按任务类型返回问题集。
-
-    车辆模板 → 车辆问题；机械臂/传动/通用 → 原 QUESTION_SPEC。
-    这是"任务类型自动识别 → 加载对应题目模板"的落地点。
-    """
-    _key, tpl = task_template(task, context)
-    qs = tpl.get("questions")
-    return list(qs) if qs else list(QUESTION_SPEC)
-
-
-def lite_ids_for(task, context=None):
-    """按任务类型返回精简题 id 列表。"""
-    _key, tpl = task_template(task, context)
-    return tuple(tpl.get("lite_ids") or LITE_QUESTION_IDS)
-
-
-def _user_material_pref(task, context):
-    """从用户回答里提取"材料倾向"与"加工方式"两题的原文片段。
-
-    门禁的 Q13（材料倾向）/ Q14（加工方式）在第二段回答里通常写作
-    「⑬PETG车架车轮ABS外壳Nylon齿轮」「⑭全部3D打印+外购轴承螺丝电机」，
-    这里按常见编号/关键词定位，拿不到就返回空串。
-    """
-    import re as _re
-    txt = str(context or "")
-    hits = []
-    # ① 带圈数字编号 ⑬/⑭ 或 13./14.
-    for pat in (r"[⑬⒀]\s*([^\n⑭⒁]{0,120})", r"[⑭⒁]\s*([^\n⑮⒂]{0,120})",
-                r"(?:^|\n)\s*13[\.、:：]\s*([^\n]{0,120})",
-                r"(?:^|\n)\s*14[\.、:：]\s*([^\n]{0,120})"):
-        for m in _re.finditer(pat, txt):
-            hits.append(m.group(1))
-    # ② 直接含"材料/加工/工艺"字样的句子
-    for m in _re.finditer(r"[^\n。；;]{0,40}(?:材料|加工方式|工艺)[^\n。；;]{0,80}", txt):
-        hits.append(m.group(0))
-    return " ".join(hits)
-
-
-def infer_material(task, context=None):
-    """【Bug-04/11 修复】推断本次设计的材料。
-
-    优先级（从高到低）：
-      ① 用户回答里【显式写出】的 3D 打印材料（PETG/PLA/Nylon/TPU/ABS/PC/POM）
-         —— 这是用户的真实选择，必须尊重；
-      ② 识别到"3D打印/增材/FDM…"工艺，但没点名材料 → 默认 PETG
-         （最通用的结构件打印材料）；
-      ③ 用户点名了金属牌号（Q235/45#/40Cr/304/316/6061/7075…）；
-      ④ 退回原来的关键词链（高温/轻量/腐蚀/传动）。
-
-    Returns:
-        (display_name, source, material_dict) —— material_dict 与 load_case 的
-        material 字段同形，可直接写入 physics 工况。
-
-    ⚠️ 所有分支【必须】返回 3 元组。历史缺陷：③④ 分支曾直接 return dict，
-       而唯一调用点（estimate_mechanics）按 3 元组解包 → 凡任务里出现
-       Q235/45#/6061/40Cr/304/316/GCr15/HT200/Q355/Cr12MoV/碳钢/轻量 等
-       任一 token 即抛 ValueError，provide_context 第二次直接崩溃，
-       state 永久停在 context_asked，整个工作流无法走完。
-    """
-    import re as _re
-    raw = (str(task or "") + " " + str(context or ""))
-    low = raw.lower()
-    pref = _user_material_pref(task, context).lower()
-    # 用户回答优先，其次全文
-    hay = (pref + " " + low) if pref.strip() else low
-
-    # ① 显式打印材料（按出现顺序，取最先提到的作为"主材料"）
-    _order = ("petg", "pa12", "pa66", "nylon", "尼龙", "pla", "tpu",
-              "abs", "pc", "pom")
-    best = None
-    for key in _order:
-        idx = hay.find(key)
-        if idx < 0:
-            continue
-        if best is None or idx < best[0]:
-            best = (idx, key)
-    if best is not None:
-        key = best[1]
-        # 尼龙的中文别名归一到 pa66 表项
-        if key in ("尼龙",):
-            key = "nylon"
-        info = _PRINT_MATERIALS.get(key)
-        if info:
-            return (info["name"], "用户回答/任务描述中的材料选择（3D 打印材料库）",
-                    dict(info, source="workflow_gate.infer_material"))
-
-    # ② 只写了工艺没写材料 → 默认 PETG
-    if any(k in hay for k in _PRINT_PROCESS_KW):
-        info = _PRINT_MATERIALS["petg"]
-        return (info["name"],
-                "识别到 3D 打印工艺但未指定材料 → 默认 PETG（可显式覆盖）",
-                dict(info, source="workflow_gate.infer_material.default_print"))
-
-    # ③ 金属牌号
-    # ── 两级匹配：① 牌号精确 token 优先 → ② 用途/泛化词 → ③ 等效映射兜底 ──
-    # 为什么必须分级：实测缺陷 —— `'45# 齿轮'` 曾因 40Cr 的关键词含"齿轮"
-    #   且排在前面，被解析成 40Cr（σy 785 而非 355），材料被静默替换。
-    #   用户【明确点名】牌号时，用途词不得抢走。
-    _hit_grade = False
-    for keys, disp in _GB_GRADE_TOKENS:          # ① 牌号精确 token
-        if any(k in hay for k in keys):
-            _hit_grade = True
-            _g = _gb_grade_props(disp)
-            if _g:
-                return (_g.get("name") or disp,
-                        "用户点名的国标牌号（外部国标材料库）",
-                        dict(_g, source="workflow_gate.infer_material(GB_GRADE)"))
-            break
-    if not _hit_grade:
-        for keys, disp in _GB_KEYWORD_TO_GRADE:  # ② 用途/泛化词
-            if any(k in hay for k in keys):
-                _hit_grade = True
-                _g = _gb_grade_props(disp)
-                if _g:
-                    return (_g.get("name") or disp,
-                            "用途/泛化词映射到国标牌号（外部国标材料库）",
-                            dict(_g, source="workflow_gate.infer_material(GB_KEYWORD)"))
-                break
-    _ = _hit_grade
-    # ② 原有等效映射兜底（关键词是【元组】，不是正则 —— 用 in 判定）
-    for keys, mid, E, nu, sy, rho, disp in _MATERIAL_LOOKUP:
-        _ks = keys if isinstance(keys, (tuple, list)) else (str(keys),)
-        if any(str(k) in hay for k in _ks):
-            return (disp, "用户回答/任务描述中的金属牌号（等效欧美标映射）",
-                    {"id": mid, "name": disp, "youngs_modulus_mpa": E,
-                     "poissons_ratio": nu, "yield_strength_mpa": sy,
-                     "uts_mpa": round(sy * 1.2, 1), "density_kg_m3": rho,
-                     "source": "workflow_gate.estimate_mechanics(等效映射)"})
-
-    # ④ 关键词兜底（保持与旧行为兼容）
-    t = low
-    if any(k in t for k in ["高温", "heat"]):
-        disp = "Cr12MoV"
-    elif any(k in t for k in ["轻量", "aluminum", "6061"]):
-        disp = "6061-T6 Aluminum"
-    elif any(k in t for k in ["腐蚀", "rust", "不锈钢"]):
-        disp = "304 Stainless"
-    elif any(k in t for k in ["传动", "齿轮"]):
-        disp = "45# Steel / 40Cr"
-    else:
-        disp = "Q235 Carbon Steel"
-    return (disp, "关键词兜底（用户未给出材料，请复核）", None)
-
-
-def detect_task_type(task, context=None):
-    """【Bug-03/05 修复】按关键词给任务分类，决定题目模板与房间零件范围。
-
-    Returns: 模板键（"vehicle" / "robot_arm" / "transmission" / "generic"）
-    """
-    t = ((str(task or "") + " " + str(context or ""))).lower()
-    scores = {}
-    for key, spec in TASK_TYPE_TEMPLATES.items():
-        if key == "generic":
-            continue
-        s = 0
-        for kw, w in spec.get("keywords", ()):
-            if kw.lower() in t:
-                s += w
-        scores[key] = s
-    if not scores:
-        return "generic"
-    best_key, best_score = max(scores.items(), key=lambda kv: kv[1])
-    return best_key if best_score > 0 else "generic"
-
-
-def estimate_mechanics(task, context=None):
-    """力学估算（v2 · BUG-01/02/07 修复）。
-
-    ── BUG-01 修复：先读用户数值，再做关键词修正 ─────────────────────────
-      额定载荷 load_n 的取值优先级：
-        ① 用户输入里【明确写出】的数值（100N / 10kg …）—— 最高优先级
-        ② 无明确数值时，才用关键词粗估（默认 500N，大/重型 2000N）
-      动载系数 impact_factor 单独记录，只对基准载荷乘【一次】，
-      绝不改变"用户给出的额定值"本身。
-
-    ── BUG-07 修复：同时给出 nominal / design 两个口径 ──────────────────
-      nominal_load_n ：额定（工作）载荷 —— 与 physics 载荷工况必须一致
-      design_load_n  ：设计（等效）载荷 = nominal × impact_factor
-      两者一起返回，并由 write_load_case_file() 落盘成 physics 直接可读的
-      载荷工况，从根上消除"门禁说 1000N、physics 算 100N"的口径分裂。
-
-    ── BUG-02 修复：输出疲劳/寿命校核所需的工况参数 ─────────────────────
-      load_type / design_life_years / cycles_per_year 一并给出，
-      供 physics 的 fatigue 模块做 S-N + Miner 累积损伤校核。
-    """
-    t = (task + " " + (context or "")).lower()
-    raw = (task or "") + " " + (context or "")
-
-    # ── 1) 额定载荷：用户数值优先 ──────────────────────────────────────
-    user_load, matched = _extract_load_n(raw)
-    if user_load is not None:
-        nominal_load = float(user_load)
-        load_source = "用户输入: %s" % (matched or "")
-    else:
-        # 无明确数值 → 关键词粗估（明确标注为估算值，供用户复核）
-        if any(k in t for k in ["大型", "重型", "large"]):
-            nominal_load = 2000.0
-            load_source = "关键词粗估（大型/重型）"
-        elif any(k in t for k in ["小型", "轻型", "small"]):
-            nominal_load = 300.0
-            load_source = "关键词粗估（小型/轻型）"
-        else:
-            nominal_load = 500.0
-            load_source = "默认基准值（用户未给出载荷，请务必复核）"
-
-    # ── 2) 动载系数（只乘一次，不放大用户给的额定值）──────────────────
-    if any(k in t for k in ["冲击", "impact", "shock", "频繁启停"]):
-        impact_factor, load_type = 2.0, "impact"
-    elif any(k in t for k in ["动态", "dynamic", "循环", "疲劳", "往复", "振动"]):
-        impact_factor, load_type = 1.3, "cyclic"
-    else:
-        impact_factor, load_type = 1.0, "static"
-
-    design_load = nominal_load * impact_factor
-
-    # ── 3) 安全系数按负载性质取值（GB/T 3811 工程惯例量级）────────────
-    if load_type == "impact":
-        sf = 3.0
-    elif load_type == "cyclic":
-        sf = 2.5
-    else:
-        sf = 2.0
-    if any(k in t for k in ["传动", "齿轮", "轴", "gear"]):
-        sf = max(sf, 2.5)
-    elif any(k in t for k in ["壳体", "机架", "housing", "frame", "承载", "support", "bearing"]):
-        sf = max(sf, 2.5)
-
-    # ── 【观察点 21 修复】FDM 打印件必须计入【各向异性折减】──────────────
-    # 原实现的安全系数只按负载性质取（静载 2.0），**完全忽略制造工艺**。
-    # 但 FDM 熔融沉积件是各向异性的：层间（Z 向）结合强度显著低于层内
-    #   （实测通常只有 50%~80%），而受力方向往往正好跨层。
-    # 若仍按各向同性材料的 2.0 判合格，实际零件在层间先开裂 ——
-    #   校核结论偏乐观，属于"看起来过了、实际会断"。
-    # 修复：识别 FDM 工艺后，把要求的安全系数除以折减系数（等价于把
-    #   许用强度乘 0.8）。折减系数显式落盘，便于复核与覆盖。
-    _is_fdm = any(k in t for k in
-                  ["3d打印", "3D打印", "3d 打印", "fdm", "FDM", "熔融沉积",
-                   "打印件", "增材", "pla", "PLA", "petg", "PETG", "abs", "ABS"])
-    anisotropy_factor = 0.8 if _is_fdm else 1.0
-    sf_base = sf
-    if _is_fdm:
-        # 除以折减系数即"提高要求的安全系数"；向上取整到 0.5 的倍数便于阅读
-        sf = math.ceil((sf / anisotropy_factor) * 2) / 2
-
-    # ── 4) 材料推荐（【Bug-04/11 修复】先读用户回答，再退回关键词）──────
-    # 原缺陷：这里是一条硬编码关键词链，"轻量/6061" 命中就给铝，完全不读
-    #   用户 Q13「材料倾向」/Q14「加工方式」的回答。实测任务写明
-    #   "3D打印 + PETG车架/ABS外壳/Nylon齿轮"，门禁却回 6061-T6 铝，
-    #   并把它写进 gate_load_case.json → swapi 再据此给每个零件赋铝。
-    # 修复：infer_material() 以【用户显式材料】为最高优先，其次识别 3D 打印
-    #   工艺（默认 PETG），最后才退回旧关键词链。material_spec 一并带出，
-    #   供 write_load_case_file 直接落盘（不再二次解析）。
-    mat, mat_source, material_spec = infer_material(task, context)
-    task_type = detect_task_type(task, context)
-    task_type_label = (TASK_TYPE_TEMPLATES.get(task_type) or {}).get("label", task_type)
-
-    # ── 5) 疲劳/寿命参数（BUG-02 支撑）────────────────────────────────
-    life_years = _extract_life_years(raw)
-    if life_years is None:
-        # 【BUG-02 一致性】默认寿命必须与 load_case.DEFAULT_ACCEPTANCE 一致（30 年），
-        #   否则门禁落盘的工况与 physics 默认口径不同 → 又是一处数值分裂。
-        life_years = 30.0
-        life_source = "默认 30 年（用户未给出寿命，请复核）"
-    else:
-        life_source = "用户输入"
-    # 动作频次：按工作制度粗估（保守取中值），供 Miner 累积损伤使用
-    if any(k in t for k in ["连续运行", "24/7"]):
-        cycles_per_year = 2_000_000.0
-        duty_note = "连续运行(24/7) 估算"
-    elif any(k in t for k in ["间歇", "每天数小时"]):
-        cycles_per_year = 200_000.0
-        duty_note = "间歇运行(每天数小时) 估算"
-    elif any(k in t for k in ["偶尔"]):
-        cycles_per_year = 20_000.0
-        duty_note = "偶尔使用 估算"
-    elif any(k in t for k in ["单次动作", "静态保持"]):
-        cycles_per_year = 1_000.0
-        duty_note = "单次动作/静态保持 估算"
-    else:
-        cycles_per_year = 200_000.0
-        duty_note = "默认按间歇运行估算（请复核）"
-
-    notes = ("额定载荷来源: %s；动载系数 ×%.1f（%s）；设计寿命 %.0f 年（%s）；"
-             "动作频次 %.0f 次/年（%s）"
-             % (load_source, impact_factor, load_type, life_years, life_source,
-                cycles_per_year, duty_note))
-
-    return {
-        # ── 兼容旧字段（字符串形式，供旧文案直接引用）──
-        "load_estimate": "%d N" % round(design_load),
-        "safety_factor": sf,
-        # ── 【观察点 21 修复】把工艺折减如实落盘，便于复核与覆盖 ──────────
-        "safety_factor_base": sf_base,
-        "process": ("FDM 增材制造" if _is_fdm else "未指定（按各向同性）"),
-        "anisotropy_factor": anisotropy_factor,
-        "safety_factor_note": (
-            ("FDM 各向异性折减系数 %.2f：层间强度按层内的 %.0f%% 计入，"
-             "故要求安全系数由 %.1f 提高到 %.1f。"
-             % (anisotropy_factor, anisotropy_factor * 100, sf_base, sf))
-            if _is_fdm else
-            "未识别为 FDM 打印件，按各向同性材料取安全系数 %.1f。" % sf_base),
-        "material_recommend": mat,
-        "scenario": "通用工业场景",
-        "notes": notes,
-        # ── BUG-07 新增：机器可读的双口径数值（physics 必须用同名数值）──
-        "nominal_load_n": round(nominal_load, 3),
-        "design_load_n": round(design_load, 3),
-        "impact_factor": impact_factor,
-        "load_type": load_type,
-        "load_source": load_source,
-        "user_load_n": (round(user_load, 3) if user_load is not None else None),
-        # ── BUG-02 新增：疲劳/寿命校核输入 ──
-        "design_life_years": life_years,
-        "cycles_per_year": cycles_per_year,
-        # ── 【BUG-07】口径警告：粗估时必须让调用方与用户都看得见 ──
-        "load_is_estimate": user_load is None,
-        # ── 【Bug-04/11 新增】材料来源与可落盘的完整材料规格 ──
-        "material_source": mat_source,
-        "material_spec": material_spec,
-        # ── 【Bug-03/05 新增】任务类型（决定题目模板与房间零件范围）──
-        "task_type": task_type,
-        "task_type_label": task_type_label,
-        "consistency_contract": (
-            "physics 载荷工况的 magnitude_n 必须等于 nominal_load_n"
-            "（设计校核另乘 impact_factor，不得直接写 design_load_n 当额定值）"),
-    }
-
-# ══ 【BUG-07 修复】门禁 → physics 载荷工况的【单一数值来源】══════════════════
-# 原缺陷：门禁自己算一套（estimate_mechanics 结果只写进 workflow_state.txt 文案），
-#   physics 那边由小屋/模型另写一份 load_case.json，两边各写各的 ——
-#   实测出现"门禁口径 1000N / physics 实际 100N"的数据分裂，校核结论不可信。
-# 修复：门禁在 mechanics_done 阶段【直接把载荷工况落盘】成 physics 可读文件，
-#   并把路径一并返回。physics 侧必须用该文件（或用相同的 nominal_load_n），
-#   从此两边共用同一份数值，物理上不可能再打架。
-#
-# 疲劳/寿命（BUG-02）：同一文件里带 acceptance.design_life_years 与
-#   operating_cycles_per_year，physics 的疲劳模块直接读它做 S-N + Miner 校核。
-
-# ── 材料名 → load_case 材料字段（与 physics/material_db.py 的 id 对齐）──────
-# 【原有数据，已恢复】：这些条目是本项目原有的映射（关键词 → material_id +
-#   等效力学属性），用于把用户说的牌号落到 physics 能识别的 id 上。
-# 注意：这些数值是【等效欧美标】的通用值（S235JR/AISI 4140/6061-T6…），
-#   并非国标原文数值；若需要严格按 GB/T 校核，请导入 gb_materials.json ——
-#   导入后 _gb_grade_props() 会优先用外部国标数据（见 _material_for）。
-# ⚠️ 定义必须在使用它的 _material_for 之前（否则运行期拿到旧值/未定义）。
-_MATERIAL_LOOKUP = (
-    # (关键词, material_id, E_mpa, nu, yield_mpa, density_kg_m3, 显示名)
-    (("cr12mov", "模具钢", "耐热"), "ST_API_4140", 205000.0, 0.29, 655.0, 7850.0, "Cr12MoV (等效 AISI 4140)"),
-    (("6061", "铝"), "AL_6061_T6", 68900.0, 0.33, 276.0, 2700.0, "Aluminum 6061-T6"),
-    (("7075",), "AL_7075", 72000.0, 0.33, 503.0, 2810.0, "Aluminum 7075-T6"),
-    (("304", "不锈钢", "腐蚀"), "ST_STAINLESS_304", 193000.0, 0.30, 205.0, 8000.0, "Stainless Steel 304"),
-    (("316",), "ST_STAINLESS_316", 193000.0, 0.30, 170.0, 8000.0, "Stainless Steel 316"),
-    (("40cr", "45#", "传动", "齿轮"), "ST_API_4140", 205000.0, 0.29, 655.0, 7850.0, "40Cr / AISI 4140"),
-    (("q235", "碳钢"), "ST_API_S235", 210000.0, 0.30, 235.0, 7850.0, "Q235 (等效 S235JR)"),
-)
-
-
-# ── 【Bug-12 修复】零件包络 vs 赛道/整机尺寸的语境判别 ──────────────────────
-# 原缺陷：write_load_case_file 用无差别正则抓所有"数字+mm"，再取最大的三个
-#   作为设计域。实测"竞速小车"任务的赛道尺寸（4500×2100×1600mm）被当成
-#   设计域落盘 → physics 在 4.5m 的巨型域上把 fixed_end 放 x=0、load_face 放
-#   x=4500，而实际零件只有 300×180×120 —— 空间选择器匹配不到任何面，FEA 无意义。
-#
-# 修复：① 建立"赛道/场地/整机"语境词表，命中即排除该数字；
-#      ② 建立"零件"语境词表，命中则优先采纳；
-#      ③ 按任务类型给典型零件包络兜底；
-#      ④ 若最终包络仍明显是"整机量级"（超过任务典型零件 6 倍），
-#         退回任务典型包络并在 meta 里写明原因，绝不把赛道当零件。
-_TRACK_CONTEXT_KW = (
-    "赛道", "方框", "圆弧", "窄段", "入口", "场地", "跑道", "直线段",
-    "全长", "外形", "占地面积", "工作范围", "行程范围", "臂展", "reach",
-)
-_PART_CONTEXT_KW = (
-    "零件", "底板", "车轮", "车轴", "齿轮", "横梁", "悬架", "舵机", "电池仓",
-    "上罩", "底壳", "电机座", "转向节", "连杆", "轴承座", "支架", "加强筋",
-    "摄像头", "托架", "护罩", "厚", "壁厚", "孔径", "外径", "内孔", "Ø", "φ",
-)
-# 各任务类型的"典型零件包络"（mm），用于兜底与合理性护栏
-_TASK_DEFAULT_ENVELOPE = {
-    "vehicle": (300.0, 180.0, 120.0),
-    "robot_arm": (350.0, 300.0, 200.0),
-    "transmission": (200.0, 200.0, 100.0),
-    "generic": (200.0, 60.0, 60.0),
-}
-
-
-# ── 【国标材料 · 外部数据源】关键词 → 牌号名（只描述"怎么找"，不含数值）────
-# 国标数值不再写死在本文件：这些条目只负责"从用户的话里认出想用什么牌号"，
-#   具体 E/ν/σy/ρ 由 _gb_grade_props() 从导入的 gb_materials.json 读取。
-# 未导入数据时查不到 → 由调用方按"未收录"处理（绝不猜数值）。
-#
-# ⚠️ 【匹配分两级，牌号精确匹配优先】────────────────────────────────────
-# 实测缺陷（本轮发现）：`_material_for('45# 齿轮')` 被解析成 **40Cr** ——
-#   因为 40Cr 的关键词里含"齿轮"，而它排在 45# 之前，于是"首个命中"抢走了。
-#   后果：用户明确写 45#，系统却按 40Cr（σy 785 而非 355）校核，
-#   安全系数差 2.2 倍，且报告里显示的是 40Cr —— 材料被静默替换。
-# 根因：把【具体牌号】与【用途/泛化词】（齿轮、传动、铝、不锈钢…）
-#   混在同一优先级里，靠书写顺序决胜负。
-# 修复：分两级匹配 ——
-#   ① 先按【牌号 token】精确匹配（45#、40Cr、ZL104、Q235…）—— 用户明确点名
-#   ② 再按【用途/泛化词】匹配（齿轮→40Cr、铝→6061-T6…）—— 用户只说了用途
-# 这样"45# 齿轮"命中 ① 的 45#，"齿轮"单独出现才落到 ②。
-_GB_GRADE_TOKENS = (
-    # (牌号 token 元组, 牌号名) —— 用户【明确点名】的牌号，优先级最高
-    (("zl104",), "ZL104"),
-    (("2a12", "ly12"), "2A12"),
-    (("7075",), "7075"),
-    (("6061",), "6061-T6"),
-    (("022cr17ni12mo2",), "022Cr17Ni12Mo2"),
-    (("06cr19ni10",), "06Cr19Ni10"),
-    (("316",), "022Cr17Ni12Mo2"),
-    (("304",), "06Cr19Ni10"),
-    (("cr12mov",), "Cr12MoV"),
-    (("gcr15",), "GCr15"),
-    (("20crmnti",), "20CrMnTi"),
-    (("65mn",), "65Mn"),
-    (("40cr",), "40Cr"),
-    (("45#", "45钢"), "45#"),
-    (("q355", "q345"), "Q355"),
-    (("q235",), "Q235"),
-    (("ht200",), "HT200"),
-    (("qt500",), "QT500-7"),
-    (("zcusn10p1", "zcusn"), "ZCuSn10P1"),
-    (("h62",), "H62"),
-)
-
-_GB_KEYWORD_TO_GRADE = (
-    # ── ① 牌号精确匹配（用户明确点名）──────────────────────────────────
-    #    注意：这里同样保持"具体牌号在前"，但不会再被用途词抢走，
-    #    因为用途词统一放到下面的 _GB_USAGE_TO_GRADE。
-    # ── ② 用途 / 泛化词（用户只说了用途或材料大类）────────────────────
-    #    仅在 ① 完全没命中时才生效。
-    (("铝", "aluminum", "aluminium"), "6061-T6"),
-    (("不锈钢", "腐蚀"), "06Cr19Ni10"),
-    (("模具钢", "耐热"), "Cr12MoV"),
-    (("轴承钢",), "GCr15"),
-    (("渗碳",), "20CrMnTi"),
-    (("弹簧钢",), "65Mn"),
-    (("传动", "齿轮"), "40Cr"),
-    (("低合金",), "Q355"),
-    (("碳钢", "碳素钢"), "Q235"),
-    (("灰铸铁",), "HT200"),
-    (("球墨铸铁",), "QT500-7"),
-    (("锡青铜",), "ZCuSn10P1"),
-    (("黄铜",), "H62"),
-    (("铸铝", "铸造铝合金", "zl1"), "ZL104"),
-    (("硬铝",), "2A12"),
-)
-
-
-def _equivalent_fallback(grade):
-    """【数值兜底】为"只有国标身份、力学数值待补全"的牌号找一组可算的数值。
-
-    数据来源（按可信度排序，均为【项目原有数据】，不新建任何数值）：
-      ① 项目原有的 material_db 内置材料表（ST_STAINLESS_316 / ST_API_4140…）
-         —— 这些是项目自带、长期在用的等效欧美标数据；
-      ② 项目原有的 _MATERIAL_LOOKUP 等效映射表。
-    用途：保证 FEA 在国标数值补全前仍能运行；调用方会把来源标注为
-      "等效映射"，报告里不会冒充国标数值。
-    Returns: dict 或 None。
-    """
-    _raw = str(grade or "").strip()
-    if not _raw:
-        return None
-
-    # 归一化候选写法：原样 / 斜杠两侧 / 去中文括号 / 去符号
-    _variants = [_raw]
-    if "/" in _raw:
-        _variants += [p.strip() for p in _raw.split("/") if p.strip()]
-    if "（" in _raw:
-        _variants.append(_raw.split("（")[0].strip())
-    for _v in list(_variants):
-        _clean = "".join(ch for ch in _v if ch.isalnum() or ch in "#-")
-        if _clean and _clean not in _variants:
-            _variants.append(_clean)
-
-    # ① 项目原有 material_db 内置表（按别名索引匹配）
-    try:
-        import sys as _sys
-        _t = os.path.dirname(os.path.abspath(__file__))
-        _pd = os.path.join(_t, "physics")
-        if _pd not in _sys.path:
-            _sys.path.insert(0, _pd)
-        import material_db as _mdb
-        _want = set()
-        for _v in _variants:
-            _k = _mdb._norm_key(_v)
-            if _k:
-                _want.add(_k)
-        for _mid, _info in _mdb.ALL_MATERIALS.items():
-            if not isinstance(_info, dict):
-                continue
-            if _mid in _mdb.GB_MATERIALS:      # 跳过国标表本身（正是待补全的）
-                continue
-            _names = {_mdb._norm_key(_mid), _mdb._norm_key(_info.get("name", ""))}
-            for _a in (_info.get("aliases") or []):
-                _names.add(_mdb._norm_key(_a))
-            if _want & _names:
-                _sy = _info.get("yield_mpa")
-                if _sy and _info.get("E_mpa"):
-                    return {
-                        "id": _mid, "name": _info.get("name") or _mid,
-                        "youngs_modulus_mpa": _info.get("E_mpa"),
-                        "poissons_ratio": _info.get("nu"),
-                        "yield_strength_mpa": _sy,
-                        "uts_mpa": _info.get("uts_mpa"),
-                        "density_kg_m3": _info.get("density_kg_m3"),
-                        "equivalent_to": _info.get("name") or _mid,
-                    }
-    except Exception:
-        pass
-
-    # ② 项目原有等效映射表
-    for _keys, _mid, _E, _nu, _sy, _rho, _disp in _MATERIAL_LOOKUP:
-        _ks = _keys if isinstance(_keys, (tuple, list)) else (str(_keys),)
-        for _k in _ks:
-            _kl = str(_k).lower()
-            for _v in _variants:
-                if _kl == _v.lower() or _kl in _v.lower():
-                    return {"id": _mid, "name": _disp,
-                            "youngs_modulus_mpa": _E, "poissons_ratio": _nu,
-                            "yield_strength_mpa": _sy,
-                            "uts_mpa": round(_sy * 1.2, 1),
-                            "density_kg_m3": _rho,
-                            "equivalent_to": _disp}
-    return None
-
-
-def _gb_grade_props(grade):
-    """【国标材料 · 外部数据源】按牌号从导入的 JSON 取材料属性。
-
-    Returns: 可直接用于 load_case.material 的 dict；未收录返回 None。
-      返回体带 gb_source 字段，如实标注数据出处（便于审计）。
-    """
-    _g = str(grade or "").strip()
-    if not _g:
-        return None
-    try:
-        import sys as _sys
-        _t = os.path.dirname(os.path.abspath(__file__))
-        _p = os.path.join(_t, "physics")
-        for _d in (_p, _t):
-            if _d not in _sys.path:
-                _sys.path.insert(0, _d)
-        import material_db as _mdb
-        # 先试 GB_ 前缀 id，再试裸牌号
-        _m = None
-        for _cand in ("GB_" + _g.replace("-", "_").upper(), _g):
-            try:
-                _m = _mdb.get_material(_cand)
-            except Exception:
-                _m = None
-            if _m:
-                break
-        if not _m:
-            return None
-        # ── 【分层降级】数值未补全时，用等效映射补齐并明确标注 ────────────
-        # 背景：外部 JSON 现阶段可能只有【标准身份】（牌号/标准号/密度），
-        #   力学数值待从标准原文抄录。此时若直接返回 None，FEA 会因缺
-        #   E/ν/σy 而无法计算 —— 系统等于不可用。
-        # 因此：身份按【国标】给出（报告里体现的是国标牌号），
-        #   数值暂用项目原有的【等效欧美标】映射，并在返回体里写明
-        #   "数值来源=等效映射，待国标数值补全"，保证结论可审计、不误导。
-        # ── 数值来源判定 ────────────────────────────────────────────────
-        # material_db.get_material 已按 equivalent_id 做过【只填空、不覆盖】的
-        #   兜底填充，并给出【逐字段】台账 field_provenance / gb_sourced_fields。
-        #
-        # ⚠️ 【BUG 修复·身份冒充】不能用 values_pending 反推 values_from_gb！
-        #   values_pending 的语义是"兜底后【仍缺】字段"：
-        #     40Cr 经兜底后字段齐了 → values_pending=False，
-        #   但它的 gb_sourced_fields=[]（【没有任何字段来自 GB 原文】）。
-        #   旧代码写 `values_from_gb = not _pending` → 对 40Cr 得出 True，
-        #   于是报告判为 level=GB_NATIVE / claimable_as_gb=True，原文写
-        #   "力学数值来自 GB 标准原文（GB/T 3077-2015）" ——
-        #   而实际用的是 AISI 4140 的 655/760，属【拿兜底值冒充国标值】。
-        #   这正是本系统最不该犯的错误，必须按【字段级证据】判定。
-        _sy = _m.get("yield_mpa")
-        _E = _m.get("E_mpa")
-        _nu = _m.get("nu")
-        _rho = _m.get("density_kg_m3")
-        _vsrc = _m.get("values_source")
-        _pending = _m.get("values_pending")
-        _gb_fields = list(_m.get("gb_sourced_fields") or [])
-        _fp = _m.get("field_provenance") if isinstance(
-            _m.get("field_provenance"), dict) else {}
-        if not _gb_fields and _fp:
-            # 老数据没给 gb_sourced_fields → 从逐字段台账里推
-            _gb_fields = [k for k, v in _fp.items()
-                          if isinstance(v, dict) and v.get("source") == "GB_STANDARD"]
-        _fallback_used = False
-        if _vsrc is None:
-            if not (_E and _sy and _rho):
-                _fb = _equivalent_fallback(_g)
-                if _fb:
-                    _fallback_used = True
-                    _E = _E or _fb.get("youngs_modulus_mpa")
-                    _nu = _nu if _nu is not None else _fb.get("poissons_ratio")
-                    _sy = _sy or _fb.get("yield_strength_mpa")
-                    _rho = _rho or _fb.get("density_kg_m3")
-            _vsrc = ("等效兜底（国标数值待补全）" if _fallback_used
-                     else "GB 标准数值")
-            _pending = _fallback_used
-            if _fallback_used:
-                _gb_fields = []
-        # 【判据】只有"每个已填字段都来自 GB 原文"才可宣称 values_from_gb=True
-        _filled = [f for f in ("E_mpa", "nu", "yield_mpa", "uts_mpa",
-                               "density_kg_m3") if _m.get(f) is not None]
-        _all_from_gb = bool(_filled) and set(_filled) <= set(_gb_fields)
-        return {
-            "id": _m.get("id") or _g,
-            "name": _m.get("name") or _g,
-            "youngs_modulus_mpa": _E,
-            "poissons_ratio": _nu,
-            "yield_strength_mpa": _sy,
-            "uts_mpa": _m.get("uts_mpa") or (round(_sy * 1.2, 1) if _sy else None),
-            "density_kg_m3": _rho,
-            "standard": _m.get("standard"),
-            "gb_source": _mdb.GB_MATERIALS_SOURCE or _mdb.GB_MATERIALS_FILE,
-            "source": ("workflow_gate._gb_grade_props(外部国标材料库)"
-                       if _all_from_gb else
-                       "workflow_gate._gb_grade_props(国标身份 + 等效数值兜底)"),
-            # 【可审计性】明确区分"身份来自国标"与"数值是否已来自国标"
-            "identity_source": "GB（标准身份已确认）",
-            "values_source": _vsrc,
-            # 只有全字段来自 GB 才算"数值来自国标"；混合/兜底一律 False
-            "values_from_gb": _all_from_gb,
-            "values_pending": bool(_pending),
-            "gb_sourced_fields": _gb_fields,
-            "field_provenance": _fp or None,
-            "equivalent_name": _m.get("equivalent_name"),
-            "consistency_guard": _m.get("consistency_guard"),
-        }
-    except Exception:
-        return None
-
-
-def _gb_data_status():
-    """国标材料数据源状态（供门禁在报告/提示里说明"数值从哪来"）。"""
-    try:
-        import sys as _sys
-        _t = os.path.dirname(os.path.abspath(__file__))
-        _p = os.path.join(_t, "physics")
-        if _p not in _sys.path:
-            _sys.path.insert(0, _p)
-        import material_db as _mdb
-        return _mdb.gb_materials_status()
-    except Exception as _e:
-        return {"loaded": False, "count": 0, "error": repr(_e)}
-
-
-def _material_for(mat_name, task_text="", material_spec=None):
-    """把"推荐材料"解析成 physics load_case 需要的材料字典。
-
-    【Bug-04/11 修复】若 mechanics 里已带 material_spec（infer_material 的产物），
-    直接采用 —— 它已经尊重了用户的材料选择（PETG/ABS/Nylon…），
-    不再经过"显示名 → 关键词 → 金属"这条会把塑料误判成铝的链路。
-    """
-    if isinstance(material_spec, dict) and material_spec.get("id"):
-        return dict(material_spec)
-    hay = (str(mat_name or "") + " " + str(task_text or "")).lower()
-    # 打印材料优先（Bug-04/11）：显示名里带 PETG/PLA/Nylon 等要能正确落盘
-    for _pkey, info in _PRINT_MATERIALS.items():
-        if _pkey in hay:
-            return dict(info, source="workflow_gate._material_for(print)")
-    # 国标牌号：属性来自外部 JSON（见 _gb_grade_props）
-    # 两级匹配：① 牌号精确 token 优先 → ② 用途/泛化词（避免"45# 齿轮"被 40Cr 抢走）
-    for keys, disp in _GB_GRADE_TOKENS:
-        if any(k in hay for k in keys):
-            _g = _gb_grade_props(disp)
-            if _g:
-                return _g
-            break
-    else:
-        for keys, disp in _GB_KEYWORD_TO_GRADE:
-            if any(k in hay for k in keys):
-                _g = _gb_grade_props(disp)
-                if _g:
-                    return _g
-                break
-    # ── 原有等效映射兜底（【原有数据】关键词 → 欧美标 id + 等效属性）────────
-    #   国标数据未导入时，用这套既有映射保证系统仍然可用；
-    #   导入后上面的 _gb_grade_props 会优先返回（按国标校核）。
-    for _keys, _mid, _E, _nu, _sy, _rho, _disp in _MATERIAL_LOOKUP:
-        _ks = _keys if isinstance(_keys, (tuple, list)) else (str(_keys),)
-        if any(str(_k) in hay for _k in _ks):
-            # 注意：本函数返回【材料字典】（load_case.material 的形状），
-            #   不是 (显示名, 依据, spec) 三元组 —— 后者是 infer_material 的契约。
-            return {"id": _mid, "name": _disp,
-                    "youngs_modulus_mpa": _E, "poissons_ratio": _nu,
-                    "yield_strength_mpa": _sy, "uts_mpa": round(_sy * 1.2, 1),
-                    "density_kg_m3": _rho,
-                    "source": "workflow_gate._material_for(等效欧美标映射)"}
-    # ── 兜底：优先用【当前真的可用】的材料，绝不返回未收录的编造属性 ────────
-    # 国标数据未导入时，"Q235" 可能不在库中；此时退回仍可用的等效牌号，
-    #   并把原因写进返回体，让调用方知道"为什么拿到的不是 Q235"。
-    _st = _gb_data_status()
-    try:
-        import sys as _sys
-        _t = os.path.dirname(os.path.abspath(__file__))
-        for _d in (os.path.join(_t, "physics"), _t):
-            if _d not in _sys.path:
-                _sys.path.insert(0, _d)
-        import swapi as _sw
-        _nm = _sw.default_part_material_name()
-        _ok, _info, _ = _sw.is_valid_material(_nm)
-        if _ok and _info:
-            _sy = _info.get("yield_mpa") or _info.get("yield_strength_mpa")
-            return {
-                "id": _info.get("canonical") or _nm,
-                "name": _nm,
-                "youngs_modulus_mpa": _info.get("e_mpa") or _info.get("youngs_modulus_mpa"),
-                "poissons_ratio": _info.get("poissons_ratio"),
-                "yield_strength_mpa": _sy,
-                "uts_mpa": _info.get("uts_mpa") or (round(_sy * 1.2, 1) if _sy else None),
-                "density_kg_m3": _info.get("density") or _info.get("density_kg_m3"),
-                "source": "workflow_gate.default(可用材料兜底)",
-                "gb_data_loaded": bool(_st.get("loaded")),
-                "gb_data_note": (None if _st.get("loaded")
-                                 else ("国标材料数据尚未导入（%s）；已退回内置可用牌号。"
-                                       "导入后即按国标牌号取值。"
-                                       % (_st.get("error") or "未找到数据文件"))),
-            }
-    except Exception:
-        pass
-    # 最后兜底：如实返回"无可用材料"，不编造数值
-    return {
-        "id": None, "name": None,
-        "error": ("无可用材料：国标材料数据未导入，且内置材料库为空。"
-                  "请把 gb_materials.json 放到 tools/physics/ 下后重试。"),
-        "source": "workflow_gate.default(无可用材料)",
-    }
-
-
-def _extract_part_envelope(spec_text, task_type="generic"):
-    """【Bug-12 修复】从任务/背景回答里提取【零件】包络（排除赛道/整机尺寸）。
-
-    算法（三步，全部双向检查语境）：
-      ① 显式带标签的零件尺寸：长/宽/高/厚/直径/轴距/轮距/孔径/外径 + 数字
-         —— 这是最强的"零件"证据，直接采纳；
-      ② 尺寸三元组 a×b×c（可选带 mm）—— 若语境是赛道/场地则排除；
-      ③ 其余 数字+mm —— 仅当左右各 12 字窗口内【没有】赛道/场地词，
-         且量级不超过任务典型零件包络的 6 倍时才采纳。
-
-    关键修正（对照实测）：赛道尺寸的"赛道词"常在数字【之后】
-    （如「1000mm窄段」「4500x4500mm方框赛道」「2100mm直线」），
-    只检查前文会漏掉 → 这里左右都查。
-
-    Returns: (L, W, H, note) —— note 说明取值来源或兜底原因。
-    """
-    import re as _re
-    text = str(spec_text or "")
-    typ = _TASK_DEFAULT_ENVELOPE.get(task_type, _TASK_DEFAULT_ENVELOPE["generic"])
-    _limit = max(typ) * 6.0
-    part_dims = []
-
-    def _win(pos, n=12):
-        """数字左右各 n 字的语境窗口（双向）。"""
-        return text[max(0, pos - n):pos + n]
-
-    def _is_track(pos, n=12):
-        return any(k in _win(pos, n) for k in _TRACK_CONTEXT_KW)
-
-    # ── ① 显式带标签的零件尺寸（最强证据）────────────────────────────
-    # 标签后紧跟数字；排除"精度/公差"语境与赛道语境。
-    # 注意：不含"轴距/轮距" —— 它们是整车布置参数，不是【零件】包络，
-    #   纳入会把 300×180×120 的包络撑成 300×200×180（实机实测）。
-    _LABELS = (r"长|宽|高|厚|壁厚|直径|外径|内径|孔径|"
-               r"底板|车架|车轮|车板|齿轮|横梁|连杆|支架|齿宽")
-    for m in _re.finditer(r"(?:%s)\s*[:：=]?\s*(\d+(?:\.\d+)?)" % _LABELS, text):
-        try:
-            v = float(m.group(1))
-        except Exception:
-            continue
-        if not (1.0 <= v <= 100000.0):
-            continue
-        if _is_track(m.start()):
-            continue
-        if v not in part_dims:
-            part_dims.append(v)
-
-    # ── ② 尺寸三元组 a×b×c（可带 mm）────────────────────────────────
-    for m in _re.finditer(
-            r"(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)"
-            r"(?:\s*[x×*]\s*(\d+(?:\.\d+)?))?\s*(?:mm|毫米)?", text):
-        if _is_track(m.start()):
-            continue
-        for gi in (1, 2, 3):
-            try:
-                g = m.group(gi)
-            except Exception:
-                g = None
-            if not g:
-                continue
-            v = float(g)
-            if 1.0 <= v <= _limit and v not in part_dims:
-                part_dims.append(v)
-
-    # ── ③ 其余 数字+mm / 数字+米 / 数字+cm ──────────────────────────
-    for pat, k in ((r"([±+\-~]?)\s*(\d+(?:\.\d+)?)\s*(?:mm|毫米)", 1.0),
-                   (r"(\d+(?:\.\d+)?)\s*(?:cm|厘米)", 10.0),
-                   (r"(\d+(?:\.\d+)?)\s*(?:m|米)(?![m米a-z])", 1000.0)):
-        for m in _re.finditer(pat, text):
-            # 公差/精度语境（前文）
-            pre = text[max(0, m.start() - 10):m.start()]
-            if any(kw in pre for kw in ("精度", "公差", "偏差", "误差", "±", "+-")):
-                continue
-            # 显式公差符号前缀（仅 mm 模式有第 1 组）
-            if m.lastindex and m.lastindex >= 1:
-                try:
-                    if m.group(1) in ("±", "+", "~"):
-                        continue
-                except Exception:
-                    pass
-            try:
-                v = float(m.group(2) if m.lastindex and m.lastindex >= 2
-                          else m.group(1)) * k
-            except Exception:
-                continue
-            if not (1.0 <= v <= 100000.0):
-                continue
-            # 赛道/场地语境（双向）→ 排除
-            if _is_track(m.start()):
-                continue
-            # 量级护栏：明显是整机/赛道量级的不采纳
-            if v > _limit:
-                continue
-            if v not in part_dims:
-                part_dims.append(v)
-
-    dims = sorted(set(part_dims), reverse=True)[:3]
-    if not dims:
-        note = ("未从任务/回答中提取到【零件】包络尺寸（赛道/整机尺寸不计入），"
-                "已按任务类型取典型零件包络 %s mm；请在小屋 prompt 中明确零件长宽高。"
-                % (tuple(int(x) for x in typ),))
-        return typ[0], typ[1], typ[2], note
-
-    while len(dims) < 3:
-        dims.append(dims[-1])
-    L, W, H = float(dims[0]), float(dims[1]), float(dims[2])
-
-    # ── ④ 合理性护栏：仍像整机/赛道量级 → 退回任务典型包络 ──────────
-    if max(L, W, H) > _limit or max(L, W, H) < 1.0:
-        note = ("提取到的尺寸 %s 属【整机/赛道量级】而非零件包络，已退回任务典型"
-                "零件包络 %s mm（原实现会把赛道当设计域，导致 FEA 空间选择器失配）。"
-                % ([round(x, 1) for x in dims], tuple(int(x) for x in typ)))
-        return typ[0], typ[1], typ[2], note
-
-    note = ("零件包络取自任务/回答中的零件语境尺寸 %s"
-            % ([round(x, 1) for x in dims],))
-    return L, W, H, note
-
-
-def write_load_case_file(state, mechanics, work_dir=None):
-    """【BUG-07 修复】把门禁力学估算落盘为 physics 可直接用的载荷工况 JSON。
-
-    【Bug-04/11】材料：优先用 infer_material 的 material_spec（尊重用户选择）。
-    【Bug-12】设计域：取【零件包络】，绝不沿用赛道/整机尺寸。
-    【Bug-15】problem_id：真实短哈希，不再把任务描述里的尺寸硬塞进去。
-    【观察点4】载荷：除重力 -Z 外，追加侧向(X)与纵向(Y)工况，覆盖过弯/驱动失效模式。
-
-    Returns: {"ok", "path", "load_case"} 或 {"ok": False, "error"}
-    """
-    try:
-        task = state.get("task") or ""
-        import hashlib as _hashlib
-
-        mat = _material_for(mechanics.get("material_recommend"), task,
-                            mechanics.get("material_spec"))
-        task_type = mechanics.get("task_type") or detect_task_type(
-            task, state.get("context"))
-        spec_text = (task + " " + str(state.get("context") or ""))
-        L, W, H, _dim_note = _extract_part_envelope(spec_text, task_type)
-
-        nominal = float(mechanics.get("nominal_load_n") or 500.0)
-
-        # ── 【Bug-15 修复】problem_id 用真实短哈希，可复现且不泄露尺寸 ──
-        _seed = "%s|%s|%s" % (task, state.get("created_at") or "",
-                              mechanics.get("nominal_load_n"))
-        _pid = "GATE_" + _hashlib.sha1(_seed.encode("utf-8")).hexdigest()[:12].upper()
-
-        # ── 【观察点4 修复】多工况载荷 ────────────────────────────────
-        # 竞速小车的主要失效模式是过弯侧向力与纵向驱动力，纯 -Z 重力覆盖不到。
-        # 保持 load_rated（重力，magnitude_n = 额定载荷，与门禁口径一致），
-        # 追加侧向/纵向两个工况，供 physics 做多工况校核。
-        _impact = float(mechanics.get("impact_factor") or 1.0)
-        # ── 【Bug-D 修复】推导零件载荷分担系数 ────────────────────────────
-        # 任务类型 → 预估的"主要承力路径数"（并联分担整机载荷的分件数）。
-        #   依据：轮式小车的主要承力件是 4 个车轮/悬架；机械臂主要是各关节
-        #   与臂段；传动件按齿面/轴系成对；单体零件任务不折算。
-        #   ⚠️ 这是【保守的工程默认值】，只用于把整机载荷折算到单件量级，
-        #      避免小零件被整机载荷压出失真结论；实际份额应由小屋按结构
-        #      显式覆盖（acceptance.part_load_share）。
-        _PATHS_BY_TASK = {
-            "vehicle": 4,        # 四轮/四悬架分担
-            "robot_arm": 4,      # 多关节/多臂段
-            "transmission": 2,   # 成对啮合/双支撑轴系
-            "generic": 1,        # 单体零件：整机载荷即零件载荷
-        }
-        _parallel_paths = int(_PATHS_BY_TASK.get(task_type, 1) or 1)
-        _mspec = mechanics.get("part_load_share")
-        if _mspec:
-            try:
-                _part_load_share = float(_mspec)
-            except Exception:
-                _part_load_share = 1.0 / _parallel_paths
-        else:
-            _part_load_share = 1.0 / _parallel_paths
-        if not (_part_load_share > 0):
-            _part_load_share = 1.0
-        # ── 【P0-BUG-动载系数二次施加】载荷文件只存【额定（未乘系数）】值 ────
-        # 原缺陷：侧向工况写成 `_lat = nominal * _impact`（预乘一次），
-        #   而 physics 的 governing_design_force() 会按 acceptance.impact_factor
-        #   再乘一次 → 动载系数被施加两次，载荷被放大 impact² 倍。
-        #   实测（nominal=1224.745N, impact=2.0）：
-        #     侧向 magnitude=2449.49 → governing=2449.49×2=4898.98N
-        #   这与本文件 load_rated 的注释「magnitude_n 必须等于门禁 nominal_load_n」
-        #   以及 load_case.py:769「动载系数只施加一次」的口径直接矛盾。
-        # 修复：三个工况一律写【额定载荷】，动载系数只由 physics 施加一次；
-        #   侧向/纵向工况的意义是【覆盖失效方向】（过弯侧倾、启停驱动），
-        #   不是第二次放大。combined 工况按矢量合成后自然会给出最恶劣结果
-        #   （√3×nominal × impact），无需在此预乘。
-        _lat = round(nominal, 3)
-        _lon = round(nominal, 3)
-        case = {
-            "schema_version": "1.0",
-            "meta": {
-                "problem_id": _pid,
-                "title": task[:120] or "门禁自动生成工况",
-                "revision": "A",
-                "generated_by": "workflow_gate.estimate_mechanics",
-                "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "task_type": task_type,
-                "task_type_label": mechanics.get("task_type_label"),
-                "design_domain_mm": [round(L, 1), round(W, 1), round(H, 1)],
-                "design_domain_note": _dim_note,
-                "design_domain_basis": "零件包络（Bug-12：不再沿用赛道/整机尺寸）",
-            },
-            "units": {"length": "mm", "force": "N", "stress": "MPa", "mass": "kg"},
-            "design_domain": {
-                "bounds": {"x_min": 0.0, "x_max": float(L),
-                           "y_min": 0.0, "y_max": float(W),
-                           "z_min": 0.0, "z_max": float(H)},
-                "keep_in_regions": [], "keep_out_regions": [],
-            },
-            "material": mat,
-            "spatial_selectors": [
-                {"id": "fixed_end", "type": "box",
-                 "bounds": {"x_min": 0.0, "x_max": max(L * 0.05, 10.0),
-                            "y_min": -10.0, "y_max": W + 10.0,
-                            "z_min": -10.0, "z_max": H + 10.0},
-                 "selection_rule": "faces_intersecting_region"},
-                {"id": "load_face", "type": "box",
-                 "bounds": {"x_min": max(L * 0.95, L - 10.0), "x_max": L,
-                            "y_min": -10.0, "y_max": W + 10.0,
-                            "z_min": -10.0, "z_max": H + 10.0},
-                 "selection_rule": "faces_intersecting_region"},
-            ],
-            "boundary_conditions": [
-                {"id": "bc_fixed", "spatial_selector_id": "fixed_end",
-                 "type": "fixed_displacement",
-                 "dof_lock": {"x": True, "y": True, "z": True,
-                              "rx": True, "ry": True, "rz": True}},
-            ],
-            "loads": [
-                {"id": "load_rated", "spatial_selector_id": "load_face",
-                 "type": "distributed_force",
-                 "magnitude_n": nominal,          # ← 额定载荷，与门禁口径一致
-                 "direction": [0.0, 0.0, -1.0],
-                 "case_name": "额定重力工况",
-                 "note": "主工况：magnitude_n 必须等于门禁 nominal_load_n"},
-                {"id": "load_lateral", "spatial_selector_id": "load_face",
-                 "type": "distributed_force",
-                 "magnitude_n": _lat,
-                 "direction": [1.0, 0.0, 0.0],
-                 "case_name": "侧向工况（过弯侧倾/转向拉杆受拉）",
-                 "note": ("侧向力 = 额定载荷（【P0 修复】不再预乘动载系数 —— "
-                          "动载系数由 physics 的 governing_design_force 统一施加一次，"
-                          "避免二次放大）")},
-                {"id": "load_longitudinal", "spatial_selector_id": "load_face",
-                 "type": "distributed_force",
-                 "magnitude_n": _lon,
-                 "direction": [0.0, 1.0, 0.0],
-                 "case_name": "纵向工况（启停驱动力/制动）",
-                 "note": "纵向力 = 额定载荷"},
-            ],
-            "load_cases": [
-                {"id": "rated", "load_ids": ["load_rated"],
-                 "description": "额定重力工况（主工况）"},
-                {"id": "lateral", "load_ids": ["load_lateral"],
-                 "description": "侧向工况：过弯侧倾、转向拉杆受拉"},
-                {"id": "longitudinal", "load_ids": ["load_longitudinal"],
-                 "description": "纵向工况：频繁启停/制动"},
-                {"id": "combined",
-                 "load_ids": ["load_rated", "load_lateral", "load_longitudinal"],
-                 "description": "组合工况：全部载荷同时作用（最恶劣）"},
-            ],
-            "acceptance": {
-                "analysis_type": "linear_static",
-                "min_safety_factor": float(mechanics.get("safety_factor") or 2.0),
-                "target_safety_factor_max": 5.0,
-                # ── 【观察点 21 修复】FDM 各向异性折减（物理校核据此判合格）──
-                # anisotropy_factor < 1 表示"层间强度只按层内的该比例计入"，
-                #   要求的安全系数已在上游相应提高（见 estimate_mechanics）。
-                "anisotropy_factor": float(mechanics.get("anisotropy_factor") or 1.0),
-                "process": mechanics.get("process"),
-                "max_displacement_mm": None,
-                "min_wall_thickness_mm": None,
-                "max_mass_kg": None,
-                "must_remain_in_design_domain": True,
-                "mesh_quality_min": 0.1,
-                # ── 【BUG-02】疲劳/寿命校核输入（physics 疲劳模块读这两项）──
-                "design_life_years": float(mechanics.get("design_life_years") or 10.0),
-                "operating_cycles_per_year": float(mechanics.get("cycles_per_year") or 200000.0),
-                "load_type": mechanics.get("load_type") or "static",
-                "impact_factor": _impact,
-                "fatigue_check_required": (mechanics.get("load_type") in ("cyclic", "impact")),
-                "required_load_cases": ["rated", "lateral", "longitudinal"],
-                # ── 【Bug-D 修复】零件载荷分担系数 ──────────────────────────
-                # 工况里的 magnitude_n 是【整机】载荷；单件校核若原样施加，
-                #   小零件会被压出 SF=0.2 这类失真结论（实测 30×20×10 小块
-                #   加整机 1224.7N）。
-                # 这里给出【默认分担口径】：按任务预估的承力路径数折算。
-                #   多零件装配（模式②）默认按主要承力件数分担；单零件任务
-                #   保持 1.0（整机载荷即零件载荷），不改变既有结论。
-                # 小屋/主对话可按实际结构显式覆盖（acceptance.part_load_share）。
-                "part_load_share": _part_load_share,
-                "parallel_load_paths": _parallel_paths,
-                "load_share_basis": (
-                    "单件按 %d 条并联承力路径折算（=%.4f）；若该零件实际承担"
-                    "更大/更小份额，请在工况 acceptance.part_load_share 显式覆盖"
-                    % (_parallel_paths, _part_load_share)),
-            },
-            "optimization": {"primary": "minimize_mass",
-                             "secondary": ["minimize_max_displacement"]},
-        }
-        out_dir = work_dir or os.path.join(BASE_DIR, "load_cases")
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-        except Exception:
-            out_dir = BASE_DIR
-        path = os.path.join(out_dir, "gate_load_case.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(case, f, ensure_ascii=False, indent=2)
-        return {"ok": True, "path": path, "load_case": case}
-    except Exception as e:
-        return {"ok": False, "error": "写入载荷工况失败: %r" % (e,)}
-
-
-# ══ 【观察点1/5 修复】交付目录按任务隔离 ═══════════════════════════════════
-# 原缺陷：历史任务与新任务共用同一交付目录（实测 C:\Users\j1877\Desktop\test），
-#   新任务的同名零件会【直接覆盖】旧任务成果，且无任何提示/备份 ——
-#   本轮 DSH_车架底板.SLDPRT(106KB) 覆盖了上一轮同名文件(81KB)，若本次失败，
-#   上一轮成果已丢（观察点5）。
-# 修复：
-#   ① init 时按"任务 ID/时间戳"生成独立交付子目录；
-#   ② 目录里写 TASK_INFO.json（任务描述/时间/ID），便于追溯；
-#   ③ 同名文件已存在时自动备份 .bak（双保险）；
-#   ④ 提供 work-dir 命令查询/设置当前任务目录。
-WORKDIR_STATE_KEY = "work_dir"
-
-
-def _task_id(task, created_at=None):
-    """按任务描述 + 创建时间生成稳定的任务 ID（可读 + 唯一）。"""
-    import hashlib as _hashlib
-    _seed = "%s|%s" % (str(task or ""), str(created_at or ""))
-    _h = _hashlib.sha1(_seed.encode("utf-8")).hexdigest()[:8].upper()
-    _ts = time.strftime("%Y%m%d_%H%M%S",
-                        time.localtime(time.time()))
-    return "%s_%s" % (_ts, _h)
-
-
-def _default_delivery_root():
-    """交付根目录：优先环境变量，其次桌面 test，最后工程模式根目录/output。"""
-    try:
-        env = (os.environ.get("DSH_DELIVERY_ROOT") or "").strip()
-        if env:
-            return env
-    except Exception:
-        pass
-    home = os.environ.get("USERPROFILE") or os.environ.get("HOME") or ""
-    if home:
-        cand = os.path.join(home, "Desktop", "test")
-        try:
-            if os.path.isdir(os.path.join(home, "Desktop")):
-                return cand
-        except Exception:
-            pass
-    return os.path.join(BASE_DIR, "output")
-
-
-def prepare_task_workdir(task, state=None):
-    """【观察点1/5】为新任务创建隔离的交付目录。
-
-    ── 【BUG-观察-1 修复】消除"交付目录双轨" ────────────────────────────────
-    现场问题（竞速小车任务）：三处路径互相打架
-      · init 返回 work_dir    = ...\\Desktop\\test\\20261007_153308_673CC22C（子目录）
-      · TASK_INFO.delivery_root = ...\\Desktop\\test                  （父目录）
-      · 零件实际落盘            = ...\\Desktop\\test                  （父目录根）
-    根因：work_dir（子）与 delivery_root（父）**同以"交付"命名却语义不同**，
-      并列回传且没有任何"零件到底存哪"的字段；`sw_bridge.cmd_save()` 对相对
-      路径零决策，直落进程 cwd → 于是零件跑到父目录，总装/出图按 work_dir 找
-      零件必然找不到。
-
-    修复：
-      ① 明确目录分工并【实际创建】：parts/（零件）、drawings/（工程图）、
-         scripts/（建模脚本）—— 从机制上保证产物有唯一归宿；
-      ② 返回里新增 `save_dir_hint`（给模型的**唯一权威**保存目录）与
-         `parts_dir`，并在 `work_dir_note` 里用一句话讲清"零件存 parts_dir"；
-      ③ `delivery_root` 保留（仍是有用的"本轮所有任务的上层"概念），
-         但语义在 TASK_INFO 里写明，不再与 work_dir 混淆。
-
-    Returns: {ok, work_dir, task_id, created, backed_up, info_path,
-              delivery_root, parts_dir, drawings_dir, scripts_dir,
-              save_dir_hint, dir_semantics, error?}
-    """
-    out = {"ok": False}
-    try:
-        _tid = _task_id(task)
-        root = _default_delivery_root()
-        wd = os.path.join(root, _tid)
-        _created = not os.path.isdir(wd)
-        os.makedirs(wd, exist_ok=True)
-        # ── 【BUG-观察-1 修复】建立产物子目录，给产物唯一归宿 ──────────────
-        parts_dir = os.path.join(wd, "parts")
-        drawings_dir = os.path.join(wd, "drawings")
-        scripts_dir = os.path.join(wd, "scripts")
-        for _d in (parts_dir, drawings_dir, scripts_dir):
-            try:
-                os.makedirs(_d, exist_ok=True)
-            except Exception:
-                pass
-        # 写任务信息（可追溯：哪个目录属于哪个任务）
-        _info = {
-            "task_id": _tid,
-            "task": str(task or "")[:2000],
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "delivery_root": root,
-            # ── 【BUG-观察-1 修复】把"零件存哪"写成显式字段 ────────────────
-            "work_dir": wd,
-            "parts_dir": parts_dir,
-            "drawings_dir": drawings_dir,
-            "scripts_dir": scripts_dir,
-            "dir_semantics": {
-                "delivery_root": "本机所有任务的【上层】交付根目录，不要往这里直接存零件",
-                "work_dir": "【本任务】的隔离目录，所有产物都应在此之下",
-                "parts_dir": "★ 零件(.sldprt/.sldasm)唯一保存目录",
-                "drawings_dir": "★ 工程图(.slddrw/.dwg/.dxf/.pdf)唯一保存目录",
-                "scripts_dir": "建模脚本(.py)保存目录",
-            },
-            "note": ("【观察点1/5 修复】每个任务独立交付目录，避免同名零件覆盖上一轮成果。"
-                     "上一轮成果保留在同级其它目录中。"
-                     "【BUG-观察-1 修复】零件请存 parts_dir，工程图存 drawings_dir —— "
-                     "不要存到 delivery_root（那是所有任务的上层根目录）。"),
-        }
-        info_path = os.path.join(wd, "TASK_INFO.json")
-        try:
-            with open(info_path, "w", encoding="utf-8") as f:
-                json.dump(_info, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-        out.update({"ok": True, "work_dir": wd, "task_id": _tid,
-                    "created": _created, "info_path": info_path,
-                    "delivery_root": root,
-                    "parts_dir": parts_dir,
-                    "drawings_dir": drawings_dir,
-                    "scripts_dir": scripts_dir,
-                    # 给模型的唯一权威保存目录（相对路径解析基准）
-                    "save_dir_hint": parts_dir,
-                    "dir_semantics": _info["dir_semantics"]})
-        return out
-    except Exception as e:
-        out["error"] = "创建任务交付目录失败: %r" % (e,)
-        return out
-
-
-
-
-def cmd_work_dir(new_dir=None):
-    """查询 / 设置当前任务的交付目录（观察点1/5）。"""
-    state = load_state()
-    if new_dir:
-        _wd = os.path.abspath(str(new_dir))
-        try:
-            os.makedirs(_wd, exist_ok=True)
-        except Exception as e:
-            return {"ok": False, "error": "无法创建目录: %r" % (e,)}
-        state[WORKDIR_STATE_KEY] = _wd
-        save_state(state)
-        return {"ok": True, "work_dir": _wd, "action": "set"}
-    _cur = state.get(WORKDIR_STATE_KEY)
-    return {"ok": True, "work_dir": _cur,
-            "task_id": state.get("task_id"),
-            "task": state.get("task"),
-            "default_root": _default_delivery_root(),
-            "note": ("每个任务应有独立目录（观察点1/5）。"
-                     "设置: workflow_gate.py work-dir <绝对路径>")}
-
-
-def _get_done_rooms():
-    ms_path = os.path.join(STATE_DIR, "mode_state.json")
-    done = set()
-    if os.path.exists(ms_path):
-        try:
-            with open(ms_path, "r", encoding="utf-8") as f:
-                ms = json.load(f)
-            for rn, rv in ms.get("rooms", {}).items():
-                if rv.get("ended_at"):
-                    done.add(rn)
-        except Exception:
-            pass
-    return done
-
-
-def _rooms_detail():
-    """读取 mode_state.json 的 rooms 原始记录（含 ended_at/failed_at/active）。"""
-    ms_path = os.path.join(STATE_DIR, "mode_state.json")
-    detail = {}
-    if os.path.exists(ms_path):
-        try:
-            with open(ms_path, "r", encoding="utf-8") as f:
-                ms = json.load(f)
-            detail = ms.get("rooms", {}) or {}
-        except Exception:
-            pass
-    return detail
-
-
-def _cross_file_sync():
-    """【BUG-观察-5 修复】调用 _store.sync_report() 做真正的跨文件一致性检查。
-
-    原 `in_sync` 是假校验（两侧同源、恒为 True）。这里委托给 _store 里
-    权威的跨文件比对（parallel_mode / task_id / 房间表与 step 相容性 / 完成态分歧）。
-    任何异常都不得影响主流程 —— 失败时返回 ok=False 并说明原因，而不是抛错。
-    """
-    try:
-        import _store
-        return _store.sync_report()
-    except Exception as e:
-        return {"ok": False, "checked": False, "in_sync": None,
-                "error": "跨文件同步检查不可用: %r" % (e,),
-                "warning": ("无法执行跨文件一致性检查；"
-                            "注意 select 里原有的 in_sync 是自指校验，不能作为同步证据。")}
-
-
-def _check_wave1_done():
-    """【总装门禁核心】检查第一波（全部建模类房间）是否全部完成。
-
-    完成定义：每个建模房间 ended_at 有值且没有 failed_at。
-    返回 dict：all_done / not_ended / active / failed —— 任一非空即不允许开总装。
-    """
-    state = load_state()
-    rooms = (state.get("subagent_config") or {}).get("rooms") or _default_rooms()
-    detail = _rooms_detail()
-    not_ended, active, failed = [], [], []
-    for name, rtype in rooms:
-        if rtype not in WAVE1_TYPES:
-            continue
-        info = detail.get(name) or {}
-        if info.get("failed_at"):
-            failed.append(name)
-        elif not info.get("ended_at"):
-            (active if info.get("active") else not_ended).append(name)
-    return {"all_done": not (not_ended or active or failed),
-            "not_ended": not_ended, "active": active, "failed": failed}
-
-def bypass_requested():
-    """是否显式要求绕开三大防线（唯一合法绕行，必定留痕）。"""
-    import os as _os
-    return str(_os.environ.get("DSH_DEFENSE_BYPASS") or "").strip() in ("1", "true", "yes")
-
-
-def _wave1_room_names():
-    """第一波【建模类】房间名列表（用于开总装前的三防线强制校验）。"""
-    state = load_state()
-    cfg = state.get("subagent_config") or {}
-    out = []
-    for row in (cfg.get("rooms") or []):
-        if isinstance(row, (list, tuple)) and len(row) >= 2:
-            if str(row[1]) in WAVE1_TYPES:
-                out.append(str(row[0]))
-        elif isinstance(row, dict):
-            if str(row.get("type") or "") in WAVE1_TYPES:
-                out.append(str(row.get("name") or row.get("room")))
-    # 兜底：退化为 mode_state 里已登记的房间（排除总装/出图）
-    # ── 【P1 修复】兜底必须真的排除非建模房间 ──────────────────────────
-    # 原缺陷：注释写"排除总装/出图"，代码却是
-    #   out = [所有房间名] —— 把 assembly/drafting 房间也塞进第一波清单。
-    #   随后 check_room_defense 对这些房间按"rtype 未知 → require_physics=True"
-    #   判定（defense_gate.py 的 room_type 为空即强制要物理凭据），
-    #   而总装/出图房间本就不该有零件级 FEA →
-    #   实测 legacy 状态下 confirm-assembly 永久 DEFENSE_REQUIRED，流程卡死。
-    # 修复：兜底时按房间类型过滤，只保留建模类（WAVE1_TYPES）。
-    if not out:
-        try:
-            import json as _json
-            _mp = os.path.join(STATE_DIR, "mode_state.json")
-            if os.path.exists(_mp):
-                with open(_mp, "r", encoding="utf-8") as _f:
-                    _ms = _json.load(_f)
-                _rt = {}
-                try:
-                    import defense_gate as _dg_rt
-                    _rt = _dg_rt._room_types() or {}
-                except Exception:
-                    _rt = {}
-                _all_names = [str(n) for n in (_ms.get("rooms") or {})]
-                if _rt:
-                    # 有类型信息：只保留建模类房间
-                    out = [n for n in _all_names
-                           if str(_rt.get(n) or "") in WAVE1_TYPES]
-                    # 类型全为空（legacy）时退回"排除已知非建模名"的保守过滤
-                    if not out:
-                        _non_model = ("总装与验证", "工程图输出")
-                        out = [n for n in _all_names if n not in _non_model]
-                else:
-                    _non_model = ("总装与验证", "工程图输出")
-                    out = [n for n in _all_names if n not in _non_model]
-        except Exception:
-            out = []
-    return out
-
-
-def cmd_confirm_assembly(parts_payload):
-    """【三大防线】开总装前强制：第一波各房间必须已通过三防线。
-
-    为什么挂在这里：总装会把所有零件固化成一个装配体，一旦开总装，
-      再回头改单个零件就要重做总装 —— 所以这是"最后一个能便宜地拦下
-      材料/强度/领域问题"的时刻，必须在这里把三道防线全部卡住。
-    """
-    if not bypass_requested():
-        try:
-            import defense_gate as _dg
-            _bad = []
-            _rooms = _wave1_room_names()
-            for _r in _rooms:
-                _d = _dg.check_room_defense(_r)
-                if not _d["ok"]:
-                    _bad.append((_r, _d["blockers"]))
-            if _bad:
-                _nl = chr(10)
-                _lines = ["=== 【三大防线】拦截：第一波房间未通过校验，禁止开启总装 ===", ""]
-                for _r, _bs in _bad:
-                    _lines.append("房间 [%s]:" % _r)
-                    for _b in _bs:
-                        _lines.append("   ✗ " + _b)
-                _lines += [
-                    "",
-                    "处理：让对应小屋补齐材料凭据 / 跑 physics-optimize / 跑",
-                    "physics-validate-domain 后，重新 room-end 该房间，再调 confirm-assembly。",
-                    "（确需放行：设 DSH_DEFENSE_BYPASS=1，会留痕。）",
-                ]
-                return {
-                    "ok": False,
-                    "gate": "DEFENSE_REQUIRED",
-                    "phase": "confirm-assembly",
-                    "blocked_rooms": [x[0] for x in _bad],
-                    "error": "【三大防线】第一波房间未通过强制校验，禁止开启总装。",
-                    "message": _nl.join(_lines),
-                }
-        except ImportError as _e_imp:
-            # ── 【P0-BUG-防线 fail-open】不再静默放行 ──────────────────────
-            # 原实现 `except ImportError: pass` → 直接进入总装流程。
-            #   defense_gate.py 一旦不可导入，三道防线全部不执行且无留痕。
-            #   与 fail-closed 语义矛盾，改为显式拒绝并给出排查指引。
-            return {
-                "ok": False,
-                "gate": "DEFENSE_ERROR",
-                "phase": "confirm-assembly",
-                "error": ("【三大防线】defense_gate.py 不可导入，按[失效关闭]"
-                          "拒绝开启总装。"),
-                "detail": repr(_e_imp),
-                "message": ("=== 三大防线不可用（拒绝开启总装）===\n"
-                            "原因: defense_gate.py 导入失败 %r\n\n"
-                            "请先修复：python defense_gate.py status\n"
-                            "确需放行：DSH_DEFENSE_BYPASS=1（会留痕）。" % (_e_imp,)),
-            }
-        except Exception as _e_other:
-            return {
-                "ok": False,
-                "gate": "DEFENSE_ERROR",
-                "phase": "confirm-assembly",
-                "error": "【三大防线】校验链路异常，按[失效关闭]拒绝开启总装。",
-                "detail": repr(_e_other),
-                "message": ("=== 三大防线链路异常（拒绝开启总装）===\n"
-                            "异常: %r\n\n"
-                            "确需放行：DSH_DEFENSE_BYPASS=1（会留痕）。" % (_e_other,)),
-            }
-    elif bypass_requested():
-        # 【合法绕行留痕】DSH_DEFENSE_BYPASS=1 跳过防线，但必须记账（绝不静默）
-        try:
-            import defense_gate as _dg
-            _dg.log_bypass("workflow_gate.confirm-assembly",
-                           reason="DSH_DEFENSE_BYPASS=1", by="env")
-        except Exception:
-            pass
-    """【总装确认门禁】主对话开『总装与验证』房间前必须调用，代码级强制。
-
-    parts_payload: 主对话汇总的第一波产出零件清单（文件路径+零件名）。
-    拒绝条件（任一满足即拒绝，禁止开总装）：
-      1. 门禁流程未走完（step != user_selected）
-      2. 第一波建模房间未全部 room-end（含仍在运行/未登记/失败待重做）
-      3. 未提供零件清单
-    """
-    state = load_state()
-    _step = str(state.get("step") or "")
-    # ── 【C2 修复】前置条件放宽：不再死认 step == "user_selected" ──────────
-    # 测试反馈：Wave1 三房间都 completed，select 返回 ASSEMBLY_CONFIRM_REQUIRED，
-    #   但调用 confirm-assembly 却因 step 不等于 user_selected 被拒 → 流程卡死。
-    #   根因是 init 曾把 step 打回 depth_asked（见 C4），而这里的前置判断
-    #   只看这一个字段，没有结合"任务实际是否已推进"来判断。
-    # 现改为：只要【已选过搭建方式】或【已有房间记录】，即视为门禁已走过
-    #   select 阶段，允许进入总装确认（真正的把关交给下面的 _check_wave1_done）。
-    # ── 【P2 修复】state["rooms"] 是【幽灵键】：全文件无任何写入点，
-    #   故 `bool(state.get("rooms"))` 恒为 False，这个"或"条件永远不生效。
-    #   真正有房间记录的地方是 subagent_config.rooms（由 select 写入），
-    #   以及 mode_state.json。这里改读真实来源，让该判据恢复作用。
-    _rooms_cfg = []
-    try:
-        _rooms_cfg = ((state.get("subagent_config") or {}).get("rooms") or [])
-    except Exception:
-        _rooms_cfg = []
-    _advanced = (_step == "user_selected"
-                 or bool(state.get("user_choice"))
-                 or bool(_rooms_cfg)
-                 or bool(state.get("subagent_config")))
-    if not _advanced:
-        return {"ok": False, "gate": "ASSEMBLY_CONFIRM_REJECTED",
-                "step": _step,
-                "error": "门禁流程未完成（先走完 init→provide_context→select），不能确认总装",
-                "hint": ("当前 step=%s，且未检测到已选搭建方式/房间记录。"
-                         "请先按顺序完成：init → provide_context → select。" % _step)}
-    # 若 step 明显不一致（例如被 init 打回），顺手校正回来，避免后续 select 再卡
-    if _step != "user_selected":
-        state["step"] = "user_selected"
-        state["step_repaired_from"] = _step
-        state["step_repaired_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        save_state(state)
-    chk = _check_wave1_done()
-    if not chk["all_done"]:
-        return {"ok": False, "gate": "ASSEMBLY_CONFIRM_REJECTED",
-                "not_ended": chk["not_ended"], "active": chk["active"], "failed": chk["failed"],
-                "message": ("第一波建模房间尚未全部完成，禁止开启总装。"
-                            "未完成: %s | 仍在运行: %s | 失败待重做: %s。"
-                            "用 mode_gate.py room-status 核对状态，等全部 room-end 后再确认。"
-                            % (chk["not_ended"], chk["active"], chk["failed"]))}
-    payload = (parts_payload or "").strip()
-    if not payload:
-        return {"ok": False, "gate": "ASSEMBLY_CONFIRM_REJECTED",
-                "message": "零件清单为空。必须汇总第一波全部产出零件（文件路径+零件名）后再确认。"}
-    state["assembly_confirmed"] = True
-    state["assembly_inputs"] = payload
-    state["assembly_confirmed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    save_state(state)
-    return {"ok": True, "gate": "ASSEMBLY_CONFIRMED",
-            "assembly_inputs": payload,
-            "message": ("总装确认通过（全部建模房间已完成 + 零件清单已登记）。"
-                        "现在调用 select 获取『总装与验证』房间；总装小屋 prompt 必须原样包含"
-                        "零件清单，只做装配+干涉检查+整体验证，禁止重新建模/简化任何零件。")}
-
-
-# ── 第0题：参数需求强度（前置分流题）──────────────────────────────────────
-# 【问题2 修复】原方案一上来就抛 17 题，绝大多数用户被吓退或乱答。
-# 现改为两段式：先问 1 题判断"参数需求是否强"，再决定问全量还是精简。
-#
-#   强需求（需要精确出力学校核 / 有明确工况约束 / 要做强度与公差审查）
-#       → 问全量 QUESTION_SPEC（17 题，覆盖 99% 工业机械任务）
-#   不强（只是想先看到东西 / 结构示意 / 快速原型 / 无严格约束）
-#       → 只问 QUESTION_SPEC_LITE（5 题，覆盖决定性维度，其余由门禁取默认值）
-PARAM_DEPTH_SPEC = [
-    {
-        "id": "param_depth",
-        "group": "0 参数深度",
-        "title": "参数需求强度",
-        "hint": "本次设计是否需要严格把关参数（载荷/尺寸/公差/材料都要有据可依）？",
-        "options": [
-            "强需求：需要严格校核，参数要有设计依据（追问详细信息）",
-            "不强：先出大致结构即可，细节由你按经验定（只问关键几项）",
-        ],
-        "mech": False,
-        "depth": True,
-    },
-]
-
-# ── 精简问题集（参数需求不强时使用）────────────────────────────────────────
-# 【问题2 修复】从 QUESTION_SPEC 中精选 5 个"决定性维度"：
-#   不给这些就完全无法建模或必错；其余维度门禁都能按任务描述取合理默认值。
-#   · mech_type       —— 机构类型（决定整个拓扑结构，不给无法建模）
-#   · arm_lengths     —— 臂长/行程（决定尺寸链，不给无法定尺寸）
-#   · load_magnitude  —— 额定负载（决定强度校核基准）
-#   · load_type       —— 负载类型（决定安全系数取值）
-#   · open_extra      —— 开放补充（兜底，防止关键约束没处说）
-LITE_QUESTION_IDS = ("mech_type", "arm_lengths", "load_magnitude",
-                     "load_type", "open_extra")
-
-
-def question_spec_lite(task=None, context=None):
-    """按精简题 id 从【当前任务类型的问题集】中挑出精简版题目（保持原顺序）。
-
-    【Bug-03 修复】原实现硬绑 QUESTION_SPEC（机械臂口径），做小车任务时
-    精简 5 题也仍是"机构类型/臂长行程"的语义。现在改为：
-      · 先按任务类型取问题集（车辆模板 → 车辆题目）；
-      · 再按该模板的 lite_ids 过滤。
-    """
-    spec = question_spec_for(task, context)
-    ids = lite_ids_for(task, context)
-    picked = []
-    for q in spec:
-        if q.get("id") in ids:
-            picked.append(q)
-    return picked
-
-
 def resolve_depth(context_text):
     """从用户对第0题的回答里判断"参数需求强度"。
 
-    返回 "full"（问全量 17 题）或 "lite"（问精简 5 题）。
+    返回 "full"（强需求：题数区间 10~50）或 "lite"（弱需求：5~10）。
     判定规则（从严到宽）：
       1) 显式出现"强需求"字样 → full
       2) 显式出现"不强/精简"字样 → lite
@@ -2083,185 +575,19 @@ def resolve_depth(context_text):
     return "lite"
 
 
-# ── 背景问题规格表（单一事实来源 · 全流程统一）──────────────────────────────
-# 每一题：id / 组 / 标题 / 提示 / 选项 / 是否力学关键
-# 代码、skill 文档、persona 都从这张表生成，确保永远一致。
-QUESTION_SPEC = [
-    # A 组：结构形态（几何尺寸，直接决定能否建模）
-    {"id": "mech_type", "group": "A 结构形态", "title": "机构类型",
-     "hint": "几轴？什么机构？", 
-     "options": ["6轴关节臂", "4轴/5轴关节臂", "3轴直角坐标(XYZ)", "2轴云台", "四连杆/连杆机构", "丝杠/导轨直线模组", "其他(请说明)"],
-     "mech": True},
-    {"id": "arm_lengths", "group": "A 结构形态", "title": "臂长/行程",
-     "hint": "各段长度或各轴行程，带单位（如 大臂300mm+小臂250mm；或 X600/Y400/Z300）",
-     "options": ["你决定", "其他(请说明)"],
-     "mech": True},
-    {"id": "base_form", "group": "A 结构形态", "title": "基座形式",
-     "hint": "固定式/移动式/旋转式？安装方式？",
-     "options": ["落地固定式", "壁挂式", "法兰安装", "导轨移动式", "旋转底座", "你决定"],
-     "mech": True},
-    {"id": "end_effector", "group": "A 结构形态", "title": "末端执行器",
-     "hint": "末端形式与接口（夹爪/吸盘/法兰盘/孔径）",
-     "options": ["二指夹爪", "吸盘", "标准法兰盘", "卡盘", "焊枪/工具接口", "暂无(仅作结构验证)", "你决定"],
-     "mech": True},
-    {"id": "envelope", "group": "A 结构形态", "title": "整体包络",
-     "hint": "总体外形尺寸上限（长×宽×高）或占地范围",
-     "options": ["无严格限制", "你决定", "其他(请说明)"],
-     "mech": True},
 
-    # B 组：工况载荷（力学校核的输入）
-    {"id": "load_magnitude", "group": "B 工况载荷", "title": "额定负载",
-     "hint": "末端需要搬运/承受的重量（N 或 kg，注明单位）",
-     "options": ["你决定", "其他(请说明)"],
-     "mech": True},
-    {"id": "load_type", "group": "B 工况载荷", "title": "负载类型",
-     "hint": "动载荷性质，直接影响安全系数与疲劳校核",
-     "options": ["静态保持", "平稳动态", "频繁启停/冲击", "往复循环(疲劳)", "振动环境", "你决定"],
-     "mech": True},
-    {"id": "environment", "group": "B 工况载荷", "title": "使用场合",
-     "hint": "环境条件决定材料与防护等级",
-     "options": ["普通室内", "户外(日晒雨淋)", "潮湿/水下", "高温(>150℃)", "低温(<-20℃)", "粉尘环境", "洁净室/食品级", "你决定"],
-     "mech": True},
-    {"id": "lifespan", "group": "B 工况载荷", "title": "设计寿命",
-     "hint": "目标使用寿命（年）或动作次数",
-     "options": ["1年以内(短周期)", "3~5年", "10年", "20~30年(长期)", "你决定"],
-     "mech": True},
-
-    # C 组：驱动与运行（选型依据）
-    {"id": "drive", "group": "C 驱动与运行", "title": "驱动方式",
-     "hint": "动力来源与传动形式",
-     "options": ["伺服电机+减速机", "步进电机", "直流有刷/无刷", "液压", "气动", "手动", "你决定"],
-     "mech": False},
-    {"id": "duty", "group": "C 驱动与运行", "title": "工作制度",
-     "hint": "运行频率与占空比",
-     "options": ["连续运行(24/7)", "间歇运行(每天数小时)", "偶尔使用", "单次动作", "你决定"],
-     "mech": False},
-    {"id": "precision", "group": "C 驱动与运行", "title": "精度要求",
-     "hint": "定位/重复精度，决定配合公差与加工等级",
-     "options": ["一般(±1mm)", "较高(±0.1mm)", "精密(±0.01mm)", "无要求(仅结构验证)", "你决定"],
-     "mech": False},
-
-    # D 组：制造与边界条件
-    {"id": "material_pref", "group": "D 制造条件", "title": "材料倾向",
-     "hint": "材料偏好或限制（如必须轻量化/必须防腐）",
-     "options": ["Q235碳钢", "45#钢/40Cr", "304/316不锈钢", "6061-T6铝", "工程塑料", "无偏好(由你选)", "你决定"],
-     "mech": False},
-    {"id": "manufacturing", "group": "D 制造条件", "title": "加工方式",
-     "hint": "打算怎么造，影响结构工艺性",
-     "options": ["数控加工(CNC)", "焊接结构", "铸造", "钣金折弯", "3D打印", "外购标准件为主", "你决定"],
-     "mech": False},
-    {"id": "budget", "group": "D 制造条件", "title": "成本/重量倾向",
-     "hint": "在成本、重量、强度之间的取舍",
-     "options": ["成本优先(经济方案)", "重量优先(轻量化)", "强度/可靠性优先", "均衡", "你决定"],
-     "mech": False},
-
-    # E 组：特殊要求（自由补充）
-    {"id": "special", "group": "E 特殊要求", "title": "特殊要求",
-     "hint": "防水/防尘/防爆/轻量化/认证标准等硬性要求",
-     "options": ["无特殊要求", "防水防尘(IP等级)", "防爆", "轻量化", "需符合某国标/行业标准", "你决定"],
-     "mech": False},
-
-    # ★ 开放式收尾：确保覆盖表单之外的一切
-    {"id": "open_extra", "group": "Z 开放补充", "title": "其他补充（开放式）",
-     "hint": "以上没覆盖到的任何要求、约束、参考案例或偏好，请自由填写；"
-             "没有可写「无」",
-     "options": [],   # 纯填空，不给选项
-     "mech": False, "open": True},
-]
-
-
-def _format_question_block(num, q):
-    """把一条问题规格渲染成给用户看的文本块。"""
-    lines = ["[%s] %d. 【%s】%s" % (q.get("group", ""), num, q.get("title", ""),
-                                   q.get("hint", ""))]
-    opts = q.get("options") or []
-    if opts:
-        lines.append("     可选：" + " / ".join(opts))
-    else:
-        lines.append("     （开放题：请直接填写，无内容可写「无」）")
-    return chr(10).join(lines)
-
-
-
-
-def _ask_questions(task_desc, depth="lite", context=None):
-    """门禁背景问题集（v4 · 两段式）。
-
-    【问题2 修复】不再一上来就抛 17 题。分两段：
-      第一段（depth=None 或 "ask"）：只问 1 题 —— 「参数需求强度」
-      第二段（depth="full"）：问全量 QUESTION_SPEC（17 题）
-      第二段（depth="lite"）：问精简 question_spec_lite()（5 题）
-
-    设计目标：
-      1. 【一致性】全流程只有这一份问题定义——代码、skill 文档、persona 全部引用它，
-         杜绝"有时问5个、有时问10个"的分裂。
-      2. 【覆盖度】强需求时分组穷举关键维度，覆盖 99% 工业机械任务；
-         不强时只问决定性 5 项，其余由门禁给默认值。
-      3. 【开放式收尾】两种深度末尾都必带 open 一题，让用户补充遗漏要求。
-
-    返回纯文本（供模型原样呈现给用户）。
-    """
-    nl = chr(10)
-
-    # ── 第一段：只问"参数需求强度"这一题 ──────────────────────────────
-    if depth in (None, "ask", "ask_depth"):
-        return nl.join([
-            "=== 设计任务背景确认（第 1 步 / 共 2 步：先确认参数需求强度）===",
-            "任务描述: %s" % task_desc,
-            "",
-        ] + [
-            "%s" % _format_question_block(idx + 1, q)
-            for idx, q in enumerate(PARAM_DEPTH_SPEC)
-        ] + [
-            "",
-            "说明：这一题决定接下来问多少细节 ——",
-            "  · 选「强需求」→ 会再问 17 题（载荷/尺寸/公差/材料/制造全覆盖），",
-            "    每个零件的参数都必须有量化设计依据，适合真要出图、真要校核的场合。",
-            "  · 选「不强」  → 只再问 5 个关键项（机构类型/臂长行程/额定负载/",
-            "    负载类型/开放补充），其余维度由门禁按任务描述取合理默认值，",
-            "    并在零件参数表中标注出来供你复核。适合先看结构、快速原型。",
-            "",
-            "请回答这一题后，门禁会给出对应的第二段问题。",
-        ])
-
-    # ── 第二段：按深度给题（【Bug-03】按任务类型取问题集）──────────────
-    _key, _tpl = task_template(task_desc, context)
-    if depth == "full":
-        spec = question_spec_for(task_desc, context)
-    else:
-        spec = question_spec_lite(task_desc, context)
-    total = len(spec)
-    _tpl_note = ("" if _key in ("generic", "robot_arm")
-                 else "（已按任务类型【%s】自动加载对应题目模板）" % _tpl.get("label"))
-    header = ("=== 设计任务背景确认（第 2 步 / 共 2 步 · 参数需求【强】"
-              "· 共 %d 题，请逐题作答；不确定的可写「你决定」）===" % total) \
-        if depth == "full" else \
-        ("=== 设计任务背景确认（第 2 步 / 共 2 步 · 参数需求【不强】"
-         "· 精简 %d 题；不确定的可写「你决定」）===" % total)
-    header = header + _tpl_note
-    body = [
-        header,
-        "任务描述: %s" % task_desc,
-        "",
-    ] + [
-        "%s" % _format_question_block(idx + 1, q)
-        for idx, q in enumerate(spec)
-    ]
-    if depth == "full":
-        body += [
-            "",
-            "注：标「你决定」的题，门禁会按任务描述给出合理默认值，",
-            "    但默认值会在每个零件的参数表中明确标注，供你复核后再确认。",
-        ]
-    else:
-        body += [
-            "",
-            "注：本次为精简模式 —— 未问到的维度（基座形式/末端执行器/使用场合/",
-            "    设计寿命/驱动方式/精度/材料/加工方式/成本倾向等）由门禁按任务描述",
-            "    取合理默认值，并会在每个零件的参数表中标注出来，你可随时要求补充。",
-            "    如需完整 17 题，请重新发起并选择「强需求」。",
-        ]
-    return nl.join(body)
+# ── 【题库已删除】问题不再由代码预先枚举 ──────────────────────────────────
+#
+# 历史：这里原本是一张 17 题的固定题库（QUESTION_SPEC），门禁按它的长度
+#   算出"要问几题"，于是模型照字面把整张表一股脑问完 —— 与"分析到哪
+#   问到哪"直接冲突。用户明确要求："把那个 17 题题库找出来，删了"。
+#
+# 现在：问题由【总计子代理】在十阶段分析中现场生成，门禁只做三件事：
+#   ① 校验题数落在区间内（强 10~50 / 弱 5~10）；
+#   ② 校验每题都挂在已推进的阶段上、且写了理由（mode2_flow.record_question）；
+#   ③ 校验真的用 ask_user_question 问了（而不是在正文里自问自答）。
+#
+# 没有任何"标准题面"可以照抄 —— 想提问就必须先分析。
 
 
 
@@ -2592,6 +918,1555 @@ def _ask_depth_question(task_desc):
         "⚠️ 并且【取消了一股脑全问】：改为 AI 分析到需要时才按需提问。",
     ])
 
+
+
+def detect_task_type(task, context=None):
+    """【Bug-03/05 修复】按关键词给任务分类，决定题目模板与房间零件范围。
+
+    Returns: 模板键（"vehicle" / "robot_arm" / "transmission" / "generic"）
+    """
+    t = ((str(task or "") + " " + str(context or ""))).lower()
+    scores = {}
+    for key, spec in TASK_TYPE_TEMPLATES.items():
+        if key == "generic":
+            continue
+        s = 0
+        for kw, w in spec.get("keywords", ()):
+            if kw.lower() in t:
+                s += w
+        scores[key] = s
+    if not scores:
+        return "generic"
+    best_key, best_score = max(scores.items(), key=lambda kv: kv[1])
+    return best_key if best_score > 0 else "generic"
+
+
+def estimate_mechanics(task, context=None):
+    """力学估算（v2 · BUG-01/02/07 修复）。
+
+    ── BUG-01 修复：先读用户数值，再做关键词修正 ─────────────────────────
+      额定载荷 load_n 的取值优先级：
+        ① 用户输入里【明确写出】的数值（100N / 10kg …）—— 最高优先级
+        ② 无明确数值时，才用关键词粗估（默认 500N，大/重型 2000N）
+      动载系数 impact_factor 单独记录，只对基准载荷乘【一次】，
+      绝不改变"用户给出的额定值"本身。
+
+    ── BUG-07 修复：同时给出 nominal / design 两个口径 ──────────────────
+      nominal_load_n ：额定（工作）载荷 —— 与 physics 载荷工况必须一致
+      design_load_n  ：设计（等效）载荷 = nominal × impact_factor
+      两者一起返回，并由 write_load_case_file() 落盘成 physics 直接可读的
+      载荷工况，从根上消除"门禁说 1000N、physics 算 100N"的口径分裂。
+
+    ── BUG-02 修复：输出疲劳/寿命校核所需的工况参数 ─────────────────────
+      load_type / design_life_years / cycles_per_year 一并给出，
+      供 physics 的 fatigue 模块做 S-N + Miner 累积损伤校核。
+    """
+    t = (task + " " + (context or "")).lower()
+    raw = (task or "") + " " + (context or "")
+
+    # ── 1) 额定载荷：用户数值优先 ──────────────────────────────────────
+    user_load, matched = _extract_load_n(raw)
+    if user_load is not None:
+        nominal_load = float(user_load)
+        load_source = "用户输入: %s" % (matched or "")
+    else:
+        # 无明确数值 → 关键词粗估（明确标注为估算值，供用户复核）
+        if any(k in t for k in ["大型", "重型", "large"]):
+            nominal_load = 2000.0
+            load_source = "关键词粗估（大型/重型）"
+        elif any(k in t for k in ["小型", "轻型", "small"]):
+            nominal_load = 300.0
+            load_source = "关键词粗估（小型/轻型）"
+        else:
+            nominal_load = 500.0
+            load_source = "默认基准值（用户未给出载荷，请务必复核）"
+
+    # ── 2) 动载系数（只乘一次，不放大用户给的额定值）──────────────────
+    if any(k in t for k in ["冲击", "impact", "shock", "频繁启停"]):
+        impact_factor, load_type = 2.0, "impact"
+    elif any(k in t for k in ["动态", "dynamic", "循环", "疲劳", "往复", "振动"]):
+        impact_factor, load_type = 1.3, "cyclic"
+    else:
+        impact_factor, load_type = 1.0, "static"
+
+    design_load = nominal_load * impact_factor
+
+    # ── 3) 安全系数按负载性质取值（GB/T 3811 工程惯例量级）────────────
+    if load_type == "impact":
+        sf = 3.0
+    elif load_type == "cyclic":
+        sf = 2.5
+    else:
+        sf = 2.0
+    if any(k in t for k in ["传动", "齿轮", "轴", "gear"]):
+        sf = max(sf, 2.5)
+    elif any(k in t for k in ["壳体", "机架", "housing", "frame", "承载", "support", "bearing"]):
+        sf = max(sf, 2.5)
+
+    # ── 【观察点 21 修复】FDM 打印件必须计入【各向异性折减】──────────────
+    # 原实现的安全系数只按负载性质取（静载 2.0），**完全忽略制造工艺**。
+    # 但 FDM 熔融沉积件是各向异性的：层间（Z 向）结合强度显著低于层内
+    #   （实测通常只有 50%~80%），而受力方向往往正好跨层。
+    # 若仍按各向同性材料的 2.0 判合格，实际零件在层间先开裂 ——
+    #   校核结论偏乐观，属于"看起来过了、实际会断"。
+    # 修复：识别 FDM 工艺后，把要求的安全系数除以折减系数（等价于把
+    #   许用强度乘 0.8）。折减系数显式落盘，便于复核与覆盖。
+    _is_fdm = any(k in t for k in
+                  ["3d打印", "3D打印", "3d 打印", "fdm", "FDM", "熔融沉积",
+                   "打印件", "增材", "pla", "PLA", "petg", "PETG", "abs", "ABS"])
+    anisotropy_factor = 0.8 if _is_fdm else 1.0
+    sf_base = sf
+    if _is_fdm:
+        # 除以折减系数即"提高要求的安全系数"；向上取整到 0.5 的倍数便于阅读
+        sf = math.ceil((sf / anisotropy_factor) * 2) / 2
+
+    # ── 4) 材料推荐（【Bug-04/11 修复】先读用户回答，再退回关键词）──────
+    # 原缺陷：这里是一条硬编码关键词链，"轻量/6061" 命中就给铝，完全不读
+    #   用户 Q13「材料倾向」/Q14「加工方式」的回答。实测任务写明
+    #   "3D打印 + PETG车架/ABS外壳/Nylon齿轮"，门禁却回 6061-T6 铝，
+    #   并把它写进 gate_load_case.json → swapi 再据此给每个零件赋铝。
+    # 修复：infer_material() 以【用户显式材料】为最高优先，其次识别 3D 打印
+    #   工艺（默认 PETG），最后才退回旧关键词链。material_spec 一并带出，
+    #   供 write_load_case_file 直接落盘（不再二次解析）。
+    mat, mat_source, material_spec = infer_material(task, context)
+    task_type = detect_task_type(task, context)
+    task_type_label = (TASK_TYPE_TEMPLATES.get(task_type) or {}).get("label", task_type)
+
+    # ── 5) 疲劳/寿命参数（BUG-02 支撑）────────────────────────────────
+    life_years = _extract_life_years(raw)
+    if life_years is None:
+        # 【BUG-02 一致性】默认寿命必须与 load_case.DEFAULT_ACCEPTANCE 一致（30 年），
+        #   否则门禁落盘的工况与 physics 默认口径不同 → 又是一处数值分裂。
+        life_years = 30.0
+        life_source = "默认 30 年（用户未给出寿命，请复核）"
+    else:
+        life_source = "用户输入"
+    # 动作频次：按工作制度粗估（保守取中值），供 Miner 累积损伤使用
+    if any(k in t for k in ["连续运行", "24/7"]):
+        cycles_per_year = 2_000_000.0
+        duty_note = "连续运行(24/7) 估算"
+    elif any(k in t for k in ["间歇", "每天数小时"]):
+        cycles_per_year = 200_000.0
+        duty_note = "间歇运行(每天数小时) 估算"
+    elif any(k in t for k in ["偶尔"]):
+        cycles_per_year = 20_000.0
+        duty_note = "偶尔使用 估算"
+    elif any(k in t for k in ["单次动作", "静态保持"]):
+        cycles_per_year = 1_000.0
+        duty_note = "单次动作/静态保持 估算"
+    else:
+        cycles_per_year = 200_000.0
+        duty_note = "默认按间歇运行估算（请复核）"
+
+    notes = ("额定载荷来源: %s；动载系数 ×%.1f（%s）；设计寿命 %.0f 年（%s）；"
+             "动作频次 %.0f 次/年（%s）"
+             % (load_source, impact_factor, load_type, life_years, life_source,
+                cycles_per_year, duty_note))
+
+    return {
+        # ── 兼容旧字段（字符串形式，供旧文案直接引用）──
+        "load_estimate": "%d N" % round(design_load),
+        "safety_factor": sf,
+        # ── 【观察点 21 修复】把工艺折减如实落盘，便于复核与覆盖 ──────────
+        "safety_factor_base": sf_base,
+        "process": ("FDM 增材制造" if _is_fdm else "未指定（按各向同性）"),
+        "anisotropy_factor": anisotropy_factor,
+        "safety_factor_note": (
+            ("FDM 各向异性折减系数 %.2f：层间强度按层内的 %.0f%% 计入，"
+             "故要求安全系数由 %.1f 提高到 %.1f。"
+             % (anisotropy_factor, anisotropy_factor * 100, sf_base, sf))
+            if _is_fdm else
+            "未识别为 FDM 打印件，按各向同性材料取安全系数 %.1f。" % sf_base),
+        "material_recommend": mat,
+        "scenario": "通用工业场景",
+        "notes": notes,
+        # ── BUG-07 新增：机器可读的双口径数值（physics 必须用同名数值）──
+        "nominal_load_n": round(nominal_load, 3),
+        "design_load_n": round(design_load, 3),
+        "impact_factor": impact_factor,
+        "load_type": load_type,
+        "load_source": load_source,
+        "user_load_n": (round(user_load, 3) if user_load is not None else None),
+        # ── BUG-02 新增：疲劳/寿命校核输入 ──
+        "design_life_years": life_years,
+        "cycles_per_year": cycles_per_year,
+        # ── 【BUG-07】口径警告：粗估时必须让调用方与用户都看得见 ──
+        "load_is_estimate": user_load is None,
+        # ── 【Bug-04/11 新增】材料来源与可落盘的完整材料规格 ──
+        "material_source": mat_source,
+        "material_spec": material_spec,
+        # ── 【Bug-03/05 新增】任务类型（决定题目模板与房间零件范围）──
+        "task_type": task_type,
+        "task_type_label": task_type_label,
+        "consistency_contract": (
+            "physics 载荷工况的 magnitude_n 必须等于 nominal_load_n"
+            "（设计校核另乘 impact_factor，不得直接写 design_load_n 当额定值）"),
+    }
+
+# ══ 【BUG-07 修复】门禁 → physics 载荷工况的【单一数值来源】══════════════════
+# 原缺陷：门禁自己算一套（estimate_mechanics 结果只写进 workflow_state.txt 文案），
+#   physics 那边由小屋/模型另写一份 load_case.json，两边各写各的 ——
+#   实测出现"门禁口径 1000N / physics 实际 100N"的数据分裂，校核结论不可信。
+# 修复：门禁在 mechanics_done 阶段【直接把载荷工况落盘】成 physics 可读文件，
+#   并把路径一并返回。physics 侧必须用该文件（或用相同的 nominal_load_n），
+#   从此两边共用同一份数值，物理上不可能再打架。
+#
+# 疲劳/寿命（BUG-02）：同一文件里带 acceptance.design_life_years 与
+#   operating_cycles_per_year，physics 的疲劳模块直接读它做 S-N + Miner 校核。
+
+# ── 材料名 → load_case 材料字段（与 physics/material_db.py 的 id 对齐）──────
+# 【原有数据，已恢复】：这些条目是本项目原有的映射（关键词 → material_id +
+#   等效力学属性），用于把用户说的牌号落到 physics 能识别的 id 上。
+# 注意：这些数值是【等效欧美标】的通用值（S235JR/AISI 4140/6061-T6…），
+#   并非国标原文数值；若需要严格按 GB/T 校核，请导入 gb_materials.json ——
+#   导入后 _gb_grade_props() 会优先用外部国标数据（见 _material_for）。
+# ⚠️ 定义必须在使用它的 _material_for 之前（否则运行期拿到旧值/未定义）。
+_MATERIAL_LOOKUP = (
+    # (关键词, material_id, E_mpa, nu, yield_mpa, density_kg_m3, 显示名)
+    (("cr12mov", "模具钢", "耐热"), "ST_API_4140", 205000.0, 0.29, 655.0, 7850.0, "Cr12MoV (等效 AISI 4140)"),
+    (("6061", "铝"), "AL_6061_T6", 68900.0, 0.33, 276.0, 2700.0, "Aluminum 6061-T6"),
+    (("7075",), "AL_7075", 72000.0, 0.33, 503.0, 2810.0, "Aluminum 7075-T6"),
+    (("304", "不锈钢", "腐蚀"), "ST_STAINLESS_304", 193000.0, 0.30, 205.0, 8000.0, "Stainless Steel 304"),
+    (("316",), "ST_STAINLESS_316", 193000.0, 0.30, 170.0, 8000.0, "Stainless Steel 316"),
+    (("40cr", "45#", "传动", "齿轮"), "ST_API_4140", 205000.0, 0.29, 655.0, 7850.0, "40Cr / AISI 4140"),
+    (("q235", "碳钢"), "ST_API_S235", 210000.0, 0.30, 235.0, 7850.0, "Q235 (等效 S235JR)"),
+)
+
+
+# ── 【Bug-12 修复】零件包络 vs 赛道/整机尺寸的语境判别 ──────────────────────
+# 原缺陷：write_load_case_file 用无差别正则抓所有"数字+mm"，再取最大的三个
+#   作为设计域。实测"竞速小车"任务的赛道尺寸（4500×2100×1600mm）被当成
+#   设计域落盘 → physics 在 4.5m 的巨型域上把 fixed_end 放 x=0、load_face 放
+#   x=4500，而实际零件只有 300×180×120 —— 空间选择器匹配不到任何面，FEA 无意义。
+#
+# 修复：① 建立"赛道/场地/整机"语境词表，命中即排除该数字；
+#      ② 建立"零件"语境词表，命中则优先采纳；
+#      ③ 按任务类型给典型零件包络兜底；
+#      ④ 若最终包络仍明显是"整机量级"（超过任务典型零件 6 倍），
+#         退回任务典型包络并在 meta 里写明原因，绝不把赛道当零件。
+_TRACK_CONTEXT_KW = (
+    "赛道", "方框", "圆弧", "窄段", "入口", "场地", "跑道", "直线段",
+    "全长", "外形", "占地面积", "工作范围", "行程范围", "臂展", "reach",
+)
+_PART_CONTEXT_KW = (
+    "零件", "底板", "车轮", "车轴", "齿轮", "横梁", "悬架", "舵机", "电池仓",
+    "上罩", "底壳", "电机座", "转向节", "连杆", "轴承座", "支架", "加强筋",
+    "摄像头", "托架", "护罩", "厚", "壁厚", "孔径", "外径", "内孔", "Ø", "φ",
+)
+# 各任务类型的"典型零件包络"（mm），用于兜底与合理性护栏
+_TASK_DEFAULT_ENVELOPE = {
+    "vehicle": (300.0, 180.0, 120.0),
+    "robot_arm": (350.0, 300.0, 200.0),
+    "transmission": (200.0, 200.0, 100.0),
+    "generic": (200.0, 60.0, 60.0),
+}
+
+
+# ── 【国标材料 · 外部数据源】关键词 → 牌号名（只描述"怎么找"，不含数值）────
+# 国标数值不再写死在本文件：这些条目只负责"从用户的话里认出想用什么牌号"，
+#   具体 E/ν/σy/ρ 由 _gb_grade_props() 从导入的 gb_materials.json 读取。
+# 未导入数据时查不到 → 由调用方按"未收录"处理（绝不猜数值）。
+#
+# ⚠️ 【匹配分两级，牌号精确匹配优先】────────────────────────────────────
+# 实测缺陷（本轮发现）：`_material_for('45# 齿轮')` 被解析成 **40Cr** ——
+#   因为 40Cr 的关键词里含"齿轮"，而它排在 45# 之前，于是"首个命中"抢走了。
+#   后果：用户明确写 45#，系统却按 40Cr（σy 785 而非 355）校核，
+#   安全系数差 2.2 倍，且报告里显示的是 40Cr —— 材料被静默替换。
+# 根因：把【具体牌号】与【用途/泛化词】（齿轮、传动、铝、不锈钢…）
+#   混在同一优先级里，靠书写顺序决胜负。
+# 修复：分两级匹配 ——
+#   ① 先按【牌号 token】精确匹配（45#、40Cr、ZL104、Q235…）—— 用户明确点名
+#   ② 再按【用途/泛化词】匹配（齿轮→40Cr、铝→6061-T6…）—— 用户只说了用途
+# 这样"45# 齿轮"命中 ① 的 45#，"齿轮"单独出现才落到 ②。
+_GB_GRADE_TOKENS = (
+    # (牌号 token 元组, 牌号名) —— 用户【明确点名】的牌号，优先级最高
+    (("zl104",), "ZL104"),
+    (("2a12", "ly12"), "2A12"),
+    (("7075",), "7075"),
+    (("6061",), "6061-T6"),
+    (("022cr17ni12mo2",), "022Cr17Ni12Mo2"),
+    (("06cr19ni10",), "06Cr19Ni10"),
+    (("316",), "022Cr17Ni12Mo2"),
+    (("304",), "06Cr19Ni10"),
+    (("cr12mov",), "Cr12MoV"),
+    (("gcr15",), "GCr15"),
+    (("20crmnti",), "20CrMnTi"),
+    (("65mn",), "65Mn"),
+    (("40cr",), "40Cr"),
+    (("45#", "45钢"), "45#"),
+    (("q355", "q345"), "Q355"),
+    (("q235",), "Q235"),
+    (("ht200",), "HT200"),
+    (("qt500",), "QT500-7"),
+    (("zcusn10p1", "zcusn"), "ZCuSn10P1"),
+    (("h62",), "H62"),
+)
+
+_GB_KEYWORD_TO_GRADE = (
+    # ── ① 牌号精确匹配（用户明确点名）──────────────────────────────────
+    #    注意：这里同样保持"具体牌号在前"，但不会再被用途词抢走，
+    #    因为用途词统一放到下面的 _GB_USAGE_TO_GRADE。
+    # ── ② 用途 / 泛化词（用户只说了用途或材料大类）────────────────────
+    #    仅在 ① 完全没命中时才生效。
+    (("铝", "aluminum", "aluminium"), "6061-T6"),
+    (("不锈钢", "腐蚀"), "06Cr19Ni10"),
+    (("模具钢", "耐热"), "Cr12MoV"),
+    (("轴承钢",), "GCr15"),
+    (("渗碳",), "20CrMnTi"),
+    (("弹簧钢",), "65Mn"),
+    (("传动", "齿轮"), "40Cr"),
+    (("低合金",), "Q355"),
+    (("碳钢", "碳素钢"), "Q235"),
+    (("灰铸铁",), "HT200"),
+    (("球墨铸铁",), "QT500-7"),
+    (("锡青铜",), "ZCuSn10P1"),
+    (("黄铜",), "H62"),
+    (("铸铝", "铸造铝合金", "zl1"), "ZL104"),
+    (("硬铝",), "2A12"),
+)
+
+
+def write_load_case_file(state, mechanics, work_dir=None):
+    """【BUG-07 修复】把门禁力学估算落盘为 physics 可直接用的载荷工况 JSON。
+
+    【Bug-04/11】材料：优先用 infer_material 的 material_spec（尊重用户选择）。
+    【Bug-12】设计域：取【零件包络】，绝不沿用赛道/整机尺寸。
+    【Bug-15】problem_id：真实短哈希，不再把任务描述里的尺寸硬塞进去。
+    【观察点4】载荷：除重力 -Z 外，追加侧向(X)与纵向(Y)工况，覆盖过弯/驱动失效模式。
+
+    Returns: {"ok", "path", "load_case"} 或 {"ok": False, "error"}
+    """
+    try:
+        task = state.get("task") or ""
+        import hashlib as _hashlib
+
+        mat = _material_for(mechanics.get("material_recommend"), task,
+                            mechanics.get("material_spec"))
+        task_type = mechanics.get("task_type") or detect_task_type(
+            task, state.get("context"))
+        spec_text = (task + " " + str(state.get("context") or ""))
+        L, W, H, _dim_note = _extract_part_envelope(spec_text, task_type)
+
+        nominal = float(mechanics.get("nominal_load_n") or 500.0)
+
+        # ── 【Bug-15 修复】problem_id 用真实短哈希，可复现且不泄露尺寸 ──
+        _seed = "%s|%s|%s" % (task, state.get("created_at") or "",
+                              mechanics.get("nominal_load_n"))
+        _pid = "GATE_" + _hashlib.sha1(_seed.encode("utf-8")).hexdigest()[:12].upper()
+
+        # ── 【观察点4 修复】多工况载荷 ────────────────────────────────
+        # 竞速小车的主要失效模式是过弯侧向力与纵向驱动力，纯 -Z 重力覆盖不到。
+        # 保持 load_rated（重力，magnitude_n = 额定载荷，与门禁口径一致），
+        # 追加侧向/纵向两个工况，供 physics 做多工况校核。
+        _impact = float(mechanics.get("impact_factor") or 1.0)
+        # ── 【Bug-D 修复】推导零件载荷分担系数 ────────────────────────────
+        # 任务类型 → 预估的"主要承力路径数"（并联分担整机载荷的分件数）。
+        #   依据：轮式小车的主要承力件是 4 个车轮/悬架；机械臂主要是各关节
+        #   与臂段；传动件按齿面/轴系成对；单体零件任务不折算。
+        #   ⚠️ 这是【保守的工程默认值】，只用于把整机载荷折算到单件量级，
+        #      避免小零件被整机载荷压出失真结论；实际份额应由小屋按结构
+        #      显式覆盖（acceptance.part_load_share）。
+        _PATHS_BY_TASK = {
+            "vehicle": 4,        # 四轮/四悬架分担
+            "robot_arm": 4,      # 多关节/多臂段
+            "transmission": 2,   # 成对啮合/双支撑轴系
+            "generic": 1,        # 单体零件：整机载荷即零件载荷
+        }
+        _parallel_paths = int(_PATHS_BY_TASK.get(task_type, 1) or 1)
+        _mspec = mechanics.get("part_load_share")
+        if _mspec:
+            try:
+                _part_load_share = float(_mspec)
+            except Exception:
+                _part_load_share = 1.0 / _parallel_paths
+        else:
+            _part_load_share = 1.0 / _parallel_paths
+        if not (_part_load_share > 0):
+            _part_load_share = 1.0
+        # ── 【P0-BUG-动载系数二次施加】载荷文件只存【额定（未乘系数）】值 ────
+        # 原缺陷：侧向工况写成 `_lat = nominal * _impact`（预乘一次），
+        #   而 physics 的 governing_design_force() 会按 acceptance.impact_factor
+        #   再乘一次 → 动载系数被施加两次，载荷被放大 impact² 倍。
+        #   实测（nominal=1224.745N, impact=2.0）：
+        #     侧向 magnitude=2449.49 → governing=2449.49×2=4898.98N
+        #   这与本文件 load_rated 的注释「magnitude_n 必须等于门禁 nominal_load_n」
+        #   以及 load_case.py:769「动载系数只施加一次」的口径直接矛盾。
+        # 修复：三个工况一律写【额定载荷】，动载系数只由 physics 施加一次；
+        #   侧向/纵向工况的意义是【覆盖失效方向】（过弯侧倾、启停驱动），
+        #   不是第二次放大。combined 工况按矢量合成后自然会给出最恶劣结果
+        #   （√3×nominal × impact），无需在此预乘。
+        _lat = round(nominal, 3)
+        _lon = round(nominal, 3)
+        case = {
+            "schema_version": "1.0",
+            "meta": {
+                "problem_id": _pid,
+                "title": task[:120] or "门禁自动生成工况",
+                "revision": "A",
+                "generated_by": "workflow_gate.estimate_mechanics",
+                "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "task_type": task_type,
+                "task_type_label": mechanics.get("task_type_label"),
+                "design_domain_mm": [round(L, 1), round(W, 1), round(H, 1)],
+                "design_domain_note": _dim_note,
+                "design_domain_basis": "零件包络（Bug-12：不再沿用赛道/整机尺寸）",
+            },
+            "units": {"length": "mm", "force": "N", "stress": "MPa", "mass": "kg"},
+            "design_domain": {
+                "bounds": {"x_min": 0.0, "x_max": float(L),
+                           "y_min": 0.0, "y_max": float(W),
+                           "z_min": 0.0, "z_max": float(H)},
+                "keep_in_regions": [], "keep_out_regions": [],
+            },
+            "material": mat,
+            "spatial_selectors": [
+                {"id": "fixed_end", "type": "box",
+                 "bounds": {"x_min": 0.0, "x_max": max(L * 0.05, 10.0),
+                            "y_min": -10.0, "y_max": W + 10.0,
+                            "z_min": -10.0, "z_max": H + 10.0},
+                 "selection_rule": "faces_intersecting_region"},
+                {"id": "load_face", "type": "box",
+                 "bounds": {"x_min": max(L * 0.95, L - 10.0), "x_max": L,
+                            "y_min": -10.0, "y_max": W + 10.0,
+                            "z_min": -10.0, "z_max": H + 10.0},
+                 "selection_rule": "faces_intersecting_region"},
+            ],
+            "boundary_conditions": [
+                {"id": "bc_fixed", "spatial_selector_id": "fixed_end",
+                 "type": "fixed_displacement",
+                 "dof_lock": {"x": True, "y": True, "z": True,
+                              "rx": True, "ry": True, "rz": True}},
+            ],
+            "loads": [
+                {"id": "load_rated", "spatial_selector_id": "load_face",
+                 "type": "distributed_force",
+                 "magnitude_n": nominal,          # ← 额定载荷，与门禁口径一致
+                 "direction": [0.0, 0.0, -1.0],
+                 "case_name": "额定重力工况",
+                 "note": "主工况：magnitude_n 必须等于门禁 nominal_load_n"},
+                {"id": "load_lateral", "spatial_selector_id": "load_face",
+                 "type": "distributed_force",
+                 "magnitude_n": _lat,
+                 "direction": [1.0, 0.0, 0.0],
+                 "case_name": "侧向工况（过弯侧倾/转向拉杆受拉）",
+                 "note": ("侧向力 = 额定载荷（【P0 修复】不再预乘动载系数 —— "
+                          "动载系数由 physics 的 governing_design_force 统一施加一次，"
+                          "避免二次放大）")},
+                {"id": "load_longitudinal", "spatial_selector_id": "load_face",
+                 "type": "distributed_force",
+                 "magnitude_n": _lon,
+                 "direction": [0.0, 1.0, 0.0],
+                 "case_name": "纵向工况（启停驱动力/制动）",
+                 "note": "纵向力 = 额定载荷"},
+            ],
+            "load_cases": [
+                {"id": "rated", "load_ids": ["load_rated"],
+                 "description": "额定重力工况（主工况）"},
+                {"id": "lateral", "load_ids": ["load_lateral"],
+                 "description": "侧向工况：过弯侧倾、转向拉杆受拉"},
+                {"id": "longitudinal", "load_ids": ["load_longitudinal"],
+                 "description": "纵向工况：频繁启停/制动"},
+                {"id": "combined",
+                 "load_ids": ["load_rated", "load_lateral", "load_longitudinal"],
+                 "description": "组合工况：全部载荷同时作用（最恶劣）"},
+            ],
+            "acceptance": {
+                "analysis_type": "linear_static",
+                "min_safety_factor": float(mechanics.get("safety_factor") or 2.0),
+                "target_safety_factor_max": 5.0,
+                # ── 【观察点 21 修复】FDM 各向异性折减（物理校核据此判合格）──
+                # anisotropy_factor < 1 表示"层间强度只按层内的该比例计入"，
+                #   要求的安全系数已在上游相应提高（见 estimate_mechanics）。
+                "anisotropy_factor": float(mechanics.get("anisotropy_factor") or 1.0),
+                "process": mechanics.get("process"),
+                "max_displacement_mm": None,
+                "min_wall_thickness_mm": None,
+                "max_mass_kg": None,
+                "must_remain_in_design_domain": True,
+                "mesh_quality_min": 0.1,
+                # ── 【BUG-02】疲劳/寿命校核输入（physics 疲劳模块读这两项）──
+                "design_life_years": float(mechanics.get("design_life_years") or 10.0),
+                "operating_cycles_per_year": float(mechanics.get("cycles_per_year") or 200000.0),
+                "load_type": mechanics.get("load_type") or "static",
+                "impact_factor": _impact,
+                "fatigue_check_required": (mechanics.get("load_type") in ("cyclic", "impact")),
+                "required_load_cases": ["rated", "lateral", "longitudinal"],
+                # ── 【Bug-D 修复】零件载荷分担系数 ──────────────────────────
+                # 工况里的 magnitude_n 是【整机】载荷；单件校核若原样施加，
+                #   小零件会被压出 SF=0.2 这类失真结论（实测 30×20×10 小块
+                #   加整机 1224.7N）。
+                # 这里给出【默认分担口径】：按任务预估的承力路径数折算。
+                #   多零件装配（模式②）默认按主要承力件数分担；单零件任务
+                #   保持 1.0（整机载荷即零件载荷），不改变既有结论。
+                # 小屋/主对话可按实际结构显式覆盖（acceptance.part_load_share）。
+                "part_load_share": _part_load_share,
+                "parallel_load_paths": _parallel_paths,
+                "load_share_basis": (
+                    "单件按 %d 条并联承力路径折算（=%.4f）；若该零件实际承担"
+                    "更大/更小份额，请在工况 acceptance.part_load_share 显式覆盖"
+                    % (_parallel_paths, _part_load_share)),
+            },
+            "optimization": {"primary": "minimize_mass",
+                             "secondary": ["minimize_max_displacement"]},
+        }
+        out_dir = work_dir or os.path.join(BASE_DIR, "load_cases")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception:
+            out_dir = BASE_DIR
+        path = os.path.join(out_dir, "gate_load_case.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(case, f, ensure_ascii=False, indent=2)
+        return {"ok": True, "path": path, "load_case": case}
+    except Exception as e:
+        return {"ok": False, "error": "写入载荷工况失败: %r" % (e,)}
+
+
+# ══ 【观察点1/5 修复】交付目录按任务隔离 ═══════════════════════════════════
+# 原缺陷：历史任务与新任务共用同一交付目录（实测 C:\Users\j1877\Desktop\test），
+#   新任务的同名零件会【直接覆盖】旧任务成果，且无任何提示/备份 ——
+#   本轮 DSH_车架底板.SLDPRT(106KB) 覆盖了上一轮同名文件(81KB)，若本次失败，
+#   上一轮成果已丢（观察点5）。
+# 修复：
+#   ① init 时按"任务 ID/时间戳"生成独立交付子目录；
+#   ② 目录里写 TASK_INFO.json（任务描述/时间/ID），便于追溯；
+#   ③ 同名文件已存在时自动备份 .bak（双保险）；
+#   ④ 提供 work-dir 命令查询/设置当前任务目录。
+WORKDIR_STATE_KEY = "work_dir"
+
+
+def _task_id(task, created_at=None):
+    """按任务描述 + 创建时间生成稳定的任务 ID（可读 + 唯一）。"""
+    import hashlib as _hashlib
+    _seed = "%s|%s" % (str(task or ""), str(created_at or ""))
+    _h = _hashlib.sha1(_seed.encode("utf-8")).hexdigest()[:8].upper()
+    _ts = time.strftime("%Y%m%d_%H%M%S",
+                        time.localtime(time.time()))
+    return "%s_%s" % (_ts, _h)
+
+
+def _default_delivery_root():
+    """交付根目录：优先环境变量，其次桌面 test，最后工程模式根目录/output。"""
+    try:
+        env = (os.environ.get("DSH_DELIVERY_ROOT") or "").strip()
+        if env:
+            return env
+    except Exception:
+        pass
+    home = os.environ.get("USERPROFILE") or os.environ.get("HOME") or ""
+    if home:
+        cand = os.path.join(home, "Desktop", "test")
+        try:
+            if os.path.isdir(os.path.join(home, "Desktop")):
+                return cand
+        except Exception:
+            pass
+    return os.path.join(BASE_DIR, "output")
+
+
+def cmd_work_dir(new_dir=None):
+    """查询 / 设置当前任务的交付目录（观察点1/5）。"""
+    state = load_state()
+    if new_dir:
+        _wd = os.path.abspath(str(new_dir))
+        try:
+            os.makedirs(_wd, exist_ok=True)
+        except Exception as e:
+            return {"ok": False, "error": "无法创建目录: %r" % (e,)}
+        state[WORKDIR_STATE_KEY] = _wd
+        save_state(state)
+        return {"ok": True, "work_dir": _wd, "action": "set"}
+    _cur = state.get(WORKDIR_STATE_KEY)
+    return {"ok": True, "work_dir": _cur,
+            "task_id": state.get("task_id"),
+            "task": state.get("task"),
+            "default_root": _default_delivery_root(),
+            "note": ("每个任务应有独立目录（观察点1/5）。"
+                     "设置: workflow_gate.py work-dir <绝对路径>")}
+
+
+def _get_done_rooms():
+    ms_path = os.path.join(STATE_DIR, "mode_state.json")
+    done = set()
+    if os.path.exists(ms_path):
+        try:
+            with open(ms_path, "r", encoding="utf-8") as f:
+                ms = json.load(f)
+            for rn, rv in ms.get("rooms", {}).items():
+                if rv.get("ended_at"):
+                    done.add(rn)
+        except Exception:
+            pass
+    return done
+
+
+def _rooms_detail():
+    """读取 mode_state.json 的 rooms 原始记录（含 ended_at/failed_at/active）。"""
+    ms_path = os.path.join(STATE_DIR, "mode_state.json")
+    detail = {}
+    if os.path.exists(ms_path):
+        try:
+            with open(ms_path, "r", encoding="utf-8") as f:
+                ms = json.load(f)
+            detail = ms.get("rooms", {}) or {}
+        except Exception:
+            pass
+    return detail
+
+
+def _cross_file_sync():
+    """【BUG-观察-5 修复】调用 _store.sync_report() 做真正的跨文件一致性检查。
+
+    原 `in_sync` 是假校验（两侧同源、恒为 True）。这里委托给 _store 里
+    权威的跨文件比对（parallel_mode / task_id / 房间表与 step 相容性 / 完成态分歧）。
+    任何异常都不得影响主流程 —— 失败时返回 ok=False 并说明原因，而不是抛错。
+    """
+    try:
+        import _store
+        return _store.sync_report()
+    except Exception as e:
+        return {"ok": False, "checked": False, "in_sync": None,
+                "error": "跨文件同步检查不可用: %r" % (e,),
+                "warning": ("无法执行跨文件一致性检查；"
+                            "注意 select 里原有的 in_sync 是自指校验，不能作为同步证据。")}
+
+
+def bypass_requested():
+    """是否显式要求绕开三大防线（唯一合法绕行，必定留痕）。"""
+    import os as _os
+    return str(_os.environ.get("DSH_DEFENSE_BYPASS") or "").strip() in ("1", "true", "yes")
+
+
+def cmd_confirm_assembly(parts_payload):
+    """【三大防线】开总装前强制：第一波各房间必须已通过三防线。
+
+    为什么挂在这里：总装会把所有零件固化成一个装配体，一旦开总装，
+      再回头改单个零件就要重做总装 —— 所以这是"最后一个能便宜地拦下
+      材料/强度/领域问题"的时刻，必须在这里把三道防线全部卡住。
+    """
+    if not bypass_requested():
+        try:
+            import defense_gate as _dg
+            _bad = []
+            _rooms = _wave1_room_names()
+            for _r in _rooms:
+                _d = _dg.check_room_defense(_r)
+                if not _d["ok"]:
+                    _bad.append((_r, _d["blockers"]))
+            if _bad:
+                _nl = chr(10)
+                _lines = ["=== 【三大防线】拦截：第一波房间未通过校验，禁止开启总装 ===", ""]
+                for _r, _bs in _bad:
+                    _lines.append("房间 [%s]:" % _r)
+                    for _b in _bs:
+                        _lines.append("   ✗ " + _b)
+                _lines += [
+                    "",
+                    "处理：让对应小屋补齐材料凭据 / 跑 physics-optimize / 跑",
+                    "physics-validate-domain 后，重新 room-end 该房间，再调 confirm-assembly。",
+                    "（确需放行：设 DSH_DEFENSE_BYPASS=1，会留痕。）",
+                ]
+                return {
+                    "ok": False,
+                    "gate": "DEFENSE_REQUIRED",
+                    "phase": "confirm-assembly",
+                    "blocked_rooms": [x[0] for x in _bad],
+                    "error": "【三大防线】第一波房间未通过强制校验，禁止开启总装。",
+                    "message": _nl.join(_lines),
+                }
+        except ImportError as _e_imp:
+            # ── 【P0-BUG-防线 fail-open】不再静默放行 ──────────────────────
+            # 原实现 `except ImportError: pass` → 直接进入总装流程。
+            #   defense_gate.py 一旦不可导入，三道防线全部不执行且无留痕。
+            #   与 fail-closed 语义矛盾，改为显式拒绝并给出排查指引。
+            return {
+                "ok": False,
+                "gate": "DEFENSE_ERROR",
+                "phase": "confirm-assembly",
+                "error": ("【三大防线】defense_gate.py 不可导入，按[失效关闭]"
+                          "拒绝开启总装。"),
+                "detail": repr(_e_imp),
+                "message": ("=== 三大防线不可用（拒绝开启总装）===\n"
+                            "原因: defense_gate.py 导入失败 %r\n\n"
+                            "请先修复：python defense_gate.py status\n"
+                            "确需放行：DSH_DEFENSE_BYPASS=1（会留痕）。" % (_e_imp,)),
+            }
+        except Exception as _e_other:
+            return {
+                "ok": False,
+                "gate": "DEFENSE_ERROR",
+                "phase": "confirm-assembly",
+                "error": "【三大防线】校验链路异常，按[失效关闭]拒绝开启总装。",
+                "detail": repr(_e_other),
+                "message": ("=== 三大防线链路异常（拒绝开启总装）===\n"
+                            "异常: %r\n\n"
+                            "确需放行：DSH_DEFENSE_BYPASS=1（会留痕）。" % (_e_other,)),
+            }
+    elif bypass_requested():
+        # 【合法绕行留痕】DSH_DEFENSE_BYPASS=1 跳过防线，但必须记账（绝不静默）
+        try:
+            import defense_gate as _dg
+            _dg.log_bypass("workflow_gate.confirm-assembly",
+                           reason="DSH_DEFENSE_BYPASS=1", by="env")
+        except Exception:
+            pass
+    """【总装确认门禁】主对话开『总装与验证』房间前必须调用，代码级强制。
+
+    parts_payload: 主对话汇总的第一波产出零件清单（文件路径+零件名）。
+    拒绝条件（任一满足即拒绝，禁止开总装）：
+      1. 门禁流程未走完（step != user_selected）
+      2. 第一波建模房间未全部 room-end（含仍在运行/未登记/失败待重做）
+      3. 未提供零件清单
+    """
+    state = load_state()
+    _step = str(state.get("step") or "")
+    # ── 【C2 修复】前置条件放宽：不再死认 step == "user_selected" ──────────
+    # 测试反馈：Wave1 三房间都 completed，select 返回 ASSEMBLY_CONFIRM_REQUIRED，
+    #   但调用 confirm-assembly 却因 step 不等于 user_selected 被拒 → 流程卡死。
+    #   根因是 init 曾把 step 打回 depth_asked（见 C4），而这里的前置判断
+    #   只看这一个字段，没有结合"任务实际是否已推进"来判断。
+    # 现改为：只要【已选过搭建方式】或【已有房间记录】，即视为门禁已走过
+    #   select 阶段，允许进入总装确认（真正的把关交给下面的 _check_wave1_done）。
+    # ── 【P2 修复】state["rooms"] 是【幽灵键】：全文件无任何写入点，
+    #   故 `bool(state.get("rooms"))` 恒为 False，这个"或"条件永远不生效。
+    #   真正有房间记录的地方是 subagent_config.rooms（由 select 写入），
+    #   以及 mode_state.json。这里改读真实来源，让该判据恢复作用。
+    _rooms_cfg = []
+    try:
+        _rooms_cfg = ((state.get("subagent_config") or {}).get("rooms") or [])
+    except Exception:
+        _rooms_cfg = []
+    _advanced = (_step == "user_selected"
+                 or bool(state.get("user_choice"))
+                 or bool(_rooms_cfg)
+                 or bool(state.get("subagent_config")))
+    if not _advanced:
+        return {"ok": False, "gate": "ASSEMBLY_CONFIRM_REJECTED",
+                "step": _step,
+                "error": "门禁流程未完成（先走完 init→provide_context→select），不能确认总装",
+                "hint": ("当前 step=%s，且未检测到已选搭建方式/房间记录。"
+                         "请先按顺序完成：init → provide_context → select。" % _step)}
+    # 若 step 明显不一致（例如被 init 打回），顺手校正回来，避免后续 select 再卡
+    if _step != "user_selected":
+        state["step"] = "user_selected"
+        state["step_repaired_from"] = _step
+        state["step_repaired_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_state(state)
+    chk = _check_wave1_done()
+    if not chk["all_done"]:
+        return {"ok": False, "gate": "ASSEMBLY_CONFIRM_REJECTED",
+                "not_ended": chk["not_ended"], "active": chk["active"], "failed": chk["failed"],
+                "message": ("第一波建模房间尚未全部完成，禁止开启总装。"
+                            "未完成: %s | 仍在运行: %s | 失败待重做: %s。"
+                            "用 mode_gate.py room-status 核对状态，等全部 room-end 后再确认。"
+                            % (chk["not_ended"], chk["active"], chk["failed"]))}
+    payload = (parts_payload or "").strip()
+    if not payload:
+        return {"ok": False, "gate": "ASSEMBLY_CONFIRM_REJECTED",
+                "message": "零件清单为空。必须汇总第一波全部产出零件（文件路径+零件名）后再确认。"}
+    state["assembly_confirmed"] = True
+    state["assembly_inputs"] = payload
+    state["assembly_confirmed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    save_state(state)
+    return {"ok": True, "gate": "ASSEMBLY_CONFIRMED",
+            "assembly_inputs": payload,
+            "message": ("总装确认通过（全部建模房间已完成 + 零件清单已登记）。"
+                        "现在调用 select 获取『总装与验证』房间；总装小屋 prompt 必须原样包含"
+                        "零件清单，只做装配+干涉检查+整体验证，禁止重新建模/简化任何零件。")}
+
+
+# ── 第0题：参数需求强度（前置分流题）──────────────────────────────────────
+# 【问题2 修复】原方案一上来就抛 17 题，绝大多数用户被吓退或乱答。
+# 现改为两段式：先问 1 题判断"参数需求是否强"，再决定问全量还是精简。
+#
+#   强需求（需要精确出力学校核 / 有明确工况约束 / 要做强度与公差审查）
+#       → 问全量 QUESTION_SPEC（17 题，覆盖 99% 工业机械任务）
+#   不强（只是想先看到东西 / 结构示意 / 快速原型 / 无严格约束）
+#       → 只问 QUESTION_SPEC_LITE（5 题，覆盖决定性维度，其余由门禁取默认值）
+PARAM_DEPTH_SPEC = [
+    {
+        "id": "param_depth",
+        "group": "0 参数深度",
+        "title": "参数需求强度",
+        "hint": "本次设计是否需要严格把关参数（载荷/尺寸/公差/材料都要有据可依）？",
+        "options": [
+            "强需求：需要严格校核，参数要有设计依据（追问详细信息）",
+            "不强：先出大致结构即可，细节由你按经验定（只问关键几项）",
+        ],
+        "mech": False,
+        "depth": True,
+    },
+]
+
+# ── 精简问题集（参数需求不强时使用）────────────────────────────────────────
+# 【问题2 修复】从 QUESTION_SPEC 中精选 5 个"决定性维度"：
+#   不给这些就完全无法建模或必错；其余维度门禁都能按任务描述取合理默认值。
+#   · mech_type       —— 机构类型（决定整个拓扑结构，不给无法建模）
+#   · arm_lengths     —— 臂长/行程（决定尺寸链，不给无法定尺寸）
+#   · load_magnitude  —— 额定负载（决定强度校核基准）
+#   · load_type       —— 负载类型（决定安全系数取值）
+#   · open_extra      —— 开放补充（兜底，防止关键约束没处说）
+LITE_QUESTION_IDS = ("mech_type", "arm_lengths", "load_magnitude",
+                     "load_type", "open_extra")
+
+
+def infer_material(task, context=None):
+    """【Bug-04/11 修复】推断本次设计的材料。
+
+    优先级（从高到低）：
+      ① 用户回答里【显式写出】的 3D 打印材料（PETG/PLA/Nylon/TPU/ABS/PC/POM）
+         —— 这是用户的真实选择，必须尊重；
+      ② 识别到"3D打印/增材/FDM…"工艺，但没点名材料 → 默认 PETG
+         （最通用的结构件打印材料）；
+      ③ 用户点名了金属牌号（Q235/45#/40Cr/304/316/6061/7075…）；
+      ④ 退回原来的关键词链（高温/轻量/腐蚀/传动）。
+
+    Returns:
+        (display_name, source, material_dict) —— material_dict 与 load_case 的
+        material 字段同形，可直接写入 physics 工况。
+
+    ⚠️ 所有分支【必须】返回 3 元组。历史缺陷：③④ 分支曾直接 return dict，
+       而唯一调用点（estimate_mechanics）按 3 元组解包 → 凡任务里出现
+       Q235/45#/6061/40Cr/304/316/GCr15/HT200/Q355/Cr12MoV/碳钢/轻量 等
+       任一 token 即抛 ValueError，provide_context 第二次直接崩溃，
+       state 永久停在 context_asked，整个工作流无法走完。
+    """
+    import re as _re
+    raw = (str(task or "") + " " + str(context or ""))
+    low = raw.lower()
+    pref = _user_material_pref(task, context).lower()
+    # 用户回答优先，其次全文
+    hay = (pref + " " + low) if pref.strip() else low
+
+    # ① 显式打印材料（按出现顺序，取最先提到的作为"主材料"）
+    _order = ("petg", "pa12", "pa66", "nylon", "尼龙", "pla", "tpu",
+              "abs", "pc", "pom")
+    best = None
+    for key in _order:
+        idx = hay.find(key)
+        if idx < 0:
+            continue
+        if best is None or idx < best[0]:
+            best = (idx, key)
+    if best is not None:
+        key = best[1]
+        # 尼龙的中文别名归一到 pa66 表项
+        if key in ("尼龙",):
+            key = "nylon"
+        info = _PRINT_MATERIALS.get(key)
+        if info:
+            return (info["name"], "用户回答/任务描述中的材料选择（3D 打印材料库）",
+                    dict(info, source="workflow_gate.infer_material"))
+
+    # ② 只写了工艺没写材料 → 默认 PETG
+    if any(k in hay for k in _PRINT_PROCESS_KW):
+        info = _PRINT_MATERIALS["petg"]
+        return (info["name"],
+                "识别到 3D 打印工艺但未指定材料 → 默认 PETG（可显式覆盖）",
+                dict(info, source="workflow_gate.infer_material.default_print"))
+
+    # ③ 金属牌号
+    # ── 两级匹配：① 牌号精确 token 优先 → ② 用途/泛化词 → ③ 等效映射兜底 ──
+    # 为什么必须分级：实测缺陷 —— `'45# 齿轮'` 曾因 40Cr 的关键词含"齿轮"
+    #   且排在前面，被解析成 40Cr（σy 785 而非 355），材料被静默替换。
+    #   用户【明确点名】牌号时，用途词不得抢走。
+    _hit_grade = False
+    for keys, disp in _GB_GRADE_TOKENS:          # ① 牌号精确 token
+        if any(k in hay for k in keys):
+            _hit_grade = True
+            _g = _gb_grade_props(disp)
+            if _g:
+                return (_g.get("name") or disp,
+                        "用户点名的国标牌号（外部国标材料库）",
+                        dict(_g, source="workflow_gate.infer_material(GB_GRADE)"))
+            break
+    if not _hit_grade:
+        for keys, disp in _GB_KEYWORD_TO_GRADE:  # ② 用途/泛化词
+            if any(k in hay for k in keys):
+                _hit_grade = True
+                _g = _gb_grade_props(disp)
+                if _g:
+                    return (_g.get("name") or disp,
+                            "用途/泛化词映射到国标牌号（外部国标材料库）",
+                            dict(_g, source="workflow_gate.infer_material(GB_KEYWORD)"))
+                break
+    _ = _hit_grade
+    # ② 原有等效映射兜底（关键词是【元组】，不是正则 —— 用 in 判定）
+    for keys, mid, E, nu, sy, rho, disp in _MATERIAL_LOOKUP:
+        _ks = keys if isinstance(keys, (tuple, list)) else (str(keys),)
+        if any(str(k) in hay for k in _ks):
+            return (disp, "用户回答/任务描述中的金属牌号（等效欧美标映射）",
+                    {"id": mid, "name": disp, "youngs_modulus_mpa": E,
+                     "poissons_ratio": nu, "yield_strength_mpa": sy,
+                     "uts_mpa": round(sy * 1.2, 1), "density_kg_m3": rho,
+                     "source": "workflow_gate.estimate_mechanics(等效映射)"})
+
+    # ④ 关键词兜底（保持与旧行为兼容）
+    t = low
+    if any(k in t for k in ["高温", "heat"]):
+        disp = "Cr12MoV"
+    elif any(k in t for k in ["轻量", "aluminum", "6061"]):
+        disp = "6061-T6 Aluminum"
+    elif any(k in t for k in ["腐蚀", "rust", "不锈钢"]):
+        disp = "304 Stainless"
+    elif any(k in t for k in ["传动", "齿轮"]):
+        disp = "45# Steel / 40Cr"
+    else:
+        disp = "Q235 Carbon Steel"
+    return (disp, "关键词兜底（用户未给出材料，请复核）", None)
+
+
+def _material_for(mat_name, task_text="", material_spec=None):
+    """把"推荐材料"解析成 physics load_case 需要的材料字典。
+
+    【Bug-04/11 修复】若 mechanics 里已带 material_spec（infer_material 的产物），
+    直接采用 —— 它已经尊重了用户的材料选择（PETG/ABS/Nylon…），
+    不再经过"显示名 → 关键词 → 金属"这条会把塑料误判成铝的链路。
+    """
+    if isinstance(material_spec, dict) and material_spec.get("id"):
+        return dict(material_spec)
+    hay = (str(mat_name or "") + " " + str(task_text or "")).lower()
+    # 打印材料优先（Bug-04/11）：显示名里带 PETG/PLA/Nylon 等要能正确落盘
+    for _pkey, info in _PRINT_MATERIALS.items():
+        if _pkey in hay:
+            return dict(info, source="workflow_gate._material_for(print)")
+    # 国标牌号：属性来自外部 JSON（见 _gb_grade_props）
+    # 两级匹配：① 牌号精确 token 优先 → ② 用途/泛化词（避免"45# 齿轮"被 40Cr 抢走）
+    for keys, disp in _GB_GRADE_TOKENS:
+        if any(k in hay for k in keys):
+            _g = _gb_grade_props(disp)
+            if _g:
+                return _g
+            break
+    else:
+        for keys, disp in _GB_KEYWORD_TO_GRADE:
+            if any(k in hay for k in keys):
+                _g = _gb_grade_props(disp)
+                if _g:
+                    return _g
+                break
+    # ── 原有等效映射兜底（【原有数据】关键词 → 欧美标 id + 等效属性）────────
+    #   国标数据未导入时，用这套既有映射保证系统仍然可用；
+    #   导入后上面的 _gb_grade_props 会优先返回（按国标校核）。
+    for _keys, _mid, _E, _nu, _sy, _rho, _disp in _MATERIAL_LOOKUP:
+        _ks = _keys if isinstance(_keys, (tuple, list)) else (str(_keys),)
+        if any(str(_k) in hay for _k in _ks):
+            # 注意：本函数返回【材料字典】（load_case.material 的形状），
+            #   不是 (显示名, 依据, spec) 三元组 —— 后者是 infer_material 的契约。
+            return {"id": _mid, "name": _disp,
+                    "youngs_modulus_mpa": _E, "poissons_ratio": _nu,
+                    "yield_strength_mpa": _sy, "uts_mpa": round(_sy * 1.2, 1),
+                    "density_kg_m3": _rho,
+                    "source": "workflow_gate._material_for(等效欧美标映射)"}
+    # ── 兜底：优先用【当前真的可用】的材料，绝不返回未收录的编造属性 ────────
+    # 国标数据未导入时，"Q235" 可能不在库中；此时退回仍可用的等效牌号，
+    #   并把原因写进返回体，让调用方知道"为什么拿到的不是 Q235"。
+    _st = _gb_data_status()
+    try:
+        import sys as _sys
+        _t = os.path.dirname(os.path.abspath(__file__))
+        for _d in (os.path.join(_t, "physics"), _t):
+            if _d not in _sys.path:
+                _sys.path.insert(0, _d)
+        import swapi as _sw
+        _nm = _sw.default_part_material_name()
+        _ok, _info, _ = _sw.is_valid_material(_nm)
+        if _ok and _info:
+            _sy = _info.get("yield_mpa") or _info.get("yield_strength_mpa")
+            return {
+                "id": _info.get("canonical") or _nm,
+                "name": _nm,
+                "youngs_modulus_mpa": _info.get("e_mpa") or _info.get("youngs_modulus_mpa"),
+                "poissons_ratio": _info.get("poissons_ratio"),
+                "yield_strength_mpa": _sy,
+                "uts_mpa": _info.get("uts_mpa") or (round(_sy * 1.2, 1) if _sy else None),
+                "density_kg_m3": _info.get("density") or _info.get("density_kg_m3"),
+                "source": "workflow_gate.default(可用材料兜底)",
+                "gb_data_loaded": bool(_st.get("loaded")),
+                "gb_data_note": (None if _st.get("loaded")
+                                 else ("国标材料数据尚未导入（%s）；已退回内置可用牌号。"
+                                       "导入后即按国标牌号取值。"
+                                       % (_st.get("error") or "未找到数据文件"))),
+            }
+    except Exception:
+        pass
+    # 最后兜底：如实返回"无可用材料"，不编造数值
+    return {
+        "id": None, "name": None,
+        "error": ("无可用材料：国标材料数据未导入，且内置材料库为空。"
+                  "请把 gb_materials.json 放到 tools/physics/ 下后重试。"),
+        "source": "workflow_gate.default(无可用材料)",
+    }
+
+
+def _extract_part_envelope(spec_text, task_type="generic"):
+    """【Bug-12 修复】从任务/背景回答里提取【零件】包络（排除赛道/整机尺寸）。
+
+    算法（三步，全部双向检查语境）：
+      ① 显式带标签的零件尺寸：长/宽/高/厚/直径/轴距/轮距/孔径/外径 + 数字
+         —— 这是最强的"零件"证据，直接采纳；
+      ② 尺寸三元组 a×b×c（可选带 mm）—— 若语境是赛道/场地则排除；
+      ③ 其余 数字+mm —— 仅当左右各 12 字窗口内【没有】赛道/场地词，
+         且量级不超过任务典型零件包络的 6 倍时才采纳。
+
+    关键修正（对照实测）：赛道尺寸的"赛道词"常在数字【之后】
+    （如「1000mm窄段」「4500x4500mm方框赛道」「2100mm直线」），
+    只检查前文会漏掉 → 这里左右都查。
+
+    Returns: (L, W, H, note) —— note 说明取值来源或兜底原因。
+    """
+    import re as _re
+    text = str(spec_text or "")
+    typ = _TASK_DEFAULT_ENVELOPE.get(task_type, _TASK_DEFAULT_ENVELOPE["generic"])
+    _limit = max(typ) * 6.0
+    part_dims = []
+
+    def _win(pos, n=12):
+        """数字左右各 n 字的语境窗口（双向）。"""
+        return text[max(0, pos - n):pos + n]
+
+    def _is_track(pos, n=12):
+        return any(k in _win(pos, n) for k in _TRACK_CONTEXT_KW)
+
+    # ── ① 显式带标签的零件尺寸（最强证据）────────────────────────────
+    # 标签后紧跟数字；排除"精度/公差"语境与赛道语境。
+    # 注意：不含"轴距/轮距" —— 它们是整车布置参数，不是【零件】包络，
+    #   纳入会把 300×180×120 的包络撑成 300×200×180（实机实测）。
+    _LABELS = (r"长|宽|高|厚|壁厚|直径|外径|内径|孔径|"
+               r"底板|车架|车轮|车板|齿轮|横梁|连杆|支架|齿宽")
+    for m in _re.finditer(r"(?:%s)\s*[:：=]?\s*(\d+(?:\.\d+)?)" % _LABELS, text):
+        try:
+            v = float(m.group(1))
+        except Exception:
+            continue
+        if not (1.0 <= v <= 100000.0):
+            continue
+        if _is_track(m.start()):
+            continue
+        if v not in part_dims:
+            part_dims.append(v)
+
+    # ── ② 尺寸三元组 a×b×c（可带 mm）────────────────────────────────
+    for m in _re.finditer(
+            r"(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)"
+            r"(?:\s*[x×*]\s*(\d+(?:\.\d+)?))?\s*(?:mm|毫米)?", text):
+        if _is_track(m.start()):
+            continue
+        for gi in (1, 2, 3):
+            try:
+                g = m.group(gi)
+            except Exception:
+                g = None
+            if not g:
+                continue
+            v = float(g)
+            if 1.0 <= v <= _limit and v not in part_dims:
+                part_dims.append(v)
+
+    # ── ③ 其余 数字+mm / 数字+米 / 数字+cm ──────────────────────────
+    for pat, k in ((r"([±+\-~]?)\s*(\d+(?:\.\d+)?)\s*(?:mm|毫米)", 1.0),
+                   (r"(\d+(?:\.\d+)?)\s*(?:cm|厘米)", 10.0),
+                   (r"(\d+(?:\.\d+)?)\s*(?:m|米)(?![m米a-z])", 1000.0)):
+        for m in _re.finditer(pat, text):
+            # 公差/精度语境（前文）
+            pre = text[max(0, m.start() - 10):m.start()]
+            if any(kw in pre for kw in ("精度", "公差", "偏差", "误差", "±", "+-")):
+                continue
+            # 显式公差符号前缀（仅 mm 模式有第 1 组）
+            if m.lastindex and m.lastindex >= 1:
+                try:
+                    if m.group(1) in ("±", "+", "~"):
+                        continue
+                except Exception:
+                    pass
+            try:
+                v = float(m.group(2) if m.lastindex and m.lastindex >= 2
+                          else m.group(1)) * k
+            except Exception:
+                continue
+            if not (1.0 <= v <= 100000.0):
+                continue
+            # 赛道/场地语境（双向）→ 排除
+            if _is_track(m.start()):
+                continue
+            # 量级护栏：明显是整机/赛道量级的不采纳
+            if v > _limit:
+                continue
+            if v not in part_dims:
+                part_dims.append(v)
+
+    dims = sorted(set(part_dims), reverse=True)[:3]
+    if not dims:
+        note = ("未从任务/回答中提取到【零件】包络尺寸（赛道/整机尺寸不计入），"
+                "已按任务类型取典型零件包络 %s mm；请在小屋 prompt 中明确零件长宽高。"
+                % (tuple(int(x) for x in typ),))
+        return typ[0], typ[1], typ[2], note
+
+    while len(dims) < 3:
+        dims.append(dims[-1])
+    L, W, H = float(dims[0]), float(dims[1]), float(dims[2])
+
+    # ── ④ 合理性护栏：仍像整机/赛道量级 → 退回任务典型包络 ──────────
+    if max(L, W, H) > _limit or max(L, W, H) < 1.0:
+        note = ("提取到的尺寸 %s 属【整机/赛道量级】而非零件包络，已退回任务典型"
+                "零件包络 %s mm（原实现会把赛道当设计域，导致 FEA 空间选择器失配）。"
+                % ([round(x, 1) for x in dims], tuple(int(x) for x in typ)))
+        return typ[0], typ[1], typ[2], note
+
+    note = ("零件包络取自任务/回答中的零件语境尺寸 %s"
+            % ([round(x, 1) for x in dims],))
+    return L, W, H, note
+
+
+def _wave1_room_names():
+    """第一波【建模类】房间名列表（用于开总装前的三防线强制校验）。"""
+    state = load_state()
+    cfg = state.get("subagent_config") or {}
+    out = []
+    for row in (cfg.get("rooms") or []):
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            if str(row[1]) in WAVE1_TYPES:
+                out.append(str(row[0]))
+        elif isinstance(row, dict):
+            if str(row.get("type") or "") in WAVE1_TYPES:
+                out.append(str(row.get("name") or row.get("room")))
+    # 兜底：退化为 mode_state 里已登记的房间（排除总装/出图）
+    # ── 【P1 修复】兜底必须真的排除非建模房间 ──────────────────────────
+    # 原缺陷：注释写"排除总装/出图"，代码却是
+    #   out = [所有房间名] —— 把 assembly/drafting 房间也塞进第一波清单。
+    #   随后 check_room_defense 对这些房间按"rtype 未知 → require_physics=True"
+    #   判定（defense_gate.py 的 room_type 为空即强制要物理凭据），
+    #   而总装/出图房间本就不该有零件级 FEA →
+    #   实测 legacy 状态下 confirm-assembly 永久 DEFENSE_REQUIRED，流程卡死。
+    # 修复：兜底时按房间类型过滤，只保留建模类（WAVE1_TYPES）。
+    if not out:
+        try:
+            import json as _json
+            _mp = os.path.join(STATE_DIR, "mode_state.json")
+            if os.path.exists(_mp):
+                with open(_mp, "r", encoding="utf-8") as _f:
+                    _ms = _json.load(_f)
+                _rt = {}
+                try:
+                    import defense_gate as _dg_rt
+                    _rt = _dg_rt._room_types() or {}
+                except Exception:
+                    _rt = {}
+                _all_names = [str(n) for n in (_ms.get("rooms") or {})]
+                if _rt:
+                    # 有类型信息：只保留建模类房间
+                    out = [n for n in _all_names
+                           if str(_rt.get(n) or "") in WAVE1_TYPES]
+                    # 类型全为空（legacy）时退回"排除已知非建模名"的保守过滤
+                    if not out:
+                        _non_model = ("总装与验证", "工程图输出")
+                        out = [n for n in _all_names if n not in _non_model]
+                else:
+                    _non_model = ("总装与验证", "工程图输出")
+                    out = [n for n in _all_names if n not in _non_model]
+        except Exception:
+            out = []
+    return out
+
+
+def _check_wave1_done():
+    """【总装门禁核心】检查第一波（全部建模类房间）是否全部完成。
+
+    完成定义：每个建模房间 ended_at 有值且没有 failed_at。
+    返回 dict：all_done / not_ended / active / failed —— 任一非空即不允许开总装。
+    """
+    state = load_state()
+    rooms = (state.get("subagent_config") or {}).get("rooms") or _default_rooms()
+    detail = _rooms_detail()
+    not_ended, active, failed = [], [], []
+    for name, rtype in rooms:
+        if rtype not in WAVE1_TYPES:
+            continue
+        info = detail.get(name) or {}
+        if info.get("failed_at"):
+            failed.append(name)
+        elif not info.get("ended_at"):
+            (active if info.get("active") else not_ended).append(name)
+    return {"all_done": not (not_ended or active or failed),
+            "not_ended": not_ended, "active": active, "failed": failed}
+
+
+def _user_material_pref(task, context):
+    """从用户回答里提取"材料倾向"与"加工方式"两题的原文片段。
+
+    门禁的 Q13（材料倾向）/ Q14（加工方式）在第二段回答里通常写作
+    「⑬PETG车架车轮ABS外壳Nylon齿轮」「⑭全部3D打印+外购轴承螺丝电机」，
+    这里按常见编号/关键词定位，拿不到就返回空串。
+    """
+    import re as _re
+    txt = str(context or "")
+    hits = []
+    # ① 带圈数字编号 ⑬/⑭ 或 13./14.
+    for pat in (r"[⑬⒀]\s*([^\n⑭⒁]{0,120})", r"[⑭⒁]\s*([^\n⑮⒂]{0,120})",
+                r"(?:^|\n)\s*13[\.、:：]\s*([^\n]{0,120})",
+                r"(?:^|\n)\s*14[\.、:：]\s*([^\n]{0,120})"):
+        for m in _re.finditer(pat, txt):
+            hits.append(m.group(1))
+    # ② 直接含"材料/加工/工艺"字样的句子
+    for m in _re.finditer(r"[^\n。；;]{0,40}(?:材料|加工方式|工艺)[^\n。；;]{0,80}", txt):
+        hits.append(m.group(0))
+    return " ".join(hits)
+
+
+def _equivalent_fallback(grade):
+    """【数值兜底】为"只有国标身份、力学数值待补全"的牌号找一组可算的数值。
+
+    数据来源（按可信度排序，均为【项目原有数据】，不新建任何数值）：
+      ① 项目原有的 material_db 内置材料表（ST_STAINLESS_316 / ST_API_4140…）
+         —— 这些是项目自带、长期在用的等效欧美标数据；
+      ② 项目原有的 _MATERIAL_LOOKUP 等效映射表。
+    用途：保证 FEA 在国标数值补全前仍能运行；调用方会把来源标注为
+      "等效映射"，报告里不会冒充国标数值。
+    Returns: dict 或 None。
+    """
+    _raw = str(grade or "").strip()
+    if not _raw:
+        return None
+
+    # 归一化候选写法：原样 / 斜杠两侧 / 去中文括号 / 去符号
+    _variants = [_raw]
+    if "/" in _raw:
+        _variants += [p.strip() for p in _raw.split("/") if p.strip()]
+    if "（" in _raw:
+        _variants.append(_raw.split("（")[0].strip())
+    for _v in list(_variants):
+        _clean = "".join(ch for ch in _v if ch.isalnum() or ch in "#-")
+        if _clean and _clean not in _variants:
+            _variants.append(_clean)
+
+    # ① 项目原有 material_db 内置表（按别名索引匹配）
+    try:
+        import sys as _sys
+        _t = os.path.dirname(os.path.abspath(__file__))
+        _pd = os.path.join(_t, "physics")
+        if _pd not in _sys.path:
+            _sys.path.insert(0, _pd)
+        import material_db as _mdb
+        _want = set()
+        for _v in _variants:
+            _k = _mdb._norm_key(_v)
+            if _k:
+                _want.add(_k)
+        for _mid, _info in _mdb.ALL_MATERIALS.items():
+            if not isinstance(_info, dict):
+                continue
+            if _mid in _mdb.GB_MATERIALS:      # 跳过国标表本身（正是待补全的）
+                continue
+            _names = {_mdb._norm_key(_mid), _mdb._norm_key(_info.get("name", ""))}
+            for _a in (_info.get("aliases") or []):
+                _names.add(_mdb._norm_key(_a))
+            if _want & _names:
+                _sy = _info.get("yield_mpa")
+                if _sy and _info.get("E_mpa"):
+                    return {
+                        "id": _mid, "name": _info.get("name") or _mid,
+                        "youngs_modulus_mpa": _info.get("E_mpa"),
+                        "poissons_ratio": _info.get("nu"),
+                        "yield_strength_mpa": _sy,
+                        "uts_mpa": _info.get("uts_mpa"),
+                        "density_kg_m3": _info.get("density_kg_m3"),
+                        "equivalent_to": _info.get("name") or _mid,
+                    }
+    except Exception:
+        pass
+
+    # ② 项目原有等效映射表
+    for _keys, _mid, _E, _nu, _sy, _rho, _disp in _MATERIAL_LOOKUP:
+        _ks = _keys if isinstance(_keys, (tuple, list)) else (str(_keys),)
+        for _k in _ks:
+            _kl = str(_k).lower()
+            for _v in _variants:
+                if _kl == _v.lower() or _kl in _v.lower():
+                    return {"id": _mid, "name": _disp,
+                            "youngs_modulus_mpa": _E, "poissons_ratio": _nu,
+                            "yield_strength_mpa": _sy,
+                            "uts_mpa": round(_sy * 1.2, 1),
+                            "density_kg_m3": _rho,
+                            "equivalent_to": _disp}
+    return None
+
+
+def _gb_grade_props(grade):
+    """【国标材料 · 外部数据源】按牌号从导入的 JSON 取材料属性。
+
+    Returns: 可直接用于 load_case.material 的 dict；未收录返回 None。
+      返回体带 gb_source 字段，如实标注数据出处（便于审计）。
+    """
+    _g = str(grade or "").strip()
+    if not _g:
+        return None
+    try:
+        import sys as _sys
+        _t = os.path.dirname(os.path.abspath(__file__))
+        _p = os.path.join(_t, "physics")
+        for _d in (_p, _t):
+            if _d not in _sys.path:
+                _sys.path.insert(0, _d)
+        import material_db as _mdb
+        # 先试 GB_ 前缀 id，再试裸牌号
+        _m = None
+        for _cand in ("GB_" + _g.replace("-", "_").upper(), _g):
+            try:
+                _m = _mdb.get_material(_cand)
+            except Exception:
+                _m = None
+            if _m:
+                break
+        if not _m:
+            return None
+        # ── 【分层降级】数值未补全时，用等效映射补齐并明确标注 ────────────
+        # 背景：外部 JSON 现阶段可能只有【标准身份】（牌号/标准号/密度），
+        #   力学数值待从标准原文抄录。此时若直接返回 None，FEA 会因缺
+        #   E/ν/σy 而无法计算 —— 系统等于不可用。
+        # 因此：身份按【国标】给出（报告里体现的是国标牌号），
+        #   数值暂用项目原有的【等效欧美标】映射，并在返回体里写明
+        #   "数值来源=等效映射，待国标数值补全"，保证结论可审计、不误导。
+        # ── 数值来源判定 ────────────────────────────────────────────────
+        # material_db.get_material 已按 equivalent_id 做过【只填空、不覆盖】的
+        #   兜底填充，并给出【逐字段】台账 field_provenance / gb_sourced_fields。
+        #
+        # ⚠️ 【BUG 修复·身份冒充】不能用 values_pending 反推 values_from_gb！
+        #   values_pending 的语义是"兜底后【仍缺】字段"：
+        #     40Cr 经兜底后字段齐了 → values_pending=False，
+        #   但它的 gb_sourced_fields=[]（【没有任何字段来自 GB 原文】）。
+        #   旧代码写 `values_from_gb = not _pending` → 对 40Cr 得出 True，
+        #   于是报告判为 level=GB_NATIVE / claimable_as_gb=True，原文写
+        #   "力学数值来自 GB 标准原文（GB/T 3077-2015）" ——
+        #   而实际用的是 AISI 4140 的 655/760，属【拿兜底值冒充国标值】。
+        #   这正是本系统最不该犯的错误，必须按【字段级证据】判定。
+        _sy = _m.get("yield_mpa")
+        _E = _m.get("E_mpa")
+        _nu = _m.get("nu")
+        _rho = _m.get("density_kg_m3")
+        _vsrc = _m.get("values_source")
+        _pending = _m.get("values_pending")
+        _gb_fields = list(_m.get("gb_sourced_fields") or [])
+        _fp = _m.get("field_provenance") if isinstance(
+            _m.get("field_provenance"), dict) else {}
+        if not _gb_fields and _fp:
+            # 老数据没给 gb_sourced_fields → 从逐字段台账里推
+            _gb_fields = [k for k, v in _fp.items()
+                          if isinstance(v, dict) and v.get("source") == "GB_STANDARD"]
+        _fallback_used = False
+        if _vsrc is None:
+            if not (_E and _sy and _rho):
+                _fb = _equivalent_fallback(_g)
+                if _fb:
+                    _fallback_used = True
+                    _E = _E or _fb.get("youngs_modulus_mpa")
+                    _nu = _nu if _nu is not None else _fb.get("poissons_ratio")
+                    _sy = _sy or _fb.get("yield_strength_mpa")
+                    _rho = _rho or _fb.get("density_kg_m3")
+            _vsrc = ("等效兜底（国标数值待补全）" if _fallback_used
+                     else "GB 标准数值")
+            _pending = _fallback_used
+            if _fallback_used:
+                _gb_fields = []
+        # 【判据】只有"每个已填字段都来自 GB 原文"才可宣称 values_from_gb=True
+        _filled = [f for f in ("E_mpa", "nu", "yield_mpa", "uts_mpa",
+                               "density_kg_m3") if _m.get(f) is not None]
+        _all_from_gb = bool(_filled) and set(_filled) <= set(_gb_fields)
+        return {
+            "id": _m.get("id") or _g,
+            "name": _m.get("name") or _g,
+            "youngs_modulus_mpa": _E,
+            "poissons_ratio": _nu,
+            "yield_strength_mpa": _sy,
+            "uts_mpa": _m.get("uts_mpa") or (round(_sy * 1.2, 1) if _sy else None),
+            "density_kg_m3": _rho,
+            "standard": _m.get("standard"),
+            "gb_source": _mdb.GB_MATERIALS_SOURCE or _mdb.GB_MATERIALS_FILE,
+            "source": ("workflow_gate._gb_grade_props(外部国标材料库)"
+                       if _all_from_gb else
+                       "workflow_gate._gb_grade_props(国标身份 + 等效数值兜底)"),
+            # 【可审计性】明确区分"身份来自国标"与"数值是否已来自国标"
+            "identity_source": "GB（标准身份已确认）",
+            "values_source": _vsrc,
+            # 只有全字段来自 GB 才算"数值来自国标"；混合/兜底一律 False
+            "values_from_gb": _all_from_gb,
+            "values_pending": bool(_pending),
+            "gb_sourced_fields": _gb_fields,
+            "field_provenance": _fp or None,
+            "equivalent_name": _m.get("equivalent_name"),
+            "consistency_guard": _m.get("consistency_guard"),
+        }
+    except Exception:
+        return None
+
+
+def _gb_data_status():
+    """国标材料数据源状态（供门禁在报告/提示里说明"数值从哪来"）。"""
+    try:
+        import sys as _sys
+        _t = os.path.dirname(os.path.abspath(__file__))
+        _p = os.path.join(_t, "physics")
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+        import material_db as _mdb
+        return _mdb.gb_materials_status()
+    except Exception as _e:
+        return {"loaded": False, "count": 0, "error": repr(_e)}
+
+
+def _purge_old_credentials():
+    """【强制清空】新任务开始前，把所有旧凭证/旧登记移出读取路径。
+
+    用户要求原文：
+      "你最好要保证凭证每一个对话都是不一样的，或者你可以加一个代码流程，
+       是强制执行是直接先清空之前的凭证，然后再继续进行下面的操作"
+
+    因此这里不是"只归档部分文件"，而是【全量清空】三类跨任务残留：
+      ① reports/ 下的凭据类文件（*.physics.json / *.domain.json /
+         *.report.json / defense_bypass.json）
+      ② 全局 artifacts_registry.json（无 task 后缀的旧登记表）
+      ③ 全局 heartbeats/ 下的旧心跳（会让新房间"看起来还活着"）
+
+    清空方式：移动到 reports/_purged_<时间戳>/ 下（不物理删除，保留审计）。
+    三处清完才算通过；任何一处失败都返回 ok=False，由 init 明确报出。
+    """
+    import shutil as _shutil
+    _stamp = time.strftime("%Y%m%d-%H%M%S")
+    _purged_to = os.path.join(STATE_DIR, "reports", "_purged_" + _stamp)
+    _moved = []
+    _errors = []
+
+    def _move(src, name):
+        try:
+            os.makedirs(_purged_to, exist_ok=True)
+            dst = os.path.join(_purged_to, name)
+            if os.path.exists(dst):
+                dst = dst + "." + str(int(time.time() * 1000) % 100000)
+            _shutil.move(src, dst)
+            _moved.append(name)
+        except Exception as ex:
+            _errors.append("%s: %r" % (name, ex))
+
+    _rep = os.path.join(STATE_DIR, "reports")
+    # ① reports/ 下的凭据与报告（只清文件，任务子目录原样保留）
+    if os.path.isdir(_rep):
+        for _name in os.listdir(_rep):
+            _full = os.path.join(_rep, _name)
+            if os.path.isdir(_full):
+                continue
+            if (_name.endswith(".physics.json")
+                    or _name.endswith(".domain.json")
+                    or _name.endswith(".report.json")
+                    or _name == "defense_bypass.json"):
+                _move(_full, _name)
+    # ② 全局产物登记表（带 task 后缀的保留，那是按局隔离后的正常存放）
+    for _reg in ("artifacts_registry.json",):
+        _p = os.path.join(STATE_DIR, _reg)
+        if os.path.exists(_p):
+            _move(_p, _reg)
+    # ③ 全局心跳文件（heartbeats/ 根下散落的，不含任务子目录）
+    _hb = os.path.join(STATE_DIR, "heartbeats")
+    if os.path.isdir(_hb):
+        for _name in os.listdir(_hb):
+            _full = os.path.join(_hb, _name)
+            if os.path.isdir(_full):
+                continue
+            if _name.endswith(".heartbeat"):
+                _move(_full, "hb_" + _name)
+
+    return {
+        "ok": not _errors,
+        "purged": _moved,
+        "count": len(_moved),
+        "purged_to": (_purged_to if _moved else None),
+        "errors": _errors,
+        "note": ("已强制清空 %d 项旧凭证/登记，新任务从干净状态开始。"
+                 % len(_moved)) if _moved else "无旧凭证需要清空。",
+    }
+
+
+def prepare_task_workdir(task, state=None):
+    """【观察点1/5】为新任务创建隔离的交付目录。
+
+    ── 【BUG-观察-1 修复】消除"交付目录双轨" ────────────────────────────────
+    现场问题（竞速小车任务）：三处路径互相打架
+      · init 返回 work_dir    = ...\\Desktop\\test\\20261007_153308_673CC22C（子目录）
+      · TASK_INFO.delivery_root = ...\\Desktop\\test                  （父目录）
+      · 零件实际落盘            = ...\\Desktop\\test                  （父目录根）
+    根因：work_dir（子）与 delivery_root（父）**同以"交付"命名却语义不同**，
+      并列回传且没有任何"零件到底存哪"的字段；`sw_bridge.cmd_save()` 对相对
+      路径零决策，直落进程 cwd → 于是零件跑到父目录，总装/出图按 work_dir 找
+      零件必然找不到。
+
+    修复：
+      ① 明确目录分工并【实际创建】：parts/（零件）、drawings/（工程图）、
+         scripts/（建模脚本）—— 从机制上保证产物有唯一归宿；
+      ② 返回里新增 `save_dir_hint`（给模型的**唯一权威**保存目录）与
+         `parts_dir`，并在 `work_dir_note` 里用一句话讲清"零件存 parts_dir"；
+      ③ `delivery_root` 保留（仍是有用的"本轮所有任务的上层"概念），
+         但语义在 TASK_INFO 里写明，不再与 work_dir 混淆。
+
+    Returns: {ok, work_dir, task_id, created, backed_up, info_path,
+              delivery_root, parts_dir, drawings_dir, scripts_dir,
+              save_dir_hint, dir_semantics, error?}
+    """
+    out = {"ok": False}
+    try:
+        _tid = _task_id(task)
+        root = _default_delivery_root()
+        wd = os.path.join(root, _tid)
+        _created = not os.path.isdir(wd)
+        os.makedirs(wd, exist_ok=True)
+        # ── 【BUG-观察-1 修复】建立产物子目录，给产物唯一归宿 ──────────────
+        parts_dir = os.path.join(wd, "parts")
+        drawings_dir = os.path.join(wd, "drawings")
+        scripts_dir = os.path.join(wd, "scripts")
+        for _d in (parts_dir, drawings_dir, scripts_dir):
+            try:
+                os.makedirs(_d, exist_ok=True)
+            except Exception:
+                pass
+        # 写任务信息（可追溯：哪个目录属于哪个任务）
+        _info = {
+            "task_id": _tid,
+            "task": str(task or "")[:2000],
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "delivery_root": root,
+            # ── 【BUG-观察-1 修复】把"零件存哪"写成显式字段 ────────────────
+            "work_dir": wd,
+            "parts_dir": parts_dir,
+            "drawings_dir": drawings_dir,
+            "scripts_dir": scripts_dir,
+            "dir_semantics": {
+                "delivery_root": "本机所有任务的【上层】交付根目录，不要往这里直接存零件",
+                "work_dir": "【本任务】的隔离目录，所有产物都应在此之下",
+                "parts_dir": "★ 零件(.sldprt/.sldasm)唯一保存目录",
+                "drawings_dir": "★ 工程图(.slddrw/.dwg/.dxf/.pdf)唯一保存目录",
+                "scripts_dir": "建模脚本(.py)保存目录",
+            },
+            "note": ("【观察点1/5 修复】每个任务独立交付目录，避免同名零件覆盖上一轮成果。"
+                     "上一轮成果保留在同级其它目录中。"
+                     "【BUG-观察-1 修复】零件请存 parts_dir，工程图存 drawings_dir —— "
+                     "不要存到 delivery_root（那是所有任务的上层根目录）。"),
+        }
+        info_path = os.path.join(wd, "TASK_INFO.json")
+        try:
+            with open(info_path, "w", encoding="utf-8") as f:
+                json.dump(_info, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        out.update({"ok": True, "work_dir": wd, "task_id": _tid,
+                    "created": _created, "info_path": info_path,
+                    "delivery_root": root,
+                    "parts_dir": parts_dir,
+                    "drawings_dir": drawings_dir,
+                    "scripts_dir": scripts_dir,
+                    # 给模型的唯一权威保存目录（相对路径解析基准）
+                    "save_dir_hint": parts_dir,
+                    "dir_semantics": _info["dir_semantics"]})
+        return out
+    except Exception as e:
+        out["error"] = "创建任务交付目录失败: %r" % (e,)
+        return out
 
 
 def cmd_init(task_desc):
@@ -2935,6 +2810,16 @@ def cmd_init(task_desc):
             _reset_mode_rooms()
         except Exception:
             pass
+    # ── 【旧局残留清理】新任务开始时，把"上一局的全局凭据"归档，
+    #    避免新对话被旧产物误导（用户反馈：删了旧对话，新对话仍显示旧产物）。
+    #    注意：只动【全局老路径】，不动 reports/<task_id>/ 下任何东西
+    #    （那是按任务隔离后的正常存放处，按局保留以便审计）。
+    try:
+        _archived = _purge_old_credentials()
+        state["legacy_state_purged"] = _archived
+    except Exception as _e:
+        state["legacy_state_archived"] = {"ok": False, "error": repr(_e)}
+
     state["step"] = "mode_confirm_asked"
     state["task"] = task_desc
     state["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2982,6 +2867,8 @@ def cmd_init(task_desc):
                 "5. 总装与验证 → 出图",
             ],
             # ── 【残留检测】把"开始前清掉了什么"透明地报给用户 ──────────
+            # ★ 新任务开始前【强制清空】旧凭证的结果（用户要求：每局凭证必须干净）
+            "legacy_state_purged": state.get("legacy_state_purged"),
             "residue_cleaned": bool(_residue_cleaned or _need_reset),
             "residue_actions": ((_residue or {}).get("actions") or []) if _residue_cleaned else (
                 (["【BUG-12】init 清理上一轮 mode_state 残留"] if _need_reset else [])),
@@ -3145,13 +3032,7 @@ def cmd_provide_context(context_text):
         state["depth_asked_ts"] = time.time()
         state["context_asked_ts"] = time.time()
         save_state(state)
-        total = (len(question_spec_for(state.get("task"), state.get("context")))
-                 if depth == "full"
-                 else len(question_spec_lite(state.get("task"), state.get("context"))))
-        # ── 【问题1 修复】登记"第二段问题必须用系统问题提问" ────────────
-        _spec2 = (question_spec_for(state.get("task"), state.get("context"))
-                  if depth == "full"
-                  else question_spec_lite(state.get("task"), state.get("context")))
+        total = 0
         # ── ★【已移除 · 流程重排】────────────────────────────────────────
         # 原代码在此处产 `_fixed_qs`（A/B/C 搭建方式 + D/E 并行策略），
         # 与 init 的 `_mode_confirm_message` **重复** → 用户被问了两遍
@@ -3167,9 +3048,6 @@ def cmd_provide_context(context_text):
         #     但不能超过10题。所有的问题都要交给AI自己分析。」
         #
         # 因此：
-        #   · QUESTION_SPEC 退化为【候选题库】（AI 从中挑，不再"一股脑全问"）；
-        #   · 真正要问几题由 AI 按分析进度决定，但**必须**落在 [min,max] 内；
-        #   · 每问一题都要挂到"已经分析到的阶段"并写明理由（mode2_flow.record_question）。
         _m2mod, _m2err = _m2_require()
         _budget = None
         if _m2mod is not None:
@@ -3183,14 +3061,12 @@ def cmd_provide_context(context_text):
                                  "如需重来请先 workflow_gate.py reset。")}
             _budget = {"min": _sd["min"], "max": _sd["max"],
                        "label": _sd["label"], "asked": 0}
-            # 题库规模与区间的关系要讲清楚，避免调用方以为"必须问满题库"
-            _pool = len(_spec2)
-            _budget["candidate_pool"] = _pool
+            _budget.pop("candidate_pool", None)
             _budget["note"] = (
-                "题库共 %d 题（候选池，不必全问）。%s 的实际提问数必须落在 "
-                "[%d,%d]：AI 按十阶段分析进度【按需】提问 —— 分析到哪个阶段、"
-                "确实缺信息时才问对应问题，每问一题都要写明理由（record_question）。"
-                % (_pool, _sd["label"], _sd["min"], _sd["max"]))
+                "%s：提问数必须落在 [%d,%d]。问题由总计子代理在十阶段分析中"
+                "现场生成 —— 分析到哪个阶段、确实缺信息才问，"
+                "每问一题都要写到对应阶段并写理由（mode2_flow.record_question）。"
+                % (_sd["label"], _sd["min"], _sd["max"]))
 
         return {
             "ok": True,
@@ -3203,14 +3079,23 @@ def cmd_provide_context(context_text):
             "budget_enforced_by": ("mode2_flow.validate_question_budget"
                                    if _budget else None),
             "budget_error": _m2err,
-            # ── 【固定两问】参数题由门禁给出；A/B/C 与 D/E 在末段固定问 ──
+            # 按需提问：不固定题数，只约束区间（强 10~50 / 弱 5~10）。
+            # 问题由总计子代理现场生成，没有预设题库。
             "mandatory_contract": {
                 "enforced": bool(_cc is not None),
                 "stage": "context",
-                "required_questions": total,
-                "must_use": "ask_user_question",
-                "rule": ("把下面 %d 题用系统问题问给用户；"
-                         "禁止用正文文字代替提问。" % total),
+                "mode": "on_demand",
+                "required_questions": None,   # 已废弃：不再有固定题数
+                "question_budget": _budget,
+                    "must_use": "ask_user_question",
+                "rule": ((
+                    "问题没有预设题库 —— 由总计子代理在十阶段分析中现场生成。"
+                    "分析到哪个阶段、确实缺哪项信息，才问那一项；"
+                    "每题必须挂到已推进的阶段并写理由（mode2_flow.py ask --stage --reason），"
+                    "并逐题用 answer-question 记录用户真实答复。"
+                    "总题数必须落在 [%d,%d] 区间内。禁止用正文文字代替提问。")
+                    % ((_budget["min"] if _budget else 10),
+                       (_budget["max"] if _budget else 50))),
             },
             "message": nl.join([
                 "已识别参数需求强度: 【%s】→ 提问数必须落在 %d ~ %d 题之间。"
@@ -3338,6 +3223,11 @@ def cmd_provide_context(context_text):
     # 供调用方核对（若第 1 步没解析出来，这里提示用 select 显式给出）。
     _collected_choice = state.get("prefill_choice")
     _collected_parallel = state.get("prefill_parallel")
+    # ★ 把"载荷是否为估算值"落进 state —— select 会据此强制要求复核，
+    #   否则模型嘴上说"复核"、实际照旧往下走（截图第 5 条实测违规）。
+    state["load_is_estimate"] = bool(m.get("load_is_estimate"))
+    state["load_confirmed_at"] = None
+    save_state(state)
     return {"ok": True, "step": "mechanics_done", "task": state["task"],
             "param_depth": depth, "mechanics": m,
             # ── 【流程重排】A/B/C + D/E 已在第 1 步问过，此处只回传已收集值 ──
@@ -3707,7 +3597,7 @@ def cmd_select(choice, parallel=None, unknown=None):
     # ── 【FL-02 修复】首次 select 必须校验"本次会话真的走过提问流程" ────────
     # 实测缺陷：workflow_state.json 里【上一次正常流程的残留状态】
     #   （step=mechanics_done）能让直接 `select C E` 返回 gate=True，
-    #   第0题与第二段提问（17题）被整体绕过 —— 门禁形同虚设。
+    #   第0题与按需提问被整体绕过 —— 门禁形同虚设。
     # 判据（只对"首次 select"生效，波次推进不受影响）：
     #   step 必须是 mechanics_done，且本次会话的三个阶段时间戳
     #   （depth_asked_ts / context_asked_ts / mechanics_done_ts）都存在，
@@ -3821,9 +3711,32 @@ def cmd_select(choice, parallel=None, unknown=None):
         }
         # 编制是否已由总计子代理登记 —— 决定本次 select 能否放行"创建小屋"
         _sp = _m2mod.get_subagent_plan(_wd3)
+
+        _task_now3 = state.get("task_id")
+        _sp_ok = bool(_sp.get("ok"))
+        _sp_stale = False
+        if _sp_ok and _task_now3:
+            _sp_task = _sp.get("task_id")
+            if not _sp_task or str(_sp_task) != str(_task_now3):
+                _sp_stale = True
+                _sp_ok = False
+        _q_stale = False
+        _q_report = None
+        try:
+            _q_report = _m2mod.question_report(_wd3)
+            _qp = _m2mod.load_plan(_wd3) or {}
+            _qp_task = _qp.get("task_id")
+            if _q_report and (_q_report.get("asked") or 0) > 0:
+                if not _qp_task or (_task_now3 and str(_qp_task) != str(_task_now3)):
+                    _q_stale = True
+        except Exception:
+            _q_report = None
         _m2_block = {
             "plan_file": _m2mod.plan_path(_wd3),
-            "subagent_plan_ready": bool(_sp.get("ok")),
+            "subagent_plan_ready": _sp_ok,
+            "subagent_plan_stale": _sp_stale,
+            "question_ledger_stale": _q_stale,
+            "question_report": _q_report,
             "subagent_plan_error": (None if _sp.get("ok") else _sp.get("error")),
             "authority": _m2mod.SUBPLAN_AUTHORITY,
             "prime_room": _m2mod.PRIME_ROOM_NAME,
@@ -4164,6 +4077,51 @@ def cmd_select(choice, parallel=None, unknown=None):
     # 若此处放行，就会用**代码默认房间表**（旧的 5 房间）继续，
     #   总计子代理永远不启动 —— 实测就是"总计子代理没用出来"。
     # 因此编制必须成为【前置条件】：没登记就拒绝，并给出可执行的下一步。
+    # ★ 编制属于上一轮任务 → 同样不放行（残留编制不能用来开工）
+    if _m2_block and _m2_block.get("subagent_plan_stale"):
+        return {
+            "ok": False,
+            "gate": "MODE2_SUBAGENT_PLAN_STALE",
+            "step": "mechanics_done",
+            "error": "子代理编制属于上一轮任务（或缺少 task_id），拒绝放行。",
+            "subagent_plan": _m2_block,
+            "how": ["让总计子代理为本任务重新登记编制：",
+                    "  python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
+                    "--rationale \"<分解理由>\" --decided-by \"总计子代理\""],
+        }
+
+    # ★ 提问台账属于上一轮任务 → 视为"从未按需提问"，同样不放行
+    if _m2_block and _m2_block.get("question_ledger_stale"):
+        return {
+            "ok": False,
+            "gate": "MODE2_QUESTION_LEDGER_STALE",
+            "step": "mechanics_done",
+            "error": ("提问台账里是上一轮任务的问题记录，不能当作本轮已问过。"),
+            "question_report": _m2_block.get("question_report"),
+            "how": ["请对本任务重新走按需提问：",
+                    "  python mode2_flow.py ask \"<问题>\" --stage <阶段> --reason \"<理由>\""],
+        }
+
+    # ★ 【截图第 5 条】载荷为估算值却未经用户复核 → 拒绝开工。
+    #   实测：门禁明确回了 load_is_estimate=true / 500N（而实际约 9N），
+    #   模型嘴上说"复核"，实际照旧按 500N 往下走，零件被强行加厚。
+    #   代码级做法：没有 confirm-load 记录就不放行。
+    if state.get("load_is_estimate") and not state.get("load_confirmed_at"):
+        return {
+            "ok": False,
+            "gate": "LOAD_REVIEW_REQUIRED",
+            "step": "mechanics_done",
+            "mechanics": state.get("mechanics_result"),
+            "error": ("【载荷未经复核】当前额定载荷 %s N 是门禁按关键词估算的，"
+                      "不是用户确认值 —— 拒绝开工。"
+                      % (state.get("mechanics_result") or {}).get("nominal_load_n")),
+            "how": [
+                "1) 用 ask_user_question 把载荷问给用户，拿到明确数值（带单位）；",
+                "2) 把用户答复写回门禁：",
+                "     python workflow_gate.py confirm-load \"<用户原话>\"",
+                "3) 再调 select。",
+            ],
+        }
     if _m2_block and not _m2_block.get("subagent_plan_ready"):
         return {
             "ok": False,
@@ -4590,6 +4548,50 @@ def verify_ownership(work_dir=None):
 
 def cmd_verify_ownership(work_dir=None):
     return verify_ownership(work_dir)
+
+
+def cmd_confirm_load(answer_text):
+    """【载荷复核】把用户对载荷的明确答复写回门禁，解除 LOAD_REVIEW_REQUIRED。
+
+    必须能从答复里解析出数值（带单位），否则拒绝 —— 空口头"已复核"无效。
+    """
+    state = load_state()
+    m = state.get("mechanics_result") or {}
+    if not m:
+        return {"ok": False,
+                "error": "尚无力学估算结果，请先 provide_context 完成估算。"}
+    raw = str(answer_text or "").strip()
+    if not raw:
+        return {"ok": False, "error": "必须提供用户的答复原文。"}
+    n, _matched = _extract_load_n(raw)
+    if not n:
+        return {"ok": False,
+                "gate": "LOAD_VALUE_REQUIRED",
+                "error": ("无法从答复中解析出载荷数值（需带单位，如 9N / 0.9kg）。"
+                          "拒绝把\"已复核\"这种空话当作确认。"),
+                "answer": raw}
+    old_n = m.get("nominal_load_n")
+    state["load_confirmed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    state["load_confirmed_answer"] = raw
+    state["load_is_estimate"] = False
+    # 用户给的数值替换门禁估算值；动载系数沿用原判定
+    m["nominal_load_n"] = n
+    m["design_load_n"] = round(n * float(m.get("impact_factor") or 1.0), 3)
+    m["load_source"] = "用户复核: %s" % raw[:60]
+    state["mechanics_result"] = m
+    save_state(state)
+    # 同步刷新落盘的载荷工况文件，保证 physics 与门禁同源
+    try:
+        _lc = write_load_case_file(state, m)
+    except Exception as e:
+        _lc = {"ok": False, "error": repr(e)}
+    return {"ok": True,
+            "confirmed_nominal_load_n": n,
+            "previous_estimate_n": old_n,
+            "design_load_n": m["design_load_n"],
+            "load_case_file": _lc.get("path"),
+            "message": ("载荷已按用户答复复核为 %s N（原估算 %s N）。"
+                        "现在可以继续 select。" % (n, old_n))}
 
 
 def cmd_check_part(part_name, room):
@@ -5042,6 +5044,9 @@ def _main_body():
                              ensure_ascii=False, indent=2))
             sys.exit(2)
         print(json.dumps(cmd_select(_choice, _parallel, _unknown), ensure_ascii=False, indent=2))
+    elif cmd == "confirm-load":
+        print(json.dumps(cmd_confirm_load(sys.argv[2] if len(sys.argv) > 2 else ""),
+                         ensure_ascii=False, indent=2))
     elif cmd == "confirm-assembly":
         print(json.dumps(cmd_confirm_assembly(sys.argv[2] if len(sys.argv) > 2 else ""), ensure_ascii=False, indent=2))
     elif cmd == "status":

@@ -184,7 +184,9 @@ window.__ModuleLoader__.load({
       // grid-column:3 把面板钉进宿主 grid 的第三列，宽度由列宽（--eng-pane）
       // 决定 —— 列开则面板在，列合则面板随列宽 0 消失，物理上不可能覆盖中间列。
       '.eng-console{' +
-        'background:#fff;border-left:1px solid #cbd5e1;box-sizing:border-box;color:#0f172a;' +
+        'background:var(--dsw-alias-bg-layer-1,#fff);' +
+        'border-left:1px solid var(--dsw-alias-border-l2,#d8dee9);box-sizing:border-box;' +
+        'color:var(--dsw-alias-label-primary,#0f172a);' +
         'display:flex;flex-direction:row;font-size:12px;' +
         'position:relative;' +                       // 文档流（无 fixed/absolute）
         'grid-column:3;grid-row:1;' +                // 钉进宿主 grid 第 3 列
@@ -222,17 +224,33 @@ window.__ModuleLoader__.load({
       'body.' + DOCK_CLASS + ' div[style*="grid-template-columns"]>*{' +
         'min-width:0;' +
       '}',
-      '.eng-tree{background:#f1f5f9;border-right:1px solid #cbd5e1;box-sizing:border-box;' +
-        'display:flex;flex:0 0 190px;flex-direction:column;height:100%;' +
+      // ── 目录（次级导航）：浅底、窄、安静，不与正文抢视觉 ──────────────
+      '.eng-tree{background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.03));' +
+        'border-right:1px solid var(--dsw-alias-border-l2,#e5e7eb);box-sizing:border-box;' +
+        'display:flex;flex:0 0 168px;flex-direction:column;height:100%;' +
         'min-width:0;overflow:hidden}',
       '.eng-tree-cap{' +
-        'align-items:center;border-bottom:1px solid #cbd5e1;color:#334155;' +
-        'display:flex;flex:none;font-size:12px;font-weight:700;gap:6px;' +
-        'justify-content:space-between;letter-spacing:.02em;padding:9px 10px}' +
-      '.eng-tree-list{flex:1;min-height:0;overflow-y:auto;padding:8px}',
-      '.eng-node{align-items:center;background:#fff;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box;color:#334155;cursor:pointer;display:flex;font-size:12px;font-weight:600;gap:7px;margin:0 0 6px;padding:8px 9px;text-align:left;width:100%}',
-      '.eng-node:hover{background:#e2e8f0}',
-      '.eng-node.on{background:#1d4ed8;border-color:#1d4ed8;color:#fff}',
+        'align-items:center;border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
+        'color:var(--dsw-alias-label-secondary,#475569);display:flex;flex:none;' +
+        'font-size:11.5px;font-weight:700;gap:6px;justify-content:space-between;' +
+        'letter-spacing:.04em;padding:11px 10px}' +
+      '.eng-tree-cap-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.eng-tree-cap-n{' +
+        'background:var(--dsw-alias-bg-layer-3,rgba(15,23,42,.08));border-radius:999px;' +
+        'flex:none;font-size:10px;font-weight:700;padding:1px 6px' +
+      '}' +
+      '.eng-tree-list{display:flex;flex:1;flex-direction:column;gap:4px;' +
+        'min-height:0;overflow-y:auto;padding:7px}',
+      // 目录条目：默认透明（不抢眼），选中才实心高亮 —— 一眼看出"当前在看谁"
+      '.eng-node{align-items:center;background:transparent;border:1px solid transparent;' +
+        'border-radius:8px;box-sizing:border-box;color:var(--dsw-alias-label-secondary,#475569);' +
+        'cursor:pointer;display:flex;font-family:inherit;font-size:12px;font-weight:600;' +
+        'gap:7px;padding:8px 9px;text-align:left;width:100%}' +
+      '.eng-node:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.06))}' +
+      '.eng-node.on{' +
+        'background:var(--dsw-alias-state-business-tertiary,#eef2ff);' +
+        'border-color:var(--dsw-alias-state-business-primary,#2563eb);' +
+        'color:var(--dsw-alias-label-primary-bluish,#3730a3)}',
       '.eng-dot{border-radius:50%;flex:none;height:8px;width:8px;background:#94a3b8}',
       '.eng-dot.run{background:#16a34a;animation:eng-pulse 1.3s ease-in-out infinite}',
       '.eng-dot.done{background:#0ea5e9}',
@@ -241,60 +259,143 @@ window.__ModuleLoader__.load({
       '.eng-node-state{flex:none;font-size:10px;opacity:.75}',
       '.eng-detail{background:#fff;box-sizing:border-box;display:flex;flex:1 1 0;flex-direction:column;' +
         'height:100%;min-width:0;overflow:hidden}',
-      '.eng-head{align-items:center;background:#f8fafc;border-bottom:1px solid #cbd5e1;' +
-        'display:flex;flex:none;gap:6px;min-height:44px;padding:0 8px 0 10px}',
-      '.eng-name{color:#0f172a;flex:1;font-size:13px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-      '.eng-tag{background:#e2e8f0;border-radius:5px;color:#475569;flex:none;font-size:10px;font-weight:600;padding:2px 7px;white-space:nowrap}',
-      '.eng-tag.run{background:#16a34a;color:#fff}',
+      // ── 详情标题栏：两行结构（名称+状态 / 副标题摘要）───────────────
+      '.eng-head{' +
+        'background:var(--dsw-alias-bg-layer-1,#fff);' +
+        'border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
+        'display:flex;flex:none;flex-direction:column;gap:3px;' +
+        'padding:11px 12px 10px;position:relative' +
+      '}' +
+      '.eng-head-main{align-items:center;display:flex;gap:7px;min-width:0;padding-right:56px}' +
+      '.eng-name{' +
+        'color:var(--dsw-alias-label-primary,#0f172a);flex:1;font-size:13.5px;' +
+        'font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;' +
+        'white-space:nowrap' +
+      '}' +
+      '.eng-head-sub{' +
+        'color:var(--dsw-alias-label-tertiary,#94a3b8);font-size:11px;' +
+        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' +
+      '}' +
+      '.eng-head .eng-collapse{position:absolute;right:10px;top:12px}' +
+      '.eng-tag{' +
+        'background:var(--dsw-alias-bg-layer-3,rgba(15,23,42,.07));border-radius:5px;' +
+        'color:var(--dsw-alias-label-secondary,#475569);flex:none;font-size:10px;' +
+        'font-weight:700;padding:2px 7px;white-space:nowrap' +
+      '}' +
+      '.eng-tag.quiet{opacity:.72}' +
+      '.eng-tag.run{background:#16a34a;color:#fff}' +
+      '.eng-tag.done{background:#0ea5e9;color:#fff}',
       '.eng-x{background:#fff;border:1px solid #cbd5e1;border-radius:6px;color:#475569;cursor:pointer;flex:none;font-size:13px;font-weight:700;height:24px;line-height:1;width:24px}',
       '.eng-x:hover{background:#e2e8f0}',
       // ── 【排版优化】日志区：舒适的行高/字号 + 强制换行，避免"堆砌代码块"感 ──
+      // ── 【UI 美化】深色模式补齐 ─────────────────────────────────────
+      // 原来只有少量规则带 --dsw-alias token，大量硬编码浅色值在暗色主题下
+      //   会刺眼（纯白底 + 深灰字）。这里统一给出暗色覆盖。
+      '@media(prefers-color-scheme:dark){' +
+        '.eng-bubble.sys{background:rgba(255,255,255,.06);color:#cbd5e1}' +
+        '.eng-tool-card{background:rgba(14,165,233,.10);border-color:rgba(14,165,233,.32)}' +
+        '.eng-tool-card-h{color:#7dd3fc}' +
+        '.eng-tool-card-b{background:#1c2128;border-top-color:rgba(14,165,233,.3);color:#cbd5e1}' +
+        '.eng-err-card{background:rgba(239,68,68,.14);border-color:rgba(239,68,68,.42);color:#fca5a5}' +
+        '.eng-md-pre{background:rgba(255,255,255,.07)}' +
+        '.eng-md-code{background:rgba(37,99,235,.22)}' +
+      '}',
+      // ══ 【UI 美化】子代理面板 · 阅读区 ══════════════════════════════════
+      // 用户反馈：自带面板"很乱，根本看不来啥"。这里按"时间轴 + 卡片"重排：
+      //   · 每条事件 = 一个 .eng-evt（左侧色条区分类型，标题行有图标+标签）；
+      //   · 日志区加大留白与行高，长段落不再挤成一坨；
+      //   · 全部改用 --dsw-alias-* 语义 token，自动跟随亮/暗主题。
       '.eng-log{' +
-        'flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;' +
-        'padding:12px 14px 18px;' +
-        'line-height:1.75;' +                 // 舒适行高，长段落更易读
-        'font-size:12.5px;' +                 // 略大字号，不再是密集小字
-        'overflow-wrap:break-word;' +         // 长单词断行
-        'word-break:break-word;' +            // 兼容旧浏览器
-        'letter-spacing:.01em' +
+        'display:flex;flex:1;flex-direction:column;gap:10px;' +
+        'font-size:12.5px;letter-spacing:.01em;line-height:1.72;' +
+        'min-height:0;overflow-wrap:break-word;overflow-x:hidden;' +
+        'overflow-y:auto;padding:14px 14px 22px;word-break:break-word' +
       '}' +
-      // 统一各类文本块：换行、行宽、间距
-      '.eng-log p,.eng-log div{overflow-wrap:break-word;word-break:break-word;max-width:100%}',
-      '.eng-log *{box-sizing:border-box}',
-      // 段落间距：避免大段文字挤成一团
-      '.eng-bubble,.eng-think,.eng-err-card,.eng-tool-card{margin-bottom:9px}',
-      '.eng-bubble:last-child,.eng-think:last-child{margin-bottom:0}',
-      '.eng-note{color:#64748b;font-size:12px;padding:18px 14px;text-align:center}',
-      // ── 聊天气泡 ─────────────────────────────────────────────
-      // 【布局重构】气泡：pre-wrap 保留换行 + 任意位置断行，长串不溢出
-      '.eng-bubble{border-radius:10px;margin:0 0 9px;padding:8px 12px;font-size:12px;line-height:1.6;' +
-        'white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;max-width:100%;' +
-        'background:#eff6ff;border:1px solid #bfdbfe;color:#1e3a5f}',
-      '.eng-bubble.sys{background:#f8fafc;border-color:#e2e8f0;color:#475569}',
-      // ── 思考引用框 ───────────────────────────────────────────
-      // 【排版优化】思考框：取消斜体（用户反馈大段斜体阅读体验差），
-      // 改用左侧竖线 + 稍淡的文字色来区分，保持可读性。
-      '.eng-think{border-left:3px solid #cbd5e1;color:#64748b;font-size:12px;font-style:normal;line-height:1.68;' +
-        'margin:0 0 9px;padding:6px 0 6px 10px;white-space:pre-wrap;word-break:break-word;' +
-        'overflow-wrap:anywhere;max-width:100%;text-align:left}',
-      // ── 工具卡 ───────────────────────────────────────────────
-      '.eng-tool-card{background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;margin:0 0 7px;' +
-        'overflow:hidden;max-width:100%;min-width:0}',
-      '.eng-tool-card-h{align-items:center;color:#0369a1;cursor:pointer;display:flex;font-size:11.5px;font-weight:600;gap:6px;padding:6px 10px;user-select:none}',
-      '.eng-tool-card-h:hover{background:#e0f2fe}',
-      '.eng-tool-txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-      '.eng-tool-caret{flex:none;font-size:10px;opacity:.55}',
-      // 【布局重构】代码块/工具输出：强制换行 + 横向滚动兜底，杜绝溢出边框
-      '.eng-tool-card-b{background:#fff;border-top:1px solid #bae6fd;color:#334155;' +
-        'font-family:ui-monospace,Consolas,monospace;font-size:11px;max-height:200px;' +
-        'overflow:auto;padding:7px 10px;white-space:pre-wrap;word-break:break-word;' +
-        'overflow-wrap:anywhere;max-width:100%}',
-      // ── 错误告警卡 ───────────────────────────────────────────
-      '.eng-err-card{align-items:flex-start;background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;' +
-        'color:#991b1b;display:flex;font-size:11.5px;gap:7px;line-height:1.5;margin:0 0 8px;padding:7px 10px;' +
-        'word-break:break-word;overflow-wrap:anywhere;max-width:100%;min-width:0}',
-      '.eng-err-card>*{min-width:0;overflow-wrap:anywhere}',
-      '.eng-err-ico{flex:none}',
+      '.eng-log p,.eng-log div{overflow-wrap:break-word;word-break:break-word;max-width:100%}' +
+      '.eng-log *{box-sizing:border-box}' +
+      '.eng-note{' +
+        'color:var(--dsw-alias-label-tertiary,#94a3b8);font-size:12px;' +
+        'padding:22px 14px;text-align:center' +
+      '}' +
+
+      // ── 事件条目：时间轴卡片 ───────────────────────────────────────
+      '.eng-evt{' +
+        'border-left:3px solid var(--dsw-alias-border-l2,#e2e8f0);' +
+        'display:flex;flex-direction:column;gap:4px;' +
+        'min-width:0;padding:1px 0 1px 10px' +
+      '}' +
+      '.eng-evt-hd{align-items:center;display:flex;gap:5px;min-height:16px}' +
+      '.eng-evt-ico{flex:none;font-size:11px;line-height:1;opacity:.9}' +
+      '.eng-evt-label{' +
+        'color:var(--dsw-alias-label-tertiary,#94a3b8);flex:none;' +
+        'font-size:10.5px;font-weight:700;letter-spacing:.04em' +
+      '}' +
+      '.eng-evt-bd{min-width:0}' +
+      // 颜色语义：思考=灰 / 输出=蓝 / 命令=青 / 结果=石板 / 报错=红 / 提问=紫
+      '.eng-evt-think{border-left-color:var(--dsw-alias-border-l2,#cbd5e1)}' +
+      '.eng-evt-text{border-left-color:var(--dsw-alias-state-business-primary,#3b82f6)}' +
+      '.eng-evt-tool{border-left-color:#0ea5e9}' +
+      '.eng-evt-result{border-left-color:#94a3b8}' +
+      '.eng-evt-error{border-left-color:#ef4444}' +
+      '.eng-evt-ask{border-left-color:#8b5cf6}' +
+
+      // ── 输出气泡（助手正文）：不再是蓝底方块，改为干净的文档流 ───────
+      // 大段正文套气泡只会显得闷；这里让它读起来像文档：无底色、大行高。
+      '.eng-bubble{' +
+        'color:var(--dsw-alias-label-primary,#1e293b);font-size:12.5px;' +
+        'line-height:1.78;max-width:100%;overflow-wrap:anywhere;' +
+        'padding:0;white-space:normal;word-break:break-word' +
+      '}' +
+      '.eng-bubble.sys{' +
+        'background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.04));' +
+        'border-radius:8px;color:var(--dsw-alias-label-secondary,#475569);' +
+        'font-family:ui-monospace,SFMono-Regular,Consolas,monospace;' +
+        'font-size:11.5px;line-height:1.6;max-height:280px;overflow:auto;' +
+        'padding:8px 10px;white-space:pre-wrap' +
+      '}' +
+
+      // ── 思考框：弱化但不消失 ───────────────────────────────────────
+      '.eng-think{' +
+        'color:var(--dsw-alias-label-tertiary,#7a8699);font-size:12px;' +
+        'font-style:normal;line-height:1.7;max-width:100%;' +
+        'overflow-wrap:anywhere;text-align:left;white-space:pre-wrap;' +
+        'word-break:break-word' +
+      '}' +
+
+      // ── 工具卡：一行标题 + 可展开参数 ─────────────────────────────
+      '.eng-tool-card{' +
+        'background:var(--dsw-alias-bg-layer-2,rgba(14,165,233,.06));' +
+        'border:1px solid var(--dsw-alias-border-l2,#bae6fd);border-radius:8px;' +
+        'max-width:100%;min-width:0;overflow:hidden' +
+      '}' +
+      '.eng-tool-card-h{' +
+        'align-items:center;color:#0369a1;cursor:pointer;display:flex;' +
+        'font-size:11.5px;font-weight:600;gap:6px;padding:7px 10px;' +
+        'user-select:none' +
+      '}' +
+      '.eng-tool-card-h:hover{background:rgba(14,165,233,.10)}' +
+      '.eng-tool-txt{' +
+        'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' +
+      '}' +
+      '.eng-tool-caret{flex:none;font-size:10px;opacity:.55}' +
+      '.eng-tool-card-b{' +
+        'background:var(--dsw-alias-bg-layer-1,#fff);border-top:1px solid rgba(14,165,233,.25);' +
+        'color:var(--dsw-alias-label-secondary,#334155);' +
+        'font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;' +
+        'max-height:220px;max-width:100%;overflow:auto;overflow-wrap:anywhere;' +
+        'padding:8px 10px;white-space:pre-wrap;word-break:break-word' +
+      '}' +
+
+      // ── 错误卡 ────────────────────────────────────────────────────
+      '.eng-err-card{' +
+        'align-items:flex-start;background:var(--dsw-alias-state-error-tertiary,#fef2f2);' +
+        'border:1px solid var(--dsw-alias-state-error-primary,#fca5a5);' +
+        'border-radius:8px;color:#991b1b;display:flex;font-size:11.5px;gap:7px;' +
+        'line-height:1.55;max-width:100%;min-width:0;overflow-wrap:anywhere;' +
+        'padding:8px 10px;word-break:break-word' +
+      '}' +
+      '.eng-err-card>*{min-width:0;overflow-wrap:anywhere}' +
+      '.eng-err-ico{flex:none}' +
       // ── 交互式提问卡（小弹窗） ───────────────────────────────
       '.eng-ask{background:#fff;border:1px solid #c7d2fe;border-radius:12px;box-shadow:0 2px 10px rgba(30,64,175,.10);margin:0 0 11px;overflow:hidden}',
       '.eng-ask-hd{align-items:center;background:linear-gradient(180deg,#eef2ff,#e0e7ff);border-bottom:1px solid #c7d2fe;color:#3730a3;display:flex;font-size:12px;font-weight:700;gap:6px;padding:8px 11px}',
@@ -1085,6 +1186,61 @@ window.__ModuleLoader__.load({
         'padding:0;width:28px' +
       '}' +
       '.eng-side-send:disabled{background:var(--dsw-alias-border-l2,#cbd5e1);cursor:default}',
+
+      // ── 【问问AI】多对话切换条 ──────────────────────────────────────
+      // 每个「对话一 / 对话二…」都是独立历史，切换条让它们一眼可辨、一键可切。
+      // flex:none + 横向滚动：对话多到放不下时横滚，不换行、不挤压其它区域。
+      '.eng-side-tabs{' +
+        'border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
+        'display:flex;flex:none;gap:6px;overflow-x:auto;padding:7px 10px;' +
+        'scrollbar-width:thin' +
+      '}' +
+      '.eng-side-tab{' +
+        'align-items:center;background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.04));' +
+        'border:1px solid transparent;border-radius:8px;color:var(--dsw-alias-label-secondary,#475569);' +
+        'cursor:pointer;display:inline-flex;flex:none;font-family:inherit;font-size:11.5px;' +
+        'gap:5px;line-height:1;padding:6px 9px;white-space:nowrap' +
+      '}' +
+      '.eng-side-tab:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.08))}' +
+      '.eng-side-tab.on{' +
+        'background:var(--dsw-alias-state-business-tertiary,#eef2ff);' +
+        'border-color:var(--dsw-alias-state-business-primary,#2563eb);' +
+        'color:var(--dsw-alias-label-primary-bluish,#3730a3);font-weight:600' +
+      '}' +
+      '.eng-side-tab-n{' +
+        'background:rgba(37,99,235,.14);border-radius:999px;font-size:10px;' +
+        'font-weight:700;padding:1px 5px' +
+      '}' +
+      '.eng-side-tab.add{padding:6px 8px}' +
+
+      // ── 【问问AI】Markdown 渲染后的排版（模型输出不再是一堆原始符号）──
+      '.eng-md-p{margin:0}' +
+      '.eng-md-p + .eng-md-p{margin-top:6px}' +
+      '.eng-md-h{font-weight:700;line-height:1.5;margin:8px 0 4px}' +
+      '.eng-md-h1{font-size:14px}' +
+      '.eng-md-h2{font-size:13.5px}' +
+      '.eng-md-h3{font-size:13px}' +
+      '.eng-md-h4,.eng-md-h5,.eng-md-h6{font-size:12.5px}' +
+      '.eng-md-h:first-child{margin-top:0}' +
+      '.eng-md-list{margin:4px 0;padding-left:18px}' +
+      '.eng-md-list li{margin:2px 0}' +
+      '.eng-md-code{' +
+        'background:rgba(37,99,235,.10);border-radius:4px;font-family:ui-monospace,' +
+        'SFMono-Regular,Consolas,monospace;font-size:11.5px;padding:1px 4px' +
+      '}' +
+      '.eng-md-pre{' +
+        'background:var(--dsw-alias-bg-layer-3,rgba(15,23,42,.06));border-radius:8px;' +
+        'font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px;' +
+        'line-height:1.6;margin:6px 0;overflow-x:auto;padding:8px 10px;' +
+        'white-space:pre' +
+      '}' +
+      '.eng-md-pre code{font-family:inherit}' +
+      '.eng-md-quote{' +
+        'border-left:3px solid var(--dsw-alias-border-l2,#cbd5e1);' +
+        'color:var(--dsw-alias-label-secondary,#475569);margin:6px 0;padding:2px 0 2px 9px' +
+      '}' +
+      '.eng-md-hr{border-top:1px solid var(--dsw-alias-border-l2,#e5e7eb);margin:8px 0}' +
+      '.eng-md-link{color:var(--dsw-alias-state-business-primary,#2563eb);text-decoration:underline}' +
 
       // ══ 【工程人设】设置页填空 ══════════════════════════════════════════
       '.eng-persona{display:flex;flex-direction:column;gap:8px;padding:10px 2px 2px}' +
@@ -2188,15 +2344,37 @@ window.__ModuleLoader__.load({
       }
       return null;
     }
+    // ── 【UI 美化】事件类型徽标表 ──────────────────────────────────────
+    // 用户反馈面板"看不来啥"：所有事件长得一样，分不清哪段是思考、哪段是命令、
+    //   哪段是结果。这里给每类事件一个固定图标 + 标签 + 色调，扫一眼即可识别。
+    var ENG_EVENT_META = {
+      think:  { ico: '💭', label: '思考',  cls: 'think' },
+      text:   { ico: '🗨',  label: '输出',  cls: 'text' },
+      result: { ico: '📄', label: '结果',  cls: 'result' },
+      tool:   { ico: '⚙',  label: '命令',  cls: 'tool' },
+      error:  { ico: '⚠',  label: '报错',  cls: 'error' },
+      ask:    { ico: '❓', label: '需要你确认', cls: 'ask' }
+    };
+
+    /** 把事件包进统一的"时间轴条目"：左侧色条 + 类型徽标 + 正文。 */
+    function engWrapEvent(kind, key, node) {
+      var meta = ENG_EVENT_META[kind] || ENG_EVENT_META.text;
+      return h('div', { className: 'eng-evt eng-evt-' + meta.cls, key: key },
+        h('div', { className: 'eng-evt-hd' },
+          h('span', { className: 'eng-evt-ico' }, meta.ico),
+          h('span', { className: 'eng-evt-label' }, meta.label)),
+        h('div', { className: 'eng-evt-bd' }, node));
+    }
+
     function renderEvent(ev, idx, info) {
       var m = formatMessage(ev);
       if (!m) return null;
       var key = String(ev.sessionId || '') + ':' + String(ev.seq) + ':' + String(idx);
-      if (m.t === 'think') return h(ThinkBox, { key: key, text: m.text });
-      if (m.t === 'text') return h(Bubble, { key: key, text: m.text });
-      if (m.t === 'result') return h(Bubble, { key: key, sys: true, text: m.text });
-      if (m.t === 'tool') return h(ToolCard, { key: key, name: m.name, args: m.args });
-      if (m.t === 'error') return h(ErrorCard, { key: key, text: m.text });
+      if (m.t === 'think') return engWrapEvent('think', key, h(ThinkBox, { text: m.text }));
+      if (m.t === 'text') return engWrapEvent('text', key, h(Bubble, { text: m.text }));
+      if (m.t === 'result') return engWrapEvent('result', key, h(Bubble, { sys: true, text: m.text }));
+      if (m.t === 'tool') return engWrapEvent('tool', key, h(ToolCard, { name: m.name, args: m.args }));
+      if (m.t === 'error') return engWrapEvent('error', key, h(ErrorCard, { text: m.text }));
       if (m.t === 'ask') return h(AskCard, {
         key: key,
         questions: m.questions,
@@ -2791,35 +2969,47 @@ window.__ModuleLoader__.load({
       // 注意：面板始终挂载，用 .collapsed 类切换宽度以驱动过渡动画；
       //       收起时 width:0 + pointer-events:none，等价于完全不占位。
       var stackTree = veryNarrow;
+      // ── 【UI 美化】面板主体 ────────────────────────────────────────────
+      // 用户反馈（对照 DSH 官方子代理界面）：自带的这套面板"很乱，看不来啥"。
+      // 主要毛病与对应改法：
+      //   ① 目录/详情/日志三层全是同等视觉重量 → 用【分区 + 层级】拉开：
+      //      目录是次级导航（浅底、窄），详情是主角（白底、留白大）。
+      //   ② 每个事件块长得一模一样 → 给每个事件加【类型徽标 + 图标】
+      //      （思考/输出/命令/结果/报错），扫一眼就知道这一段是什么。
+      //   ③ 事件之间没有分隔，密密麻麻 → 加时间轴竖线 + 卡片间距。
+      //   ④ 标题栏信息挤成一行 → 拆成「名称 + 状态」与「副标题摘要」两行。
       var consoleEl = h('div', {
         className: 'eng-console' + (stackTree ? ' stacked' : '') +
                    (isCollapsed ? ' collapsed' : '') +
                    (embedded ? ' embedded' : '') +
-                   // 【让位】由 React 直接表达（不依赖 body 类），
-                   //   配合 .eng-console.yielded{display:none} 生效。
                    (!embedded && yieldToHost ? ' yielded' : '')
       },
         h('div', { className: 'eng-tree' },
           h('div', { className: 'eng-tree-cap' },
-            h('span', null, '子代理目录'),
-            // 顶部折叠按钮：放在目录标题栏右侧，显眼易点
-            // 嵌入模式不给折叠按钮（官方 tab 自带关闭/切换，避免语义重复）
+            h('span', { className: 'eng-tree-cap-t' }, '子代理'),
+            h('span', { className: 'eng-tree-cap-n' }, String(entries.length)),
             embedded ? null : h('button', {
               className: 'eng-collapse',
               title: '折叠子代理面板，让对话区占满全宽',
               onClick: function () { closedSt[1](true); }
-            }, '折叠 ›')),
+            }, '›')),
           h('div', { className: 'eng-tree-list' }, nodes)),
         h('div', { className: 'eng-detail' },
           h('div', { className: 'eng-head' },
-            h('span', { className: 'eng-name' }, title),
-            h('span', { className: 'eng-tag' + (running ? ' run' : '') }, running ? '运行中' : (done ? '已完成' : '未运行')),
-            h('span', { className: 'eng-tag' }, current && current.mode === 'one-shot' ? '一次性' : '可持续'),
+            h('div', { className: 'eng-head-main' },
+              h('span', { className: 'eng-name' }, title),
+              h('span', { className: 'eng-tag' + (running ? ' run' : (done ? ' done' : '')) },
+                running ? '运行中' : (done ? '已完成' : '未运行')),
+              h('span', { className: 'eng-tag quiet' },
+                current && current.mode === 'one-shot' ? '一次性' : '可持续')),
+            h('div', { className: 'eng-head-sub' },
+              String(logSt[0].length) + ' 条输出 · '
+              + (running ? '正在实时接收' : (done ? '已结束' : '等待启动'))),
             embedded ? null : h('button', {
               className: 'eng-collapse',
               title: '折叠子代理面板',
               onClick: function () { closedSt[1](true); }
-            }, '折叠 ›')),
+            }, '折叠')),
           h('div', { className: 'eng-log', ref: boxRef }, body)));
       // 用 Fragment 同时输出：收起态的小标签 + 面板本体
       // 嵌入模式不输出小标签（官方右列自己管开合）
@@ -3448,13 +3638,16 @@ window.__ModuleLoader__.load({
             }
           }, busyLaunch ? '启动中' : '启动')),
 
-        // ── 错误日志区（可折叠）+「发给模型」────────────────────────────
+        // ── 启动日志区（可折叠）+「发给模型」──────────────────────────
+        //   ⚠️ 标题用「启动日志」而不是「错误日志」：启动成功时这里同样会
+        //   展示完整步骤日志（find path → spawn → wait → connect），
+        //   全部 OK 的记录不叫错误日志，否则用户会误以为出了问题。
         S.logText ? h('div', { className: 'eng-conn-log' },
           h('div', { className: 'eng-conn-log-hd' },
             h('span', {
               className: 'eng-conn-log-tg',
               onClick: function () { patch({ logOpen: !S.logOpen }); }
-            }, (S.logOpen ? '▾ ' : '▸ ') + '错误日志'),
+            }, (S.logOpen ? '▾ ' : '▸ ') + '启动日志'),
             h('button', {
               className: 'eng-conn-btn tiny',
               type: 'button',
@@ -4548,30 +4741,227 @@ window.__ModuleLoader__.load({
     //     · 子代理 = 蓝色圆点 + 「未运行/运行中」徽标
     //     · 详情分析 = 紫色对话气泡图标 + 「分析 N 轮」徽标
     //   若后续要真正嵌进侧栏，需要 ui-sidebar 暴露插槽（属官方改动，不做）。
+    // ══════════════════════════════════════════════════════════════════════
+    // 【问问AI · 轻量 Markdown 渲染】
+    // ──────────────────────────────────────────────────────────────────────
+    // 为什么需要它：模型回答里大量使用 **加粗**、行内代码、- 列表、## 标题。
+    //   过去面板直接把原文塞进气泡（white-space:pre-wrap），这些标记就原样
+    //   显示成一串反引号和星号，看起来又乱又不像成品 —— 用户反馈
+    //   "模型原本想要放大字体的符号没有正确"，说的正是这个。
+    //
+    // 设计约束（重要）：
+    //   · 不引入任何新依赖：插件只 require('react')，必须零依赖；
+    //   · 不用 dangerouslySetInnerHTML：模型输出不可信，绝不拼 HTML；
+    //   · 因此这里做【行内解析 + React 节点】的极小子集渲染：
+    //       代码围栏 / # 标题 / - * 列表 / > 引用 / --- 分隔线 /
+    //       **粗体** / *斜体* / 行内代码 / 链接 [t](url)
+    //     不认识的语法一律按纯文本输出，绝不吞字。
+    var ENG_MD_INLINE = [
+      // 行内代码优先级最高：内部的 ** / * 不应再被解析
+      { re: /\x60([^\x60\n]+)\x60/g, kind: 'code' },
+      { re: /\*\*([^*\n]+)\*\*/g, kind: 'bold' },
+      { re: /(?<!\*)\*([^*\n]+)\*(?!\*)/g, kind: 'italic' },
+      { re: /(?<![\w])_([^_\n]+)_(?![\w])/g, kind: 'italic' },
+      { re: /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, kind: 'link' }
+    ];
+
+    /** 把一段行内文本渲染成 React 节点数组（递归下降，最多 3 层防炸）。 */
+    function engRenderInline(text, keyPrefix, depth) {
+      var s = String(text == null ? '' : text);
+      if (!s) return [];
+      var d = depth || 0;
+      if (d > 3) return [s];
+      var best = null;
+      for (var i = 0; i < ENG_MD_INLINE.length; i++) {
+        var rule = ENG_MD_INLINE[i];
+        rule.re.lastIndex = 0;
+        var m = rule.re.exec(s);
+        if (!m) continue;
+        if (!best || m.index < best.m.index ||
+            (m.index === best.m.index && m[0].length > best.m[0].length)) {
+          best = { rule: rule, m: m };
+        }
+      }
+      if (!best) return [s];
+      var m2 = best.m;
+      var out = [];
+      if (m2.index > 0) out.push(s.slice(0, m2.index));
+      var inner = m2[1] != null ? m2[1] : m2[0];
+      var tail = s.slice(m2.index + m2[0].length);
+      var key = keyPrefix + '-' + best.rule.kind;
+      if (best.rule.kind === 'code') {
+        out.push(h('code', { className: 'eng-md-code', key: key }, inner));
+      } else if (best.rule.kind === 'bold') {
+        out.push(h('strong', { key: key }, engRenderInline(inner, key, d + 1)));
+      } else if (best.rule.kind === 'italic') {
+        out.push(h('em', { key: key }, engRenderInline(inner, key, d + 1)));
+      } else if (best.rule.kind === 'link') {
+        out.push(h('a', {
+          className: 'eng-md-link', key: key,
+          href: m2[2], target: '_blank', rel: 'noreferrer noopener'
+        }, engRenderInline(inner, key, d + 1)));
+      } else {
+        out.push(inner);
+      }
+      var rest = engRenderInline(tail, key + 'r', d + 1);
+      for (var j = 0; j < rest.length; j++) out.push(rest[j]);
+      return out;
+    }
+
+    /** 把整段 Markdown 文本渲染成 React 节点数组（块级 + 行内）。 */
+    function engRenderMarkdown(src, keyPrefix) {
+      var text = String(src == null ? '' : src).replace(/\r\n?/g, '\n');
+      var lines = text.split('\n');
+      var out = [];
+      var kp = keyPrefix || 'md';
+      var i = 0;
+      var seq = 0;
+      function nextKey() { return kp + '-' + (seq++); }
+      var FENCE_RE = /^\s*(\x60{3,}|~{3,})\s*([\w+-]*)\s*$/;
+      var H_RE = /^\s*(#{1,6})\s+(.*)$/;
+      var HR_RE = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/;
+      var Q_RE = /^\s*>\s?/;
+      var LI_RE = /^\s*([-*+]|\d{1,3}[.)])\s+/;
+      while (i < lines.length) {
+        var ln = lines[i];
+        // ① 代码围栏
+        var fence = FENCE_RE.exec(ln);
+        if (fence) {
+          var ch = fence[1].charAt(0);
+          var closeRe = new RegExp('^\\s*' + (ch === '~' ? '~' : '\\x60') + '{3,}\\s*$');
+          var codeLines = [];
+          i++;
+          while (i < lines.length && !closeRe.test(lines[i])) {
+            codeLines.push(lines[i]);
+            i++;
+          }
+          i++;
+          out.push(h('pre', { className: 'eng-md-pre', key: nextKey() },
+            h('code', null, codeLines.join('\n'))));
+          continue;
+        }
+        // ② 标题
+        var hd = H_RE.exec(ln);
+        if (hd) {
+          var lv = Math.min(6, hd[1].length);
+          out.push(h('div', { className: 'eng-md-h eng-md-h' + lv, key: nextKey() },
+            engRenderInline(hd[2], nextKey(), 0)));
+          i++;
+          continue;
+        }
+        // ③ 分隔线
+        if (HR_RE.test(ln)) {
+          out.push(h('div', { className: 'eng-md-hr', key: nextKey() }));
+          i++;
+          continue;
+        }
+        // ④ 引用
+        if (Q_RE.test(ln)) {
+          var quote = [];
+          while (i < lines.length && Q_RE.test(lines[i])) {
+            quote.push(lines[i].replace(Q_RE, ''));
+            i++;
+          }
+          out.push(h('div', { className: 'eng-md-quote', key: nextKey() },
+            engRenderMarkdown(quote.join('\n'), nextKey())));
+          continue;
+        }
+        // ⑤ 列表（有序 / 无序）
+        if (LI_RE.test(ln)) {
+          var ordered = /^\s*\d{1,3}[.)]\s+/.test(ln);
+          var items = [];
+          while (i < lines.length && LI_RE.test(lines[i])) {
+            items.push(lines[i].replace(LI_RE, ''));
+            i++;
+            while (i < lines.length && /^\s{2,}\S/.test(lines[i])
+                   && !LI_RE.test(lines[i])) {
+              items[items.length - 1] += ' ' + lines[i].trim();
+              i++;
+            }
+          }
+          out.push(h(ordered ? 'ol' : 'ul', { className: 'eng-md-list', key: nextKey() },
+            items.map(function (it, ii) {
+              return h('li', { key: nextKey() + '-li' + ii },
+                engRenderInline(it, nextKey() + '-li' + ii, 0));
+            })));
+          continue;
+        }
+        // ⑥ 空行
+        if (!ln.trim()) { i++; continue; }
+        // ⑦ 普通段落：连续非空行合并（行间用 <br> 保留换行）
+        var para = [];
+        while (i < lines.length && lines[i].trim()
+               && !FENCE_RE.test(lines[i]) && !H_RE.test(lines[i])
+               && !HR_RE.test(lines[i]) && !Q_RE.test(lines[i])
+               && !LI_RE.test(lines[i])) {
+          para.push(lines[i]);
+          i++;
+        }
+        if (para.length) {
+          var pk = nextKey();
+          var nodes = [];
+          for (var ci = 0; ci < para.length; ci++) {
+            if (ci) nodes.push(h('br', { key: pk + '-br' + ci }));
+            var inl = engRenderInline(para[ci], pk + '-c' + ci, 0);
+            for (var q = 0; q < inl.length; q++) nodes.push(inl[q]);
+          }
+          out.push(h('div', { className: 'eng-md-p', key: pk }, nodes));
+        } else {
+          i++;   // 防御：避免死循环
+        }
+      }
+      return out;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════
+    // 【问问AI】每个 DSH 会话一份独立历史：切会话自动跟随，话题可新建/可关闭。
+    var ENG_SIDE_LIMIT = 30;   // 每个 DSH 会话最多保留 30 个话题，防内存膨胀
+    var ENG_SIDE_CN = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+                       '十一', '十二', '十三', '十四', '十五', '十六', '十七',
+                       '十八', '十九', '二十'];
+
+    /** 生成「对话一」这种中文序号名。 */
+    function engSideName(n) {
+      var idx = Math.max(0, (n | 0) - 1);
+      return '对话' + (ENG_SIDE_CN[idx] || String(n));
+    }
+
+
     function SelectionDetailLayer(props) {
       // ── 作用域门禁：设置里关掉「右键引用调出AI解释」→ 完全不工作 ──────
       // 用户强调「这个功能是必须要有效的」，所以这里必须是【真门禁】：
-      //   关闭时不挂鼠标监听、不渲染按钮/面板（零副作用），
-      //   而不是"按钮还在但点了没反应"。
-      // ⚠️ 所有 hook 必须在 return 之前调用（React hooks 规则，历史上
-      //   在 EngInputDock 上踩过：条件调用 hook 会让 entry 永久失效）。
+      //   关闭时不挂鼠标监听、不渲染按钮/面板（零副作用）。
+      // ⚠️ 所有 hook 必须在 return 之前调用（React hooks 规则）。
       var settings = useEngSettings();
+      // ── 当前 DSH 会话 id（响应式：切会话自动重算）──────────────────────
+      // 用 useSessions 选择器取 mainView 保留者 —— 这是官方 root 侧标准做法
+      //   （ui-layout/DocumentTitle.tsx:19-23 等多处）。
+      var dshSessionId = '';
+      try {
+        dshSessionId = (typeof props.useEngCurrentSessionId === 'function')
+          ? String(props.useEngCurrentSessionId(function (v) { return v; }) || '')
+          : '';
+      } catch (e) { dshSessionId = ''; }
+      // props 里拿不到时再退回 DOM 探针（放在 effect 里以保持 hooks 稳定）
       var st = useState({
-        open: false,          // 面板是否打开
-        anchor: null,         // 选区锚点（用于浮层按钮定位）
-        btnVisible: false,    // 浮层按钮是否显示
-        selection: '',        // 本次选中的原文
-        messages: [],         // 面板内的分析对话（前端持有，宿主无状态）
-        input: '',            // 面板输入框内容
+        open: false,
+        anchor: null,
+        btnVisible: false,
+        selectionPreview: '',
+        // ── 按 DSH 会话分组的话题表 ────────────────────────────────────
+        //   bySession: { [dshSessionId]: { topics: [...], activeId, seq } }
+        //   每个 topic = { id, name, selection, messages, input }
+        bySession: {},
+        // DOM 探到的会话 id（props 拿不到时用）
+        domSessionId: '',
         busy: false,
         err: null,
-        route: null,          // {provider, model}：从当前会话读，用于辅助调用
-        // 【一键发送给工作模式建模】：sending=发送中；sentTo=已发送到的会话 id
+        route: null,
         sending: false,
         sentTo: null,
         sentDrafted: false,
-        // 面板尺寸：用户可以拖左上角手柄自由放大放小（用户明确要求）
-        size: { w: 420, h: 520 },
+        size: { w: 470, h: 580 },
       });
       var S = st[0];
       var setS = st[1];
@@ -4583,19 +4973,120 @@ window.__ModuleLoader__.load({
           return n;
         });
       }
+
+      // ── 有效的 DSH 会话 key ───────────────────────────────────────────
+      //   优先 props 的响应式值；其次 DOM 探针；都没有则用 '__anon__'。
+      var sessionKey = String(dshSessionId || S.domSessionId || '__anon__');
+      var bucket = S.bySession[sessionKey] || { topics: [], activeId: null, seq: 0 };
+      var curTopic = null;
+      for (var bi = 0; bi < bucket.topics.length; bi++) {
+        if (bucket.topics[bi].id === bucket.activeId) { curTopic = bucket.topics[bi]; break; }
+      }
+
+      /** 修改某个 DSH 会话的 bucket（不可变更新）。 */
+      function patchBucket(sid, fn) {
+        st[1](function (p) {
+          var n = {};
+          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+          var bs = {};
+          for (var kk in p.bySession) if (Object.prototype.hasOwnProperty.call(p.bySession, kk)) bs[kk] = p.bySession[kk];
+          var old = bs[sid] || { topics: [], activeId: null, seq: 0 };
+          bs[sid] = fn(old);
+          n.bySession = bs;
+          return n;
+        });
+      }
+      /** 更新当前话题的若干字段。 */
+      function patchCur(fields) {
+        var sid = sessionKey;
+        patchBucket(sid, function (b) {
+          var topics = b.topics.map(function (t) {
+            if (t.id !== b.activeId) return t;
+            var nt = {};
+            for (var k in t) if (Object.prototype.hasOwnProperty.call(t, k)) nt[k] = t[k];
+            for (var k2 in fields) if (Object.prototype.hasOwnProperty.call(fields, k2)) nt[k2] = fields[k2];
+            return nt;
+          });
+          return { topics: topics, activeId: b.activeId, seq: b.seq };
+        });
+      }
       var panelRef = useRef(null);
       var listRef = useRef(null);
 
+      /** 在当前 DSH 会话下新建一个话题（点「问问AI」时调用）。 */
+      function newTopic(selectionText) {
+        var id = 't' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+        var sid = sessionKey;
+        patchBucket(sid, function (b) {
+          var n = (b.seq || 0) + 1;
+          var topic = {
+            id: id,
+            name: engSideName(n),
+            selection: String(selectionText || ''),
+            messages: [],
+            input: '',
+          };
+          var topics = b.topics.concat([topic]);
+          // 超上限：丢最早的（当前这个永不丢）
+          while (topics.length > ENG_SIDE_LIMIT) {
+            var dropIdx = -1;
+            for (var i = 0; i < topics.length; i++) {
+              if (topics[i].id !== id) { dropIdx = i; break; }
+            }
+            if (dropIdx < 0) break;
+            topics.splice(dropIdx, 1);
+          }
+          return { topics: topics, activeId: id, seq: n };
+        });
+        patch({ err: null });
+        return id;
+      }
+
+      /** 关闭某个话题（标签页上的 ×）。 */
+      function closeTopic(topicId) {
+        var sid = sessionKey;
+        patchBucket(sid, function (b) {
+          var topics = b.topics.filter(function (t) { return t.id !== topicId; });
+          var activeId = b.activeId;
+          if (activeId === topicId) {
+            // 关的是当前标签 → 切到相邻的一个（优先右边，其次左边）
+            var oldIdx = 0;
+            for (var i = 0; i < b.topics.length; i++) {
+              if (b.topics[i].id === topicId) { oldIdx = i; break; }
+            }
+            var next = topics[oldIdx] || topics[oldIdx - 1] || null;
+            activeId = next ? next.id : null;
+          }
+          return { topics: topics, activeId: activeId, seq: b.seq };
+        });
+        patch({ err: null });
+      }
+
+      // ── DOM 探针：props 拿不到会话 id 时兜底（切会话时更新）────────────
+      useEffect(function () {
+        if (dshSessionId) return;
+        var read = function () {
+          var v = '';
+          try {
+            var el = document.querySelector('[data-conversation-session]');
+            v = (el && el.getAttribute('data-conversation-session')) || '';
+            if (!v) {
+              var el2 = document.querySelector('[data-conversation-content]');
+              v = (el2 && el2.getAttribute('data-conversation-session')) || '';
+            }
+          } catch (e) { }
+          if (v && v !== S.domSessionId) patch({ domSessionId: String(v) });
+        };
+        read();
+        var iv = setInterval(read, 1200);
+        return function () { clearInterval(iv); };
+      }, [dshSessionId, S.domSessionId]);
+
       // ── 读取当前会话的模型路由 ────────────────────────────────────────
-      // /side-chat 需要 provider/model 才能发辅助请求。取当前会话最近一次
-      //   请求头里的路由（宿主 /log 端点在 route 字段里回传）。
       useEffect(function () {
         if (!S.open || S.route) return;
         try {
-          // 当前会话 id：官方 root 侧标准做法（mainView 保留者）
-          var sid = null;
-          var badges = document.querySelector('[data-conversation-content]');
-          if (badges) sid = badges.getAttribute('data-conversation-session');
+          var sid = sessionKey === '__anon__' ? null : sessionKey;
           if (!sid) return;
           fetch('/dsh-engineering-ui/log?sessionId=' + encodeURIComponent(sid) + '&limit=1')
             .then(function (r) { return r.json(); })
@@ -4604,14 +5095,11 @@ window.__ModuleLoader__.load({
                 patch({ route: j.route });
               }
             })
-            .catch(function () { /* 取不到就在发送时报错 */ });
-        } catch (e) { /* 忽略 */ }
-      }, [S.open, S.route]);
+            .catch(function () { });
+        } catch (e) { }
+      }, [S.open, S.route, sessionKey]);
 
-      // ── ① 划词检测：在 Agent 回复区域监听 selectionchange ──────────────
-      // 只认【对话区内的选区】，避免选中侧栏/设置等无关文字时也弹按钮。
-      // 用 mouseup 而不是 selectionchange 收尾：selectionchange 在拖选过程中
-      //   会高频触发，按钮会跟着乱跳。
+      // ── ① 划词检测 ────────────────────────────────────────────────────
       useEffect(function () {
         var onUp = function () {
           try {
@@ -4619,7 +5107,6 @@ window.__ModuleLoader__.load({
             if (!sel || sel.isCollapsed) { patch({ btnVisible: false }); return; }
             var text = String(sel.toString() || '').trim();
             if (text.length < 2) { patch({ btnVisible: false }); return; }
-            // 选区必须落在对话区内（[data-conversation-content] 或滚动体）
             var node = sel.anchorNode;
             var el = node && node.nodeType === 1 ? node : (node ? node.parentElement : null);
             var inConv = false;
@@ -4629,22 +5116,20 @@ window.__ModuleLoader__.load({
               el = el.parentElement;
             }
             if (!inConv) { patch({ btnVisible: false }); return; }
-            // 记录选区矩形，用于给浮层按钮定位
             var rect = null;
             try {
               var r = sel.getRangeAt(0).getBoundingClientRect();
               if (r && (r.width || r.height)) rect = { left: r.left, top: r.top, bottom: r.bottom, right: r.right };
-            } catch (e) { /* 无矩形时退回鼠标位置 */ }
-            patch({ btnVisible: true, selection: text.slice(0, 8000), anchor: rect });
-          } catch (e) { /* 选区 API 异常 → 不显示 */ }
+            } catch (e) { }
+            patch({ btnVisible: true, selectionPreview: text.slice(0, 8000), anchor: rect });
+          } catch (e) { }
         };
         var onDown = function (ev) {
-          // 点的不是浮层按钮/面板 → 收起按钮（但不动已打开的面板）
           try {
             var t = ev.target;
             if (t && t.closest && (t.closest('.eng-sel-btn') || t.closest('.eng-side'))) return;
             patch({ btnVisible: false });
-          } catch (e) { /* 忽略 */ }
+          } catch (e) { }
         };
         document.addEventListener('mouseup', onUp, true);
         document.addEventListener('mousedown', onDown, true);
@@ -4654,63 +5139,76 @@ window.__ModuleLoader__.load({
         };
       }, []);
 
-      // 面板打开时滚动到底（流式输出时也跟着滚）
+      // 面板打开时滚动到底（流式时跟着滚）
+      var curMsgs = (curTopic && curTopic.messages) || [];
+      var lastLen = curMsgs.length ? String(curMsgs[curMsgs.length - 1].text || '').length : 0;
       useEffect(function () {
         var box = listRef.current;
         if (box) box.scrollTop = box.scrollHeight;
-      }, [S.open, S.messages.length, S.messages.length ? S.messages[S.messages.length - 1].text : '']);
+      }, [S.open, bucket.activeId, sessionKey, curMsgs.length, lastLen]);
 
-      // ── ② 发起一次分析（首轮或追问都走这里）────────────────────────────
+      // ── ② 发起一次分析（只作用于当前话题）─────────────────────────────
       var ask = function (questionText) {
         var q = String(questionText || '').trim();
         if (S.busy) return;
+        if (!curTopic) return;
         if (!S.route) {
           patch({ err: '无法确定模型路由（请确认当前会话已开始过，或稍后重试）' });
           return;
         }
-        // 面板内历史 + 本次提问
-        var nextMsgs = S.messages.slice();
+        var nextMsgs = curTopic.messages.slice();
         if (q) nextMsgs.push({ role: 'user', text: q });
-        // 先放一条空的助手消息占位，流式增量会不断更新它的 text
-        //   → 面板立刻有内容，不再长时间空白（修「一直出不来分析」）
         var withPlaceholder = nextMsgs.concat([{ role: 'assistant', text: '', streaming: true }]);
         var botIdx = withPlaceholder.length - 1;
-        patch({ busy: true, err: null, messages: withPlaceholder, input: '' });
+        var targetSid = sessionKey;
+        var targetTid = curTopic.id;
+        patch({ busy: true, err: null });
+        patchCur({ messages: withPlaceholder, input: '' });
 
-        /** 把最后一条助手消息的文本替换成 latest（流式更新）。 */
-        var setBotText = function (latest, done) {
+        /** 写回【发起时那个话题】，不依赖"当前显示谁"。 */
+        var writeBot = function (mutate) {
           st[1](function (p) {
             var n = {};
             for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-            var msgs = p.messages.slice();
+            var bs = {};
+            for (var kk in p.bySession) if (Object.prototype.hasOwnProperty.call(p.bySession, kk)) bs[kk] = p.bySession[kk];
+            var b = bs[targetSid];
+            if (b) {
+              var topics = b.topics.map(function (t) {
+                if (t.id !== targetTid) return t;
+                var msgs = t.messages.slice();
+                mutate(msgs);
+                var nt = {};
+                for (var k3 in t) if (Object.prototype.hasOwnProperty.call(t, k3)) nt[k3] = t[k3];
+                nt.messages = msgs;
+                return nt;
+              });
+              bs[targetSid] = { topics: topics, activeId: b.activeId, seq: b.seq };
+            }
+            n.bySession = bs;
+            return n;
+          });
+        };
+        var setBotText = function (latest, done) {
+          writeBot(function (msgs) {
             if (msgs[botIdx]) {
               msgs[botIdx] = { role: 'assistant', text: String(latest || ''), streaming: !done };
             }
-            n.messages = msgs;
-            if (done) { n.busy = false; }
-            return n;
           });
+          if (done) patch({ busy: false });
         };
         var setErr = function (m) {
-          st[1](function (p) {
-            var n = {};
-            for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-            // 失败时去掉占位气泡，避免留一条空消息
-            var msgs = p.messages.slice();
+          writeBot(function (msgs) {
             if (msgs[botIdx] && !msgs[botIdx].text) msgs.splice(botIdx, 1);
-            n.messages = msgs;
-            n.busy = false;
-            n.err = String(m || '分析失败');
-            return n;
           });
+          patch({ busy: false, err: String(m || '分析失败') });
         };
 
-        // 用 SSE 流式读取；不支持时自动回退到一次性 JSON。
         fetch('/dsh-engineering-ui/side-chat', {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'accept': 'text/event-stream' },
           body: JSON.stringify({
-            selection: S.selection,
+            selection: curTopic.selection,
             messages: nextMsgs,
             provider: S.route.provider,
             model: S.route.model,
@@ -4720,13 +5218,11 @@ window.__ModuleLoader__.load({
           .then(function (r) {
             var ct = String((r.headers && r.headers.get && r.headers.get('content-type')) || '');
             if (ct.indexOf('text/event-stream') < 0) {
-              // 服务端没走流式（例如出错早返回 JSON）→ 按 JSON 处理
               return r.json().then(function (j) {
                 if (j && j.ok && j.reply) setBotText(j.reply, true);
                 else setErr((j && j.error) || '分析失败');
               });
             }
-            // 手动读流并解析 SSE 帧
             var reader = r.body && r.body.getReader ? r.body.getReader() : null;
             if (!reader) {
               return r.text().then(function (txt) {
@@ -4744,7 +5240,6 @@ window.__ModuleLoader__.load({
                   return;
                 }
                 buf += dec.decode(res.value, { stream: true });
-                // SSE 帧以空行分隔
                 var parts = buf.split('\n\n');
                 buf = parts.pop();
                 for (var i = 0; i < parts.length; i++) {
@@ -4767,9 +5262,7 @@ window.__ModuleLoader__.load({
           });
       };
 
-      // ── ③ 回填到主对话输入框（图三「添加到对话」）──────────────────────
-      // 走官方 composer 的 contenteditable；用 execCommand 走原生输入路径，
-      //   这样 React/Lexical 能正确收到这次输入。
+      // ── ③ 回填到主对话输入框 ─────────────────────────────────────────
       var addToConversation = function (text) {
         var body = String(text || '').trim();
         if (!body) return false;
@@ -4777,22 +5270,19 @@ window.__ModuleLoader__.load({
           var el = document.querySelector('[data-conversation-region="composer"] [contenteditable="true"]');
           if (!el) return false;
           el.focus();
-          // 已有草稿时先换行，避免和原文粘在一起
           var pre = String(el.textContent || '').trim() ? '\n\n' : '';
           document.execCommand('insertText', false, pre + body);
           return true;
         } catch (e) { return false; }
       };
 
-      // ── ④【一键发送给工作模式建模】（面板内版本）───────────────────────
-      // 发送内容 = 选中原文 + 面板里已有的分析结论。
-      // 真正的会话创建/预设设置/发送/跳转都在 engSendToWorkSession 里，
-      //   与操作行按钮（conversation.chat.assistant-actions）共用同一条链路。
+      // ── ④ 一键发送给工作模式建模 ──────────────────────────────────────
       var sendToWorkMode = function () {
         if (S.sending) return;
-        var analysis = S.messages.filter(function (m) { return m.role === 'assistant' && m.text; })
+        if (!curTopic) return;
+        var analysis = curTopic.messages.filter(function (m) { return m.role === 'assistant' && m.text; })
           .map(function (m) { return String(m.text).trim(); }).filter(Boolean).join('\n\n---\n\n');
-        var sel = String(S.selection || '').trim();
+        var sel = String(curTopic.selection || '').trim();
         if (!sel && !analysis) {
           patch({ err: '没有可发送的内容' });
           return;
@@ -4812,15 +5302,14 @@ window.__ModuleLoader__.load({
       };
 
       // ══ 设置门禁（所有 hook 之后）══════════════════════════════════════
-      // 「设计过程优化 → 右键引用调出AI解释」关闭时：整个功能不工作。
-      //   放在 hook 之后是为了不违反 React hooks 规则（同 EngInputDock 的教训）。
       if (!settings.enableSelectionExplain) return null;
 
-      // ── 浮层按钮（图二）──────────────────────────────────────────────
+      var msgs = (curTopic && curTopic.messages) || [];
+
+      // ── 浮层按钮：在当前 DSH 会话下新建一个话题 ────────────────────────
       var btn = null;
-      if (S.btnVisible && !S.open && S.anchor) {
-        // 定位在选区下方的水平中心；靠近顶部时放到选区上方，避免被裁掉。
-        var W = 96;
+      if (S.btnVisible && S.anchor) {
+        var W = 92;
         var cx = (S.anchor.left + S.anchor.right) / 2;
         var left = Math.max(8, Math.min((window.innerWidth || 1200) - W - 8, cx - W / 2));
         var below = (S.anchor.bottom + 8);
@@ -4830,26 +5319,81 @@ window.__ModuleLoader__.load({
           className: 'eng-sel-btn',
           type: 'button',
           style: { left: left + 'px', top: top + 'px' },
-          // ⚠️ 用 onMouseDown 而不是 onClick：mouseup 会先改变选区，
-          //    onClick 期间 selection 可能已被清空 → 拿不到原文。
+          // ⚠️ 用 onMouseDown 而不是 onClick：mouseup 会先改变选区。
           onMouseDown: function (ev) {
-            ev.preventDefault();   // 阻止默认行为以保留选区
+            ev.preventDefault();
             ev.stopPropagation();
-            patch({ open: true, btnVisible: false });
-            // 打开即自动发起一次分析（图三的行为）
+            var picked = String(S.selectionPreview || '').trim();
+            newTopic(picked);
+            patch({ open: true, btnVisible: false, err: null });
             setTimeout(function () { ask(''); }, 0);
           },
         }, '问问AI');
       }
 
-      // ── 右下角面板（图三）────────────────────────────────────────────
+      // ── 浏览器式标签页（可关闭）───────────────────────────────────────
+      var tabs = null;
+      if (bucket.topics.length) {
+        tabs = h('div', { className: 'eng-side-tabs' },
+          bucket.topics.map(function (t) {
+            var on = t.id === bucket.activeId;
+            return h('div', {
+              key: 'tab-' + t.id,
+              className: 'eng-side-tab' + (on ? ' on' : ''),
+              title: (t.selection ? String(t.selection).slice(0, 90) : t.name),
+            },
+              h('button', {
+                className: 'eng-side-tab-t',
+                type: 'button',
+                onClick: function () {
+                  if (S.busy) return;
+                  var sid2 = sessionKey;
+                  patchBucket(sid2, function (b) {
+                    return { topics: b.topics, activeId: t.id, seq: b.seq };
+                  });
+                  patch({ err: null, sentTo: null, sentDrafted: false });
+                },
+              }, t.name,
+                t.messages.length
+                  ? h('span', { className: 'eng-side-tab-n' }, String(t.messages.length))
+                  : null),
+              h('button', {
+                className: 'eng-side-tab-x',
+                type: 'button',
+                title: '关闭「' + t.name + '」',
+                onClick: function (ev2) {
+                  try { ev2.stopPropagation(); } catch (e) { }
+                  if (S.busy) return;
+                  closeTopic(t.id);
+                },
+              }, '×'));
+          }),
+          h('button', {
+            className: 'eng-side-tab add',
+            type: 'button',
+            title: '用当前选中文字，在本对话下新建一个话题',
+            onClick: function () {
+              if (S.busy) return;
+              var picked = String(S.selectionPreview || '').trim();
+              if (!picked) { patch({ err: '请先在对话里划选一段文字，再新建话题' }); return; }
+              newTopic(picked);
+              patch({ err: null });
+              setTimeout(function () { ask(''); }, 0);
+            },
+          }, '＋'));
+      }
+
+      // ── 右下角面板 ────────────────────────────────────────────────────
       var panel = null;
       if (S.open) {
-        var rows = S.messages.map(function (m, i) {
+        var rows = msgs.map(function (m, i) {
           var isBot = m.role === 'assistant';
           return h('div', { key: 'm' + i, className: 'eng-side-row ' + (isBot ? 'bot' : 'me') },
-            h('div', { className: 'eng-side-bubble' }, m.text),
-            isBot
+            h('div', { className: 'eng-side-bubble' },
+              isBot
+                ? engRenderMarkdown(m.text, 'md' + i)
+                : m.text),
+            isBot && m.text && !m.streaming
               ? h('div', { className: 'eng-side-acts' },
                   h('button', {
                     className: 'eng-side-act',
@@ -4865,12 +5409,8 @@ window.__ModuleLoader__.load({
         panel = h('div', {
             className: 'eng-side',
             ref: panelRef,
-            // 面板尺寸由用户拖拽决定，存在 state 里（切会话/重开保留本页期间的值）
             style: { width: S.size.w + 'px', height: S.size.h + 'px' },
           },
-          // ── 左上角拖拽手柄：调整面板大小（用户要求"能自由放大放小"）────
-          // 用 pointer events + setPointerCapture：拖动时即使指针移出面板
-          //   也能继续收到事件，不会中途丢失。
           h('div', {
             className: 'eng-side-grip',
             title: '拖动调整大小',
@@ -4883,13 +5423,12 @@ window.__ModuleLoader__.load({
                 var startX = ev.clientX, startY = ev.clientY;
                 var w0 = S.size.w, h0 = S.size.h;
                 var move = function (e2) {
-                  // 面板锚在右下角：向左拖变宽、向上拖变高
                   var w = w0 + (startX - e2.clientX);
                   var hh = h0 + (startY - e2.clientY);
                   var maxW = Math.max(320, (window.innerWidth || 1200) - 36);
                   var maxH = Math.max(240, (window.innerHeight || 800) - 36);
-                  w = Math.max(300, Math.min(maxW, w));
-                  hh = Math.max(220, Math.min(maxH, hh));
+                  w = Math.max(360, Math.min(maxW, w));
+                  hh = Math.max(280, Math.min(maxH, hh));
                   patch({ size: { w: Math.round(w), h: Math.round(hh) } });
                 };
                 var up = function () {
@@ -4898,34 +5437,38 @@ window.__ModuleLoader__.load({
                 };
                 document.addEventListener('pointermove', move, true);
                 document.addEventListener('pointerup', up, true);
-              } catch (e) { /* 不支持 pointer events 时退化为不可缩放 */ }
+              } catch (e) { }
             },
           }, '⤡'),
           h('div', { className: 'eng-side-hd' },
             h('span', { className: 'eng-side-ico' }, '💬'),
             h('span', { className: 'eng-side-title' }, '问问AI'),
-            h('span', { className: 'eng-side-badge' }, S.messages.length ? (S.messages.length + ' 条') : ''),
+            h('span', { className: 'eng-side-badge' },
+              (curTopic ? curTopic.name : '无话题')
+              + (sessionKey === '__anon__' ? '' : '')),
             h('button', {
               className: 'eng-side-x',
               type: 'button',
-              title: '关闭',
+              title: '关闭面板（各话题历史保留，重新打开继续）',
               onClick: function () { patch({ open: false }); },
             }, '×')),
-          // 选中原文（折叠展示，让用户知道在分析什么）
-          h('div', { className: 'eng-side-src', title: S.selection }, S.selection),
+          tabs,
+          curTopic
+            ? h('div', { className: 'eng-side-src', title: curTopic.selection }, curTopic.selection)
+            : h('div', { className: 'eng-side-src' },
+                '本对话还没有话题 —— 在对话里划选一段文字，点「问问AI」开始'),
           h('div', { className: 'eng-side-list', ref: listRef },
-            rows.length ? rows : h('div', { className: 'eng-side-note' }, S.busy ? '正在分析…' : '正在等待分析…'),
+            rows.length
+              ? rows
+              : h('div', { className: 'eng-side-note' },
+                  S.busy ? '正在分析…' : '正在等待分析…'),
             S.err ? h('div', { className: 'eng-side-err' }, S.err) : null),
-          // ── 【一键发送给工作模式建模】────────────────────────────────
-          // 新建一个工程模式会话，把「引用原文 + 已有分析」作为首轮任务发过去，
-          //   然后跳到那个会话 —— 由工作模式的工作区真正干活（建模/仿真）。
-          // 放在输入框上方，与「继续追问」区分开：一个是继续聊，
-          //   一个是"带着结论去开工"。
           h('div', { className: 'eng-side-work' },
             h('button', {
               className: 'eng-side-workbtn',
               type: 'button',
-              disabled: S.sending || S.busy || (!S.selection && !S.messages.length),
+              disabled: S.sending || S.busy || !curTopic
+                || (!curTopic.selection && !curTopic.messages.length),
               title: '新建一个工程模式会话，把本次分析交给它去建模',
               onClick: function () { sendToWorkMode(); },
             }, S.sending ? '正在交给工作模式…' : '⚙ 一键发送给工作模式建模'),
@@ -4938,27 +5481,26 @@ window.__ModuleLoader__.load({
             h('input', {
               className: 'eng-side-in',
               type: 'text',
-              placeholder: '继续追问…（Enter 发送）',
-              value: S.input,
-              disabled: S.busy,
-              onChange: function (ev) { patch({ input: ev.target.value }); },
+              placeholder: (curTopic ? curTopic.name : '') + '·继续追问…（Enter 发送）',
+              value: curTopic ? (curTopic.input || '') : '',
+              disabled: S.busy || !curTopic,
+              onChange: function (ev) { patchCur({ input: ev.target.value }); },
               onKeyDown: function (ev) {
                 if (ev.key === 'Enter' && !ev.shiftKey) {
                   ev.preventDefault();
-                  ask(S.input);
+                  ask(curTopic ? curTopic.input : '');
                 }
               },
             }),
             h('button', {
               className: 'eng-side-send',
               type: 'button',
-              disabled: S.busy || !S.input.trim(),
-              onClick: function () { ask(S.input); },
+              disabled: S.busy || !curTopic || !String(curTopic.input || '').trim(),
+              onClick: function () { ask(curTopic ? curTopic.input : ''); },
             }, S.busy ? '…' : '↑')));
       }
 
       if (!btn && !panel) return null;
-      // display:contents：让两个浮层元素都直接参与 shell.overlay 的层级
       return h('div', { className: 'eng-sel-host', style: { display: 'contents' } }, btn, panel);
     }
 
@@ -5915,6 +6457,10 @@ window.__ModuleLoader__.load({
     exports.SubagentDock = SubagentConsole;
     exports.formatMessage = formatMessage;
     exports.renderEvent = renderEvent;
+    // 【问问AI】Markdown 子集渲染器（供回归测试直接验证渲染结果）
+    exports.engRenderMarkdown = engRenderMarkdown;
+    exports.engRenderInline = engRenderInline;
+    exports.engSideName = engSideName;
     exports.AskCard = AskCard;
     exports.parseQuestions = parseQuestions;
     return module.exports;

@@ -128,7 +128,8 @@
         返回 load_is_estimate=true 时必须先向用户复核。
       6) 分别问 A/B/C、D/E（两次独立调用）7) select C,E → 出子代理配置 8) 按返回建全部小屋。
 
-      【串行E】todo 列全 → 逐房间：room-start(须在建 subagent 前) → subagent_fork → 等完成(list_agents)
+
+      【串行E】todo 列全 → 逐房间：mode_gate.py room-start(须在建 subagent 前) → subagent_fork → 等完成(list_agents)
       → interrupt_agent → room-end。禁提前建多个 subagent，禁同开多 SW 实例。
 
       【并行D】select 给几个就开几个（空=全完成）。

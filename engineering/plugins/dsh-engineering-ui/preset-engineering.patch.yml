@@ -162,7 +162,8 @@
                   返回 load_is_estimate=true 时必须先向用户复核。
                 6) 分别问 A/B/C、D/E（两次独立调用）7) select C,E → 出子代理配置 8) 按返回建全部小屋。
 
-                【串行E】todo 列全 → 逐房间：room-start(须在建 subagent 前) → subagent_fork → 等完成(list_agents)
+
+                【串行E】todo 列全 → 逐房间：mode_gate.py room-start(须在建 subagent 前) → subagent_fork → 等完成(list_agents)
                 → interrupt_agent → room-end。禁提前建多个 subagent，禁同开多 SW 实例。
 
                 【并行D】select 给几个就开几个（空=全完成）。
@@ -312,35 +313,6 @@
 
           # ── 上下文压缩 ──────────────────────────────────────────────────────────────
           # 管理长对话的上下文窗口，确保设计过程的可追溯性
-          #
-          # ⚠️【2026-10-17 修复 · 上下文超限】
-          #   现象：新开对话发第一条消息就报
-          #     CONTEXT_WINDOW_EXCEEDED / prompt is too long: 100001 tokens > 100000 maximum
-          #   根因（源码 dsh-compaction-basic/lib/index.js:124-134）：
-          #     触发阈值 = min(contextWindow * thresholdRatio,
-          #                   contextWindow - 输出预留 - headroomTokens)
-          #     默认 thresholdRatio=0.8 会取到 contextWindow*0.8，
-          #     于是压缩被推迟到窗口的 80%；若模型【自报的窗口偏大】
-          #     （例如某适配器把实际 100k 的模型写成 192k），
-          #     DSH 以为还有大把空间、根本不压缩 → 服务端直接拒收。
-          #   为什么必须显式配：默认值完全依赖「模型自报窗口是否可信」，
-          #     而第三方适配器的窗口元数据并不总是对的。
-          #   本配置把判定改成【模型无关】：
-          #     · headroomTokens 24000 —— 【这是真正的保险】。公式是
-          #         min(cw*ratio, cw - 输出预留 - headroom)
-          #       只要 cw - 输出预留 - 24000 小于 cw*ratio，阈值就由 headroom 项决定。
-          #       实测：cw=100k、输出预留 32k 时，阈值恒为 43232 ——
-          #       ratio 取 0.5/0.6/0.8 结果完全一样，说明安全边际不依赖窗口比例。
-          #     · thresholdRatio 0.6 —— 对大窗口模型（1M）起主要作用，
-          #       避免 1M 窗口要攒到 976k 才压缩；
-          #     · retainRatio 0.15 —— 压缩后保留 15% 最近原文，设计上下文连续。
-          #   这样任何人拿到本预设、换任何模型（hy3 / GPT / DeepSeek / 本地），
-          #     都由 headroom 项兜住安全边际，与模型元数据是否准确无关。
-          #
-          #   ⚠️ 另一半配套修复在适配器侧（不属于本预设）：
-          #     某模型的 maxOutputTokens 若声明得比窗口还激进（实测有适配器给
-          #     100k 窗口的模型声明 64k 输出），会把输入可用空间挤到 36k；
-          #     此时必须先修适配器的输出预留，否则任何压缩阈值都救不回来。
 
           - id: compaction
             name: cordis:group
@@ -352,9 +324,13 @@
               - id: compaction-basic
                 name: '@deepseek-ai/dsh-compaction-basic'
                 config:
-                  thresholdRatio: 0.6
-                  headroomTokens: 24000
-                  retainRatio: 0.15
+                  # 阈值 = min(声明窗口*ratio, 声明窗口-输出预留-headroom)。
+                  # 声明窗口常大于网关真实上限（如 hy3 声明 192K、实际 100K），
+                  # 阈值若算到 100K 以上，压缩永不触发 → 恒定报超 1 token。
+                  # 现取 min(192K*0.5, 192K-64K-48K)=80K，稳稳低于真实上限。
+                  thresholdRatio: 0.5
+                  headroomTokens: 48000
+                  retainRatio: 0.12
 
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'

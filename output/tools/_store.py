@@ -316,6 +316,111 @@ def report() -> dict:
     }
 
 
+def sync_report() -> dict:
+    import time as _time
+
+    d = state_dir()
+    out = {
+        "ok": True,
+        "checked": False,
+        "in_sync": None,
+        "state_dir": d,
+        "workflow": None,
+        "mode": None,
+        "cross_file": None,
+        "error": None,
+        "note": "",
+        "at": _time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    def _read_json(name):
+        import json as _json
+        path = os.path.join(d, name)
+        if not os.path.isfile(path):
+            return None, "%s 不存在: %s" % (name, path)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return _json.load(f), None
+        except Exception as e:
+            return None, "%s 解析失败: %r" % (name, e)
+
+    wf, wf_err = _read_json("workflow_state.json")
+    ms, ms_err = _read_json("mode_state.json")
+    if wf_err or ms_err:
+        out["ok"] = False
+        out["error"] = "; ".join([x for x in (wf_err, ms_err) if x])
+        out["note"] = ("跨文件一致性检查未执行（缺文件或损坏）—— "
+                       "in_sync 保持 None，请勿当作已同步。")
+        return out
+
+    if not isinstance(wf, dict) or not isinstance(ms, dict):
+        out["ok"] = False
+        out["error"] = "状态文件根节点不是对象"
+        out["note"] = "跨文件一致性检查未执行，in_sync 保持 None。"
+        return out
+
+    # ── workflow_state 侧：门禁认定的完成房间 ────────────────────────────
+    wf_rooms = wf.get("done_rooms")
+    if not isinstance(wf_rooms, list):
+        # 兼容旧结构：有些版本把完成信息记在 rooms 里
+        wf_rooms = []
+        _r = wf.get("rooms")
+        if isinstance(_r, dict):
+            for k, v in _r.items():
+                if isinstance(v, dict) and v.get("done"):
+                    wf_rooms.append(k)
+    wf_task = wf.get("task_id")
+    wf_step = wf.get("step")
+
+    # ── mode_state 侧：状态机记录的已结束房间 ────────────────────────────
+    ms_rooms = ms.get("rooms") if isinstance(ms.get("rooms"), dict) else {}
+    ms_done = sorted([k for k, v in ms_rooms.items()
+                      if isinstance(v, dict) and (v.get("ended_at") or 0) > 0])
+    ms_active = sorted([k for k, v in ms_rooms.items()
+                        if isinstance(v, dict) and v.get("active")])
+    ms_failed = sorted([k for k, v in ms_rooms.items()
+                        if isinstance(v, dict) and v.get("failed_at")])
+
+    wf_done = sorted(set(str(x) for x in wf_rooms))
+    only_wf = [x for x in wf_done if x not in ms_done]
+    only_ms = [x for x in ms_done if x not in wf_done]
+    in_sync = (not only_wf) and (not only_ms)
+
+    out["checked"] = True
+    out["in_sync"] = bool(in_sync)
+    out["workflow"] = {
+        "task_id": wf_task,
+        "step": wf_step,
+        "done_rooms": wf_done,
+        "count": len(wf_done),
+    }
+    out["mode"] = {
+        "done_rooms": ms_done,
+        "active_rooms": ms_active,
+        "failed_rooms": ms_failed,
+        "count": len(ms_done),
+    }
+    out["cross_file"] = {
+        "only_in_workflow": only_wf,
+        "only_in_mode": only_ms,
+        "identical": bool(in_sync),
+    }
+
+    if in_sync:
+        out["note"] = ("跨文件一致性：两侧已完成房间完全一致（%d 个）。"
+                       % len(wf_done))
+    else:
+        _parts = []
+        if only_wf:
+            _parts.append("workflow_state 认为已完成、但 mode_state 无结束时间: %s"
+                          % ", ".join(only_wf))
+        if only_ms:
+            _parts.append("mode_state 已结束、但 workflow_state 未登记: %s"
+                          % ", ".join(only_ms))
+        out["note"] = "跨文件不一致 —— " + "；".join(_parts)
+    return out
+
+
 def _ensure_importable():
     """把状态目录加入 sys.path，供 import mode_gate / defense_gate 等使用。"""
     d = state_dir()

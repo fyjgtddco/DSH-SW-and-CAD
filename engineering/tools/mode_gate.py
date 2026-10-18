@@ -186,6 +186,9 @@ _SW_STATE_FILE = os.path.join(STATE_DIR, "sw_state.json")
 _SW_MONITOR_PID_FILE = os.path.join(STATE_DIR, "sw_monitor.pid")
 _SW_MONITOR_INTERVAL = 3   # 监控刷新间隔（秒）
 
+# 兼容别名：下游有两处按不带前缀的名字引用（曾 NameError）。
+SW_MONITOR_INTERVAL = _SW_MONITOR_INTERVAL
+
 STATE_PATH = os.path.join(STATE_DIR, "mode_state.json")
 WORKFLOW_STATE_PATH = os.path.join(STATE_DIR, "workflow_state.json")
 MODE_NAMES = {"1": "基础零件搭建", "2": "大型复杂器械装配", "3": "原图解分析"}
@@ -305,10 +308,19 @@ def cmd_platform_sync(room, status, by="main"):
 
 
 def _heartbeat_path(room):
-    """返回房间心跳文件路径。"""
-    os.makedirs(HEARTBEAT_DIR, exist_ok=True)
+    """返回房间心跳文件路径（按任务隔离，旧心跳不会让新房间"看起来还活着"）。"""
+    try:
+        _wf = os.path.join(STATE_DIR, "workflow_state.json")
+        _tid = None
+        if os.path.exists(_wf):
+            with open(_wf, "r", encoding="utf-8") as _f:
+                _tid = (json.load(_f) or {}).get("task_id")
+        _base = os.path.join(HEARTBEAT_DIR, str(_tid)) if _tid else HEARTBEAT_DIR
+    except Exception:
+        _base = HEARTBEAT_DIR
+    os.makedirs(_base, exist_ok=True)
     safe = "".join(c for c in room if c.isalnum() or c in " _-").strip()
-    return os.path.join(HEARTBEAT_DIR, safe + ".heartbeat")
+    return os.path.join(_base, safe + ".heartbeat")
 
 
 def cmd_room_heartbeat(name):
@@ -1124,14 +1136,28 @@ def scan_legacy_artifacts(work_dir, epoch=None):
 #     python mode_gate.py room-artifact <房间名> <文件路径> [零件名]
 #   登记表写入 artifacts_registry.json，按【房间名】隔离；
 #   _recent_artifact_evidence 优先用登记表判定归属，扫描 mtime 降级为兜底。
-ARTIFACT_REGISTRY_FILE = os.path.join(STATE_DIR, "artifacts_registry.json")
+def _registry_file():
+    """产物登记表按【任务】隔离 —— 新任务不得看到上一局的零件清单。"""
+    try:
+        _wf = os.path.join(STATE_DIR, "workflow_state.json")
+        if os.path.exists(_wf):
+            with open(_wf, "r", encoding="utf-8") as _f:
+                _tid = (json.load(_f) or {}).get("task_id")
+            if _tid:
+                return os.path.join(STATE_DIR, "artifacts_registry.%s.json" % _tid)
+    except Exception:
+        pass
+    return os.path.join(STATE_DIR, "artifacts_registry.json")
+
+ARTIFACT_REGISTRY_FILE = _registry_file()
 
 
 def _load_artifact_registry():
     """读取产物归属登记表 {room: [{path, name, ts, at}]}（失败返回 {}）。"""
     try:
-        if os.path.exists(ARTIFACT_REGISTRY_FILE):
-            with open(ARTIFACT_REGISTRY_FILE, "r", encoding="utf-8") as f:
+        _rf = _registry_file()
+        if os.path.exists(_rf):
+            with open(_rf, "r", encoding="utf-8") as f:
                 d = json.load(f)
             return d if isinstance(d, dict) else {}
     except Exception:
@@ -1141,7 +1167,7 @@ def _load_artifact_registry():
 
 def _save_artifact_registry(data):
     try:
-        with open(ARTIFACT_REGISTRY_FILE, "w", encoding="utf-8") as f:
+        with open(_registry_file(), "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         return True
     except Exception:
@@ -1205,7 +1231,7 @@ def cmd_room_artifact(room, file_path, part_name=None):
     return {"ok": ok, "room": _room,
             "artifact": {"path": _real_abs, "name": _name, "exists": bool(_exists)},
             "registered_count": len(data[_room]),
-            "file": ARTIFACT_REGISTRY_FILE,
+            "file": _registry_file(),
             "note": ("已登记本房间产物归属（大小写不敏感去重，Bug-09）；"
                      "room-status 的 artifact 判定将以登记表为准（Bug-16/17）。")}
 
@@ -1390,8 +1416,25 @@ def _safe_room_name(room):
     return "".join(c for c in room if c.isalnum() or c in " _-").strip()
 
 
+def _reports_dir_task():
+    """当前任务的 reports 子目录（与 defense_gate 同一隔离口径）。"""
+    try:
+        _wf = os.path.join(STATE_DIR, "workflow_state.json")
+        if os.path.exists(_wf):
+            with open(_wf, "r", encoding="utf-8") as _f:
+                _tid = (json.load(_f) or {}).get("task_id")
+            if _tid:
+                _d = os.path.join(REPORTS_DIR, str(_tid))
+                os.makedirs(_d, exist_ok=True)
+                return _d
+    except Exception:
+        pass
+    return REPORTS_DIR
+
+
 def _report_path(room):
-    return os.path.join(REPORTS_DIR, _safe_room_name(room) + ".report.json")
+    """房间进度报告 —— 按任务隔离，避免新对话读到上一局的房间状态。"""
+    return os.path.join(_reports_dir_task(), _safe_room_name(room) + ".report.json")
 
 
 def _read_json_file(path):
@@ -3462,12 +3505,75 @@ def cmd_declare(mode):
             "parallel_mode": _norm_pmode(state.get("parallel_mode"))}
 
 
+def _require_subagent_plan():
+    """房间开工前必须有总计子代理登记过的编制（判据来自落盘文件，不是自述）。"""
+    try:
+        import mode2_flow as _m2
+    except Exception as e:
+        return {"ok": False,
+                "error": "mode2_flow 不可用，无法校验编制: %r" % (e,)}
+    try:
+        _plan = _m2.get_subagent_plan(_mode2_work_dir())
+    except Exception as e:
+        return {"ok": False, "error": "读取编制失败: %r" % (e,)}
+    if not _plan.get("ok"):
+        return {
+            "ok": False,
+            "gate": "SUBAGENT_PLAN_REQUIRED",
+            "error": "尚未登记子代理编制，禁止 room-start。",
+        }
+    # 编制必须属于【当前任务】—— 残留的旧编制同样不能拿来开工。
+    _task_now = None
+    try:
+        import workflow_gate as _wg2
+        _task_now = (_wg2.load_state() or {}).get("task_id")
+    except Exception:
+        _task_now = None
+    _plan_task = _plan.get("task_id")
+    # 没有 task_id 的编制无法证明属于本任务 —— 一律按残留处理（fail-closed）。
+    if _task_now and not _plan_task:
+        return {
+            "ok": False,
+            "gate": "SUBAGENT_PLAN_STALE",
+            "error": ("子代理编制缺少 task_id，无法证明属于当前任务 %s —— "
+                      "按残留处理，禁止开工。" % _task_now),
+            "hint": "让总计子代理重新登记编制（会写入本任务 task_id）。",
+        }
+    if _task_now and _plan_task and str(_plan_task) != str(_task_now):
+        return {
+            "ok": False,
+            "gate": "SUBAGENT_PLAN_STALE",
+            "error": ("子代理编制属于上一轮任务（%s），当前任务为 %s —— "
+                      "残留编制不允许用于开工。"
+                      % (_plan_task, _task_now)),
+            "hint": "让总计子代理为本任务重新登记编制后再 room-start。",
+        }
+    return {"ok": True, "plan": _plan}
+
+
+def _mode2_work_dir():
+    """取 mode2_flow 的工作目录（与门禁同一任务目录）。"""
+    try:
+        import workflow_gate as _wg
+        _st = _wg.load_state()
+        return _wg._m2_work_dir(_st)
+    except Exception:
+        return None
+
+
 def cmd_room_start(name):
     state = load_state()
     if str(state.get("mode")) != "2":
         err = "当前不是大型复杂器械装配模式,无需登记小屋。"
         err += "若确认为装配任务请先: mode_gate.py declare 2"
         return {"ok": False, "error": err}
+    # ── 强制点 C：房间开工前必须已由总计子代理登记编制 ──────────────────
+    # 实测违规：十阶段还停在 TaskUnderstanding，就直接 room-start + fork×2，
+    #   而且 prompt 里的零件清单和门禁波次要求对不上。
+    # 编制是"该开哪几间、每间做什么"的唯一来源；没有编制就不许开工。
+    _plan_gate = _require_subagent_plan()
+    if not _plan_gate.get("ok"):
+        return _plan_gate
     pmode = get_parallel_mode()
     # ── 【Bug#1 修复 · 关键】把 self-heal 的结果同步进本地 state 副本 ────────
     #   场景：mode_state 是粘性 'sequential'（上一轮选过 E），而本轮用户选了 D。
@@ -4768,6 +4874,71 @@ def cmd_sw_release(name):
             "note": "该房间未持有 SW 锁" + ("（已顺带清理残留标志）" if _purged else "")}
 
 
+def cmd_close_all():
+    """关闭全部 SolidWorks 并释放 SW 锁（流程清场用）。
+
+    为什么要在这里提供：
+      persona / SKILL 里写的是「每波前用 close-all 清场」，但 close-all 只在
+      sw_bridge.py 里，mode_gate.py 没有 → 流程中按文档调用会得到「未知命令」，
+      表现为"SW 只能确认无进程，没法用命令清场"。
+      本命令 = sw_bridge.close-all + 释放本机全部房间的 SW 锁（同一件事的两半）。
+    """
+    out = {"ok": True, "command": "close-all", "steps": []}
+    # ① 关闭 SW
+    try:
+        import subprocess as _sp
+        import sys as _sys
+        import os as _os
+        _bridge = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                "sw_bridge.py")
+        _r = _sp.run([_sys.executable, _bridge, "close-all"],
+                     capture_output=True, text=True, encoding="utf-8",
+                     errors="replace", timeout=120)
+        _txt = (_r.stdout or "").strip()
+        out["steps"].append({"step": "sw_bridge close-all",
+                             "ok": _r.returncode == 0,
+                             "detail": _txt[-400:] if _txt else ""})
+    except Exception as e:
+        out["steps"].append({"step": "sw_bridge close-all", "ok": False,
+                             "error": repr(e)})
+    # ② 释放所有房间的 SW 锁（清场后不应再有独占者）
+    try:
+        st = load_state()
+        _rel = []
+        for _room, _v in (st.get("rooms") or {}).items():
+            try:
+                if _v.get("sw_lock") or _v.get("lock"):
+                    _v.pop("sw_lock", None)
+                    _v.pop("lock", None)
+                _rel.append(_room)
+            except Exception:
+                continue
+        st["sw_lock"] = {"owner": None, "queue": []}
+        save_state(st)
+        out["steps"].append({"step": "release_sw_locks", "ok": True,
+                             "rooms": _rel})
+    except Exception as e:
+        out["steps"].append({"step": "release_sw_locks", "ok": False,
+                             "error": repr(e)})
+    # ③ 复查进程是否真的归零（close-all 是异步的）
+    try:
+        import subprocess as _sp2
+        _r2 = _sp2.run(["tasklist", "/FI", "IMAGENAME eq SLDWORKS.exe"],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=20)
+        _remain = "SLDWORKS.EXE" in (_r2.stdout or "").upper()
+        out["steps"].append({"step": "verify_exited", "ok": not _remain,
+                             "detail": ("仍有残留进程" if _remain
+                                        else "进程已全部退出")})
+        if _remain:
+            out["ok"] = False
+            out["hint"] = "SW 进程未完全退出，稍后重试或手动结束。"
+    except Exception as e:
+        out["steps"].append({"step": "verify_exited", "ok": False,
+                             "error": repr(e)})
+    return out
+
+
 def cmd_sw_proc():
     running = _sw_running()
     pids = []
@@ -5145,6 +5316,8 @@ def main():
         result = cmd_sw_guard_stop()
     elif cmd in ("sw-guard-status", "sw-guard"):
         result = cmd_sw_guard_status()
+    elif cmd == "close-all":
+        result = cmd_close_all()
     elif cmd == "sw-proc":
         result = cmd_sw_proc()
     elif cmd == "sw-status":

@@ -36,6 +36,15 @@
 """
 from __future__ import annotations
 
+try:
+    import sys as _sys_utf8
+    for _stream_name in ("stdout", "stderr"):
+        _st = getattr(_sys_utf8, _stream_name, None)
+        if _st is not None and hasattr(_st, "reconfigure"):
+            _st.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import json
 import os
 import re
@@ -144,8 +153,47 @@ def validate_question_budget(depth, asked_count, *, final=False):
 # 三、流程状态读写（原子写）
 # ═══════════════════════════════════════════════════════════════════════════
 def _plan_dir(work_dir=None):
-    """计划文件所在目录：优先任务的 work_dir，否则用 tools/load_cases。"""
+    """计划文件所在目录。
+
+    优先级：显式 work_dir → workflow_state 里当前任务的 work_dir → tools/load_cases。
+
+    为什么要加中间这一层：
+      set-subagent-plan 不带 --work-dir 时曾直接落到 load_cases，
+      而 workflow_gate.select / mode_gate.room-start 读的是【任务目录】，
+      于是"登记成功"却"门禁看不见"—— 表现为编制 task_id 对不上、
+      room-start 被 SUBAGENT_PLAN_STALE 误拦。
+      现在默认对齐到当前任务目录，两边永远是同一份文件。
+    """
     base = work_dir
+    if not base:
+        # 从 workflow_state 取当前任务目录 —— 必须与门禁【同一份】状态文件。
+        # 直接问 workflow_gate 要（它知道真实的 STATE_DIR），
+        # 不要自己拼路径：工程模式有"仓库 / 安装副本"两套 tools，
+        # 自己拼会读到另一套里的旧任务，导致编制 task_id 永远对不上。
+        # 注意：不能直接 `import workflow_gate` —— 工程模式有"仓库 /
+        # 安装副本"两套 tools，sys.path 里可能先命中另一套，
+        # 于是读到【另一个任务】的 work_dir，编制就永远对不上。
+        # 这里改为按【本文件同目录】加载，保证与调用方是同一份状态。
+        # ── 直接读状态文件，不 import 任何同族模块 ─────────────────────
+        # 踩过两次的坑：sys.path 里同时存在「仓库 tools」与「安装副本 tools」，
+        # import workflow_gate 可能命中另一套 → 读到另一个任务的 work_dir。
+        # 状态目录的权威裁决者是 _store.state_dir()，直接用它最稳。
+        try:
+            _sd = None
+            try:
+                import _store as _st_mod
+                _sd = _st_mod.state_dir()
+            except Exception:
+                _sd = None
+            if not _sd:
+                _sd = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+            _wf = os.path.join(_sd, "workflow_state.json")
+            if os.path.exists(_wf):
+                with open(_wf, "r", encoding="utf-8") as _f:
+                    _stj = json.load(_f) or {}
+                base = _stj.get("work_dir") or None
+        except Exception:
+            base = None
     if not base:
         try:
             import _root  # noqa: F401  （仅为触发根目录解析，失败则忽略）
@@ -211,6 +259,18 @@ def save_plan(plan, work_dir=None):
     plan = dict(plan or {})
     plan["schema"] = "dsh-engineering/mode2-plan@1"
     plan["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    # task_id 一律以 workflow_state 为准，保证新旧任务的编制不会混用。
+    if not plan.get("task_id"):
+        try:
+            import json as _json
+            import os as _os
+            _sp = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                "workflow_state.json")
+            if _os.path.exists(_sp):
+                with open(_sp, "r", encoding="utf-8") as _f:
+                    plan["task_id"] = (_json.load(_f) or {}).get("task_id")
+        except Exception:
+            pass
     p = plan_path(work_dir)
     try:
         _atomic_write_json(p, plan)
@@ -393,7 +453,7 @@ def record_question(topic, stage, reason, work_dir=None):
     if not chk["ok"]:
         return dict(chk, blocked_by="question_budget")
 
-    q = {"seq": n_now + 1, "topic": topic, "stage": stage,
+    q = {"seq": n_now + 1, "topic": topic, "stage": stage, "answered": False,
          "stage_label": STAGE_LABELS[stage], "reason": reason,
          "at": time.strftime("%Y-%m-%d %H:%M:%S"), "ts": time.time()}
     plan.setdefault("questions", []).append(q)
@@ -403,6 +463,40 @@ def record_question(topic, stage, reason, work_dir=None):
             "remaining_to_max": max(0, lim["max"] - len(plan["questions"])),
             "note": ("已登记按需提问 %d/%d（%s）。"
                      % (len(plan["questions"]), lim["max"], lim["label"]))}
+
+
+def answer_question(seq, answer, work_dir=None):
+    """记录某道已登记问题的【用户真实答复】。
+
+    为什么必须有这一步：record_question 只登记"我要问什么"，
+      模型完全可以登记完就当问过了（实测把 21 条拼成"汇总答复"直接
+      调 provide_context）。这里强制把答复逐条落到对应题目上，
+      未答的题在收尾校验时会让交付直接失败。
+    """
+    ans = str(answer or "").strip()
+    if not ans:
+        return {"ok": False, "error": "答复内容为空 —— 空答复不算问过。"}
+    try:
+        seq = int(seq)
+    except Exception:
+        return {"ok": False, "error": "seq 必须是整数题号。"}
+    plan = load_plan(work_dir)
+    qs = plan.get("questions") or []
+    hit = None
+    for q in qs:
+        if q.get("seq") == seq:
+            hit = q
+            break
+    if hit is None:
+        return {"ok": False, "error": "没有第 %d 题（请先 record_question）。" % seq}
+    hit["answered"] = True
+    hit["answer"] = ans
+    hit["answered_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    plan["questions"] = qs
+    save_plan(plan, work_dir)
+    _done = len([q for q in qs if q.get("answered")])
+    return {"ok": True, "seq": seq, "answered": _done, "total": len(qs),
+            "note": "已记录第 %d 题答复（%d/%d）。" % (seq, _done, len(qs))}
 
 
 def question_report(work_dir=None, final=False):
@@ -415,24 +509,64 @@ def question_report(work_dir=None, final=False):
         return {"ok": False, "error": "尚未确定参数需求强度（强需求/弱需求）。"}
     qs = plan.get("questions", [])
     chk = validate_question_budget(depth, len(qs), final=final)
+    # 登记 ≠ 问过：只有 answered=True 才算真的问到了用户。
+    _answered = [q for q in qs if q.get("answered")]
+    _unanswered = [q for q in qs if not q.get("answered")]
+    if final and _unanswered:
+        chk = dict(chk)
+        chk["ok"] = False
+        chk["error"] = ("有 %d 题只登记、未记录用户答复（等于没问）：%s"
+                        % (len(_unanswered),
+                           "、".join(str(q.get("topic")) for q in _unanswered[:6])))
     by_stage = {}
     for q in qs:
         by_stage.setdefault(q.get("stage_label") or q.get("stage"), []).append(q.get("topic"))
     out = dict(chk)
     out["questions"] = qs
+    out["answered"] = len(_answered)
+    out["unanswered"] = len(_unanswered)
     out["by_stage"] = by_stage
     return out
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 七、★ 子代理数量：由【总计子代理】决定（不再固定 3 个）
-# ═══════════════════════════════════════════════════════════════════════════
-#: 只有这个名字有权决定子代理编制 —— 其它任何来源一律拒绝。
 SUBPLAN_AUTHORITY = "总计子代理"
 
 #: 每个子代理（房间）必须被总计子代理说明"为什么需要它"。
 MIN_SUBAGENTS = 1
 MAX_SUBAGENTS = 24
+
+
+def require_stages_complete(work_dir=None):
+    """【强制点】编制作出 / 开工前，十阶段必须全部完成。
+
+    为什么必须有这条：
+      set_subagent_plan 原本只校验 decided_by == "总计子代理" 这个**字符串**，
+      模型只要在参数里写上这几个字就能通过 —— 实测就是这样绕过的：
+      手写 4 间房、6 间房直接过 select，而 stage-status 还停在开头。
+      字符串是自证的，分析产物不是。所以这里验的是 stage 的 done 状态。
+
+    Returns: {"ok": True, ...} 或 {"ok": False, "gate": "ANALYSIS_INCOMPLETE", ...}
+    """
+    st = stage_status(work_dir)
+    if not st.get("ok"):
+        return st
+    _missing = st.get("missing") or []
+    if _missing:
+        return {
+            "ok": False,
+            "gate": "ANALYSIS_INCOMPLETE",
+            "stage_index": st.get("stage_index"),
+            "done_count": st.get("done_count"),
+            "total": st.get("total"),
+            "missing": _missing,
+            "error": ("十阶段分析尚未完成（已完成 %d/%d），禁止登记编制或开工。"
+                      % (st.get("done_count") or 0, st.get("total") or 10)),
+            "hint": ("请让总计子代理按序推进并逐阶段 mark-stage-done："
+                     "mode2_flow.py begin-stage <阶段> → mark-stage-done <阶段>。",
+                     "未完成的阶段：%s" % "、".join(_missing)),
+        }
+    return {"ok": True, "done_count": st.get("done_count"),
+            "total": st.get("total")}
 
 
 def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
@@ -455,6 +589,13 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
                 "error": ("【越权】子代理编制只能由【%s】决定，收到 decided_by=%r。"
                           "固定房间表已被取消 —— 编制必须来自总计子代理的分析结论。"
                           % (SUBPLAN_AUTHORITY, decided_by))}
+    # ── 强制点 A：编制作出之前，十阶段必须真的走完 ──────────────────────
+    # 只校验 decided_by 字符串是**不够的** —— 模型完全可以自己写上
+    # "总计子代理"却根本没做分析（实测：手写 4 间房、6 间房绕过 select）。
+    # 因此这里验的是**分析产物**：十阶段必须全部 mark_stage_done。
+    _gate = require_stages_complete(work_dir)
+    if not _gate.get("ok"):
+        return _gate
     if not isinstance(rooms, list) or not rooms:
         return {"ok": False, "error": "rooms 必须是非空数组（至少 1 个建模子代理）。"}
     if not str(rationale or "").strip():
@@ -505,8 +646,19 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
     plan = load_plan(work_dir)
     if plan.get("_load_error"):
         return {"ok": False, "error": plan["_load_error"]}
+    # task_id 必须来自当前任务本身 —— 编制与任务绑定，
+    # 否则 room-start 会因"编制不属于本任务"被误拦。
+    _tid = plan.get("task_id")
+    if not _tid:
+        try:
+            import workflow_gate as _wg
+            _tid = (_wg.load_state() or {}).get("task_id")
+        except Exception:
+            _tid = None
+    plan["task_id"] = _tid
     plan["subagent_plan"] = {
         "decided_by": SUBPLAN_AUTHORITY,
+        "task_id": _tid,
         "rationale": str(rationale).strip(),
         "count": len(norm),
         "rooms": norm,
@@ -1259,6 +1411,11 @@ def _main_body(argv):
     p.add_argument("--reason", required=True)
     p.add_argument("--work-dir", default=None)
 
+    p = sub.add_parser("answer-question", help="★记录某题的用户真实答复")
+    p.add_argument("seq", type=int, help="题号（record_question 返回的 seq）")
+    p.add_argument("answer", help="用户答复原文")
+    p.add_argument("--work-dir", default=None)
+
     p = sub.add_parser("questions", help="查看提问台账与题数校验")
     p.add_argument("--final", action="store_true", help="按收尾口径校验下界")
     p.add_argument("--work-dir", default=None)
@@ -1337,6 +1494,8 @@ def _main_body(argv):
         r = stage_status(wd)
     elif args.cmd == "ask":
         r = record_question(args.topic, args.stage, args.reason, wd)
+    elif args.cmd == "answer-question":
+        r = answer_question(args.seq, args.answer, wd)
     elif args.cmd == "questions":
         r = question_report(wd, final=args.final)
     elif args.cmd == "set-subagent-plan":

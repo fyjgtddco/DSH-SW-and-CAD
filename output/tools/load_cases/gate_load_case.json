@@ -1,19 +1,19 @@
 {
   "schema_version": "1.0",
   "meta": {
-    "problem_id": "GATE_4820BB247FC9",
-    "title": "校内比赛轨迹小车（3D打印）：在4500x4500mm场地内按给定路线快速行驶并完成多组180°/S形转弯；含车架、车轮、转向/传动机构、电子舱；要求速度快、转弯灵活、全部3D打印可制作",
+    "problem_id": "GATE_4B3DF19A4C78",
+    "title": "校内比赛高速转弯轨迹小车，3D打印",
     "revision": "A",
     "generated_by": "workflow_gate.estimate_mechanics",
-    "generated_at": "2026-10-17 23:00:28",
+    "generated_at": "2026-10-18 21:01:03",
     "task_type": "vehicle",
     "task_type_label": "轮式车辆 / 小车",
     "design_domain_mm": [
       350.0,
-      65.0,
-      18.0
+      180.0,
+      80.0
     ],
-    "design_domain_note": "零件包络取自任务/回答中的零件语境尺寸 [350.0, 65.0, 18.0]",
+    "design_domain_note": "零件包络取自任务/回答中的零件语境尺寸 [350.0, 180.0, 80.0]",
     "design_domain_basis": "零件包络（Bug-12：不再沿用赛道/整机尺寸）"
   },
   "units": {
@@ -27,9 +27,9 @@
       "x_min": 0.0,
       "x_max": 350.0,
       "y_min": 0.0,
-      "y_max": 65.0,
+      "y_max": 180.0,
       "z_min": 0.0,
-      "z_max": 18.0
+      "z_max": 80.0
     },
     "keep_in_regions": [],
     "keep_out_regions": []
@@ -52,9 +52,9 @@
         "x_min": 0.0,
         "x_max": 17.5,
         "y_min": -10.0,
-        "y_max": 75.0,
+        "y_max": 190.0,
         "z_min": -10.0,
-        "z_max": 28.0
+        "z_max": 90.0
       },
       "selection_rule": "faces_intersecting_region"
     },
@@ -65,9 +65,9 @@
         "x_min": 340.0,
         "x_max": 350.0,
         "y_min": -10.0,
-        "y_max": 75.0,
+        "y_max": 190.0,
         "z_min": -10.0,
-        "z_max": 28.0
+        "z_max": 90.0
       },
       "selection_rule": "faces_intersecting_region"
     }

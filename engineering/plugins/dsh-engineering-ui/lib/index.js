@@ -2696,7 +2696,11 @@ export function apply(ctx) {
     const py = resolvePython();
     if (!py) return { ok: false, error: '未找到可用的 Python 解释器' };
     const args = [bridge, 'conn-probe'];
-    if (target === 'sw' || target === 'cad') args.push('--target', target);
+    // ── 【连接区扩展】任何具体目标都要走【单目标探测】───────────────
+    //   原实现只对 sw/cad 传 --target，abaqus/webots 会退化成“探测全部”，
+    //   于是点『Webots连接』会把 SolidWorks 的 COM Dispatch 也带着跑一遍
+    //   （慢、且可能把 SW 窗口拉到前台）。
+    if (target) args.push('--target', target);
     try {
       const r = spawnSync(py, args, {
         encoding: 'utf8', timeout: 120000, cwd: dir,

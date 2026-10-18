@@ -87,11 +87,17 @@ def _empty_state():
         "abaqus": {"connected": False, "running": None, "pid": None,
                    "processes": [], "checked_at": None, "error": None,
                    "interface": "process-only（Abaqus 无 COM 自动化接口）"},
+        # 【连接区扩展】Webots（无 COM 接口，探测进程 + 安装路径）
+        "webots": {"connected": False, "running": None, "pid": None,
+                   "processes": [], "checked_at": None, "error": None,
+                   "interface": "process-only（Webots 无 COM 自动化接口）"},
         # 【诉求2】探测到的安装路径 —— 交给 AI 直接复用，避免重复全盘扫描
         "paths": {
             "sldworks_exe": None,
             "acad_exe": None,
             "abaqus_exe": None,
+            "nx_exe": None,
+            "webots_exe": None,
             "scanned_drives": [],
             "resolved_at": None,
         },
@@ -100,6 +106,7 @@ def _empty_state():
             "sw": None,
             "cad": None,
             "abaqus": None,
+            "webots": None,
         },
     }
 
@@ -393,10 +400,29 @@ def discover_paths(force=False):
     acad_exe = paths.get("acad_exe")
     abq_exe = paths.get("abaqus_exe")
     ans_exe = paths.get("nx_exe")
-    cached_ok = (not force) and (sw_exe or acad_exe or abq_exe or ans_exe)
+    web_exe = paths.get("webots_exe")
+    cached_ok = (not force) and (sw_exe or acad_exe or abq_exe or ans_exe or web_exe)
     if cached_ok:
         # 缓存有效性：至少有一个已解析路径仍真实存在
-        if any(p and os.path.exists(p) for p in (sw_exe, acad_exe, abq_exe, ans_exe)):
+        if any(p and os.path.exists(p)
+               for p in (sw_exe, acad_exe, abq_exe, ans_exe, web_exe)):
+            # ── 【连接区扩展·升级兼容】旧状态文件里没有新增目标的键 ──────
+            #   直接 return 会让 webots_exe / abaqus_exe 永远缺失（UI 显示的
+            #   "已连接"与 paths 里查不到 exe 自相矛盾）。这里只补缺的键，
+            #   不重扫 SW/CAD（那才是慢的部分）。
+            _missing = [k for k in ("abaqus_exe", "webots_exe")
+                        if k not in paths]
+            if not _missing:
+                return paths
+            getBackfill = _find_cae_exe
+            idx2 = {"abaqus_exe": "abaqus", "webots_exe": "webots"}
+            for _k in _missing:
+                try:
+                    paths[_k] = getBackfill(_CAE_TARGETS[idx2[_k]])
+                except Exception:
+                    paths[_k] = None
+            st["paths"] = paths
+            save(st)
             return paths
     # 重新探测
     _sw = None
@@ -425,6 +451,7 @@ def discover_paths(force=False):
         "acad_exe": _ac,
         "abaqus_exe": _cae_exe.get("abaqus"),
         "nx_exe": _cae_exe.get("nx"),
+        "webots_exe": _cae_exe.get("webots"),
         "scanned_drives": _drives,
         "resolved_at": time.time(),
         "resolved_at_str": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -641,7 +668,9 @@ def probe_all(with_com=True, resolve_paths=True):
     cad = probe_cad(with_com=with_com)
     cad["checked_at"] = now_str
     st["cad"] = cad
-    for _t in ("abaqus", "nx"):
+    # 【NX → Webots 改造】webots 与 abaqus 同属"进程 + 安装路径"型目标，
+    #   一并纳入全量探测（旧名 nx 仍保留探测，状态文件向后兼容）。
+    for _t in ("abaqus", "webots", "nx"):
         _cae = probe_cae(_t)
         _cae["checked_at"] = now_str
         st[_t] = _cae
@@ -674,6 +703,17 @@ def _nx_process_list():
     """
     return _tasklist_match(("UGRAF", "NXNASTRAN", "UGSLMD",
                             "UG_II", "NX.EXE"))
+
+
+def _webots_process_list():
+    """列出 Webots 相关进程（零副作用，只读 tasklist）。
+
+    Webots 的进程名：
+      · webots.exe      —— 主程序（Windows 版位于 msys64/mingw64/bin/）
+      · webots-controller.exe —— 控制器（TCP 控制器协议）
+      · webots-launcher.exe   —— 新版启动器
+    """
+    return _tasklist_match(("WEBOTS",))
 
 
 def _tasklist_match(keywords):
@@ -737,6 +777,21 @@ _CAE_TARGETS = {
         "integration": ("`run_journal <脚本.py>`（NX Open 批处理）"
                         " 或 NX Nastran 求解器命令行"),
         "version_re": r"(NX\s*\d+(?:\.\d+)?|1[89]\.\d|2[0-9]\.\d|20\d{2})",
+    },
+    # ── 【NX → Webots 改造】Webots 也是"进程 + 安装路径"型目标 ──────────
+    # 与 Abaqus / NX 完全同一套探测逻辑（无 COM，走 webots-controller TCP）。
+    # 安装布局（Windows）：<盘>:\Webots\msys64\mingw64\bin\webots.exe，
+    # 且安装器通常会写环境变量 WEBOTS_HOME（例：D:\Webots）—— 见 _find_cae_exe。
+    "webots": {
+        "display": "Webots",
+        "install_dirs": ("Webots", "Cyberbotics", "Program Files\\Webots",
+                         "Program Files\\Cyberbotics",
+                         "Program Files (x86)\\Webots"),
+        "exe_names": ("webots.exe",),
+        "process_fn": _webots_process_list,
+        "integration": ("`webots --mode=fast <世界文件.wbt>` 启动仿真，"
+                        "外部控制走 webots-controller（TCP 控制器协议）"),
+        "version_re": r"(R\d{4}[a-z]?|20\d{2})",
     },
 }
 
@@ -818,6 +873,12 @@ def _find_cae_exe(cfg):
                 pats.append(os.path.join(_d, _sub))
     except Exception:
         return None
+    # ── 【NX → Webots 改造】Webots 安装器会写 WEBOTS_HOME（如 D:\Webots），
+    #    直接用它做第一候选，比按 Program Files 猜路径可靠得多。
+    if (cfg.get("display") or "").lower() == "webots":
+        _wh = (os.environ.get("WEBOTS_HOME") or "").strip()
+        if _wh and os.path.isdir(_wh):
+            pats.insert(0, _wh)
     for _base in pats:
         if not os.path.isdir(_base):
             continue
@@ -864,6 +925,8 @@ def probe_target(target, with_com=True):
     st = load()
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
     t = str(target or "").lower()
+    # 【NX → Webots 改造】旧名先归一，保证写入的是规范键（webots）
+    t = _TARGET_ALIASES.get(t, t)
     if t == "sw":
         sw = probe_sw(with_com=with_com)
         sw["checked_at"] = now_str
@@ -886,8 +949,8 @@ def probe_target(target, with_com=True):
         }
     else:
         raise ValueError(
-            "target 必须是 'sw' / 'cad' / 'abaqus' / 'placeholder*'，收到: %r"
-            % (target,))
+            "target 必须是 'sw' / 'cad' / 'abaqus' / 'webots'"
+            " / 'placeholder*' 之一，收到: %r" % (target,))
     # 路径一并刷新（若尚未解析过）
     if not (st.get("paths") or {}).get("sldworks_exe"):
         st["paths"] = discover_paths()
@@ -900,7 +963,13 @@ def probe_target(target, with_com=True):
 # ══════════════════════════════════════════════════════════════════════════
 
 # 全部合法的连接目标（新增目标只需在这里登记）
-KNOWN_TARGETS = ("sw", "cad", "abaqus", "nx")
+# 【NX → Webots 改造】nx 已由 webots 取代；nx 作为【旧名别名】保留在
+#   _TARGET_ALIASES 里，读到旧状态文件/旧调用时自动映射，不会报错。
+KNOWN_TARGETS = ("sw", "cad", "abaqus", "webots")
+# 旧名 → 新名（向后兼容；新增改名只需在这里登记一条）
+_TARGET_ALIASES = {
+    "nx": "webots",
+}
 
 
 def _norm_target(target):
@@ -913,6 +982,8 @@ def _norm_target(target):
     现在只认 KNOWN_TARGETS，未知一律返回 None，由调用方明确报错。
     """
     t = str(target or "").strip().lower()
+    # 【NX → Webots 改造】旧名先映射，再判合法（nx → webots）
+    t = _TARGET_ALIASES.get(t, t)
     if t in KNOWN_TARGETS:
         return t
     if t.startswith("placeholder"):
@@ -973,6 +1044,8 @@ def gate(target="sw"):
         "cad": "直接使用现有 AutoCAD（跳过启动与排障）。",
         "abaqus": ("检测到 Abaqus 可用 —— 可直接用 `abaqus python <脚本>` "
                    "或 `abaqus cae noGUI=<脚本>` 提交分析。"),
+        "webots": ("检测到 Webots 可用 —— 可直接用 `webots --mode=fast "
+                   "<世界.wbt>` 启动仿真，外部控制走 webots-controller。"),
         "nx": ("检测到 NX 可用 —— 可直接用 `run_journal <脚本.py>`"
                "（NX Open 批处理）提交作业。"),
     }
@@ -982,6 +1055,8 @@ def gate(target="sw"):
         "cad": "按原有流程启动 AutoCAD。",
         "abaqus": ("未检测到 Abaqus —— 请在【设置 → 连接区】点『Abaqus连接』"
                    "探测安装路径，或先安装/启动 Abaqus。"),
+        "webots": ("未检测到 Webots —— 请在【设置 → 连接区】点『Webots连接』"
+                   "探测安装路径，或先安装/启动 Webots。"),
         "nx": ("未检测到 NX —— 请在【设置 → 连接区】点『NX连接』"
                   "探测安装路径，或先安装/启动 NX。"),
     }
@@ -1014,7 +1089,8 @@ def gate(target="sw"):
     }
     # 把"该用哪个 exe"直接给出来 —— 免得 AI 再去全盘找（诉求2）
     _EXE_KEY = {"sw": "sldworks_exe", "cad": "acad_exe",
-                "abaqus": "abaqus_exe", "nx": "nx_exe"}
+                "abaqus": "abaqus_exe", "nx": "nx_exe",
+                "webots": "webots_exe"}
     out["exe"] = paths.get(_EXE_KEY.get(t, "")) or entry.get("exe")
     if not out["exe"]:
         out["exe_hint"] = ("尚未解析到安装路径，可运行 "
@@ -1034,6 +1110,9 @@ def summary():
         "stale": is_stale(st),
         "sw": st.get("sw"),
         "cad": st.get("cad"),
+        # 【连接区扩展】Abaqus / Webots 也要透给 UI（前端按 state[target] 读）
+        "abaqus": st.get("abaqus"),
+        "webots": st.get("webots") or st.get("nx"),
         "paths": st.get("paths"),
         "launch": st.get("launch"),
     }
@@ -1102,15 +1181,28 @@ def launch(target, exe=None, wait_window=120, connect=True):
     Returns: {"ok":..., "target":..., "steps":[...], "error":..., "state":...}
     """
     import subprocess
-    t = "sw" if str(target).lower() == "sw" else "cad"
+    # ── 【NX → Webots 改造】不再把「非 sw」一律当成 cad ────────────────
+    #   原实现 `t = "sw" if ...=="sw" else "cad"` 会让 webots/abaqus 的启动
+    #   去拉起 AutoCAD —— 安静地做错事。现在按 _norm_target 归一，
+    #   不认识的直接如实报错。
+    t = _norm_target(target)
+    if not t:
+        return {"ok": False, "target": str(target), "steps": [],
+                "error": ("target 必须是 'sw' / 'cad' / 'abaqus' / "
+                          "'webots' 之一，收到: %r" % (target,))}
     steps = []
 
     # ── 步骤 1：解析可执行文件路径（全盘符，任意盘都能找到）──────────────
     if not exe:
+        _EXE_OF = {"sw": "sldworks_exe", "cad": "acad_exe",
+                   "abaqus": "abaqus_exe", "webots": "webots_exe"}
         try:
             paths = discover_paths()
-            exe = (paths or {}).get(
-                "sldworks_exe" if t == "sw" else "acad_exe")
+            exe = (paths or {}).get(_EXE_OF.get(t, ""))
+            # 【连接区扩展】CAE 型目标（Abaqus / Webots）若 paths 里还没有，
+            #   现场再找一次（discover_paths 的缓存可能早于本目标被登记）。
+            if not exe and t in _CAE_TARGETS:
+                exe = _find_cae_exe(_CAE_TARGETS[t])
         except Exception as e:
             exe = None
             steps.append(_step_result("resolve_path", False, error=repr(e)))
@@ -1124,8 +1216,13 @@ def launch(target, exe=None, wait_window=120, connect=True):
         steps.append(_step_result("resolve_path", os.path.exists(exe), exe=exe))
 
     if not exe or not os.path.exists(exe):
-        _exe_name = "SLDWORKS.exe" if t == "sw" else "acad.exe"
-        _env_name = "DSH_SW_EXE" if t == "sw" else "DSH_ACAD_EXE"
+        _EXE_NAME = {"sw": "SLDWORKS.exe", "cad": "acad.exe",
+                     "abaqus": "abaqus.bat / ABQcaeK.exe",
+                     "webots": "webots.exe"}
+        _ENV_NAME = {"sw": "DSH_SW_EXE", "cad": "DSH_ACAD_EXE",
+                     "abaqus": "DSH_ABAQUS_EXE", "webots": "DSH_WEBOTS_EXE"}
+        _exe_name = _EXE_NAME.get(t, t)
+        _env_name = _ENV_NAME.get(t, "DSH_" + t.upper() + "_EXE")
         _hint_reg = ("· 若软件确实已安装，多为此类情况：注册表里没有完整安装记录，"
                      "或装在【非常规目录】（例如 Z:\\7-Zip\\AutoCAD 2020）。"
                      if t == "cad" else
@@ -1194,8 +1291,13 @@ def launch(target, exe=None, wait_window=120, connect=True):
                     lst, _e = _sw_process_list()
                     appeared = bool(lst)
                     _last = lst
-                else:
+                elif t == "cad":
                     _last = _acad_process_list()
+                    appeared = bool(_last)
+                else:
+                    # 【连接区扩展】Abaqus / Webots：用各自的关键词表等进程出现
+                    _last = (_CAE_TARGETS.get(t, {}).get("process_fn")
+                             or (lambda: []))()
                     appeared = bool(_last)
             except Exception:
                 appeared = False
@@ -1242,14 +1344,22 @@ def launch(target, exe=None, wait_window=120, connect=True):
         try:
             if t == "sw":
                 res = probe_sw(with_com=True)
-            else:
+            elif t == "cad":
                 res = probe_cad(with_com=True)
+            else:
+                # 【连接区扩展】Abaqus / Webots 无 COM：connected 语义是
+                #   "安装可用或进程在跑"，不是"COM 会话已建立"。
+                res = probe_cae(t)
             connected = bool(res.get("connected"))
             steps.append(_step_result(
                 "connect", connected,
-                detail=("COM 连接成功" if connected else "COM 连接失败"),
+                detail=(("COM 连接成功" if connected else "COM 连接失败")
+                        if t in ("sw", "cad") else
+                        ("已确认可用（无 COM 接口，走命令行/控制器）"
+                         if connected else "未确认可用（未找到安装且进程未运行）")),
                 **{k: v for k, v in res.items()
-                   if k in ("error", "revision", "binding", "pid", "drawing")}))
+                   if k in ("error", "revision", "binding", "pid", "drawing",
+                            "exe", "note", "interface")}))
             if not connected and res.get("error"):
                 _log_launch(t, False, steps, error=str(res.get("error")))
                 return {"ok": False, "target": t, "steps": steps,
@@ -1274,7 +1384,7 @@ def launch(target, exe=None, wait_window=120, connect=True):
 def launch_log(target):
     """读取某目标最近一次启动日志（供 UI 展示 / 发给模型诊断）。"""
     st = load()
-    t = "sw" if str(target).lower() == "sw" else "cad"
+    t = _norm_target(target) or str(target or "").strip().lower() or "sw"
     lg = (st.get("launch") or {}).get(t)
     if not lg:
         return {"ok": False, "target": t, "error": "尚无启动日志"}
@@ -1288,9 +1398,11 @@ def format_launch_log(target, for_model=True):
     让模型能据此判断"到底是许可证问题还是路径问题还是沙箱问题"。
     """
     st = load()
-    t = "sw" if str(target).lower() == "sw" else "cad"
+    t = _norm_target(target) or str(target or "").strip().lower() or "sw"
     lg = (st.get("launch") or {}).get(t)
-    name = "SolidWorks" if t == "sw" else "AutoCAD"
+    _NAMES = {"sw": "SolidWorks", "cad": "AutoCAD",
+              "abaqus": "Abaqus", "webots": "Webots"}
+    name = _NAMES.get(t, t)
     lines = []
     if not lg:
         return "[%s] 尚无启动日志 —— 请先在设置页点『启动』。" % name

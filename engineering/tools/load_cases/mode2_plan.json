@@ -1,134 +1,14 @@
 {
   "schema": "dsh-engineering/mode2-plan@1",
-  "created_at": "2026-10-15 22:41:00",
-  "updated_at": "2026-10-15 22:45:16",
+  "created_at": null,
+  "updated_at": null,
   "param_depth": null,
-  "stages": [
-    {
-      "stage": "TaskUnderstanding",
-      "label": "任务理解",
-      "needs": "结构化 TaskSpec：目标/环境/载荷/约束/未知量",
-      "status": "done",
-      "note": "",
-      "at": "2026-10-15 22:45:12",
-      "ts": 1792075512.6974638,
-      "artifact": "",
-      "done_at": "2026-10-15 22:45:12"
-    },
-    {
-      "stage": "FunctionalDecomposition",
-      "label": "功能分解",
-      "needs": "FunctionTree：子功能 + 输入输出 + 依赖",
-      "status": "done",
-      "note": "",
-      "at": "2026-10-15 22:45:12",
-      "ts": 1792075512.9340503,
-      "artifact": "",
-      "done_at": "2026-10-15 22:45:13"
-    },
-    {
-      "stage": "PhysicsReasoning",
-      "label": "物理推导",
-      "needs": "PhysicsModel：运动/力/转矩/能量/自由度 + 假定",
-      "status": "done",
-      "note": "",
-      "at": "2026-10-15 22:45:13",
-      "ts": 1792075513.174618,
-      "artifact": "",
-      "done_at": "2026-10-15 22:45:13"
-    }
-  ],
-  "stage_index": 2,
+  "task_id": null,
+  "stages": [],
+  "stage_index": -1,
   "questions": [],
-  "subagent_plan": {
-    "decided_by": "总计子代理",
-    "rationale": "排查测试",
-    "count": 4,
-    "rooms": [
-      {
-        "name": "臂体结构",
-        "type": "structural",
-        "parts": [
-          "臂管"
-        ],
-        "why": "承载",
-        "depends_on": []
-      },
-      {
-        "name": "关节传动",
-        "type": "transmission",
-        "parts": [
-          "减速器"
-        ],
-        "why": "传动",
-        "depends_on": [
-          "臂体结构"
-        ]
-      },
-      {
-        "name": "总装与验证",
-        "type": "assembly",
-        "parts": [
-          "总装"
-        ],
-        "why": "装配",
-        "depends_on": [
-          "关节传动"
-        ]
-      },
-      {
-        "name": "工程图输出",
-        "type": "drafting",
-        "parts": [
-          "图纸"
-        ],
-        "why": "出图",
-        "depends_on": [
-          "总装与验证"
-        ]
-      }
-    ],
-    "at": "2026-10-15 22:45:13"
-  },
-  "prime_reports": [
-    {
-      "part_name": "臂管",
-      "room": "臂体结构",
-      "file": "C:/x/臂管.SLDPRT",
-      "dims": {
-        "length_mm": 800,
-        "width_mm": 60,
-        "height_mm": 60
-      },
-      "material": null,
-      "credentials": {
-        "material": "m.json",
-        "physics": "p.json",
-        "domain": "d.json"
-      },
-      "adjacent": [
-        "减速器"
-      ],
-      "interfaces": [],
-      "at": "2026-10-15 22:45:14",
-      "ts": 1792075514.9757519
-    }
-  ],
-  "prime_consistency": {
-    "ok": false,
-    "checked_pairs": 0,
-    "mismatches": [],
-    "escalate_to_parent": false,
-    "source": "part_registry.check_adjacency_consistency",
-    "evaluated": false,
-    "summary": "未能检查：台账为空（parts 为空），没有任何零件可检查",
-    "error": "无法评估相邻尺寸一致性（缺少邻接或接口数据）—— 不得当作通过。请先补齐零件台账/接口信息。",
-    "at": "2026-10-15 22:45:15"
-  },
-  "notes": [],
-  "docx_export": {
-    "path": "C:\\Users\\j1877\\AppData\\Local\\Temp\\tmp8tp6lu2s\\台账.docx",
-    "size_bytes": 3860,
-    "at": "2026-10-15 22:45:16"
-  }
+  "subagent_plan": null,
+  "prime_reports": [],
+  "prime_consistency": null,
+  "notes": []
 }

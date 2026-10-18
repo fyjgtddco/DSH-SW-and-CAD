@@ -1,0 +1,31 @@
+{
+  "ok": true,
+  "pid": 15964,
+  "started_at": "2026-10-18 22:28:50",
+  "updated_at": "2026-10-18 22:29:00",
+  "ticks": 2,
+  "interval": 10.0,
+  "cpu_limit": 85.0,
+  "mem_limit": 85.0,
+  "kill_enabled": true,
+  "stop_after_kill": true,
+  "last": {
+    "tick": 2,
+    "time": "2026-10-18 22:29:00",
+    "cpu_pct": 30.54,
+    "mem_pct": 82.52,
+    "cpu_ok": true,
+    "mem_ok": true,
+    "cpu_error": null,
+    "mem_error": null,
+    "total_mb": 15986.68,
+    "available_mb": 2794.37,
+    "used_mb": 13192.31,
+    "breach": false,
+    "reasons": [],
+    "errors": []
+  },
+  "alerts": [],
+  "killed": false,
+  "version": "1.0.0"
+}

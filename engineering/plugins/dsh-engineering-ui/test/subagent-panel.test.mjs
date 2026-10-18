@@ -317,6 +317,56 @@ check('★ 滚动上限复用宿主面板高度公式（避免双滚动条）',
 check('★ 卡片本身不设固定高度（行不被裁切）',
   !/\.eng-grp-card\{[^}]*max-height/.test(src.replace(/\s+/g, '')));
 
+// ══ 【问问AI】多对话（每个对话独立历史）+ Markdown 渲染 ═══════════════
+//   用户反馈："每一个对话都是使用一个对话历史……对话 1-9999 都是使用一个
+//   对话历史，容易乱"，以及"模型原本想放大字体的符号没有正确"。
+console.log('\n=== 问问AI：按 DSH 会话分组 + 可关闭标签页 + Markdown ===');
+check('★ 话题按 DSH 会话分组（bySession，切会话自动跟随）',
+  src.includes('bySession') && src.includes('sessionKey'));
+check('★ 会话 id 来自 DSH（mainView 保留者），不是自造',
+  src.includes('function engCurrentSessionId') && src.includes('retainedBy'));
+check('★ 新话题有独立 id 与中文序号名（对话一/对话二…）',
+  src.includes('function newTopic(') && src.includes('function engSideName('));
+check('★ 顶部标签页可切换 + 可关闭（×）',
+  src.includes('eng-side-tabs') && src.includes('eng-side-tab-x')
+  && src.includes('function closeTopic('));
+check('★ 流式增量写回【发起时那个话题】（targetTid）',
+  src.includes('targetTid') && src.includes('writeBot'));
+check('★ 输入框草稿按对话保存（patchCur input）',
+  src.includes('patchCur({ input: ev.target.value })'));
+check('★ 存在 Markdown 渲染器（不再是原始星号/反引号）',
+  typeof client.engRenderMarkdown === 'function'
+  && typeof client.engRenderInline === 'function');
+check('★ Markdown 用 React 节点渲染，不用 innerHTML（模型输出不可信）',
+  // 只能出现在注释里（说明"我们不用它"），不能是真实调用
+  (src.match(/dangerouslySetInnerHTML/g) || []).length === 1
+  && /不用 dangerouslySetInnerHTML/.test(src));
+check('★ 助手消息走 engRenderMarkdown，用户消息保持纯文本',
+  /engRenderMarkdown\(m\.text/.test(src));
+
+// ══ 【连接区】启动日志标题（成功时也展示，不该叫"错误日志"）══════════
+console.log('\n=== 连接区日志标题 ===');
+check('★ 日志区标题为「启动日志」而不是「错误日志」',
+  src.includes("+ '启动日志'") && !src.includes("+ '错误日志'"));
+
+// ══ 【UI 美化】子代理面板阅读区 ══════════════════════════════════════
+console.log('\n=== 子代理面板 UI 美化 ===');
+check('★ 事件按类型包裹（思考/输出/命令/结果/报错/提问）',
+  src.includes('ENG_EVENT_META') && src.includes('engWrapEvent'));
+check('★ 事件条目有左侧色条与类型标签',
+  src.includes('.eng-evt{') && src.includes('.eng-evt-label'));
+check('★ 详情标题栏拆成两行（名称+状态 / 副标题摘要）',
+  src.includes('eng-head-main') && src.includes('eng-head-sub'));
+check('★ 目录条目弱化、选中态才高亮（不与正文抢视觉）',
+  // 样式串是分段拼接的，不能按单行正则匹配；去掉空白后判断关键字组合
+  (function () {
+    var flat = src.replace(/\s+/g, '');
+    return flat.indexOf(".eng-node{align-items:center;background:transparent") >= 0
+      && flat.indexOf('.eng-node.on{') >= 0;
+  })());
+check('★ 全部改用语义 token（跟随亮/暗主题）',
+  src.includes('--dsw-alias-label-primary') && src.includes('@media(prefers-color-scheme:dark)'));
+
 // ══ 【问题4·开启侧】官方右侧子代理入口指向本插件 ══════════════════════
 console.log('\n=== 问题4 开启侧：接管官方 subagentchat 入口 ===');
 check('★ 接管官方子代理 tab（kind=subagentchat）',

@@ -64,9 +64,56 @@ try:
     STATE_DIR = _store_mod.state_dir()
 except Exception:
     STATE_DIR = _BASE_DIR
-REPORTS_DIR = os.path.join(STATE_DIR, "reports")
-ARTIFACT_REGISTRY_FILE = os.path.join(STATE_DIR, "artifacts_registry.json")
-BYPASS_LOG_FILE = os.path.join(REPORTS_DIR, "defense_bypass.json")
+def _current_task_id():
+    """当前任务 id（用于凭据按局隔离）。读 workflow_state，读不到返回 None。"""
+    try:
+        import json as _json
+        _p = os.path.join(STATE_DIR, "workflow_state.json")
+        if os.path.exists(_p):
+            with open(_p, "r", encoding="utf-8") as _f:
+                return (_json.load(_f) or {}).get("task_id") or None
+    except Exception:
+        pass
+    return None
+
+
+def reports_dir(task_id=None):
+    """凭据/报告目录 —— 按【任务】隔离，避免上一局产物污染新对话。
+
+    问题（用户反馈）：删掉旧对话后，新对话仍能读到上一局的
+      reports/结构件.physics.json、*.domain.json、defense_bypass.json，
+      于是门禁认为"这些房间已经校核过了"，任务一开始就带着旧结论。
+    根因：reports/ 是【全局共享】目录，文件名只按房间名索引，
+      跨任务必然撞车（房间名就那几种：结构件/传动机构/壳体机架…）。
+
+    现在：reports/<task_id>/<房间>.<kind>.json。task_id 取不到时退回旧路径
+      （保持向后兼容，不至于把已有现场直接作废）。
+    """
+    tid = task_id or _current_task_id()
+    if tid:
+        _d = os.path.join(STATE_DIR, "reports", str(tid))
+        try:
+            os.makedirs(_d, exist_ok=True)
+        except Exception:
+            return os.path.join(STATE_DIR, "reports")
+        return _d
+    return os.path.join(STATE_DIR, "reports")
+
+
+REPORTS_DIR = reports_dir()
+def artifact_registry_file(task_id=None):
+    """产物登记表同样按任务隔离（否则新任务会看到上一局的零件清单）。"""
+    tid = task_id or _current_task_id()
+    if tid:
+        return os.path.join(STATE_DIR, "artifacts_registry.%s.json" % tid)
+    return os.path.join(STATE_DIR, "artifacts_registry.json")
+
+ARTIFACT_REGISTRY_FILE = artifact_registry_file()
+# 绕行留痕同样按任务隔离 —— 旧任务的"已绕过"记录不能让新任务看起来豁免过。
+def bypass_log_file(task_id=None):
+    return os.path.join(reports_dir(task_id), "defense_bypass.json")
+
+BYPASS_LOG_FILE = bypass_log_file()
 
 # 需要物理/领域校核的【建模类】房间类型（与 workflow_gate.WAVE1_TYPES 对齐）
 MODELING_ROOM_TYPES = ("structural", "transmission", "housing",
@@ -944,8 +991,12 @@ def check_material_attestation(part_path):
 # ══════════════════════════════════════════════════════════════════════
 
 def _room_file(room, suffix):
+    """凭据文件路径 —— 落在【当前任务】的 reports 子目录下（按局隔离）。
+
+    每次调用都现取目录（不缓存），这样中途换任务也不会写错地方。
+    """
     safe = "".join(c for c in str(room) if c.isalnum() or c in " _-").strip()
-    return os.path.join(REPORTS_DIR, safe + suffix)
+    return os.path.join(reports_dir(), safe + suffix)
 
 
 def physics_attest_path(room):
@@ -1381,7 +1432,7 @@ def request_signed_credential(spec):
 def note_unsigned_attempt(room, kind, reason):
     """记录一次"宿主不可用导致产出无签名凭据"的事实（审计用）。"""
     try:
-        items = _read_json(BYPASS_LOG_FILE) or {"items": []}
+        items = _read_json(bypass_log_file()) or {"items": []}
         if not isinstance(items, dict) or not isinstance(items.get("items"), list):
             items = {"items": []}
         items["items"].append({
@@ -1392,7 +1443,7 @@ def note_unsigned_attempt(room, kind, reason):
             "by": "fail-closed",
         })
         items["items"] = items["items"][-200:]
-        _write_json(BYPASS_LOG_FILE, items)
+        _write_json(bypass_log_file(), items)
     except Exception:
         pass
 
@@ -1745,7 +1796,7 @@ def check_domain_attestation(room):
 
 def _registered_artifacts(room):
     """读 artifacts_registry.json，取本房间登记的产物（含存在性）。"""
-    reg = _read_json(ARTIFACT_REGISTRY_FILE) or {}
+    reg = _read_json(artifact_registry_file()) or {}
     rec = reg.get(str(room))
     if not isinstance(rec, list):
         return []
