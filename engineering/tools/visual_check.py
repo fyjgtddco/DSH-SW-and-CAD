@@ -511,6 +511,60 @@ def _now_str():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 【Bug⑨】长任务自动推进房间阶段（看图矫正可能跑很多轮，主代理需要看得见）
+# ═══════════════════════════════════════════════════════════════════════════
+def push_room_validating(room=None, what=""):
+    """在【房间上下文】里把 room-report 的 stage 推进到 validating。
+
+    现场缺陷（竞速小车任务，Bug⑨）：
+      底盘结构件房连续 74 分钟的 room-report 都停在 modeling，而实际早已
+      进入"物理校核 + 看图矫正"阶段。看图闭环（check_and_correct）本身
+      可能跑 3~10 轮、每轮都要切视图+截图+回读几何，是典型的长任务；
+      期间完全不碰 room-report → 主代理无法区分"在矫正"与"已僵死"。
+
+    行为契约（幂等 / 不覆盖终态 / 失败不阻断，细节见 mode_gate.push_room_stage）：
+      ① 房间必须存在且 active（only_if_active）→ 否则不写任何文件；
+      ② 最新 stage 已是 validating → 幂等跳过；
+      ③ 已上报 done/failed → 不让步；
+      ④ 本函数【不抛异常】，任何失败都折成 ok=False 返回。
+
+    ⚠️ 与 mode_gate 之间是【单向弱依赖】：只在运行时按需 import，
+       模块不可用时本模块照常工作（看图闭环不受影响）。
+
+    Args:
+        room: 房间名；None → 取 DSH_ROOM 环境变量。
+        what: 正在做什么（写进 detail）。
+    Returns:
+        {"ok", "pushed", "skipped", "room", "stage", "reason"?}
+    """
+    out = {"ok": False, "pushed": False, "skipped": None, "room": None,
+           "stage": "validating"}
+    try:
+        _room = (room or os.environ.get("DSH_ROOM") or "").strip()
+        out["room"] = _room or None
+        if not _room:
+            out["skipped"] = "no-room-context"
+            out["reason"] = "无房间上下文（room 未传且 DSH_ROOM 未设置）"
+            return out
+        try:
+            import mode_gate as _mg        # 同目录优先（BASE_DIR 已在 sys.path）
+        except Exception as e:
+            out["skipped"] = "no-mode-gate"
+            out["reason"] = "mode_gate 不可用: %r" % (e,)
+            return out
+        if not hasattr(_mg, "push_room_stage"):
+            out["skipped"] = "mode-gate-too-old"
+            out["reason"] = "mode_gate 缺少 push_room_stage（旧版本副本？）"
+            return out
+        _detail = (str(what).strip() or "看图矫正中") + "（自动推进，Bug⑨）"
+        return _mg.push_room_stage(_room, "validating", _detail)
+    except Exception as e:
+        out["skipped"] = "exception"
+        out["reason"] = repr(e)
+        return out
+
+
 def _safe_name(text, fallback="part"):
     """把零件名/视图名清洗成可安全用作文件名的字符串。"""
     s = str(text or "").strip()
@@ -2288,7 +2342,7 @@ def report_visual_result(room, part_name, loop_record, work_dir=None,
 # 八、D. ★ 建模后强制闭环节点（房间收尾必须走的门）
 # ═══════════════════════════════════════════════════════════════════════════
 def enforce_visual_gate(part_path, expect, out_dir=None,
-                        max_rounds=MAX_ROUNDS_DEFAULT):
+                        max_rounds=MAX_ROUNDS_DEFAULT, room=None):
     """建模成功之后【必须】走的视觉门。
 
     判定顺序（任一环节不过 → passed=False，上游据此拒绝放行）：
@@ -2320,6 +2374,14 @@ def enforce_visual_gate(part_path, expect, out_dir=None,
     gate_file = os.path.join(out_dir, GATE_FILE)
     out["evidence_file"] = gate_file
 
+    # ── 【Bug⑨】看图闭环是长任务：跑之前先推进一次 stage ─────────────────
+    # 闭环可能要跑 3~10 轮（切视图→截图→回读几何→矫正），期间房间的
+    #   room-report 会一直停在 modeling，主代理分不清"在矫正"还是"已僵死"。
+    # 本调用严格幂等、失败不阻断（详见 push_room_validating 的契约）。
+    _stage_push = push_room_validating(
+        room, "看图矫正中（visual_check.enforce_visual_gate: %s）"
+              % os.path.basename(str(part_path or "")))
+
     loop = check_and_correct(part_path, expect, max_rounds=max_rounds,
                              out_dir=out_dir)
     out["loop_file"] = loop.get("evidence_file")
@@ -2335,6 +2397,7 @@ def enforce_visual_gate(part_path, expect, out_dir=None,
         out["blockers"].append("闭环残留问题: %s" % b)
     # ③ 看图证据核实
     ev = verify_visual_evidence(loop, out_dir=out_dir)
+    out["stage_push"] = _stage_push
     out["visual_evidence"] = {
         "ok": ev.get("ok"), "checked_rounds": ev.get("checked_rounds"),
         "checked_shots": ev.get("checked_shots"),
@@ -2418,6 +2481,8 @@ def _build_parser():
                     dest="max_rounds",
                     help="最大轮数，默认 %d（硬上限 %d）"
                          % (MAX_ROUNDS_DEFAULT, MAX_ROUNDS_HARD_CAP))
+    c2.add_argument("--room", default=None,
+                    help="所属房间名（可选）。给了才推进 room-report 的 stage")
 
     c3 = sub.add_parser("verify", help="校验「看图」是否真的发生过（截图存在且非空）")
     c3.add_argument("--record", required=True, help="visual_loop.json 路径")
@@ -2429,6 +2494,11 @@ def _build_parser():
     c4.add_argument("--out", default=None, help="留痕目录（默认自动生成）")
     c4.add_argument("--max-rounds", type=int, default=MAX_ROUNDS_DEFAULT,
                     dest="max_rounds", help="最大轮数，默认 %d" % MAX_ROUNDS_DEFAULT)
+    # 【Bug⑨】房间上下文：给了才推进 room-report 的 stage（validating）
+    c4.add_argument("--room", default=None,
+                    help="所属房间名（可选）。给了才把 room-report 的 stage "
+                         "推进到 validating（主代理据此看出「看图矫正中」）；"
+                         "不传则取 DSH_ROOM 环境变量，都没有则不动任何房间")
 
     c5 = sub.add_parser("report", help="把闭环结论登记进模式二计划（不可用时降级）")
     c5.add_argument("--room", default="", help="上报房间名")
@@ -2475,6 +2545,8 @@ def main(argv=None):
         return 0 if res.get("ok") else 1
 
     if ns.cmd == "loop":
+        # 【Bug⑨】闭环同样长任务：先推进一次 stage（幂等、失败不阻断）
+        push_room_validating(ns.room, "看图闭环中（visual_check loop）")
         res = check_and_correct(ns.part, ns.expect, max_rounds=ns.max_rounds,
                                 out_dir=ns.out)
         emit(res)
@@ -2487,7 +2559,7 @@ def main(argv=None):
 
     if ns.cmd == "gate":
         res = enforce_visual_gate(ns.part, ns.expect, out_dir=ns.out,
-                                  max_rounds=ns.max_rounds)
+                                  max_rounds=ns.max_rounds, room=ns.room)
         emit(res)
         return 0 if res.get("passed") else 1
 

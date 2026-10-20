@@ -1,22 +1,14 @@
 {
   "schema": "dsh-connection-state/1",
-  "updated_at": 1792317013.0397313,
-  "updated_at_str": "2026-10-18 17:50:13",
+  "updated_at": 1792415005.9671555,
+  "updated_at_str": "2026-10-19 21:03:25",
   "sw": {
-    "running": true,
-    "pid": 24744,
-    "processes": [
-      {
-        "pid": 24744,
-        "name": "SLDWORKS.exe",
-        "mem": "384,944 K"
-      }
-    ],
-    "connected": true,
+    "running": false,
+    "pid": null,
+    "processes": [],
+    "connected": false,
     "error": null,
-    "revision": "33.5.0",
-    "binding": "static",
-    "checked_at": "2026-10-18 17:50:10"
+    "checked_at": "2026-10-19 21:03:25"
   },
   "cad": {
     "running": false,

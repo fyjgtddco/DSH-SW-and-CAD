@@ -81,6 +81,214 @@ STAGE_NEEDS = {s[0]: s[2] for s in STAGES}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 一·补充、【Bug② 修复】阶段产物新鲜度（stale）基础判据
+# ═══════════════════════════════════════════════════════════════════════════
+# 缺陷回顾（2026-10-19 循迹小车实测）：
+#   十阶段 artifacts 在【用户答复之前】就落盘了，答复之后从不回写 ——
+#   mode2_plan.json 里仍是「底盘 100×100 / PLA」，用户确认的是
+#   「150×120 / PETG」。下游房间读到的全是过期值，只能靠主代理在 prompt 里
+#   手工硬写才纠正。
+#
+# 本段的判据（全部落盘，不靠模型自觉）：
+#   · 每个阶段的"最新一条记录"决定它到底完成没有 —— 重做会用新记录覆盖旧状态；
+#   · 阶段产物若依赖【未答题目】，就在 stage_status 里显式暴露；
+#   · 题目一旦被作答，该题目挂载的阶段产物立刻标记 stale（带原因）；
+#   · stale 阶段一律视为【未完成】（fail-closed），必须重做后才能继续；
+#   · 重做必须给出【新的 artifact】，与过期前完全相同的产物被拒绝（防走过场）。
+def _stage_records(plan):
+    """按阶段汇总 stage 记录（保持落盘顺序）。"""
+    out = {}
+    for s in (plan or {}).get("stages", []) or []:
+        if not isinstance(s, dict):
+            continue
+        sid = s.get("stage")
+        if sid not in STAGE_LABELS:
+            continue
+        out.setdefault(sid, []).append(s)
+    return out
+
+
+def _stage_latest(plan):
+    """每个阶段的【最新一条】记录。
+
+    为什么要"最新一条"而不是"任意一条 done"：
+      重做一个早期阶段时，旧记录仍是 done；若只看"存在 done"，重做永远
+      无法让该阶段回到未完成，stale 也就永远清不掉。取最新记录才反映真实状态。
+    """
+    return {sid: recs[-1] for sid, recs in _stage_records(plan).items() if recs}
+
+
+def _stage_done_map(plan):
+    """阶段 → 已登记的 artifact（仅"最新记录为 done"的阶段）。"""
+    out = {}
+    for sid, rec in _stage_latest(plan).items():
+        if rec.get("status") == "done":
+            out[sid] = rec.get("artifact") or ""
+    return out
+
+
+def _stage_question_seqs(plan):
+    """阶段 → 挂在它上面的题号（台账 + 依赖登记两处合并，兼容旧计划文件）。"""
+    out = {}
+    for st, seqs in ((plan or {}).get("stage_question_deps") or {}).items():
+        for s in (seqs or []):
+            try:
+                out.setdefault(st, []).append(int(s))
+            except Exception:
+                continue
+    for q in ((plan or {}).get("questions") or []):
+        st = q.get("stage")
+        if st not in STAGE_LABELS:
+            continue
+        try:
+            seq = int(q.get("seq"))
+        except Exception:
+            continue
+        if seq not in out.setdefault(st, []):
+            out[st].append(seq)
+    for st in out:
+        out[st] = sorted(set(out[st]))
+    return out
+
+
+def _unanswered_by_stage(plan):
+    """阶段 → 该阶段上【尚未作答】的题目列表（"产物依赖未答题目"的判据）。"""
+    qmap = {q.get("seq"): q for q in ((plan or {}).get("questions") or [])}
+    out = {}
+    for st, seqs in _stage_question_seqs(plan).items():
+        pend = [qmap[s] for s in seqs if s in qmap and not qmap[s].get("answered")]
+        if pend:
+            out[st] = pend
+    return out
+
+
+def _stale_map(plan):
+    """阶段 → stale 记录（同一阶段只保留一条，后写覆盖前写）。"""
+    out = {}
+    for e in ((plan or {}).get("stale_stages") or []):
+        if isinstance(e, dict) and e.get("stage") in STAGE_LABELS:
+            out[e["stage"]] = e
+    return out
+
+
+def _mark_stage_stale(plan, stage, questions, old_artifact, reason):
+    """把某阶段标记为【产物过期】。同阶段多次标记 → 合并题号、刷新原因。"""
+    stale = [e for e in (plan.get("stale_stages") or [])
+             if isinstance(e, dict) and e.get("stage") != stage]
+    prev = _stale_map(plan).get(stage) or {}
+    qs = []
+    for q in (prev.get("questions") or []) + list(questions or []):
+        if not isinstance(q, dict):
+            continue
+        if all(int(x.get("seq", -1)) != int(q.get("seq", -2)) for x in qs):
+            qs.append(q)
+    entry = {
+        "stage": stage,
+        "label": STAGE_LABELS[stage],
+        "reason": reason,
+        "questions": qs,
+        "old_artifact": old_artifact,
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ts": time.time(),
+        "since": prev.get("since") or time.strftime("%Y-%m-%d %H:%M:%S"),
+        "redo_started_at": prev.get("redo_started_at"),
+    }
+    stale.append(entry)
+    plan["stale_stages"] = stale
+    return entry
+
+
+def _clear_stale(plan, stage, cleared_by, artifact=None):
+    """清除某阶段的 stale，并留审计痕迹（stale_history 只增不改）。"""
+    keep = []
+    hit = None
+    for e in (plan.get("stale_stages") or []):
+        if isinstance(e, dict) and e.get("stage") == stage:
+            hit = e
+            continue
+        keep.append(e)
+    plan["stale_stages"] = keep
+    if hit is not None:
+        hist = dict(hit)
+        hist["cleared_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        hist["cleared_by"] = cleared_by
+        hist["cleared_artifact"] = artifact
+        plan.setdefault("stale_history", []).append(hist)
+    return hit
+
+
+def _parse_ts(s):
+    """把 'YYYY-mm-dd HH:MM:SS' 解析成 epoch；解析不了返回 None（fail-safe 不误判）。"""
+    try:
+        return time.mktime(time.strptime(str(s).strip(), "%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return None
+
+
+def _stale_implied(plan):
+    """【Bug② 修复 · 存量数据判定】从时间戳推断"产物过期"（只读，不落盘）。
+
+    为什么还要这一层：
+      answer_question 的 stale 标记是【向前生效】的 —— 它只能拦住"之后"的改答。
+      而 bug 记录里的现场是【已经发生】的：十阶段产物 20:30~20:33 落盘，
+      用户答复 20:55~20:57 才到，mode2_plan.json 里躺的就是过期文本。
+      若只认落盘标记，这些历史/存量计划文件依旧会被判"完成"。
+
+    判据（纯数据，不靠模型自述）：
+      阶段最新一条 done 记录的 done_at  <  该阶段上某道题的 answered_at
+      → 产物写完【之后】用户才给出答案 → 产物必然没吸收这个答案 → 过期。
+
+    只做只读推断；真正清除仍必须走 refresh-stage + 新产物（见 mark_stage_done）。
+    """
+    out = {}
+    done = _stage_done_map(plan)
+    latest = _stage_latest(plan)
+    q_by_seq = {q.get("seq"): q for q in (plan.get("questions") or [])}
+    for st, seqs in _stage_question_seqs(plan).items():
+        if st not in done:
+            continue
+        _art_at = _parse_ts((latest.get(st) or {}).get("done_at"))
+        if _art_at is None:
+            continue
+        _late = []
+        for s in seqs:
+            q = q_by_seq.get(s)
+            if not q or not q.get("answered"):
+                continue
+            _ans_at = _parse_ts(q.get("answered_at"))
+            if _ans_at is not None and _ans_at > _art_at:
+                _late.append({"seq": s, "topic": q.get("topic"),
+                              "answered_at": q.get("answered_at")})
+        if _late:
+            out[st] = {
+                "stage": st,
+                "label": STAGE_LABELS[st],
+                "artifact_at": (latest.get(st) or {}).get("done_at"),
+                "questions": _late,
+                "reason": ("题目 %s 在产物落盘【之后】才被作答，产物未吸收该答复"
+                           % "、".join(str(q["seq"]) for q in _late)),
+                "source": "timestamp_inference",
+            }
+    return out
+
+
+def _redo_watch(plan):
+    """重做监视表：refresh-stage 之后，必须交回【不同的新产物】才算重做完成。"""
+    return plan.setdefault("stale_redo_watch", {})
+
+
+def _redo_expectation(plan, stage):
+    """取某阶段"必须重做"的期望（stale 记录或 refresh 后的监视项，任一存在即可）。"""
+    st = _stale_map(plan).get(stage)
+    if st:
+        return st, "stale"
+    w = (_redo_watch(plan) or {}).get(stage)
+    if isinstance(w, dict):
+        return w, "redo_watch"
+    return None, None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 二、提问数量硬约束（用户口径）
 # ═══════════════════════════════════════════════════════════════════════════
 # 用户原话：
@@ -228,7 +436,23 @@ def _fresh_plan():
         "stages": [],          # 已开始的阶段（含 status）
         "stage_index": -1,     # 已推进到的阶段下标（-1 = 未开始）
         "questions": [],       # 【按需提问】台账，见 record_question
+        # ══ 【Bug② 修复】十阶段产物与用户答复的依赖 / 过期（stale）台账 ══
+        # 原缺陷：十阶段 artifacts 在用户答复【之前】就落盘，答复后从不回写，
+        #   导致 mode2_plan.json 里仍是过期值（实测：底盘 100×100/PLA，
+        #   而用户确认的是 150×120/PETG），后续房间只能靠主代理手工覆盖。
+        # 现在：
+        #   stage_question_deps —— 哪个阶段的产物依赖哪些题目（含未答标记）；
+        #   stale_stages        —— 因用户答复而【产物过期】、必须重算的阶段；
+        #   stale_history       —— 已清除的过期记录（审计用，只增不改）。
+        "stage_question_deps": {},
+        "stale_stages": [],
+        "stale_history": [],
         "subagent_plan": None, # 由【总计子代理】写入
+        # ══ 【Bug③ 修复】rooms 快照（与门禁同一口径）══
+        # 原缺陷：set-subagent-plan 只改 subagent_plan，不刷新 mode2_plan 的
+        #   rooms 快照，于是 mode_gate / defense_gate / workflow_gate 三处
+        #   room_type 各说各话（drivetrain/sensor/drawing vs transmission/...）。
+        "subagent_config": None,
         "prime_reports": [],   # 建模小屋 → 总理子代理 的上报
         "prime_consistency": None,
         "notes": [],
@@ -255,20 +479,47 @@ def load_plan(work_dir=None):
         return d
 
 
+def _state_dir():
+    """状态目录权威裁决者（_store.state_dir()），与门禁读同一份状态文件。
+
+    ── 为什么不能按"脚本所在目录"拼路径 ────────────────────────────────
+    工程模式在磁盘上有两份 tools（仓库副本 + ~/.dsh 安装副本）。按
+    __file__ 拼 workflow_state.json 会拿到【自己这份】的状态 —— 而门禁
+    / 守卫读的是权威目录。实测后果：plan 的 task_id 取自另一份，
+    编制 task_id 与当前任务永远对不上 → select 报 MODE2_SUBAGENT_PLAN_STALE，
+    Bug③ 的"rooms 快照同步"也就整条链路失效。
+    """
+    try:
+        import _store as _st
+        _d = _st.state_dir()
+        if _d:
+            return _d
+    except Exception:
+        pass
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def current_task_id(work_dir=None):
+    """当前任务 task_id（权威目录里的 workflow_state）。读不到返回 None。"""
+    try:
+        _p = os.path.join(_state_dir(), "workflow_state.json")
+        if os.path.exists(_p):
+            with open(_p, "r", encoding="utf-8") as _f:
+                return (json.load(_f) or {}).get("task_id") or None
+    except Exception:
+        pass
+    return None
+
+
 def save_plan(plan, work_dir=None):
     plan = dict(plan or {})
     plan["schema"] = "dsh-engineering/mode2-plan@1"
     plan["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    # task_id 一律以 workflow_state 为准，保证新旧任务的编制不会混用。
+    # task_id 一律以【权威目录】的 workflow_state 为准 ——
+    # 否则编制与任务对不上，room-start 会被 SUBAGENT_PLAN_STALE 误拦。
     if not plan.get("task_id"):
         try:
-            import json as _json
-            import os as _os
-            _sp = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
-                                "workflow_state.json")
-            if _os.path.exists(_sp):
-                with open(_sp, "r", encoding="utf-8") as _f:
-                    plan["task_id"] = (_json.load(_f) or {}).get("task_id")
+            plan["task_id"] = current_task_id()
         except Exception:
             pass
     p = plan_path(work_dir)
@@ -360,7 +611,20 @@ def mark_stage_done(stage, artifact="", work_dir=None):
 
     为什么要登记 artifact：没有产出的"阶段完成"就是走过场。
     最终交付时会校验关键阶段是否真的留下了产出。
+
+    ── 【Bug② 修复】重做 / stale 语义（代码强制）─────────────────────────
+    ① 只认【最新一条】未完成记录为落点：重做一个早期阶段时，新记录会被
+       mark 成 done，旧记录保持原样 —— stage_status 取最新记录，所以重做
+       是"重新开始"而不是"补一条 done 骗过去"。
+    ② 若该阶段是 stale（题目已作答、产物需重算），必须交回【新产物】：
+       与过期前的 artifact 完全相同 → 拒绝（否则模型写回旧文本就清掉 stale）。
+    ③ 成功后才清 stale（清不掉就说明重做没发生）。
+    ④ 阶段产物若依赖【仍未作答】的题目，直接拒收 —— 这正是"产物写在用户
+       答复之前"的根因，必须堵在写入侧。
     """
+    if stage not in STAGE_IDS:
+        return {"ok": False,
+                "error": "未知阶段 %r；合法阶段：%s" % (stage, " → ".join(STAGE_IDS))}
     plan = load_plan(work_dir)
     if plan.get("_load_error"):
         return {"ok": False, "error": plan["_load_error"]}
@@ -373,30 +637,124 @@ def mark_stage_done(stage, artifact="", work_dir=None):
         return {"ok": False,
                 "error": ("阶段【%s】尚未 begin_stage，无法标记完成。"
                           "必须先 begin_stage 再 mark_stage_done。"
-                          % STAGE_LABELS.get(stage, stage))}
+                          % STAGE_LABELS.get(stage, stage)),
+                "hint": "先 begin-stage %s（重做也要重新 begin-stage）再 mark-stage-done。" % stage}
+
+    # ④ 依赖未答题目 → 拒收（fail-closed）
+    _pend = _unanswered_by_stage(plan).get(stage) or []
+    if _pend:
+        return {
+            "ok": False,
+            "gate": "STAGE_AWAITING_ANSWER",
+            "stage": stage,
+            "label": STAGE_LABELS[stage],
+            "unanswered": [{"seq": q.get("seq"), "topic": q.get("topic")} for q in _pend],
+            "error": ("阶段【%s】的产物依赖尚未作答的题目（%s）—— "
+                      "禁止在用户答复之前把产物落成最终态。"
+                      % (STAGE_LABELS[stage],
+                         "、".join("第%s题" % q.get("seq") for q in _pend))),
+            "hint": ("先让用户作答：mode2_flow.py answer-question <seq> \"<答复>\"，"
+                     "然后重做该阶段（refresh-stage）再 mark-stage-done。"),
+        }
+
+    # ②③ 重做必须交新产物
+    _exp, _src = _redo_expectation(plan, stage)
+    if _exp:
+        _old = (_exp or {}).get("old_artifact")
+        _new = str(artifact or "").strip()
+        if not _new:
+            return {
+                "ok": False, "gate": "STAGE_REDO_ARTIFACT_REQUIRED", "stage": stage,
+                "error": ("阶段【%s】的产物已过期/已登记重做，mark-stage-done 必须带 "
+                          "--artifact 提交【重算后的新产物】（空产物不算重做）。"
+                          % STAGE_LABELS[stage]),
+                "old_artifact": _old,
+                "hint": ("python mode2_flow.py mark-stage-done %s "
+                         "--artifact \"<重算后的产物>\"" % stage),
+            }
+        if _old and _new == str(_old).strip():
+            return {
+                "ok": False, "gate": "STAGE_REDO_NOT_REFRESHED", "stage": stage,
+                "error": ("阶段【%s】的产物与过期前【完全相同】—— 这不是重做。"
+                          "用户答复已改变输入，必须真的重算后再提交。"
+                          % STAGE_LABELS[stage]),
+                "old_artifact": _old,
+                "reason": (_exp or {}).get("reason"),
+            }
+
     hit["status"] = "done"
     hit["artifact"] = artifact
     hit["done_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    hit["artifact_ts"] = time.time()
+    _cleared = None
+    if _exp:
+        hit["redone_at"] = hit["done_at"]
+        hit["redone_from_artifact"] = (_exp or {}).get("old_artifact")
+        _cleared = _clear_stale(plan, stage, cleared_by="mark_stage_done",
+                                artifact=artifact)
+        _redo_watch(plan).pop(stage, None)
+    # 依赖台账同步刷新：新产物 >= 当前已答题目
+    plan.setdefault("stage_question_deps", {})[stage] = _stage_question_seqs(plan).get(stage, [])
     save_plan(plan, work_dir)
-    return {"ok": True, "stage": stage, "artifact": artifact}
+    out = {"ok": True, "stage": stage, "artifact": artifact}
+    if _cleared is not None:
+        out["stale_cleared"] = True
+        out["redone"] = True
+        out["note"] = ("阶段【%s】已按用户答复重做，stale 已清除。" % STAGE_LABELS[stage])
+    return out
 
 
 def stage_status(work_dir=None):
-    """返回十阶段的推进情况，含"哪些阶段有产出、哪些还是空"。"""
+    """返回十阶段的推进情况，含"哪些阶段有产出、哪些是 stale、哪些在等答复"。
+
+    ── 【Bug② 修复】输出必须能一眼看到：
+      · done / artifact：按【最新一条记录】判定（重做后旧 done 不算数）；
+      · stale：产物因用户作答而过期，必须重做；
+      · awaiting_answer：产物依赖未答题目（还没到可交付的状态）；
+      · blocking：会真正挡住 require_stages_complete 的阶段标签。
+    """
     plan = load_plan(work_dir)
-    done = {}
-    for s in plan.get("stages", []):
-        if s.get("status") == "done":
-            done[s["stage"]] = s.get("artifact") or ""
+    if plan.get("_load_error"):
+        return {"ok": False, "error": plan["_load_error"]}
+    done = _stage_done_map(plan)
+    stale = dict(_stale_map(plan))
+    # 存量数据：answer 早于产物落盘的历史计划文件，也要在查询里暴露出来
+    # （只读推断，不污染 stale_stages 落盘台账 —— 清除仍必须走真重做）
+    _implied = _stale_implied(plan)
+    for _sid, _rec in _implied.items():
+        if _sid not in stale:
+            stale[_sid] = _rec
+    pending = _unanswered_by_stage(plan)
     rows = []
     for _id, _lab, _need in STAGES:
-        rows.append({"stage": _id, "label": _lab, "needs": _need,
-                     "done": _id in done, "artifact": done.get(_id, "")})
+        _q = _stage_question_seqs(plan).get(_id, [])
+        _st = stale.get(_id)
+        _pend = pending.get(_id) or []
+        rows.append({
+            "stage": _id, "label": _lab, "needs": _need,
+            "done": _id in done,
+            "artifact": done.get(_id, ""),
+            "stale": bool(_st),
+            "stale_reason": (_st or {}).get("reason"),
+            "stale_questions": [q.get("seq") for q in ((_st or {}).get("questions") or [])],
+            "awaiting_answer": [q.get("seq") for q in _pend],
+            "questions": _q,
+            "blocking": (bool(_st) or bool(_pend) or _id not in done),
+        })
     _missing = [r["label"] for r in rows if not r["done"]]
+    _stale_labels = [r["label"] for r in rows if r["stale"]]
+    _await_labels = [r["label"] for r in rows if r["awaiting_answer"]]
+    _blocking = [r["label"] for r in rows if r["blocking"]]
     return {"ok": True, "stage_index": plan.get("stage_index", -1),
             "total": len(STAGES), "done_count": len(done),
             "rows": rows, "missing": _missing,
-            "complete": not _missing}
+            "stale": _stale_labels, "stale_count": len(_stale_labels),
+            "awaiting_answer": _await_labels,
+            "blocking": _blocking,
+            "complete": not _blocking,
+            "counted_done": not _missing,
+            "note": ("stale 阶段视为未完成（fail-closed）：用户答复改变了输入，"
+                     "必须 refresh-stage 重做后才能继续。") if _stale_labels else None}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -457,12 +815,27 @@ def record_question(topic, stage, reason, work_dir=None):
          "stage_label": STAGE_LABELS[stage], "reason": reason,
          "at": time.strftime("%Y-%m-%d %H:%M:%S"), "ts": time.time()}
     plan.setdefault("questions", []).append(q)
+    # ── 【Bug② 修复】登记「该阶段产物依赖这道题」───────────────────────
+    # 这是"产物依赖未答题目"的落盘判据：answer_question 会据此把该阶段标 stale，
+    # mark_stage_done 会据此拒收"用户答复前就定稿"的产物。
+    deps = plan.setdefault("stage_question_deps", {})
+    _seqs = [int(x) for x in (deps.get(stage) or [])]
+    if q["seq"] not in _seqs:
+        deps[stage] = sorted(_seqs + [q["seq"]])
+    plan["stage_question_deps"] = deps
     save_plan(plan, work_dir)
+    _answered_map = {qq.get("seq"): bool(qq.get("answered"))
+                     for qq in plan.get("questions", [])}
     return {"ok": True, "question": q, "asked": len(plan["questions"]),
             "min": lim["min"], "max": lim["max"],
             "remaining_to_max": max(0, lim["max"] - len(plan["questions"])),
+            "stage_question_deps": deps,
             "note": ("已登记按需提问 %d/%d（%s）。"
-                     % (len(plan["questions"]), lim["max"], lim["label"]))}
+                     "该题答复后，阶段【%s】的产物会被标记为过期（stale），"
+                     "必须重做。"
+                     % (len(plan["questions"]), lim["max"], lim["label"],
+                        STAGE_LABELS[stage])),
+            "answered_map": _answered_map}
 
 
 def answer_question(seq, answer, work_dir=None):
@@ -489,14 +862,128 @@ def answer_question(seq, answer, work_dir=None):
             break
     if hit is None:
         return {"ok": False, "error": "没有第 %d 题（请先 record_question）。" % seq}
+    _prev_answer = hit.get("answer")
     hit["answered"] = True
     hit["answer"] = ans
     hit["answered_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    if _prev_answer is not None and str(_prev_answer) != ans:
+        hit["reanswered_count"] = int(hit.get("reanswered_count") or 0) + 1
     plan["questions"] = qs
+    _stage = hit.get("stage")
+
+    # ── 【Bug② 修复】答复落盘即把该阶段产物标为 stale（题目 X 已作答，产物需重算）
+    _affected = []
+    if _stage in STAGE_LABELS:
+        _done_art = _stage_done_map(plan).get(_stage)
+        _reason = ("题目 %d（%s）已作答，产物需重算：%s"
+                   % (seq, hit.get("topic") or "", ans[:60]))
+        deps = plan.setdefault("stage_question_deps", {})
+        _seqs = [int(x) for x in (deps.get(_stage) or [])]
+        if seq not in _seqs:
+            deps[_stage] = sorted(_seqs + [seq])
+        plan["stage_question_deps"] = deps
+        # 只有"该阶段真的产出过东西"才需要过期：
+        #   · 从没 done 过（只是 begin 了）→ 本来就待做，靠 awaiting_answer 拦截即可；
+        #   · 已经 stale（refresh 后又改答）→ 保留 stale，不能因刷新而洗白。
+        _had_done = any(s.get("status") == "done"
+                        for s in (plan.get("stages") or [])
+                        if isinstance(s, dict) and s.get("stage") == _stage)
+        if _done_art is not None or _had_done or _stage in _stale_map(plan):
+            _stale = _mark_stage_stale(
+                plan, _stage,
+                [{"seq": seq, "topic": hit.get("topic"), "answer": ans}],
+                old_artifact=_done_art, reason=_reason)
+            _affected.append({"stage": _stage, "label": STAGE_LABELS[_stage],
+                              "reason": _stale.get("reason"),
+                              "old_artifact": _done_art,
+                              "redo_command": ("python mode2_flow.py refresh-stage %s"
+                                               % _stage)})
     save_plan(plan, work_dir)
     _done = len([q for q in qs if q.get("answered")])
-    return {"ok": True, "seq": seq, "answered": _done, "total": len(qs),
-            "note": "已记录第 %d 题答复（%d/%d）。" % (seq, _done, len(qs))}
+    out = {"ok": True, "seq": seq, "answered": _done, "total": len(qs),
+           "note": "已记录第 %d 题答复（%d/%d）。" % (seq, _done, len(qs))}
+    if _affected:
+        out["stale_stages"] = _affected
+        out["stale_marked"] = [a["stage"] for a in _affected]
+        out["note"] += (" 阶段【%s】的产物已标为过期（stale），"
+                        "必须 refresh-stage 重做后才能继续。"
+                        % "、".join(a["label"] for a in _affected))
+    return out
+
+
+def refresh_stage(stage, work_dir=None, reason="", artifact=""):
+    """【Bug② 修复】显式重做某阶段：进入重做态，并要求交回【新产物】。
+
+    为什么需要这个显式入口：
+      stale 只是"标记"。若没有"开始重做"这个动作，模型可以继续说
+      "我已经重做了"却什么都不写。这里把重做变成一次**状态变更**：
+        ① 只接受已做过（或 stale）的阶段 —— 没做过的直接 begin-stage 即可；
+        ② 立刻追加一条 in_progress 记录（最新记录不再是 done → 阶段重新变成未完成）；
+        ③ 登记 stale_redo_watch：后续 mark-stage-done 必须带来【新产物】，
+           与过期前完全相同的产物会被拒（防"写回旧文本就清掉 stale"）；
+        ④ stale 记录**此时不清除** —— 只有真的重做成功后才清除。
+
+    Args:
+        stage: 阶段 id
+        work_dir: 计划文件目录
+        reason: 为什么要重做（留痕；为空时沿用 stale 原因）
+        artifact: 可选的新产物 —— 给出即等价于 refresh + mark-stage-done 一步完成
+
+    Returns: {"ok","stage","redone","stale_before","old_artifact","questions_to_apply",...}
+    """
+    if stage not in STAGE_IDS:
+        return {"ok": False,
+                "error": "未知阶段 %r；合法阶段：%s" % (stage, " → ".join(STAGE_IDS))}
+    plan = load_plan(work_dir)
+    if plan.get("_load_error"):
+        return {"ok": False, "error": plan["_load_error"]}
+    _latest = _stage_latest(plan).get(stage)
+    _stale = _stale_map(plan).get(stage)
+    if _latest is None and _stale is None:
+        return {"ok": False,
+                "error": ("阶段【%s】还没做过，无需 refresh —— 直接 begin-stage "
+                          "正常推进即可。" % STAGE_LABELS[stage]),
+                "hint": "python mode2_flow.py begin-stage %s" % stage}
+
+    _reason = (str(reason or "").strip()
+               or (_stale or {}).get("reason") or "手工请求重做该阶段")
+    _old_artifact = (_stale or {}).get("old_artifact")
+    if _old_artifact is None and _latest:
+        _old_artifact = _latest.get("artifact")
+
+    idx = STAGE_IDS.index(stage)
+    plan["stage_index"] = max(int(plan.get("stage_index", -1)), idx)
+    plan.setdefault("stages", []).append({
+        "stage": stage, "label": STAGE_LABELS[stage], "needs": STAGE_NEEDS[stage],
+        "status": "in_progress", "note": "redo: " + _reason,
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"), "ts": time.time(),
+        "redo_of_artifact": _old_artifact,
+    })
+    _redo_watch(plan)[stage] = {
+        "stage": stage,
+        "old_artifact": _old_artifact,
+        "reason": _reason,
+        "questions": ((_stale or {}).get("questions") or []),
+        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    save_plan(plan, work_dir)
+
+    out = {"ok": True, "stage": stage, "label": STAGE_LABELS[stage],
+           "redone": True, "stale_before": bool(_stale),
+           "old_artifact": _old_artifact, "reason": _reason,
+           "requires": STAGE_NEEDS[stage],
+           "questions_to_apply": [q for q in ((_stale or {}).get("questions") or [])],
+           "next": ("重算后提交【新】产物：python mode2_flow.py mark-stage-done %s "
+                    "--artifact \"<新产物>\"（与旧产物相同会被拒）" % stage)}
+    if str(artifact or "").strip():
+        _mk = mark_stage_done(stage, artifact, work_dir)
+        out["mark"] = _mk
+        out["ok"] = bool(_mk.get("ok"))
+        out["artifact"] = artifact if _mk.get("ok") else None
+        if not _mk.get("ok"):
+            out["error"] = _mk.get("error")
+            out["gate"] = _mk.get("gate")
+    return out
 
 
 def question_report(work_dir=None, final=False):
@@ -536,6 +1023,126 @@ MIN_SUBAGENTS = 1
 MAX_SUBAGENTS = 24
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 七·补充、【Bug③ 修复】房间类型规范化 + rooms 快照（三处一致性）
+# ═══════════════════════════════════════════════════════════════════════════
+# 缺陷回顾（2026-10-19 实测）：
+#   总计子代理在 set-subagent-plan 里把房间类型写成 drivetrain / sensor /
+#   drawing，门禁只认 transmission / housing / drafting，于是：
+#     · workflow_gate.select 用【新类型】路由波次 → 按 drafting 放行；
+#     · 而 mode2_plan.json 的 rooms 快照从未刷新 → mode_gate.room-status /
+#       defense_gate.check-room 读到旧类型 drivetrain/sensor → require_physics
+#       被算成 false → 物理/领域凭据被静默豁免（虚假 CRITICAL 也一起放行）；
+#     · 更早还有 drawing 导致 CONFIG_MISSING_FINAL_WAVES。
+#
+# 现在（代码强制）：
+#   ① 类型必须能被规范化到【规范类型表】；规范失败 = 明确报错，不静默放过；
+#   ② set-subagent-plan 落盘时同步写 mode2_plan.json 的 subagent_config.rooms
+#      （与 workflow_state.subagent_config.rooms 同构：[房间名, 类型] 对）；
+#   ③ 只读命令 room-types 输出三处 room_type 的一致性自检。
+
+#: 门禁认可的规范房间类型（与 workflow_gate.WAVE1_TYPES / defense_gate
+#: .MODELING_ROOM_TYPES / mode_gate 波次路由对齐；不在此表 = 必然漏启动或免校核）。
+CANONICAL_ROOM_TYPES = (
+    "structural", "transmission", "housing", "support", "spring", "thermal",
+    "corrosion", "assembly", "drafting", "prime",
+)
+
+#: 历史遗留 / 同义写法 → 规范类型。
+#: 这里列出的每条都对应一次真实踩坑（见 DSH插件Bug记录.md Bug③/⑥）。
+ROOM_TYPE_ALIASES = {
+    # Bug③ 实测：drivetrain 是历史遗留类型，不在波1类型表 → require_physics=false
+    "drivetrain": "transmission",
+    "drive": "transmission",
+    "gear": "transmission",
+    "传动": "transmission",
+    # Bug⑥ 实测：sensor 不在白名单 → 物理/领域凭据被静默豁免
+    "sensor": "housing",
+    "sensors": "housing",
+    "electronics": "housing",
+    "electronic": "housing",
+    "外壳": "housing",
+    "壳体": "housing",
+    # Bug③ 实测：drawing 导致 CONFIG_MISSING_FINAL_WAVES（门禁只认 drafting）
+    "drawing": "drafting",
+    "drawings": "drafting",
+    "dwg": "drafting",
+    "工程图": "drafting",
+    "出图": "drafting",
+    # 其它常见同义写法
+    "structure": "structural",
+    "frame": "structural",
+    "结构": "structural",
+    "机架": "structural",
+    "assembly_validation": "assembly",
+    "assembly-validation": "assembly",
+    "总装": "assembly",
+    "验证": "assembly",
+    "prime_agent": "prime",
+    "总理": "prime",
+}
+
+
+def normalize_room_type(raw):
+    """把房间类型规范化到 CANONICAL_ROOM_TYPES。**失败即报错**（不静默兜底）。
+
+    Args:
+        raw: 原始类型字符串（大小写 / 空白 / 连字符 / 同义词都容忍）
+
+    Returns:
+        {"ok": True, "type": <规范类型>, "raw":..., "normalized": bool, "alias":...}
+        或 {"ok": False, "error": "...", "raw":..., "allowed": [...]}
+
+    为什么不做"猜一个最接近的"兜底：
+      静默兜底正是 Bug③/⑥ 的来源 —— drivetrain 被悄悄当成未知类型，
+      门禁于是 require_physics=false，凭据被静默豁免。宁可报错让人改。
+    """
+    _raw = raw
+    s = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not s:
+        return {"ok": False, "raw": _raw,
+                "error": ("房间类型为空 —— 必须显式给 type（规范类型：%s）。"
+                          % "/".join(CANONICAL_ROOM_TYPES)),
+                "allowed": list(CANONICAL_ROOM_TYPES)}
+    if s in CANONICAL_ROOM_TYPES:
+        return {"ok": True, "type": s, "raw": _raw, "normalized": (str(_raw) != s),
+                "alias": (str(_raw) if str(_raw) != s else None)}
+    if s in ROOM_TYPE_ALIASES:
+        canon = ROOM_TYPE_ALIASES[s]
+        return {"ok": True, "type": canon, "raw": _raw, "normalized": True,
+                "alias": str(_raw),
+                "note": ("类型 %r 不在门禁规范表内，已规范化为 %r"
+                         "（否则会漏启动或被免校核）。" % (str(_raw), canon))}
+    return {"ok": False, "raw": _raw,
+            "error": ("房间类型 %r 无法规范化到门禁认可的规范类型（%s）。"
+                      "未知类型会让波次路由漏启动、或 require_physics 直接豁免 —— "
+                      "拒绝登记。请改用规范类型，或先在此处补别名并写回归测试。"
+                      % (str(_raw), "/".join(CANONICAL_ROOM_TYPES))),
+            "allowed": list(CANONICAL_ROOM_TYPES),
+            "known_aliases": sorted(ROOM_TYPE_ALIASES)}
+
+
+def room_type_snapshot(rooms):
+    """把编制里的 rooms 规范化为门禁可直接消费的快照（[(name, type), ...]）。
+
+    单独抽出来是为了让 set_subagent_plan / room_types_report 共用同一套
+    规范化逻辑 —— 两处各写一份正是"口径分裂"的来源。
+    """
+    out, seen = [], set()
+    for r in (rooms or []):
+        if not isinstance(r, dict):
+            continue
+        nm = str(r.get("name") or "").strip()
+        nz = normalize_room_type(r.get("type"))
+        if not nm or not nz.get("ok"):
+            continue
+        if nm in seen:
+            continue
+        seen.add(nm)
+        out.append([nm, nz["type"]])
+    return out
+
+
 def require_stages_complete(work_dir=None):
     """【强制点】编制作出 / 开工前，十阶段必须全部完成。
 
@@ -550,20 +1157,47 @@ def require_stages_complete(work_dir=None):
     st = stage_status(work_dir)
     if not st.get("ok"):
         return st
-    _missing = st.get("missing") or []
-    if _missing:
+    # ── 【Bug② 修复】stale / 等答复的阶段一律视为【未完成】（fail-closed）──
+    # 原实现只看"有没有 done 记录"，于是"产物早就写死在用户答复之前"也能过闸：
+    #   阶段 7/10 里写的还是「底盘 100×100 / PLA」，用户确认的是「150×120 / PETG」。
+    # 现在 stale 阶段（题目已作答、产物需重算）与"还挂着未答题目"的阶段
+    # 都算 blocking —— 必须重做、把用户答复落进产物，才允许登记编制/开工。
+    _missing = list(st.get("missing") or [])
+    _stale = list(st.get("stale") or [])
+    _awaiting = list(st.get("awaiting_answer") or [])
+    _blocking = list(st.get("blocking") or [])
+    if _blocking:
+        _hints = []
+        if _missing:
+            _hints.append("未完成：%s" % "、".join(_missing))
+        if _stale:
+            _hints.append("产物过期（必须重做）：%s" % "、".join(_stale))
+        if _awaiting:
+            _hints.append("产物依赖未答题目：%s" % "、".join(_awaiting))
+        _how = []
+        for _lbl in _stale + _awaiting:
+            _sid = next((r["stage"] for r in (st.get("rows") or [])
+                         if r.get("label") == _lbl), None)
+            if _sid:
+                _how.append("python mode2_flow.py refresh-stage %s" % _sid)
+        if _missing:
+            _how.append("python mode2_flow.py begin-stage <阶段> → mark-stage-done <阶段>")
         return {
             "ok": False,
-            "gate": "ANALYSIS_INCOMPLETE",
+            "gate": "ANALYSIS_STALE" if (_stale or _awaiting) else "ANALYSIS_INCOMPLETE",
             "stage_index": st.get("stage_index"),
             "done_count": st.get("done_count"),
             "total": st.get("total"),
             "missing": _missing,
-            "error": ("十阶段分析尚未完成（已完成 %d/%d），禁止登记编制或开工。"
-                      % (st.get("done_count") or 0, st.get("total") or 10)),
-            "hint": ("请让总计子代理按序推进并逐阶段 mark-stage-done："
-                     "mode2_flow.py begin-stage <阶段> → mark-stage-done <阶段>。",
-                     "未完成的阶段：%s" % "、".join(_missing)),
+            "stale": _stale,
+            "awaiting_answer": _awaiting,
+            "blocking": _blocking,
+            "error": ("十阶段分析尚未达到可交付状态（已完成 %d/%d，"
+                      "其中 %d 个阶段产物过期、%d 个阶段在等用户答复），"
+                      "禁止登记编制或开工。"
+                      % (st.get("done_count") or 0, st.get("total") or 10,
+                         len(_stale), len(_awaiting))),
+            "hint": tuple(_hints + ["—— " + h for h in _how]),
         }
     return {"ok": True, "done_count": st.get("done_count"),
             "total": st.get("total")}
@@ -626,13 +1260,28 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
             return {"ok": False,
                     "error": ("子代理【%s】缺少 why（为什么需要它）。"
                               "用户要求每个零件都能追溯到存在的理由，编制同理。" % name)}
-        norm.append({
+        # ── 【Bug③ 修复】类型必须规范化；规范失败 = 明确报错（不静默放过）──
+        # 实测：drivetrain/sensor/drawing 这些历史类型不在门禁波1类型表里，
+        #   会导致波1漏启动、require_physics=false（凭据被静默豁免）。
+        _nz = normalize_room_type(r.get("type"))
+        if not _nz.get("ok"):
+            return {"ok": False,
+                    "error": ("子代理【%s】的房间类型无法规范化：%s" % (name, _nz.get("error"))),
+                    "room": name, "raw_type": r.get("type"),
+                    "allowed": _nz.get("allowed"),
+                    "hint": ("drivetrain→transmission / sensor→housing / drawing→drafting "
+                             "等历史写法可被自动规范化；其余必须显式改成规范类型。")}
+        _item = {
             "name": name,
-            "type": str(r.get("type") or "structural"),
+            "type": _nz["type"],
             "parts": [str(p).strip() for p in parts if str(p).strip()],
             "why": str(r.get("why") or "").strip(),
             "depends_on": [str(d).strip() for d in (r.get("depends_on") or []) if str(d).strip()],
-        })
+        }
+        if _nz.get("normalized"):
+            _item["type_raw"] = str(r.get("type"))
+            _item["type_normalized"] = True
+        norm.append(_item)
 
     # 依赖必须指向存在的房间（防止总计子代理写出悬空依赖）
     _names = {r["name"] for r in norm}
@@ -648,14 +1297,10 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
         return {"ok": False, "error": plan["_load_error"]}
     # task_id 必须来自当前任务本身 —— 编制与任务绑定，
     # 否则 room-start 会因"编制不属于本任务"被误拦。
-    _tid = plan.get("task_id")
-    if not _tid:
-        try:
-            import workflow_gate as _wg
-            _tid = (_wg.load_state() or {}).get("task_id")
-        except Exception:
-            _tid = None
-    plan["task_id"] = _tid
+    # task_id 必须来自【权威状态目录】的 workflow_state ——
+    # 不能 import workflow_gate（可能命中另一份 tools，读到另一个任务），
+    # 也不能沿用 plan 里可能残留的旧 task_id（上一轮任务的编制不允许复用）。
+    _tid = current_task_id(work_dir) or plan.get("task_id")
     plan["subagent_plan"] = {
         "decided_by": SUBPLAN_AUTHORITY,
         "task_id": _tid,
@@ -664,20 +1309,393 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
         "rooms": norm,
         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+    # ══ 【Bug③ 修复】同步刷新 mode2_plan.json 的 rooms 快照 ══════════════
+    # 原缺陷：set-subagent-plan 只写 subagent_plan，不碰 rooms 快照，
+    #   于是 mode2_plan 里长期留着旧类型（drivetrain/sensor/drawing），
+    #   而 workflow_gate.select 用的是编制里的新类型 →
+    #   mode_gate.room-status / defense_gate.check-room 读到旧类型 →
+    #   require_physics 被判 false → 物理/领域凭据被静默豁免。
+    # 现在：落盘时把【规范化后的】[(房间名, 类型), ...] 原样写进
+    #   subagent_config.rooms，与 workflow_state.subagent_config.rooms 同构。
+    _snap = room_type_snapshot(norm)
+    _norm_changed = [{"room": r["name"], "raw": r.get("type_raw"),
+                      "type": r["type"]}
+                     for r in norm if r.get("type_normalized")]
+    plan["subagent_config"] = {
+        "rooms": _snap,
+        "total_rooms": len(_snap),
+        "rooms_source": "总计子代理（mode2_flow.set-subagent-plan）",
+        "rooms_rationale": str(rationale).strip(),
+        "room_parts": {r["name"]: r.get("parts") or [] for r in norm},
+        "room_types_normalized": _norm_changed,
+        "synced_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "synced_from": "subagent_plan",
+        "task_id": _tid,
+    }
     save_plan(plan, work_dir)
     return {"ok": True, "count": len(norm), "rooms": norm,
             "decided_by": SUBPLAN_AUTHORITY,
-            "note": "编制已落盘；建模小屋必须严格按此编制创建，数量不得固定。"}
+            # 把同步结果回传给调用方（workflow_gate.select 会据此写 workflow_state）
+            "rooms_snapshot": _snap,
+            "room_types_normalized": _norm_changed,
+            "plan_file": plan_path(work_dir),
+            "note": ("编制已落盘，并已同步 rooms 快照到 plan 文件"
+                     "（房间类型已规范化，三处门禁口径一致）；"
+                     "建模小屋必须严格按此编制创建，数量不得固定。")}
+
+
+def _read_state_json(name):
+    """只读：从状态目录（与门禁同一份）读某个 json；读不到返回 (None, 原因)。
+
+    刻意【不 import workflow_gate / mode_gate】：
+      工程模式有"仓库 / 安装副本"两套 tools，import 可能命中另一套，
+      于是读到另一个任务的状态 —— 这里与 _plan_dir 一样按 _store 权威目录直读。
+    """
+    try:
+        _sd = None
+        try:
+            import _store as _st
+            _sd = _st.state_dir()
+        except Exception:
+            _sd = None
+        if not _sd:
+            _sd = BASE_DIR
+        _p = os.path.join(_sd, name)
+        if not os.path.exists(_p):
+            return None, "文件不存在: %s" % _p
+        with open(_p, "r", encoding="utf-8") as _f:
+            return json.load(_f) or {}, _p
+    except Exception as e:
+        return None, "读取失败: %r" % (e,)
+
+
+def _rooms_as_pairs(raw):
+    """把任意形态的 rooms 列表统一成 {房间名: 类型}（None 表示没有类型信息）。
+
+    兼容三种历史写法：
+      · [["结构件","structural"], ...]      ← workflow_state 现行写法
+      · [{"name":"结构件","type":"structural"}, ...]
+      · {"结构件": {...}}                    ← mode_state.rooms（只有房间状态，无类型）
+    """
+    out = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            _t = None
+            if isinstance(v, dict):
+                _t = v.get("type") or v.get("room_type")
+            out[str(k)] = (str(_t) if _t else None)
+        return out
+    for row in (raw or []):
+        if isinstance(row, (list, tuple)) and len(row) >= 1:
+            out[str(row[0])] = (str(row[1]) if len(row) >= 2 and row[1] else None)
+        elif isinstance(row, dict):
+            _n = row.get("name") or row.get("room")
+            if _n:
+                _t = row.get("type") or row.get("room_type")
+                out[str(_n)] = (str(_t) if _t else None)
+    return out
+
+
+def sync_rooms_snapshot(rooms, work_dir=None, source="workflow_gate.select",
+                        task_id=None):
+    """【Bug③ 修复】把门禁侧的权威房间表回写进 mode2_plan.json 的 rooms 快照。
+
+    为什么还需要"反向同步"：
+      set-subagent-plan 写的是【编制】的快照（不含固定追加的总理子代理）；
+      而 workflow_gate.select 会追加固定的【总理子代理】并可能重建配置。
+      若只单向同步，plan 快照与 workflow_state 仍会差一个房间 → 三处一致性
+      永远判不一致（假告警），真不一致反而被淹没。
+      因此 select 落盘后调用本函数，把【最终生效的】房间表写回 plan 快照。
+
+    Args:
+        rooms: [(房间名, 类型), ...] 或 [{"name","type"}, ...]
+        work_dir: 计划文件目录
+        source: 写入来源（留痕，默认 workflow_gate.select）
+        task_id: 归属任务；给出时同时校正 plan.task_id（避免跨任务污染）
+
+    Returns: {"ok": bool, "rooms": [...], "changes": [...]}
+    """
+    pairs = []
+    seen = set()
+    for row in (rooms or []):
+        if isinstance(row, (list, tuple)) and len(row) >= 1:
+            _n, _t = str(row[0]), (row[1] if len(row) >= 2 else None)
+        elif isinstance(row, dict):
+            _n, _t = str(row.get("name") or ""), row.get("type")
+        else:
+            continue
+        _n = _n.strip()
+        if not _n or _n in seen:
+            continue
+        _nz = normalize_room_type(_t)
+        if not _nz.get("ok"):
+            return {"ok": False, "room": _n, "raw_type": _t,
+                    "error": ("房间【%s】的类型 %r 无法规范化：%s"
+                              % (_n, _t, _nz.get("error"))),
+                    "allowed": _nz.get("allowed")}
+        seen.add(_n)
+        pairs.append([_n, _nz["type"]])
+    if not pairs:
+        return {"ok": False, "error": "rooms 为空 —— 拒绝把空房间表写进快照。"}
+
+    plan = load_plan(work_dir)
+    if plan.get("_load_error"):
+        return {"ok": False, "error": plan["_load_error"]}
+    cfg = plan.get("subagent_config") or {}
+    old = [list(x) for x in (cfg.get("rooms") or []) if isinstance(x, (list, tuple))]
+    changes = []
+    _old_map = {x[0]: (x[1] if len(x) > 1 else None) for x in old}
+    for n, t in pairs:
+        if _old_map.get(n) != t:
+            changes.append({"room": n, "from": _old_map.get(n), "to": t})
+    for n in _old_map:
+        if n not in {x[0] for x in pairs}:
+            changes.append({"room": n, "from": _old_map[n], "to": None,
+                            "note": "已从快照移除（不在最终房间表里）"})
+    cfg.update({
+        "rooms": pairs,
+        "total_rooms": len(pairs),
+        "rooms_source": (cfg.get("rooms_source")
+                         or "总计子代理（mode2_flow.set-subagent-plan）"),
+        "synced_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "synced_from": source,
+    })
+    if task_id:
+        cfg["task_id"] = task_id
+        plan["task_id"] = task_id
+    plan["subagent_config"] = cfg
+    save_plan(plan, work_dir)
+    return {"ok": True, "rooms": pairs, "changes": changes,
+            "path": plan_path(work_dir), "synced_from": source}
+
+
+def room_types_report(work_dir=None):
+    """【Bug③ 修复】三处 room_type 一致性【只读】自检。
+
+    背景（实测）：同一个房间在三个工具里 room_type 各不相同 ——
+      mode_gate.room-status → drivetrain（读 mode2_plan 的旧快照）
+      defense_gate.check-room → sensor（读 workflow_state）
+      workflow_gate.select → transmission（读本次编制）
+    结果是传动房按 drivetrain 判 → require_physics=false → 真实 CREDIBLE 问题
+    被静默豁免。
+
+    本命令只读、不修数据，把四处来源并列出来 + 判定一致性 + 指出每个房间
+    规范化后会走哪条门禁（require_physics 是否强制），供调用方定位差异。
+
+    Returns:
+        {"ok": 一致性通过, "consistent": bool, "sources": {...},
+         "by_room": [...], "conflicts": [...], "warnings": [...]}
+    """
+    plan = load_plan(work_dir)
+    if plan.get("_load_error"):
+        return {"ok": False, "error": plan["_load_error"], "checked": False}
+
+    sp = plan.get("subagent_plan") or {}
+    src_plan_rooms = _rooms_as_pairs(sp.get("rooms") or [])       # 编制本身
+    src_snapshot = _rooms_as_pairs(
+        (plan.get("subagent_config") or {}).get("rooms") or [])    # plan 快照
+    _wf, _wf_note = _read_state_json("workflow_state.json")
+    _ms, _ms_note = _read_state_json("mode_state.json")
+    src_wf = _rooms_as_pairs(((_wf or {}).get("subagent_config") or {}).get("rooms") or [])
+    src_ms = _rooms_as_pairs((_ms or {}).get("rooms") or {})       # 无类型，仅房间名
+    # ── 任务隔离：workflow_state 若属于【另一个任务】，它的 rooms 与本编制无关 ──
+    # 不隔离的话，上一轮残留的房间会被算进"三处一致性"，把正常状态误报成冲突。
+    _wf_task = (_wf or {}).get("task_id")
+    _plan_task = plan.get("task_id")
+    _wf_foreign = bool(_wf_task and _plan_task and str(_wf_task) != str(_plan_task))
+    if _wf_foreign:
+        _wf_note = ("workflow_state 属于另一个任务（%s），本任务为 %s —— "
+                    "不参与本次一致性比对。" % (_wf_task, _plan_task))
+        src_wf = {}
+    elif _wf is None and _wf_note:
+        pass
+
+    # 门禁实际会怎么判：defense_gate 读 workflow_state 的 rooms；
+    # 波1 建模类类型（workflow_gate.WAVE1_TYPES / defense_gate.MODELING_ROOM_TYPES）。
+    _wave1 = ("structural", "transmission", "housing", "support", "spring",
+              "thermal", "corrosion")
+    _finite = ("assembly", "drafting", "prime")
+
+    # 参与比对的房间 = 编制 / 快照 / workflow_state 的并集。
+    # mode_state.rooms 是【历史遗留台账】（可能还是上一轮任务的房间），
+    # 只能作为"额外告警"列出，不能算进三处一致性 —— 否则会拿旧任务房间
+    # 去比对本任务的编制，永远假报冲突。
+    names = []
+    for _d in (src_plan_rooms, src_snapshot, src_wf):
+        for _n in _d:
+            if _n not in names:
+                names.append(_n)
+    names.sort()
+    _ms_only = sorted(n for n in src_ms if n not in names)
+
+    by_room, conflicts, warnings = [], [], []
+    for n in names:
+        raw = {k: v.get(n) for k, v in (
+            ("subagent_plan", src_plan_rooms),
+            ("plan_snapshot", src_snapshot),
+            ("workflow_state", src_wf),
+            ("mode_state", src_ms))}
+        # 规范化每个来源
+        norm = {}
+        bad = {}
+        for k, v in raw.items():
+            if v is None:
+                norm[k] = None
+                continue
+            _nz = normalize_room_type(v)
+            if _nz.get("ok"):
+                norm[k] = _nz["type"]
+            else:
+                norm[k] = "<非法:%s>" % v
+                bad[k] = _nz.get("error")
+        _eff = None
+        for k in ("subagent_plan", "plan_snapshot", "workflow_state"):
+            if norm.get(k) and not str(norm[k]).startswith("<非法"):
+                _eff = norm[k]
+                break
+        _distinct = sorted({v for v in norm.values()
+                            if v and not str(v).startswith("<非法")})
+        _ok = len(_distinct) <= 1 and not bad
+        row = {"room": n, "raw": raw, "normalized": norm,
+               "effective_type": _eff,
+               "require_physics": bool(_eff in _wave1),
+               "wave": ("wave1" if _eff in _wave1 else
+                        ("final" if _eff in _finite else None)),
+               "consistent": _ok}
+        if bad:
+            row["type_errors"] = bad
+        if not _ok:
+            conflicts.append({"room": n, "distinct_types": _distinct,
+                              "raw": raw, "normalized": norm})
+        if _eff and _eff not in CANONICAL_ROOM_TYPES:
+            warnings.append("房间【%s】的类型 %r 不是规范类型。" % (n, _eff))
+        by_room.append(row)
+
+    # 快照 vs 编制：这是 Bug③ 的直接判据
+    def _norm_or_none(v):
+        return normalize_room_type(v).get("type") if v else None
+
+    # 快照 vs 编制 —— Bug③ 的直接判据（含 raw，便于一眼看出旧类型）
+    # 例外：固定的总理子代理只存在于快照（select 追加），编制里没有它属正常，
+    #   不算冲突 —— 否则每次都会假告警，把真不一致淹没。
+    _snap_diff, _snap_fixed_only = [], []
+    for n in sorted(set(src_plan_rooms) | set(src_snapshot)):
+        a, b = _norm_or_none(src_plan_rooms.get(n)), _norm_or_none(src_snapshot.get(n))
+        if a == b:
+            continue
+        if a is None and b == PRIME_ROOM_TYPE:
+            _snap_fixed_only.append(n)
+            continue
+        _snap_diff.append({"room": n,
+                           "subagent_plan": a,
+                           "subagent_plan_raw": src_plan_rooms.get(n),
+                           "plan_snapshot": b,
+                           "plan_snapshot_raw": src_snapshot.get(n)})
+    if _snap_diff:
+        conflicts.append({"scope": "plan_snapshot_vs_subagent_plan",
+                          "detail": _snap_diff,
+                          "fix": ("重新执行 set-subagent-plan 同步快照，"
+                                  "或 workflow_gate.py select 重建配置。")})
+
+    # workflow_state 侧要分两种情况 —— 混在一起会把"还没 select"误报成"不一致"：
+    #   · 编制里有、workflow_state 还没有 → 正常时序（set-subagent-plan 在 select 之前），
+    #     只做提示，不算冲突；
+    #   · 两边都有但类型不同 → 真不一致，报警告（select 后应自动对齐）。
+    _wf_diff, _wf_pending = [], []
+    for n in sorted(set(src_plan_rooms) | set(src_wf)):
+        a, b = _norm_or_none(src_plan_rooms.get(n)), _norm_or_none(src_wf.get(n))
+        if a != b and b is None and a is not None:
+            _wf_pending.append({"room": n, "subagent_plan": a})
+        elif a != b:
+            _wf_diff.append({"room": n, "subagent_plan": a,
+                             "subagent_plan_raw": src_plan_rooms.get(n),
+                             "workflow_state": b,
+                             "workflow_state_raw": src_wf.get(n)})
+    if _ms_only:
+        warnings.append("mode_state.json 里有 %d 个本任务编制里没有的房间（%s）—— "
+                        "属历史残留台账，未参与一致性比对；如确认无关可用 "
+                        "mode_gate.py rooms-reset 清理。" % (len(_ms_only), "、".join(_ms_only)))
+    if _wf_foreign:
+        warnings.append(_wf_note)
+    if _wf_pending:
+        warnings.append("有 %d 个房间尚未写入 workflow_state.subagent_config.rooms —— "
+                        "执行 workflow_gate.py select 后会自动同步。"
+                        % len(_wf_pending))
+    if _wf_diff:
+        warnings.append("workflow_state.subagent_config.rooms 与编制不一致（%d 个房间）—— "
+                        "请重新执行 workflow_gate.py select 重建配置。"
+                        % len(_wf_diff))
+
+    if not sp and not src_snapshot:
+        return {"ok": False, "checked": True,
+                "error": ("尚无子代理编制与 rooms 快照 —— 先由总计子代理登记编制"
+                          "（set-subagent-plan 会同步写快照）。"),
+                "sources": {"workflow_state_file": _wf_note,
+                            "mode_state_file": _ms_note},
+                "by_room": [], "conflicts": [], "warnings": warnings}
+
+    return {"ok": not conflicts, "checked": True,
+            "consistent": not conflicts,
+            "plan_file": plan_path(work_dir),
+            "sources": {
+                "subagent_plan": src_plan_rooms,
+                "plan_snapshot": src_snapshot,
+                "workflow_state": src_wf,
+                "mode_state_rooms": sorted(src_ms),
+                "workflow_state_file": _wf_note,
+                "mode_state_file": _ms_note,
+            },
+            "snapshot_synced": not _snap_diff,
+            "snapshot_fixed_only_rooms": _snap_fixed_only,
+            "workflow_state_synced": not _wf_diff,
+            "workflow_state_pending": _wf_pending,
+            "by_room": by_room,
+            "conflicts": conflicts,
+            "warnings": warnings,
+            "normalized_types": [{"room": r["name"], "raw": r.get("type_raw"),
+                                  "type": r["type"]}
+                                 for r in (sp.get("rooms") or [])
+                                 if r.get("type_normalized")],
+            "wave1_types": list(_wave1),
+            "note": ("三处 room_type 必须一致：不一致会让 defense_gate 用旧类型"
+                     "判 require_physics（drivetrain/sensor 直接被豁免校核）。")}
 
 
 def get_subagent_plan(work_dir=None):
+    """读回子代理编制，并附带【阶段新鲜度】结论（只读，不改变 ok 语义）。
+
+    ── 【Bug② 修复】为什么这里也要带 stale 信息 ────────────────────────
+    编制是在"十阶段分析完成"时登记的。但用户【之后】仍可能改答题目 →
+    阶段产物过期 → 编制所依据的结论已失效。此时若只看 ok=True 就开房间，
+    等于拿着过期结论去建模。
+    本函数把 stages_stale / stages_ready / stale_hint 一并给出，让 mode_gate /
+    workflow_gate 的调用方（以及人）一眼看到"编制还成立吗"；真正的拦截由
+    require_stages_complete（set-subagent-plan 的强制前置）负责。
+    """
     plan = load_plan(work_dir)
     sp = plan.get("subagent_plan")
     if not sp:
         return {"ok": False,
                 "error": ("尚无子代理编制 —— 必须先由【总计子代理】调 "
                           "set-subagent-plan 登记，禁止使用固定房间表。")}
-    return {"ok": True, **sp}
+    out = {"ok": True, **sp}
+    try:
+        st = stage_status(work_dir)
+        _stale = st.get("stale") or []
+        _awaiting = st.get("awaiting_answer") or []
+        out.update({
+            "stages_ready": bool(st.get("complete")),
+            "stages_stale": _stale,
+            "stages_awaiting_answer": _awaiting,
+            "stale_hint": (("编制所依据的十阶段产物已过期（%s）—— "
+                            "必须 refresh-stage 重做后才能据此开工。"
+                            % "、".join(_stale)) if _stale else None),
+        })
+    except Exception as _e:
+        # 阶段信息读不出来时不得假装"没问题"
+        out["stages_ready"] = None
+        out["stages_status_error"] = repr(_e)
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1127,7 +2145,18 @@ def pre_delivery_check(work_dir=None, registry_work_dir=None, require_primes=Tru
 
     st = stage_status(work_dir)
     if not st.get("complete"):
-        blockers.append("十阶段未走完，缺少产出：%s" % "、".join(st.get("missing") or []))
+        # 【Bug② 修复】不能只说"缺少产出" —— stale 阶段的 missing 是空的，
+        # 那样会给出"十阶段未走完，缺少产出："这种空信息，排障时无从下手。
+        _why = []
+        if st.get("missing"):
+            _why.append("缺少产出：%s" % "、".join(st.get("missing")))
+        if st.get("stale"):
+            _why.append("产物过期（用户答复后未重算，必须 refresh-stage）：%s"
+                        % "、".join(st.get("stale")))
+        if st.get("awaiting_answer"):
+            _why.append("产物依赖未答题目：%s" % "、".join(st.get("awaiting_answer")))
+        blockers.append("十阶段未达到可交付状态 —— " +
+                        ("；".join(_why) if _why else "十阶段未走完"))
 
     qr = question_report(work_dir, final=True)
     if not qr.get("ok"):
@@ -1420,6 +2449,33 @@ def _main_body(argv):
     p.add_argument("--final", action="store_true", help="按收尾口径校验下界")
     p.add_argument("--work-dir", default=None)
 
+    # ── 【Bug② 修复】重做过期阶段（清除 stale 的唯一合法入口）──────────
+    p = sub.add_parser("refresh-stage",
+                       help="★重做某阶段：进入重做态（产物过期/用户改答后必须执行）")
+    p.add_argument("stage", choices=STAGE_IDS)
+    p.add_argument("--reason", default="", help="为什么重做（留痕；默认沿用 stale 原因）")
+    p.add_argument("--artifact", default="",
+                   help="可选：同时提交重算后的新产物（= refresh + mark-stage-done）")
+    p.add_argument("--work-dir", default=None)
+    # 别名（用户口径里的 redo-stage 与 refresh-stage 等价）
+    p = sub.add_parser("redo-stage", help="★refresh-stage 的别名")
+    p.add_argument("stage", choices=STAGE_IDS)
+    p.add_argument("--reason", default="")
+    p.add_argument("--artifact", default="")
+    p.add_argument("--work-dir", default=None)
+
+    # ── 【Bug③ 修复】三处 room_type 一致性自检（只读）──────────────────
+    p = sub.add_parser("room-types",
+                       help="★只读自检：编制 / plan 快照 / workflow_state 的 room_type 是否一致")
+    p.add_argument("--work-dir", default=None)
+
+    p = sub.add_parser("sync-rooms",
+                       help="★把门禁侧最终房间表回写 plan 快照（后置对账；select 已自动调用）")
+    p.add_argument("--rooms-json", required=True, help="JSON 数组或 @文件路径")
+    p.add_argument("--source", default="cli.sync-rooms")
+    p.add_argument("--task-id", default=None)
+    p.add_argument("--work-dir", default=None)
+
     p = sub.add_parser("set-subagent-plan", help="★由总计子代理登记子代理编制")
     p.add_argument("--rooms-json", required=True, help="JSON 数组或 @文件路径")
     p.add_argument("--rationale", required=True)
@@ -1498,6 +2554,19 @@ def _main_body(argv):
         r = answer_question(args.seq, args.answer, wd)
     elif args.cmd == "questions":
         r = question_report(wd, final=args.final)
+    elif args.cmd in ("refresh-stage", "redo-stage"):
+        r = refresh_stage(args.stage, wd, getattr(args, "reason", ""),
+                          getattr(args, "artifact", ""))
+    elif args.cmd == "room-types":
+        r = room_types_report(wd)
+    elif args.cmd == "sync-rooms":
+        try:
+            _rooms = _load_json_arg(args.rooms_json)
+        except Exception as e:
+            _print({"ok": False, "error": "rooms-json 解析失败: %r" % (e,)})
+            return 1
+        r = sync_rooms_snapshot(_rooms, wd, source=args.source,
+                                task_id=getattr(args, "task_id", None))
     elif args.cmd == "set-subagent-plan":
         try:
             rooms = _load_json_arg(args.rooms_json)

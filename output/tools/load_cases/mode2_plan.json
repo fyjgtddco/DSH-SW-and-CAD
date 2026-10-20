@@ -1,7 +1,7 @@
 {
   "schema": "dsh-engineering/mode2-plan@1",
   "created_at": "2026-10-15 22:09:13",
-  "updated_at": "2026-10-18 22:12:48",
+  "updated_at": "2026-10-20 22:29:13",
   "param_depth": "full",
   "stages": [
     {
@@ -1365,24 +1365,26 @@
   ],
   "subagent_plan": {
     "decided_by": "总计子代理",
-    "task_id": "20261018_205711_BC9F87A2",
-    "rationale": "测",
+    "task_id": "OLD_TASK_20200101",
+    "rationale": "上一轮遗留",
     "count": 1,
     "rooms": [
       {
-        "name": "甲房",
+        "name": "旧房间",
         "type": "structural",
         "parts": [
-          "底板"
+          "旧零件"
         ],
-        "why": "承载",
-        "depends_on": []
+        "why": "旧"
       }
-    ],
-    "at": "2026-10-18 22:12:48"
+    ]
   },
   "prime_reports": [],
   "prime_consistency": null,
   "notes": [],
-  "task_id": "20261018_205711_BC9F87A2"
+  "task_id": "20261018_205711_BC9F87A2",
+  "stage_question_deps": {},
+  "stale_stages": [],
+  "stale_history": [],
+  "subagent_config": null
 }

@@ -1,0 +1,42 @@
+{
+  "结构件": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1792501943.5641427,
+      "at": "2026-10-20 21:12:23"
+    }
+  ],
+  "传动机构": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1792501943.9233072,
+      "at": "2026-10-20 21:12:23"
+    }
+  ],
+  "壳体机架": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1792501944.2769866,
+      "at": "2026-10-20 21:12:24"
+    }
+  ],
+  "支撑结构": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1792501948.901456,
+      "at": "2026-10-20 21:12:28"
+    }
+  ]
+}

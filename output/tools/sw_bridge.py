@@ -55,6 +55,7 @@ python sw_bridge.py ac-export [输出.dxf]   # 导出当前 AutoCAD 图纸为 DX
 """
 import sys
 import os
+import re
 import json
 import time
 import traceback
@@ -1758,6 +1759,113 @@ def _verify_run_artifacts(script_path, result):
     return out
 
 
+# ══ 【本次修复·问题3】装配类任务必须先走【总计子代理】的代码级强制 ══════
+# 用户实测："还是有 AI 不会开总计子代理的，必须改成代码强制它们开"。
+#
+# 现有强制链（select / room-start / set-subagent-plan）确实存在，但它们都
+#   假设"AI 已经进入 Mode 2 并调用门禁命令"。真实绕过路径是：
+#     AI 根本不做模式判定，直接 sw_bridge.py run <建模脚本> 开干 ——
+#     没有 declare 2、没有 select、没有 room-start，所有门禁一次都不触发。
+#   于是"总计子代理"从未被创建，十阶段分析、按需提问、编制登记全部落空。
+#
+# 本函数把这条旁路堵上：只要本次运行【看起来是多零件/装配类任务】，
+#   就必须已经登记过子代理编制；否则拒绝执行建模脚本并给出明确指引。
+#
+# 判定"多零件/装配类"的可靠信号（任一命中）：
+#   ① 工作区里已存在 ≥2 个 .sldprt（说明在造装配体，不是单零件）；
+#   ② 建模脚本里出现装配/多件语义（Assembly/装配/零件清单/for ... part）；
+#   ③ 已声明 Mode 2（那本来就该走门禁）。
+# 单零件简单任务（Mode 1）不受影响 —— 用户明确要求"单零件直接建模"。
+def _mode2_preflight_for_run(script_path, room=None):
+    """建模脚本执行前的 Mode 2 前置校验。返回 {ok} 或 {ok:False, ...}。"""
+    # ① 先看是不是已经在 Mode 2 里干活（room-start 已做过编制校验）
+    try:
+        import mode_gate as _mg
+        _st = _mg.load_state() or {}
+        if str(_st.get("mode")) == "2":
+            # Mode 2 下 room-start 已经强制校验过编制；这里只需确认房间已登记
+            if room:
+                _r = (_st.get("rooms") or {}).get(room)
+                if _r and _r.get("active"):
+                    return {"ok": True, "via": "mode2_active_room"}
+            return {"ok": True, "via": "mode2"}
+    except Exception:
+        pass
+    # ② 未声明 Mode 2：判断是否其实属于"多零件/装配类"
+    try:
+        _dir = os.path.dirname(os.path.abspath(script_path)) or os.getcwd()
+    except Exception:
+        _dir = os.getcwd()
+    _sldprt = 0
+    try:
+        for _name in os.listdir(_dir):
+            if _name.lower().endswith(".sldprt"):
+                _sldprt += 1
+    except Exception:
+        _sldprt = 0
+    _script_text = ""
+    try:
+        with open(script_path, "r", encoding="utf-8", errors="replace") as _f:
+            _script_text = _f.read(200000)
+    except Exception:
+        _script_text = ""
+    _multi_part_signal = bool(
+        re.search(r"(Assembly|装配体|总装|零件清单|multi[-_ ]?part)", _script_text, re.I)
+        or len(re.findall(r"new_part\s*\(", _script_text)) >= 2
+        or len(re.findall(r"\.save\s*\(", _script_text)) >= 2
+    )
+    _looks_like_assembly = (_sldprt >= 2) or _multi_part_signal
+    if not _looks_like_assembly:
+        return {"ok": True, "via": "single_part"}
+    # ③ 多零件任务却没走 Mode 2 → 检查是否至少登记过编制
+    try:
+        import mode2_flow as _m2
+        _wd = None
+        try:
+            import workflow_gate as _wg
+            _wd = _wg._m2_work_dir(_wg.load_state() or {})
+        except Exception:
+            _wd = None
+        _plan = _m2.get_subagent_plan(_wd)
+        if _plan.get("ok") and (_plan.get("rooms") or []):
+            # ⚠️ 必须校验编制属于【当前任务】—— 否则现场遗留的上一轮编制
+            #    会让守卫误判成"已登记"，等于把旁路又打开了（实测：安装副本
+            #    里残留旧编制 → 多零件任务照样放行）。
+            _task_now = None
+            try:
+                import workflow_gate as _wg2
+                _task_now = (_wg2.load_state() or {}).get("task_id")
+            except Exception:
+                _task_now = None
+            _plan_task = _plan.get("task_id")
+            _same_task = bool(_task_now and _plan_task and
+                              str(_plan_task) == str(_task_now))
+            if _same_task:
+                return {"ok": True, "via": "subagent_plan_exists"}
+    except Exception:
+        pass
+    return {
+        "ok": False,
+        "gate": "MODE2_TOTAL_SUBAGENT_REQUIRED",
+        "error": ("【模式二强制】检测到这是多零件/装配类任务（同目录已有 %d 个 .sldprt"
+                  " 或脚本含装配语义），但【从未启动总计子代理】—— 拒绝直接建模。"
+                  % _sldprt),
+        "why": ("用户明确要求：装配类任务必须先由【总计子代理】按十阶段流水线分析，"
+                "再登记要开几个建模房间。直接开模型 = 跳过全部质量门禁。"),
+        "how": [
+            "1) 先声明模式：python mode_gate.py declare 2",
+            "2) 启动【总计子代理】按十阶段分析（跳阶段会被拒）：",
+            "     python mode2_flow.py begin-stage TaskUnderstanding",
+            "     ... 依次走完 10 个阶段 ...",
+            "3) 登记编制（decided_by 必须是『总计子代理』）：",
+            "     python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
+            "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
+            "4) 门禁放行后 room-start，再回来执行建模脚本。",
+        ],
+        "bypass": "确属单零件任务时，请在【空目录】或独立零件目录下建模（无其他 .sldprt）。",
+    }
+
+
 def cmd_run(sw, script_path, extra_args, room=None):
     """执行 DSH 生成的建模脚本（核心能力）。
 
@@ -1780,6 +1888,12 @@ def cmd_run(sw, script_path, extra_args, room=None):
     _WRAPPER_EXIT_SHA_MISMATCH = 12
     if not os.path.exists(script_path):
         return {"ok": False, "error": f"script not found: {script_path}"}
+    # ── 【本次修复·问题3】Mode 2 前置校验：装配类任务必须先开总计子代理 ──
+    # 用户实测"AI 老是不开总计子代理"——根因是它直接 run 建模脚本，
+    #   绕过了 select / room-start 上的全部编制校验。这里把旁路堵死。
+    _m2_gate = _mode2_preflight_for_run(script_path, room=room)
+    if not _m2_gate.get("ok"):
+        return _m2_gate
     bridge_dir = _HERE
     script_abs = os.path.abspath(script_path)
 
@@ -4305,14 +4419,111 @@ def cmd_cleanup(sw, temp_dir=None):
     return {"ok": True, "cleaned": cleaned, "count": len(cleaned)}
 
 
-# ── Bug-25: 安全退出 SolidWorks ─────────────────────────────────────
-def cmd_close_all(sw):
-    """关闭所有 SolidWorks 文档（SW 2020 兼容）。
+# ══ 【Bug⑨】长任务自动推进房间阶段（validating）═════════════════════════
+def _push_room_validating(room=None, what=""):
+    """【Bug⑨】在房间上下文里把 stage 推进到 validating（幂等、失败不阻断）。
 
-    SW 2020 没有 sw.Quit() 方法，使用 CloseAllDocuments() + GC 清理替代。
+    现场缺陷（竞速小车任务）：
+      底盘结构件房 21:08 → 22:22（约 74 分钟），room-report.json 的 stage
+      长期停在「modeling / 开始建DSH_底盘」。实际 21:42 三件零件就已建完，
+      之后一直在跑物理校核、看图矫正、prime-report —— 但这些长命令
+      【完全不碰 room-report】，房间从未推进到 validating/done。
+      主代理无法判断房间"在跑 FEA"还是"已死机"，只能靠 SW CPU 与文件
+      mtime 两条旁路推断（Bug⑨ 原文）。
+
+    为什么放在 sw_bridge 而不是 physics_bridge：
+      physics-optimize / physics-validate-domain / physics-fatigue 都是经
+      sw_bridge 派发的（推荐入口）。在这里集中推进一次，即可覆盖三条长命令，
+      且【不必改动 physics_bridge.py 的内部实现】—— 避免与 physics 侧
+      正在进行的其它修复互相踩踏。
+
+    行为契约（与 mode_gate.push_room_stage 同一套，实现幂等）：
+      ① 房间不存在 / 非 active（没 room-start 或已 room-end）→ 不写，
+         只回 skipped（绝不在全局上下文中凭空造房间进度）；
+      ② 最新 stage 已是 validating → 幂等跳过，不重复追加 history；
+      ③ 已上报过 done / failed → 一律不让步（终态是事实）；
+      ④ 任何异常都不影响主流程（本函数不抛异常）。
+
+    Args:
+        room: 房间名；None → 用 DSH_ROOM 环境变量（子代理通常在房间内运行）。
+        what: 正在跑什么（写进 detail，便于主代理一眼看出是 FEA 还是看图）。
+    Returns: mode_gate.push_room_stage 的返回体；不可用时返回 ok=False + 原因。
+    """
+    _room = (room or os.environ.get("DSH_ROOM") or "").strip()
+    _detail = (str(what).strip() or "长任务执行中") + "（自动推进，Bug⑨）"
+    try:
+        _gate = _get_mode_gate_path()
+        if not _gate or not os.path.exists(_gate):
+            return {"ok": False, "pushed": False, "skipped": "no-mode-gate",
+                    "reason": "未找到 mode_gate.py，无法推进房间阶段"}
+        # 进程内 import：优先用【同目录】那份（_import_sibling 会校验不是别处的副本）；
+        # 个别部署下 mode_gate 只在 STATE_DIR，此时回退按明确路径加载 ——
+        # 无论哪条路，拿到的都是 _get_mode_gate_path() 指认的那一份。
+        try:
+            _mg = _import_sibling("mode_gate")
+        except Exception:
+            import importlib.util as _ilu
+            _spec = _ilu.spec_from_file_location("_dsh_mode_gate_stage", _gate)
+            _mg = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mg)
+        if not hasattr(_mg, "push_room_stage"):
+            return {"ok": False, "pushed": False,
+                    "skipped": "mode-gate-too-old",
+                    "reason": "mode_gate.py 缺少 push_room_stage（旧版本副本？）"}
+        return _mg.push_room_stage(_room or None, "validating", _detail)
+    except Exception as e:
+        # 进度上报坏了绝不能把校核任务带崩
+        return {"ok": False, "pushed": False, "skipped": "exception",
+                "reason": repr(e)}
+
+
+# ── Bug-25: 安全退出 SolidWorks / 【Bug⑧】close-all 保活 ─────────────
+def cmd_close_all(sw, quit=False):
+    """关闭 SolidWorks 文档并释放使用权（【Bug⑧】默认保活，--quit 才退出）。
+
+    ── 【Bug⑧ 修复】并行房间共用单台 SW 时的"互相切断" ────────────────────
+    现场缺陷（竞速小车任务，三个房间共用一台 SW，FIFO 排队）：
+      任一房间调 close-all → 本函数走 Quit + taskkill → SW 进程结束 →
+      其它房间正在进行的 RPC 连接【立即失效】。
+      主代理 conn-gate --target sw 观察到 SW PID 频繁变化
+      （4148 → 30860 → 18388 → 23448 → 472 → 34744），每次都是冷启动；
+      每次冷启动后 swapi 都要重新 Dispatch("SldWorks.Application")。
+      并行模式实际退化成"串行 + 冷启动"，单个零件建模耗时被放大
+      （本会话 9 个零件总耗时约 70 分钟）。
+
+    现在分两级（与 Bug 记录里的建议修复方向一致）：
+      · 默认     → 只调 SldWorks.CloseAllDocuments(0)，【不退出 SW 进程】。
+                   下一个房间/下一个零件复用同一实例，无需冷启动；
+      · --quit  → 走原有 close_all_and_exit（CloseAllDocuments + Quit +
+                   taskkill + 轮询确认进程真的退出）。
+
+    SW 使用权（mode_gate 的 SW 锁）在两种语义下【都】释放：
+      它是"排队使用权"，与 SW 进程生死无关 —— 不放会让队列死锁。
+
+    Args:
+        sw: SldWorks Application（可为 None：SW 没连上时仍能释放锁）
+        quit: True=真正结束 SW 进程（旧行为）；False=只关文档、保活（默认）
     """
     import swapi as _swapi
-    result = _swapi.close_all_and_exit(sw)
+    if sw is None:
+        # SW 未连接：无法发 CloseAllDocuments，但锁仍然要释放（由调用方处理）。
+        # 明确回报 resumed=False，避免调用方误以为"文档已清干净"。
+        return {"ok": False, "keepalive": (not quit), "quit": bool(quit),
+                "method": None, "docs_closed": None,
+                "error": "SW 未连接（sw=None）—— 无法执行 CloseAllDocuments。",
+                "hint": ("SW 进程可能根本没启动。若只是想释放使用权，"
+                         "用 python mode_gate.py sw-release <房间名>；"
+                         "若确认有僵尸进程，用 python sw_bridge.py close-all --quit。")}
+    if quit:
+        result = _swapi.close_all_and_exit(sw, quit=True)
+        if isinstance(result, dict):
+            result.setdefault("keepalive", False)
+            result["quit"] = True
+        return result
+    result = _swapi.close_all_documents(sw)
+    if isinstance(result, dict):
+        result["keepalive"] = True
+        result["quit"] = False
     return result
 
 
@@ -5018,8 +5229,16 @@ def main():
                 "physics-fatigue <case.json>": "疲劳 / 设计寿命（默认30年）校核",
                 "physics-report <run_id>": "查看仿真报告",
                 "physics-recommend <run_id>": "生成修正建议",
-                "close-all": "关闭 SolidWorks 并释放使用权",
+                "close-all": "【Bug⑧】只关闭 SolidWorks 文档 + 释放使用权，"
+                             "SW 进程【保活】（并行房间共用一台 SW 时不会互相"
+                             "切断 RPC）",
+                "close-all --quit": "【Bug⑧】完整退出：关文档 + Quit + "
+                                    "taskkill，确认 SLDWORKS.exe 真正退出",
             },
+            "close_all_note": ("【Bug⑧】并行模式下 close-all 默认【不】退出 SW "
+                               "进程：只调 SldWorks.CloseAllDocuments，让其它"
+                               "房间的连接继续可用、下一个零件免冷启动。"
+                               "确需释放进程请显式加 --quit。"),
             "room_note": ("并行模式(D)下 run/drawing/dwg/dxf/cad-validate "
                           "必须带 --room <房间名>；--room 可放任意位置。"),
         }, ensure_ascii=False, indent=2))
@@ -5323,9 +5542,13 @@ def main():
         elif cmd == "close":
             result = cmd_close(sw)
         elif cmd == "close-all":
-            # Bug-25: 安全退出接口（SW 2020 兼容）
-            import swapi as _swapi
-            result = _swapi.close_all_and_exit(sw)
+            # ── 【Bug⑧】默认保活：只关文档、不退出 SW 进程 ─────────────────
+            # 现场缺陷：三个并行房间共用一台 SW，任一房间 close-all 就
+            #   Quit + taskkill → 其它房间 RPC 立即失效，SW PID 频繁变化
+            #   （4148→30860→18388→23448→472→34744），并行退化为串行+冷启动。
+            # 现语义：默认只调 CloseAllDocuments（保活）；--quit 才真正退出。
+            _quit = "--quit" in _args
+            result = cmd_close_all(sw, quit=_quit)
             # 小屋完成 SW 任务 → 立即释放 SW 锁（不等 room-end），
             # 让队列里下一个排队的房间马上获得使用权（用户需求）
             try:
@@ -5677,6 +5900,13 @@ def main():
                                 _material = _args[_j + 1]
                         if not _material:
                             _material = (os.environ.get("DSH_MATERIAL") or "")
+                        # ── 【Bug⑨】长任务开始前推进一次 room stage ──────
+                        # 物理优化可能要跑几分钟～几十分钟。不推进的话
+                        #   room-report 会一直停在 modeling，主代理无法区分
+                        #   "在跑 FEA" 与 "房间已死机"（Bug⑨）。
+                        _stage_out = _push_room_validating(
+                            _room_from_strip or _detect_gate_room(args),
+                            "物理优化中（physics-optimize）")
                         result = _pb.cmd_optimize(
                             case_path, max_iter=max_iter,
                             room=(_room_from_strip or _detect_gate_room(args)
@@ -5684,6 +5914,8 @@ def main():
                             part_path=_part_path,
                             explicit_material=_material or None,
                         )
+                        if isinstance(result, dict):
+                            result["room_stage_push"] = _stage_out
         elif cmd == "physics-report":
             if not _HAS_PHYSICS:
                 result = {"ok": False, "error": "physics_bridge.py 未找到"}
@@ -5736,14 +5968,26 @@ def main():
                                        "--part <零件.SLDPRT>\n"
                                        "python sw_bridge.py physics-fatigue --report <run_id>")}
                 else:
+                    # ── 【Bug⑨】疲劳校核（默认 30 年寿命）同样是长任务 ──────
+                    _stage_out = _push_room_validating(
+                        _room_from_strip or _detect_gate_room(args),
+                        "疲劳校核中（physics-fatigue）")
                     result = _pb.cmd_fatigue(case_path, _stress, _report_id,
                                              _fat_part, _allow_dd)
+                    if isinstance(result, dict):
+                        result["room_stage_push"] = _stage_out
         elif cmd == "physics-validate-domain":
             if not _HAS_PHYSICS:
                 result = {"ok": False, "error": "physics_bridge.py 未找到"}
             else:
                 _dom = _args[1] if len(_args) > 1 else "structural"
+                # ── 【Bug⑨】领域校核也是长任务，进入前推进一次 stage ──────
+                _stage_out = _push_room_validating(
+                    _room_from_strip or _detect_gate_room(args),
+                    "领域校核中（physics-validate-domain: %s）" % _dom)
                 result = _pb.cmd_validate_domain(_dom, room=(_room_from_strip or _detect_gate_room(args) or os.environ.get("DSH_ROOM") or ""))
+                if isinstance(result, dict):
+                    result["room_stage_push"] = _stage_out
         elif cmd == "physics-list-domains":
             if not _HAS_PHYSICS:
                 result = {"ok": False, "error": "physics_bridge.py 未找到"}

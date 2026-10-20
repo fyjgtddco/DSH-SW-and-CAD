@@ -611,8 +611,62 @@ def design_load_factor(case: dict) -> tuple:
     return f, meta
 
 
+# ── 【Bug⑩ 修复】零件级载荷分担系数 + 独立承力件识别 ────────────────────
+# 实测缺陷：门禁工况默认 part_load_share=0.25（假设 4 条并联承力路径），
+#   而传感器支架/万向轮支架/电机座这类【独立悬臂件】根本没有并联路径 ——
+#   0.25 使校核载荷被低估 4 倍、SF 系统性虚高（实测 SF 从 247.7 → 61.93）。
+# 修复要点：
+#   ① 支持【零件级覆盖】：load_case 顶层 part_load_share 优先级最高；
+#   ② 若 share<1 但本件被显式标注为独立承力/独立悬臂件 → 标 REVIEW 提示复核；
+#   ③ 实际用值随结论回显（meta.share/source），由报告写进 limitations。
+# 标注方式（任一即可）：case/acceptance/meta 里的
+#   standalone_cantilever=true，或 part_class/load_path 取下列取值。
+_STANDALONE_CLASSES = (
+    "standalone_cantilever", "cantilever", "single_load_path",
+    "independent", "independent_load_path", "独立悬臂", "独立承力",
+    "独立悬臂件", "独立承力件",
+)
+
+
+def is_standalone_load_path(case: dict) -> tuple:
+    """判定本零件是否为【独立承力件】（无并联承力路径）。
+
+    返回 (is_standalone: bool, reason: str)。
+    """
+    c = case or {}
+    acc = c.get("acceptance") or {}
+    meta = c.get("meta") or {}
+    for _src_name, _src in (("case", c), ("acceptance", acc), ("meta", meta)):
+        if not isinstance(_src, dict):
+            continue
+        if _src.get("standalone_cantilever") is True:
+            return True, "%s.standalone_cantilever=true" % _src_name
+        for _k in ("part_class", "load_path", "part_type"):
+            _pc = str(_src.get(_k) or "").strip().lower()
+            if _pc and _pc in _STANDALONE_CLASSES:
+                return True, "%s.%s=%r" % (_src_name, _k, _pc)
+    return False, ""
+
+
+def _share_meta(share: float, source: str, note: str, case: dict) -> dict:
+    """统一生成 share 的 meta，并判定是否需要人工复核（Bug⑩）。"""
+    meta = {"share": float(share), "source": source, "note": note,
+            "standalone_load_path": False, "review_required": False,
+            "warning": None}
+    _alone, _why = is_standalone_load_path(case or {})
+    meta["standalone_load_path"] = bool(_alone)
+    if _alone and float(share) < 0.999:
+        meta["review_required"] = True
+        meta["warning"] = (
+            "【零件载荷分担需复核】本件被标注为独立承力/独立悬臂件（%s），"
+            "但本次校核按 part_load_share=%.4f（%s）折减了整机载荷 —— "
+            "独立件通常应按 1.0 承担，请复核载荷路径后显式覆盖"
+            "（零件级 part_load_share）" % (_why or "standalone", float(share), source))
+    return meta
+
+
 def part_load_share(case: dict) -> tuple:
-    """【Bug-D 修复】返回本零件应承担的载荷比例 (share, meta)。
+    """【Bug-D / Bug⑩ 修复】返回本零件应承担的载荷比例 (share, meta)。
 
     ── 为什么需要 ────────────────────────────────────────────────────────
     实测缺陷：竞赛小车的《整机》额定载荷（500N，组合工况 1224.7N）被
@@ -623,7 +677,9 @@ def part_load_share(case: dict) -> tuple:
       单件校核必须乘一个"分担系数"。
 
     系数来源（按优先级）：
-      ① acceptance.part_load_share（显式给定，最权威）
+      ⓪ case.part_load_share / case.load_share —— 【零件级覆盖】（最权威，
+         Bug⑩：每个零件自带 physics_case 里的 share 应优先于全局默认值）
+      ① acceptance.part_load_share（全局显式给定）
       ② acceptance.load_share
       ③ 任务级默认：单件按"整机载荷 / 预估主要承力件数"折算
          —— 由 acceptance.parallel_load_paths 指定，默认 1.0（不折算，
@@ -631,19 +687,32 @@ def part_load_share(case: dict) -> tuple:
       ④ design_domain 之外的场景一律 1.0
 
     Returns: (share: float, meta: dict)
-      meta 含 share / source / note；share 已保证 >0。
+      meta 含 share / source / note / standalone_load_path / review_required /
+      warning；share 已保证 >0。
     """
-    acc = (case or {}).get("acceptance") or {}
-    # ① 显式给定
+    case = case or {}
+    acc = case.get("acceptance") or {}
+    # ⓪ 零件级覆盖（Bug⑩）：load_case 顶层显式给出，优先于门禁默认值
+    for _k in ("part_load_share", "load_share"):
+        if _k in case:
+            try:
+                _s = float(case.get(_k))
+                if _s > 0:
+                    return _s, _share_meta(
+                        _s, "part_level.%s" % _k,
+                        "使用【零件级】显式给定的载荷分担系数"
+                        "（优先于门禁全局默认值）", case)
+            except Exception:
+                pass
+    # ① 全局显式给定
     for _k in ("part_load_share", "load_share"):
         if _k in acc:
             try:
                 _s = float(acc.get(_k))
                 if _s > 0:
-                    return _s, {
-                        "share": _s, "source": "acceptance.%s" % _k,
-                        "note": "使用显式给定的零件载荷分担系数",
-                    }
+                    return _s, _share_meta(
+                        _s, "acceptance.%s" % _k,
+                        "使用工况 acceptance 显式给定的零件载荷分担系数", case)
             except Exception:
                 pass
     # ② 按承力路径数折算（多件并联分担）
@@ -651,21 +720,20 @@ def part_load_share(case: dict) -> tuple:
         _paths = int(acc.get("parallel_load_paths") or 0)
         if _paths > 1:
             _s = 1.0 / float(_paths)
-            return _s, {
-                "share": _s, "source": "acceptance.parallel_load_paths=%d" % _paths,
-                "note": ("整机载荷由 %d 条并联承力路径分担，单件按 1/%d 折算"
-                          % (_paths, _paths)),
-            }
+            return _s, _share_meta(
+                _s, "acceptance.parallel_load_paths=%d" % _paths,
+                ("整机载荷由 %d 条并联承力路径分担，单件按 1/%d 折算"
+                 % (_paths, _paths)), case)
     except Exception:
         pass
     # ③ 兜底：不折算（保持与旧行为一致，避免静默改变既有任务结论）
-    return 1.0, {
-        "share": 1.0, "source": "default",
-        "note": ("未声明零件载荷分担系数（acceptance.part_load_share / "
-                  "parallel_load_paths）—— 按整机载荷直接校核本零件。"
-                  "若本零件只是整机中的一个分件，应在工况里显式给出分担系数，"
-                  "否则小零件会被整机载荷压出失真的低安全系数（Bug-D）。"),
-    }
+    return 1.0, _share_meta(
+        1.0, "default",
+        ("未声明零件载荷分担系数（part_load_share / "
+         "acceptance.part_load_share / parallel_load_paths）—— "
+         "按整机载荷直接校核本零件。若本零件只是整机中的一个分件，"
+         "应在工况里显式给出分担系数，否则小零件会被整机载荷压出失真的"
+         "低安全系数（Bug-D）。"), case)
 
 
 def governing_design_force(case: dict) -> tuple:
@@ -781,6 +849,12 @@ def governing_design_force(case: dict) -> tuple:
         "part_load_share": _share,
         "load_share_source": _share_meta.get("source"),
         "load_share_note": _share_meta.get("note"),
+        # ── 【Bug⑩ 修复】独立承力件 + share<1 → 必须提示复核 ──────────────
+        # 0.25 这类"按并联路径数折算"的默认值对独立悬臂件会系统性低估载荷，
+        #   让 SF 虚高 4 倍。这里把判定结果一并回显，由报告写进 limitations。
+        "part_load_share_standalone": bool(_share_meta.get("standalone_load_path")),
+        "part_load_share_review_required": bool(_share_meta.get("review_required")),
+        "part_load_share_warning": _share_meta.get("warning"),
         "design_force_before_share_n": round(_design_before_share, 3),
         "governing_case": gov[0],
         "impact_factor": _f,

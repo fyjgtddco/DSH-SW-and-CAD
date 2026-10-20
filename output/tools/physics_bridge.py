@@ -202,6 +202,11 @@ def cmd_simulate(run_dir: str) -> dict:
                  if _geo_ok else None)
     _min_wall = float(((lc_result["case"].get("acceptance") or {})
                        .get("min_wall_thickness_mm") or 2.0))
+    # ── 【Bug⑦ 修复】与 cmd_optimize 同口径：先判薄壁/镂空，再决定求解层级 ──
+    _THIN_ASSESS = _thin_hollow_assessment(
+        _geo, lc_result["case"], _wall_est, _min_wall)
+    _ROOM_NAME = _resolve_defense_room("")
+    _ROOM_TYPE = _resolve_room_type(_ROOM_NAME or "")
     _design_params = {
         "thickness_mm": {
             "id": "thickness_mm",
@@ -241,7 +246,23 @@ def cmd_simulate(run_dir: str) -> dict:
 
     # ── 【Bug17 修复】求解放在【几何注入之后】────────────────────────────
     # real_geometry 已在上方写入 lc_result["case"]，此时求解才能用到真实尺寸。
-    fea_result = fea_solver.solve_fea(lc_result["case"], output_dir=output_dir)
+    # ── 【Bug⑦】薄壁/镂空 → 优先升级 L1（本机无 3D 求解器，绝不冒充 3D FEA）──
+    if _THIN_ASSESS.get("equivalent_model_applicable") is False:
+        fea_result, _l1_note = _prefer_l1_backend(lc_result["case"], output_dir)
+        try:
+            fea_result.setdefault("limitations", []).append(
+                "【Bug⑦·求解层级】" + _l1_note)
+        except Exception:
+            pass
+    else:
+        fea_result = fea_solver.solve_fea(lc_result["case"], output_dir=output_dir)
+        try:
+            fea_result["l1_available"] = bool(
+                (fea_solver.detect_available_backends() or {}).get("feapy"))
+        except Exception:
+            pass
+    # ── 【Bug⑩】任何后端的 load_model 都必须回显本次实际用的 share ──────────
+    _ensure_load_share_disclosure(lc_result["case"], fea_result)
     gc_result["geometry_source"] = (_geo.get("source") if _geo_ok
                                     else "UNMEASURED")
     if not _geo_ok:
@@ -252,7 +273,13 @@ def cmd_simulate(run_dir: str) -> dict:
         geometry_check=gc_result, fea_result=fea_result,
         iteration=len(state.get("runs", [])) + 1,
         parent_run_id=state.get("current_run_id"),
+        # ── 【Bug⑦】房间类型交由报告层判定是否降级为 REVIEW ──────────────
+        room_type=_ROOM_TYPE,
     )
+    try:
+        report["thin_hollow_assessment"] = dict(_THIN_ASSESS)
+    except Exception:
+        pass
     report_path = sim_report.save_report(report, output_dir)
     report["report_path"] = report_path
 
@@ -538,6 +565,20 @@ def _derive_design_params(part_path="", volume_mm3=None, surface_area_mm2=None,
     return dp, src
 
 
+def _physics_run_roots():
+    """受管的物理运行根目录（output/physics_runs 的候选落点）。
+
+    ── 【Bug④】抽成独立函数，让"按房间取运行"的判定与回归测试用同一套根目录，
+      避免各调用点各拼一套导致口径不一致。
+    """
+    _here = os.path.dirname(os.path.abspath(__file__))
+    return [
+        os.path.abspath(os.path.join(_here, "..", "..", "output", "physics_runs")),
+        os.path.abspath(os.path.join(_here, "output", "physics_runs")),
+        os.path.abspath(os.path.join(_here, "..", "output", "physics_runs")),
+    ]
+
+
 def _latest_real_physics(room=""):
     """取【最近一次真实仿真】的结果，供领域防线使用（Bug12 修复）。
 
@@ -550,12 +591,7 @@ def _latest_real_physics(room=""):
     Returns: (design_params, fea_result, meta) —— 取不到时返回 ({}, {}, {...})
     """
     import glob as _glob
-    _here = os.path.dirname(os.path.abspath(__file__))
-    _roots = [
-        os.path.abspath(os.path.join(_here, "..", "..", "output", "physics_runs")),
-        os.path.abspath(os.path.join(_here, "output", "physics_runs")),
-        os.path.abspath(os.path.join(_here, "..", "output", "physics_runs")),
-    ]
+    _roots = _physics_run_roots()
     _reports = []
     for _r in _roots:
         if not os.path.isdir(_r):
@@ -569,17 +605,36 @@ def _latest_real_physics(room=""):
         _reports.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     except Exception:
         pass
+    # ── 【Bug④ 修复】指定了 room 就【只】接受属于该房间的报告 ─────────────
+    # 原实现在找不到本房报告时【静默回退】到"全库最新的一份"，于是房间的
+    #   domain 凭据会把【别的房间/主代理历史运行】的仿真数据当成自己零件的
+    #   校核结果（实测：传动与轮组房取到 opt_iter_3，报出 TR-001 轴径 1.5mm /
+    #   TR-005 变形 45.6mm 两条虚假 CRITICAL，而本房零件轴孔 Ø5、变形远小于 0.5mm）。
+    # 现在：本房没有真实仿真时明确判"取不到本房真实物理数据"（fail-closed），
+    #   由 cmd_validate_domain 拒绝签发凭据并给出可执行原因。
     _pick = None
-    if room:
+    _want_room = str(room or "").strip()
+    if _want_room:
         for _p in _reports:
             try:
                 _j = json.load(open(_p, "r", encoding="utf-8"))
             except Exception:
                 continue
-            if str(_j.get("room") or "") == str(room):
+            if str(_j.get("room") or "").strip() == _want_room:
                 _pick = (_p, _j)
                 break
+        if _pick is None:
+            return {}, {}, {
+                "ok": False,
+                "error": ("受管 output/physics_runs 下没有任何属于房间 %r 的仿真报告 —— "
+                          "不得借用其他房间/历史运行的数据（Bug④ fail-closed）"
+                          % _want_room),
+                "room": _want_room,
+                "reason_code": "NO_RUN_FOR_ROOM",
+                "report_count": len(_reports),
+            }
     if _pick is None:
+        # 【Bug④ 修复】未指定房间时才允许取"全库最新"（无归属语义的兜底）
         for _p in _reports:
             try:
                 _j = json.load(open(_p, "r", encoding="utf-8"))
@@ -653,16 +708,52 @@ def cmd_validate_domain(domain_id: str = "structural",
     # 现在：显式传入的优先；否则从最近一次真实仿真报告取；
     #   若两者都拿不到 → 明确标 data_missing 并判【不可判定】，
     #   绝不返回"无违规=合规"。
-    _data_meta = {"source": "explicit" if (design_params or fea_result) else None}
+    # 【Bug④】是否用了调用方【人工提供】的参数（= 没有仿真运行可绑定）
+    _explicit_data = bool(design_params or fea_result)
+    _data_meta = {"source": "explicit" if _explicit_data else None}
     if design_params is None:
         design_params = {}
     if fea_result is None:
         fea_result = {}
+    _room_key = _resolve_defense_room(room)
     if not design_params and not fea_result:
-        _dp, _fr, _meta = _latest_real_physics(room)
+        # ── 【Bug④ 修复】物理数据必须来自【本房间】的真实仿真（fail-closed）──
+        # 原实现在找不到本房报告时会静默回退到"全库最新的一份"（可能是
+        #   主代理历史运行 opt_iter_3、也可能是别的房间的运行）→ 规则在
+        #   别人的数据上跑出与本房零件无关的虚假 CRITICAL，并且凭据里
+        #   记录的 run_id 指向那个历史 run。
+        # 现在：_latest_real_physics(room) 已改为"给了 room 就只认本房"，
+        #   取不到时这里直接【拒绝签发凭据】并说明原因，不再拿别的数据凑。
+        _dp, _fr, _meta = _latest_real_physics(_room_key or room)
         design_params, fea_result = _dp, _fr
         _data_meta = dict(_meta or {})
-        _data_meta["source"] = "physics_runs(最近一次真实仿真)"
+        if not (isinstance(_data_meta, dict) and _data_meta.get("ok")):
+            _reason = ((_data_meta or {}).get("error")
+                       or "取不到本房间的真实仿真数据")
+            result_blocked = {
+                "ok": False,
+                "status": "NOT_EVALUATED",
+                "domain": domain_id,
+                "room": _room_key or room,
+                "error": ("领域校验拒绝执行：%s。不得借用其他房间/历史运行的"
+                          "仿真数据（Bug④ fail-closed）。" % _reason),
+                "reason_code": ((_data_meta or {}).get("reason_code")
+                                or "NO_RUN_FOR_ROOM"),
+                "data_source": _data_meta,
+                "physics_available": False,
+                "violations": [],
+                "warnings": [{
+                    "rule_id": "NO_RUN_FOR_ROOM",
+                    "severity": "CRITICAL",
+                    "message": "本房间没有可用的真实仿真运行，领域校验未执行",
+                }],
+                "hint": ("先在本房间跑一次 physics-optimize（带 --part 与 --room），"
+                         "再执行 physics-validate-domain"),
+            }
+            # 不签发任何领域凭据（fail-closed）：旧凭据若存在仍会被
+            #   defense_gate 的 room↔run_id 一致性检查拦下。
+            return result_blocked
+        _data_meta["source"] = "physics_runs(本房间最近一次真实仿真)"
     # ── 【观察点 20 修复】字段别名归一化 ──────────────────────────────────
     # 同一物理量在【仿真报告】与【领域规则】里叫法不同，导致规则"读不到数据"
     # 而误报 CRITICAL：
@@ -698,6 +789,22 @@ def cmd_validate_domain(domain_id: str = "structural",
     except Exception as _e_dp:
         if isinstance(_data_meta, dict):
             _data_meta["derive_error"] = repr(_e_dp)
+    # ── 【Bug④】确定"本次领域校验实际使用的 run_id"（凭据必须绑死它）────
+    #   来源优先级：数据源 meta 里的 run_id（= 本房最近一次真实仿真）
+    #              > 该报告文件自身的 run_id。
+    #   都取不到 → 留空，后续【拒绝签发领域凭据】并说明原因（fail-closed），
+    #   绝不退回到"随便找一个历史 run 的 id"。
+    _used_run = str((_data_meta or {}).get("run_id") or "").strip()
+    _used_report = str((_data_meta or {}).get("report_path") or "").strip()
+    if not _used_run and _used_report and os.path.exists(_used_report):
+        try:
+            _used_run = str(
+                (json.load(open(_used_report, "r", encoding="utf-8"))
+                 or {}).get("run_id") or "").strip()
+        except Exception:
+            _used_run = ""
+    if isinstance(_data_meta, dict):
+        _data_meta["run_id"] = _used_run
     _has_real = bool(
         (fea_result or {}).get("safety_factor")
         or (fea_result or {}).get("max_von_mises_mpa")
@@ -747,14 +854,35 @@ def cmd_validate_domain(domain_id: str = "structural",
             "severity": "CRITICAL",
             "message": "领域规则在空数据上运行 —— 结论不可采信",
         })
-        _emit_domain_attestation(_resolve_defense_room(room), result, domain_id)
+        _emit_domain_attestation(_resolve_defense_room(room), result, domain_id,
+                                 run_id=_used_run, allow_no_run=_explicit_data)
         result["available_domains"] = [d["id"] for d in domain_validator.list_domains()]
         return result
     # ── 【防线③领域】DSVA 结论一算出就自动落凭据 ──
+    # 【Bug④】run_id 必须是【本房本次校验实际使用】的那个（来自 data_source），
+    #   且 _emit_domain_attestation 会再核一次 room↔run_id 归属，不通过就拒签。
     try:
-        _emit_domain_attestation(_resolve_defense_room(room), result, domain_id)
-    except Exception:
-        pass
+        _used_att = _emit_domain_attestation(
+            _resolve_defense_room(room), result, domain_id, run_id=_used_run,
+            allow_no_run=_explicit_data)
+        if _used_att is None:
+            result["attestation_written"] = False
+            result.setdefault("warnings", []).append({
+                "rule_id": "CREDENTIAL_NOT_ISSUED",
+                "severity": "CRITICAL",
+                "message": ("领域凭据【未签发】：run_id=%r 无法归属到本房间本次运行"
+                            "（Bug④ fail-closed）—— room-end 将因此被拒"
+                            % (_used_run,)),
+            })
+        else:
+            result["attestation_written"] = True
+    except Exception as _e_emit:
+        result["attestation_written"] = False
+        result.setdefault("warnings", []).append({
+            "rule_id": "CREDENTIAL_ISSUE_ERROR",
+            "severity": "WARNING",
+            "message": "领域凭据签发异常：%r" % (_e_emit,),
+        })
 
     result["available_domains"] = [d["id"] for d in domain_validator.list_domains()]
     return result
@@ -1321,6 +1449,249 @@ def _estimate_wall_from_geometry(vol_mm3, area_mm2):
         return None
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  【Bug⑦】薄壁/镂空件的等效模型适用性判定 + L1 升级
+# ══════════════════════════════════════════════════════════════════════
+# 问题：L0（解析梁）/L1（numpy CST 2D 平面应力）都把零件【包围盒的排序
+#   三边】当成【实心矩形棱柱】来算。薄壁/镂空/变截面件的等效实心体积比
+#   真实体积大好几倍 → 截面惯性矩虚大 → 应力虚低 → 安全系数虚高
+#   （实测：底盘 SF=31.55、传感器支架 SF=61.93，合理区间只有 2~5）。
+# 处理（诚实优先、不伪造能力）：
+#   · 用【已有】真实几何（surface_area/volume 的 2V/A 壁厚估计 + 等效体积
+#     失真倍数）判定薄壁/镂空 —— 不新增数据依赖，不做无据推断；
+#   · 若本机有 L1（feapy/numpy，恒可用）而当前跑的是 L0 解析解 → 升级到 L1
+#     （L1 至少是二维平面应力的数值解，比梁公式更接近真实，但仍然【不是】
+#     3D FEA —— 这点必须在 limitations 里写清楚，不得冒充）；
+#   · 房间类型属承力类（structural/housing/transmission 及别名）且判定为
+#     薄壁/镂空 → 结果降级为 REVIEW（不得 PASS），limitations 显式声明。
+#     ⚠️ 只降级、不判 FAIL —— 不把现有房间全部判失败（现场安全）。
+_THIN_WALL_THRESHOLD_MM = 3.0      # FDM 打印薄壁判据（与 simulation_report 同源）
+_HOLLOW_INFLATION_LIMIT = 1.5      # 等效实心体积 / 真实体积 超过即判镂空
+_EQ_GUARD_ROOM_TYPES = ("structural", "housing", "transmission",
+                        "support", "spring", "thermal", "corrosion")
+
+
+def _norm_room_type(rtype):
+    """房间类型归一化（别名与 defense_gate/workflow_gate 同源）。"""
+    _alias = {
+        "drivetrain": "transmission", "drive_train": "transmission",
+        "sensor": "housing", "sensors": "housing", "electronics": "housing",
+        "drawing": "drafting", "drawings": "drafting", "draft": "drafting",
+        "assembly_verify": "assembly", "prime": "assembly",
+    }
+    _t = str(rtype or "").strip().lower()
+    return _alias.get(_t, _t) if _t else ""
+
+
+def _resolve_room_type(room):
+    """取房间类型（显式 env > workflow_state 快照 > mode_state 快照）。
+
+    取不到返回 ""（调用方按"未知 → 保守按承力类处理"，见 Bug⑥ 的 fail-closed
+    口径：绝不再因为"类型未知"就豁免物理校核）。
+    """
+    try:
+        _envt = str(os.environ.get("DSH_ROOM_TYPE") or "").strip()
+        if _envt:
+            return _norm_room_type(_envt)
+    except Exception:
+        pass
+    _room = str(room or "").strip()
+    if not _room:
+        return ""
+    for _fn in ("workflow_state.json", "mode_state.json"):
+        try:
+            _p = os.path.join(STATE_DIR, _fn)
+            if not os.path.exists(_p):
+                continue
+            with open(_p, "r", encoding="utf-8") as _f:
+                _d = json.load(_f) or {}
+        except Exception:
+            continue
+        try:
+            _cfg = _d.get("subagent_config") or {}
+            for _row in (_cfg.get("rooms") or []):
+                if isinstance(_row, (list, tuple)) and len(_row) >= 2:
+                    if str(_row[0]) == _room:
+                        return _norm_room_type(_row[1])
+                elif isinstance(_row, dict):
+                    _n = _row.get("name") or _row.get("room")
+                    if _n and str(_n) == _room:
+                        return _norm_room_type(_row.get("type") or "")
+        except Exception:
+            pass
+        try:
+            _rv = (_d.get("rooms") or {}).get(_room)
+            if isinstance(_rv, dict) and _rv.get("type"):
+                return _norm_room_type(_rv.get("type"))
+        except Exception:
+            pass
+    return ""
+
+
+def _thin_hollow_assessment(geo, load_case_dict, wall_est_mm=None, min_wall_mm=None):
+    """判定零件是否属薄壁/镂空/变截面（只用已有真实几何，不编造）。
+
+    Returns: dict —— 关键字段：
+      thin_wall / hollow / equivalent_model_applicable / reasons[] /
+      evidence{} / missing_evidence[]
+    """
+    geo = geo if isinstance(geo, dict) else {}
+    acc = ((load_case_dict or {}).get("acceptance") or {})
+    out = {
+        "thin_wall": False, "hollow": False,
+        "variable_section": None,          # 无逐截面数据 → 未评估（不假装）
+        "variable_section_evaluated": False,
+        "equivalent_model_applicable": True,
+        "reasons": [], "missing_evidence": [],
+        "evidence": {},
+    }
+    try:
+        _req = float(min_wall_mm if min_wall_mm is not None
+                     else (acc.get("min_wall_thickness_mm") or 2.0))
+    except Exception:
+        _req = 2.0
+    _thr = max(_THIN_WALL_THRESHOLD_MM, _req)
+
+    _wall = wall_est_mm
+    if _wall is None:
+        _wall = _estimate_wall_from_geometry(geo.get("volume_mm3"),
+                                            geo.get("surface_area_mm2"))
+    out["evidence"]["estimated_min_thickness_mm"] = (
+        round(float(_wall), 4) if _wall else None)
+    out["evidence"]["wall_threshold_mm"] = _thr
+    if _wall is None:
+        out["missing_evidence"].append("surface_area/volume（2V/A 壁厚估计）")
+    else:
+        try:
+            if float(_wall) < _thr:
+                out["thin_wall"] = True
+                out["reasons"].append(
+                    "薄壁（2V/A 估计特征厚度 %.3fmm < 判据 %.1fmm）"
+                    % (float(_wall), _thr))
+        except Exception:
+            pass
+
+    # 镂空：等效实心体积比真实体积（失真倍数）
+    _bb = geo.get("bbox_mm")
+    _vol = geo.get("volume_mm3")
+    _eq_vol = None
+    try:
+        if isinstance(_bb, (list, tuple)) and len(_bb) >= 6:
+            _dims = sorted([abs(float(_bb[1]) - float(_bb[0])),
+                            abs(float(_bb[3]) - float(_bb[2])),
+                            abs(float(_bb[5]) - float(_bb[4]))], reverse=True)
+            if all(d > 0 for d in _dims):
+                _eq_vol = _dims[0] * _dims[1] * _dims[2]
+    except Exception:
+        _eq_vol = None
+    if _eq_vol and _vol:
+        try:
+            _ratio = _eq_vol / float(_vol)
+            out["evidence"]["volume_inflation_x"] = round(_ratio, 3)
+            out["evidence"]["equivalent_solid_volume_mm3"] = round(_eq_vol, 2)
+            out["evidence"]["real_volume_mm3"] = round(float(_vol), 2)
+            if _ratio > _HOLLOW_INFLATION_LIMIT:
+                out["hollow"] = True
+                out["reasons"].append(
+                    "镂空/变截面（等效实心体积是真实体积的 %.2f 倍 > %.1f 倍判据）"
+                    % (_ratio, _HOLLOW_INFLATION_LIMIT))
+        except Exception:
+            pass
+    else:
+        out["missing_evidence"].append("bbox_mm 或 volume_mm3（等效体积失真倍数）")
+
+    if out["thin_wall"] or out["hollow"]:
+        out["equivalent_model_applicable"] = False
+    return out
+
+
+def _ensure_load_share_disclosure(case_dict, fea_result):
+    """【Bug⑩ 补口】保证【任何求解后端】的结果都回显本次实际用的 share。
+
+    为什么需要：L1（feapy）路径的 load_model 只回显力/工况，不含
+      part_load_share —— 而现在的默认路径对薄壁件恰好就是 L1。若不补，
+      报告层就无法把"本次实际用的 share 值"写进 limitations（Bug⑩ 要求）。
+    本函数只在缺字段时补齐，绝不改动已算出的 design_force_n（口径不变）。
+    """
+    if not isinstance(fea_result, dict) or not fea_result.get("ok"):
+        return fea_result
+    try:
+        _lm = fea_result.get("load_model")
+        if not isinstance(_lm, dict):
+            _lm = {}
+            fea_result["load_model"] = _lm
+        if _lm.get("part_load_share") is not None:
+            return fea_result
+        _share, _meta = load_case.part_load_share(case_dict)
+        _lm["part_load_share"] = _share
+        _lm["load_share_source"] = _meta.get("source")
+        _lm["load_share_note"] = _meta.get("note")
+        _lm["part_load_share_standalone"] = bool(
+            _meta.get("standalone_load_path"))
+        _lm["part_load_share_review_required"] = bool(
+            _meta.get("review_required"))
+        _lm["part_load_share_warning"] = _meta.get("warning")
+        _lm.setdefault("share_disclosure_source",
+                       "physics_bridge._ensure_load_share_disclosure")
+    except Exception:
+        pass
+    return fea_result
+
+
+def _prefer_l1_backend(load_case_dict, output_dir, backend=None):
+    """【Bug⑦】薄壁/镂空件优先用 L1（numpy CST）而不是 L0 解析解。
+
+    为什么不是"直接上 3D FEA"：3D 后端是否可用一律【实测】（读
+    fea_solver.SOLVER_BACKENDS），不写死结论。本函数【绝不会】把 L1 说成
+    3D FEA —— 只做"在可用能力里选更合适的那个"，并把层级如实记进结果。
+
+    Returns: (fea_result, note)
+    """
+    _b = dict(fea_solver.detect_available_backends() or {})
+    _has_l1 = bool(_b.get("feapy"))
+    _3d_keys = [k for k in ("calculix", "code_aster", "elmerfem", "gmsh") if _b.get(k)]
+    _has_3d = bool(_3d_keys)
+    _target = backend or ("feapy" if _has_l1 else None)
+    _fea = fea_solver.solve_fea(load_case_dict, output_dir=output_dir,
+                               backend=_target)
+    _upgraded = (_target == "feapy")
+    # ── L1 求解失败时必须退回（不能因为"想升级"反而丢掉结论）──────────────
+    if _upgraded and not (isinstance(_fea, dict) and _fea.get("ok")):
+        _fea_l1_err = (_fea or {}).get("error")
+        _fea = fea_solver.solve_fea(load_case_dict, output_dir=output_dir)
+        _upgraded = False
+    else:
+        _fea_l1_err = None
+    if isinstance(_fea, dict):
+        _fea["l1_available"] = _has_l1
+        _fea["solver_3d_available"] = _has_3d
+        _fea["solver_backends"] = {k: bool(v) for k, v in _b.items()}
+        _fea["l1_upgraded"] = bool(_upgraded)
+        if _fea_l1_err:
+            _fea["l1_upgrade_error"] = str(_fea_l1_err)
+        # 如实标注求解层级：L0=解析梁 / L1=2D 平面应力 CST
+        # ★ 本函数从不执行 3D FEA，故 is_3d_fea 恒 False（不冒充能力）
+        _bk = str(_fea.get("backend") or "")
+        _fea["solver_level"] = ("L1" if _bk.startswith(("pure_python", "feapy"))
+                                else "L0" if _bk else "UNKNOWN")
+        _fea["is_3d_fea"] = False
+    if _upgraded and not _has_3d:
+        _note = ("已升级到 L1（numpy CST 2D 平面应力数值解）—— 仍不是 3D FEA；"
+                 "本机 3D 求解器不可用（Gmsh/CalculiX/Code_Aster/Elmer 均未安装），"
+                 "薄壁/镂空件的 3D 应力集中无法评估")
+    elif _upgraded and _has_3d:
+        _note = ("已升级到 L1（numpy CST 2D 平面应力数值解）—— 仍不是 3D FEA；"
+                 "本机虽探测到 3D 求解器（%s），但本次未执行 3D 网格/求解，"
+                 "不得据此宣称做过 3D FEA" % ",".join(_3d_keys))
+    elif _has_3d:
+        _note = ("本机探测到 3D 求解器（%s），但本次未执行 3D FEA —— "
+                 "薄壁/镂空件结论仍需 3D 复核" % ",".join(_3d_keys))
+    else:
+        _note = ("无数值求解器可用，仅 L0 解析解 —— "
+                 "薄壁/镂空件结论不可作为合格依据")
+    return _fea, _note
+
+
 def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
                  part_path: str = "", explicit_material: str = "") -> dict:
     """自动迭代优化：generate → simulate → check → refine 直到通过或达到 max_iter。
@@ -1334,9 +1705,21 @@ def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
         return {"ok": False, "error": "invalid load case", "details": lc_result}
 
     problem_id = lc_result["case"].get("meta", {}).get("problem_id", "UNKNOWN")
+    # ── 【Bug④ 修复】房间身份必须在【运行开始前】确定一次，随后全程绑定 ────
+    # 原来每次签凭据都现调 _resolve_defense_room(room)（可能退到 env DSH_ROOM），
+    #   而 run_id 又只由迭代序号决定 → 两者没有任何绑定关系，房间凭据于是
+    #   可能引用到别的房间/历史运行的 run。
+    # 现在：本次 optimize 只认一个 _DEFENSE_ROOM；拿不到房间就【不签凭据】
+    #   （见 _emit_physics_attestation 的 fail-closed 分支），绝不猜。
+    _DEFENSE_ROOM = _resolve_defense_room(room)
+    # ── 【Bug⑥/⑦】房间类型决定"薄壁/镂空是否需要降级为 REVIEW" ─────────────
+    # 取不到类型时按""→_norm_room_type 回到空串，下游按 fail-closed 处理
+    #   （见 _eq_guard_applies：未知类型视为承力类，不再静默豁免）。
+    _ROOM_TYPE = _resolve_room_type(_DEFENSE_ROOM or room)
+    _RUN_STAMP = int(time.time())
     run_dir = os.path.join(
         _HERE, "..", "..", "output", design_state.STATE_DIR_NAME,
-        f"opt_{problem_id}_{int(time.time())}",
+        f"opt_{problem_id}_{_RUN_STAMP}",
     )
     os.makedirs(run_dir, exist_ok=True)
 
@@ -1417,6 +1800,14 @@ def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
     if _geo_ok:
         _wall_est = _estimate_wall_from_geometry(
             _geo.get("volume_mm3"), _geo.get("surface_area_mm2"))
+    # ── 【Bug⑦ 修复】薄壁/镂空判定必须在【求解之前】完成 ──────────────────
+    # 判定结果决定用 L0 还是升级到 L1（见下方 solve_fea 分支），并随报告
+    #   落盘（limitations 显式声明"该件属薄壁/镂空，L0 等效模型不适用"）。
+    # 只用已有真实几何，不做无据推断；证据缺失时如实记 missing_evidence。
+    _THIN_ASSESS = _thin_hollow_assessment(
+        _geo, lc_result["case"], _wall_est,
+        ((lc_result["case"].get("acceptance") or {})
+         .get("min_wall_thickness_mm") or 2.0))
     # design_params：有真实壁厚估计就用它，否则如实标注"未实测"
     design_params = {
         "thickness_mm": {
@@ -1446,11 +1837,47 @@ def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
 
     final_report = None
     for i in range(1, max_iter + 1):
-        run_id = f"opt_iter_{i}"
+        # ── 【Bug④ 修复】run_id 必须【唯一标识本次运行】────────────────────
+        # 原实现run_id = f"opt_iter_{i}" —— 只是一个迭代序号，全部房间/全部
+        #   历史运行共用同一个名字（实测磁盘上 opt_iter_1 有 136 份、
+        #   opt_iter_3 有 31 份，分属结构件/壳体机架/传动机构…）。
+        #   于是凭据里的 run_id 无法区分"是谁的这次运行"，防线检查只能
+        #   退回"run_id 存在即算"，等于给跨房间借用开了口子（Bug④）。
+        # 现在：run_id = <本次运行目录名>_iter_<i>，天然含本次唯一的
+        #   opt_<problem>_<时间戳> 前缀；同时把房间归属写进报告（下方已做），
+        #   于是"run_id ↔ 本次运行 ↔ 本房间"三者可核对。
+        run_id = f"{os.path.basename(run_dir)}_iter_{i}"
         output_dir = os.path.join(run_dir, f"iteration_{i}")
         os.makedirs(output_dir, exist_ok=True)
 
-        fea_result = fea_solver.solve_fea(lc_result["case"], output_dir=output_dir)
+        # ── 【Bug⑦ 修复】薄壁/镂空件优先升级到 L1（numpy CST 数值解）──────
+        # L0 梁公式对薄壁/镂空件的截面惯性矩高估最严重（实测 SF 虚高 10 倍级）。
+        # 本机没有 3D 求解器时，L1 是"可用能力里更接近真实"的那一档；
+        # 是否升级由 _thin_hollow_assessment 的判定决定（先判定、再求解）。
+        _thin = _THIN_ASSESS if "_THIN_ASSESS" in dir() else None
+        if _thin is None:
+            _thin = _thin_hollow_assessment(
+                _geo, lc_result["case"], _wall_est,
+                ((lc_result["case"].get("acceptance") or {})
+                 .get("min_wall_thickness_mm") or 2.0))
+        if _thin.get("equivalent_model_applicable") is False:
+            fea_result, _l1_note = _prefer_l1_backend(
+                lc_result["case"], output_dir)
+            try:
+                fea_result.setdefault("limitations", []).append(
+                    "【Bug⑦·求解层级】" + _l1_note)
+            except Exception:
+                pass
+        else:
+            fea_result = fea_solver.solve_fea(lc_result["case"], output_dir=output_dir)
+            try:
+                fea_result["l1_available"] = bool(
+                    (fea_solver.detect_available_backends() or {}).get("feapy"))
+            except Exception:
+                pass
+        # ── 【Bug⑩】任何后端的 load_model 都必须回显本次实际用的 share ──────
+        # L1 路径原本不回显 → 报告层无法把 share 写进 limitations。
+        _ensure_load_share_disclosure(lc_result["case"], fea_result)
 
         domain = lc_result["case"].get("design_domain", {}).get("bounds", {})
         # ── 【Bug18 根因修复】不得用 design_domain 回填缺失的 bbox 分量 ──────
@@ -1491,14 +1918,27 @@ def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
         report = sim_report.build_report(
             run_id=run_id, load_case=lc_result["case"], design_params=design_params,
             geometry_check=gc_result, fea_result=fea_result, iteration=i,
-            parent_run_id=f"opt_iter_{i-1}" if i > 1 else None,
+            # 【Bug④】父运行必须是【本次运行】的上一轮，不能写成全局共享的
+            #   "opt_iter_{i-1}"（那是跨房间混用的旧命名）
+            parent_run_id=(f"{os.path.basename(run_dir)}_iter_{i - 1}"
+                           if i > 1 else None),
+            # ── 【Bug⑦ 修复】把房间类型交给报告层 ──────────────────────
+            # 报告层据此判断"薄壁/镂空 + 承力类房间 → overall 必须降为
+            #   REVIEW（不得 PASS）"，并把等效模型局限写进 limitations。
+            room_type=_ROOM_TYPE,
         )
+        # ── 【Bug⑦】判定证据随报告落盘（可审计，不依赖二次推断）─────────
+        try:
+            report["thin_hollow_assessment"] = dict(_THIN_ASSESS)
+        except Exception:
+            pass
         # [防伪造] 报告必须自带【房间归属】：否则别的房间/别人只要复制或
         #   引用这份报告路径，就能给任意房间背书（对抗测试 C1c/C1d）。
         try:
-            _rm = _resolve_defense_room(room)
-            if _rm:
-                report["room"] = _rm
+            # 【Bug④】房间归属在运行开始前已确定（_DEFENSE_ROOM），此处不再现算，
+            #   避免中途 env/参数变化导致同一 run 内报告归属漂移。
+            if _DEFENSE_ROOM:
+                report["room"] = _DEFENSE_ROOM
         except Exception:
             pass
         report_path = sim_report.save_report(report, output_dir)
@@ -1519,8 +1959,9 @@ def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
         if report["overall_status"] == "PASS":
             # ── 【防线②物理】结论一算出就自动落凭据 ──
             try:
-                _emit_physics_attestation(_resolve_defense_room(room), report,
-                                          case_path=case_path, run_dir=run_dir)
+                _emit_physics_attestation(_DEFENSE_ROOM, report,
+                                          case_path=case_path, run_dir=run_dir,
+                                          run_id=run_id)
             except Exception:
                 pass
             return {
@@ -1538,8 +1979,9 @@ def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
         else:
             # ── 【防线②物理】收敛失败也要落凭据（结论已产生，不能被漏掉）──
             try:
-                _emit_physics_attestation(_resolve_defense_room(room), report,
-                                          case_path=case_path, run_dir=run_dir)
+                _emit_physics_attestation(_DEFENSE_ROOM, report,
+                                          case_path=case_path, run_dir=run_dir,
+                                          run_id=run_id)
             except Exception:
                 pass
 
@@ -1552,8 +1994,9 @@ def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
 
     # ── 【防线②物理】达到迭代上限：结论同样要落凭据 ──
     try:
-        _emit_physics_attestation(_resolve_defense_room(room), final_report,
-                                  case_path=case_path, run_dir=run_dir)
+        _emit_physics_attestation(_DEFENSE_ROOM, final_report,
+                                  case_path=case_path, run_dir=run_dir,
+                                  run_id=(final_report or {}).get("run_id") or "")
     except Exception:
         pass
 
@@ -1570,10 +2013,19 @@ def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
 #  设计要点：凭据必须【自动】产生，而不是等小屋记得多调一条命令。
 #  因此挂在 physics 结论已经算出来的位置（optimize / validate-domain），
 #  只要跑过一次物理链路，防线凭据就必然存在。
-def _emit_physics_attestation(room, report, case_path="", run_dir=""):
+def _emit_physics_attestation(room, report, case_path="", run_dir="",
+                              run_id=""):
     """把仿真报告折算成防线②凭据，写入 reports/<room>.physics.json。
 
     room 为空时【不写】—— 凭据必须归属到具体房间才能被 room-end 校验。
+
+    ── 【Bug④ 修复】run_id 必须绑死【本房间本次运行】─────────────────────
+    原实现直接取 report["run_id"]，而 run_id 曾只由迭代序号决定
+      （opt_iter_3），跨房间复用。现在：
+      ① 优先用调用方显式传入的 run_id（= 本次 optimize 实际产生的那一个）；
+      ② 否则用报告自己的 run_id，但必须与报告的 room【互相印证】：
+         报告 room 必须等于入参 room，report_path 必须落在【本次 run_dir】下；
+      ③ 任一不满足 → 拒绝签发（fail-closed）并写明原因，绝不用历史遗留 run。
     """
     if not room or not isinstance(report, dict):
         return None
@@ -1581,6 +2033,42 @@ def _emit_physics_attestation(room, report, case_path="", run_dir=""):
         import defense_gate as _dg
     except ImportError:
         return None
+    # ── ① room ↔ report 归属一致性（Bug④ fail-closed 闸口）──────────────
+    _rep_room = str(report.get("room") or "").strip()
+    if _rep_room and _rep_room != str(room).strip():
+        _dg.note_unsigned_attempt(
+            room, "physics",
+            "拒绝签发：报告房间归属 %r 与凭据房间 %r 不一致（Bug④）"
+            % (_rep_room, str(room)))
+        return None
+    _explicit_run = str(run_id or "").strip()
+    _rep_run = str(report.get("run_id") or "").strip()
+    if _explicit_run and _rep_run and _explicit_run != _rep_run:
+        _dg.note_unsigned_attempt(
+            room, "physics",
+            "拒绝签发：显式 run_id=%r 与报告 run_id=%r 不一致（Bug④）"
+            % (_explicit_run, _rep_run))
+        return None
+    _final_run = _explicit_run or _rep_run
+    if not _final_run:
+        _dg.note_unsigned_attempt(
+            room, "physics",
+            "拒绝签发：报告没有 run_id，无法绑定到本房间本次运行（Bug④）")
+        return None
+    # ② report_path 必须落在【本次运行目录】下（不能是历史遗留 report）
+    _rp = str(report.get("report_path") or "").strip()
+    _rd = str(run_dir or "").strip()
+    if _rd and _rp:
+        try:
+            _ap, _ad = os.path.abspath(_rp), os.path.abspath(_rd)
+            if os.path.commonpath([_ap, _ad]).lower() != _ad.lower():
+                _dg.note_unsigned_attempt(
+                    room, "physics",
+                    "拒绝签发：report_path 不在本次 run_dir 下（疑似引用历史运行，"
+                    "Bug④）：%s ∉ %s" % (_ap, _ad))
+                return None
+        except Exception:
+            pass
     _fea = report.get("fea_result") or {}
     _fat = _fea.get("fatigue") or {}
     payload = {
@@ -1594,13 +2082,16 @@ def _emit_physics_attestation(room, report, case_path="", run_dir=""):
         "passed_gates": report.get("passed_gates") or [],
         "not_evaluated": report.get("not_evaluated") or [],
         "release_status": (report.get("release_readiness") or {}).get("status"),
-        "run_id": report.get("run_id"),
+        # ── 【Bug④】run_id 已绑死本次运行（见函数头闸口），绝不用历史遗留 ──
+        "run_id": _final_run,
         # [防伪造] run_id 在磁盘上【不唯一】（opt_iter_1 有 7 份），必须同时
         #   记录【唯一路径】：report_path（具体报告文件）+ run_dir（运行目录），
         #   让防线校验能精确定位到"就是这一次运行"，而不是"借"一个同名 run_id。
         "report_path": report.get("report_path") or "",
         "case_path": case_path,
         "run_dir": run_dir,
+        # 【Bug④】凭据显式记录房间，供验签端做 room ↔ run_id 一致性核对
+        "room": str(room),
         "source": "physics_bridge",
     }
     # [主防线] 凭据必须由【宿主签发】—— 本地只提交磁盘事实，宿主自己读报告后签名。
@@ -1624,14 +2115,63 @@ def _emit_physics_attestation(room, report, case_path="", run_dir=""):
     return _dg.write_physics_attestation(room, _fallback)
 
 
-def _emit_domain_attestation(room, dom_result, domain_id=""):
-    """把 DSVA 结论折算成防线③凭据，写入 reports/<room>.domain.json。"""
+def _emit_domain_attestation(room, dom_result, domain_id="", run_id="",
+                              allow_no_run=False):
+    """把 DSVA 结论折算成防线③凭据，写入 reports/<room>.domain.json。
+
+    ── 【Bug④ 修复】领域凭据的 run_id 必须绑死【本房间本次运行】───────────
+    原实现从 dom_result["run_id"] 或 data_source["run_id"] 取；而在"本房没有
+      报告"时 _latest_real_physics 会回退到全库最新的一份（很可能是主代理
+      历史运行 opt_iter_3 / 别的房间的运行），于是领域凭据带着别人的 run_id
+      落盘，规则也在别人的真实物理量上跑出与本房零件无关的结论。
+    现在（fail-closed）：
+      ① run_id 优先取调用方显式传入的（本房本次校验实际使用的那个）；
+      ② 用 defense_gate.run_attribution_for_room() 核对
+         "run_id ↔ 本房间 ↔ 报告房间归属"三重一致；
+      ③ 核对不通过 → 【拒绝签发】，写留痕并返回 None（绝不落一份带
+         别人 run_id 的凭据）。
+    """
     if not room or not isinstance(dom_result, dict):
         return None
     try:
         import defense_gate as _dg
     except ImportError:
         return None
+    _room_s = str(room).strip()
+    _ds = dom_result.get("data_source") if isinstance(dom_result.get("data_source"), dict) else {}
+    _final_run = (str(run_id or "").strip()
+                  or str(dom_result.get("run_id") or "").strip()
+                  or str((_ds or {}).get("run_id") or "").strip())
+    if not _final_run:
+        # ── 没有仿真运行可绑定时的两条合法路径（都必须可追溯，不得静默）──
+        #  ① allow_no_run=True：本次校验用的是调用方【人工提供】的
+        #     design_params/fea_result（physics-validate-domain --param），
+        #     本来就没有、也不需要仿真运行。此时以【人工参数 + 校验时间】作为
+        #     可追溯标识落盘，并在留痕里写明"无仿真运行背书"，
+        #     验签端会把它判为"无真实运行背书"→ 物理防线仍 fail-closed。
+        #  ② 否则（默认）：拒绝签发 —— 没有 run_id 就无法证明数据属于本房本次运行。
+        if not allow_no_run:
+            _dg.note_unsigned_attempt(
+                room, "domain",
+                "拒绝签发：领域校验没有 run_id，无法绑定到本房间本次运行（Bug④）")
+            return None
+        _dg.note_unsigned_attempt(
+            room, "domain",
+            "领域凭据基于【人工提供参数】签发（无仿真运行可绑定，故 run_id 为空，"
+            "仅以 checked_at 追溯；物理防线不会因此放行）")
+    # 房间 ↔ run_id 归属核对（含报告里的 room 字段）
+    if _final_run:
+        try:
+            _ok_run, _why_run, _ = _dg.run_attribution_for_room(
+                _final_run, _room_s, (_ds or {}).get("report_path"))
+        except Exception as _e_attr:
+            _ok_run, _why_run = False, "run_id 归属核对异常: %r" % (_e_attr,)
+        if not _ok_run:
+            _dg.note_unsigned_attempt(
+                room, "domain",
+                "拒绝签发：领域凭据的 run_id=%r 无法归属到本房间本次运行（%s）(Bug④)"
+                % (_final_run, _why_run))
+            return None
     payload = {
         "domain": dom_result.get("domain") or domain_id,
         "score": dom_result.get("score"),
@@ -1647,12 +2187,14 @@ def _emit_domain_attestation(room, dom_result, domain_id=""):
         #   （报告 §5「领域凭据缺 run_id 可追溯标识」）。
         # 现在：run_id 优先取本次领域校验携带的运行标识；没有则用
         #   校验时间戳 generated_at 兜底，保证凭据始终可追溯。
-        "run_id": (str(dom_result.get("run_id") or "")
-                   or str((dom_result.get("data_source") or {}).get("run_id") or "")),
+        # 【Bug④】已核对过归属的 run_id（绝不取历史遗留/别的房间的运行）
+        "run_id": _final_run,
         "checked_at": (str(dom_result.get("checked_at") or "")
                        or time.strftime("%Y-%m-%d %H:%M:%S")),
-        # 领域校验的依据来源（最近一次真实仿真报告），便于审计追溯
-        "data_source": (dom_result.get("data_source") or {}),
+        # 【Bug④】凭据显式记录房间，供验签端做 room ↔ run_id 一致性核对
+        "room": _room_s,
+        # 领域校验的依据来源（本房间最近一次真实仿真报告），便于审计追溯
+        "data_source": (_ds or {}),
     }
     # [主防线] 领域凭据同样必须宿主签发。
     _dom_rules = payload.get("domain") or domain_id

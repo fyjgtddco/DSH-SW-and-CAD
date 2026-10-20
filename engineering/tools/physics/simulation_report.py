@@ -168,6 +168,250 @@ def _material_provenance_note(mat):
     }
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  【Bug⑦】模型等效性保真 + 【Bug⑩】载荷分担如实声明
+# ══════════════════════════════════════════════════════════════════════
+# 背景（Bug⑦）：
+#   物理链路把零件【包围盒的排序三边】等效成【实心矩形棱柱悬臂梁】求解
+#   （fea_solver 的 equivalent_solid_cantilever_from_bbox，L0 解析解与
+#   L1 numpy CST 都建立在这个等效上）。对 L 形 / 薄壁 / 镂空 / 变截面件，
+#   等效实心体比真实体积大数倍，安全系数随之被【显著高估】。
+#   实测本任务：底盘 3mm 板、电池仓壁厚 2.4mm、传感器支架横梁前伸 84mm、
+#   万向轮 U 形叉体 —— 几乎全部落在"不得仅凭本结论判定设计合格"的边界内，
+#   而门禁当时仍以 WARNING 放行（SF=31.55 / 61.93，远超合理区间 2~5）。
+#   凭据 limitations 里那句泛泛的英文免责声明【不参与任何判定】。
+# 修复原则（诚实优先，不伪造能力）：
+#   ① 用【已有】几何数据（geometry_gate 的 2V/A 壁厚估计 + 等效体积失
+#      真倍数 volume_inflation_x）判定"薄壁 / 镂空"；
+#   ② 命中且房间类型属于【含零件的承力类】（structural / housing /
+#      transmission，含 drivetrain/sensor 别名）时：
+#        · limitations 里【显式写明】"该件属薄壁/镂空，L0 等效模型不适用"；
+#        · overall 至少降为 REVIEW（绝不 PASS）；
+#   ③ 若 L1（numpy CST，feapy）可用 —— 本次结果若来自 L0 解析解，调用方
+#      应已升级到 L1（见 physics_bridge._prefer_l1_backend）；本函数把实际
+#      使用的求解层级如实写进 limitations，绝不把 L1 说成 3D FEA；
+#   ④ 没有 Gmsh/CalculiX 时明确写 "3D FEA 未执行（UNKNOWN）"，不得假装做过。
+_THIN_WALL_MM = 3.0            # 3D 打印薄壁判据（FDM 常取 2~3mm）
+_HOLLOW_INFLATION_X = 1.5      # 等效实心体积 / 真实体积 超过 1.5 倍 → 判镂空
+_HOLLOW_FILL_RATIO = 0.6       # 真实体积 / 包围盒体积 低于 60% → 判镂空
+# 需要"不得 PASS"的承力类房间（含历史别名，与 defense_gate/workflow_gate 同源）
+_EQ_GUARD_ROOM_TYPES = ("structural", "housing", "transmission",
+                        "support", "spring", "thermal", "corrosion")
+_EQ_ROOM_ALIAS = {
+    "drivetrain": "transmission", "drive_train": "transmission",
+    "sensor": "housing", "sensors": "housing", "electronics": "housing",
+    "drawing": "drafting", "drawings": "drafting", "draft": "drafting",
+    "assembly_verify": "assembly", "prime": "assembly",
+}
+
+
+def _eq_norm_room_type(room_type):
+    _t = str(room_type or "").strip().lower()
+    return _EQ_ROOM_ALIAS.get(_t, _t) if _t else ""
+
+
+def _model_equivalence_facts(report):
+    """从【已有】报告数据里提取模型等效性事实（不编造、缺就标 None）。"""
+    fr = report.get("fea_result") or {}
+    gu = fr.get("geometry_used") or {}
+    gc = report.get("geometry_gate") or {}
+    wt = gc.get("wall_thickness_estimate") or {}
+    rg = report.get("real_geometry") or {}
+    acc = report.get("acceptance_criteria") or {}
+
+    def _num(v):
+        try:
+            if v is None or isinstance(v, bool):
+                return None
+            f = float(v)
+            if f != f or f in (float("inf"), float("-inf")):
+                return None
+            return f
+        except Exception:
+            return None
+
+    est = _num(wt.get("estimated_min_thickness_mm"))
+    req = _num((acc or {}).get("min_wall_thickness_mm"))
+    if req is None:
+        req = 2.0
+    infl = _num(gu.get("volume_inflation_x"))
+    real_v = _num(gu.get("real_volume_mm3")) or _num(rg.get("volume_mm3"))
+    eq_v = _num(gu.get("equivalent_solid_volume_mm3"))
+    fill = None
+    if real_v and eq_v and eq_v > 0:
+        fill = real_v / eq_v
+
+    thin_threshold = max(_THIN_WALL_MM, req)
+    thin_wall = bool(est is not None and est < thin_threshold)
+    hollow = bool((infl is not None and infl > _HOLLOW_INFLATION_X)
+                  or (fill is not None and fill < _HOLLOW_FILL_RATIO))
+    return {
+        "model": gu.get("model") or fr.get("backend") or "",
+        "backend": fr.get("backend") or "",
+        "method": fr.get("method") or "",
+        "l1_available": bool(fr.get("l1_available")),
+        "used_l1": (str(fr.get("solver_level") or "") == "L1"
+                    or bool(str(fr.get("backend") or "").startswith(
+                        ("pure_python", "feapy")))),
+        "l1_upgraded": bool(fr.get("l1_upgraded")),
+        "l1_upgrade_error": fr.get("l1_upgrade_error"),
+        "estimated_min_thickness_mm": (round(est, 3) if est is not None else None),
+        "wall_threshold_mm": thin_threshold,
+        "volume_inflation_x": infl,
+        "real_volume_mm3": real_v,
+        "equivalent_solid_volume_mm3": eq_v,
+        "bbox_fill_ratio": (round(fill, 3) if fill is not None else None),
+        "thin_wall": thin_wall,
+        "hollow": hollow,
+        # 变截面：无逐截面几何数据，无法判定 —— 如实标注"未评估"，不假装
+        "variable_section_evaluated": False,
+        "variable_section": None,
+        "three_d_fea": "NOT_AVAILABLE",
+        "evidence_missing": [k for k, v in (
+            ("wall_thickness_estimate", est), ("volume_inflation_x", infl))
+            if v is None],
+    }
+
+
+def _apply_physics_honesty(report, room_type=""):
+    """【Bug⑦ + Bug⑩】把等效模型局限 / 载荷分担口径如实写入报告并降级。
+
+    幂等：重复调用不会重复追加 limitation / warning / 升级理由。
+    """
+    if not isinstance(report, dict):
+        return report
+    _rt = _eq_norm_room_type(room_type)
+    _guard_room = (_rt in _EQ_GUARD_ROOM_TYPES)
+    _rr = report.setdefault("release_readiness", {})
+    _lim = _rr.setdefault("limitations", [])
+    if not isinstance(_lim, list):
+        _lim = []
+        _rr["limitations"] = _lim
+    _warns = report.setdefault("warnings", [])
+    if not isinstance(_warns, list):
+        _warns = []
+        report["warnings"] = _warns
+
+    def _add_lim(txt):
+        if txt and txt not in _lim:
+            _lim.append(txt)
+
+    def _add_warn(txt):
+        if txt and txt not in _warns:
+            _warns.append(txt)
+
+    # ── 【Bug⑦】薄壁 / 镂空 → 等效模型不适用 ─────────────────────────────
+    facts = _model_equivalence_facts(report)
+    facts["guard_room_type"] = _rt or None
+    facts["guard_applied"] = bool(_guard_room)
+    report["model_equivalence"] = facts
+    _prob = facts["thin_wall"] or facts["hollow"]
+    _why = []
+    if facts["thin_wall"]:
+        _why.append("薄壁（2V/A 估计壁厚 %.3fmm < 判据 %.1fmm）"
+                    % (facts["estimated_min_thickness_mm"], facts["wall_threshold_mm"]))
+    if facts["hollow"]:
+        if facts["volume_inflation_x"] is not None:
+            _why.append("镂空/等效实心体积失真 %.2f 倍（>%.1f 倍判据）"
+                        % (facts["volume_inflation_x"], _HOLLOW_INFLATION_X))
+        else:
+            _why.append("镂空（真实体积仅占包围盒 %.0f%%）"
+                        % ((facts["bbox_fill_ratio"] or 0) * 100))
+    if _why:
+        # ★ "实际采用的求解层级"必须按真实回显判定，不能只看 backend 前缀：
+        #   L1 升级失败会自动退回 L0（fea_result.l1_upgrade_error），此时若仍写
+        #   "L1"就是谎报能力。优先级：显式 solver_level > backend 推断。
+        _sl = str((report.get("fea_result") or {}).get("solver_level") or "")
+        _solver = ("L1(numpy CST 2D 平面应力)" if (_sl == "L1" or facts["used_l1"])
+                   else "L0(解析梁理论)")
+        # 3D 求解器状态必须取自【真实探测结果】，不得写死"不可用"或"可用"
+        _fr3 = report.get("fea_result") or {}
+        _s3 = _fr3.get("solver_3d_available")
+        _sb = _fr3.get("solver_backends")
+        if _s3 is True:
+            _td = "已探测到可用 3D 求解器（%s），但本次结论并非由 3D FEA 给出" % (
+                ",".join(k for k, v in (_sb or {}).items()
+                         if v and k in ("calculix", "code_aster", "elmerfem", "gmsh"))
+                or "见 solver_backends")
+        elif _s3 is False or isinstance(_sb, dict):
+            _td = ("本机 3D 求解器（Gmsh/CalculiX/Code_Aster/Elmer）不可用 "
+                   "→ 3D FEA 未执行（UNKNOWN），结论中不含任何 3D 有限元结果")
+        else:
+            _td = "3D 求解器可用性未探测（UNKNOWN）→ 未执行 3D FEA"
+        _add_lim(
+            "【模型等效性·薄壁/镂空】该件属薄壁/镂空（%s），"
+            "本次采用的 %s 仍建立在【包围盒等效实心悬臂梁】之上 —— "
+            "L0/L1 等效模型不适用，安全系数会被显著高估，"
+            "【不得仅凭本结论判定设计合格】；需 3D FEA 复核。%s。"
+            % ("；".join(_why), _solver, _td))
+        _add_warn(
+            "【模型等效性】%s —— 等效实心悬臂梁模型不适用，"
+            "安全系数仅供参考，须 3D FEA/样件试验复核"
+            % ("；".join(_why)))
+        facts["degraded"] = True
+        facts["degrade_reason"] = "；".join(_why)
+        if _guard_room:
+            _before = str(report.get("overall_status") or "").upper()
+            if _before != "FAIL":
+                # 至少 REVIEW：PASS / UNKNOWN / WARNING 一律不得放行为 PASS。
+                # 注意：只降级、不新增 FAIL —— 不把现有房间全部判失败。
+                _downgraded = (_before != "REVIEW")
+                report["overall_status"] = "REVIEW"
+                _rr["status"] = "REVIEW_NEEDED"
+                _rr["human_review_required"] = True
+                if _downgraded:
+                    report["model_equivalence_forced_review"] = True
+                    facts["forced_review_from"] = _before or None
+                    _add_lim(
+                        "【判定降级】房间类型 %r 属承力类，薄壁/镂空件的 "
+                        "overall 已由 %s 强制降为 REVIEW（不得 PASS）—— "
+                        "REVIEW 只表示「不允许据此判定合格」，不等于判定不合格；"
+                        "补 3D FEA 或样件试验后可复核"
+                        % (_rt, _before or "未标注"))
+                else:
+                    facts["forced_review_from"] = None
+    else:
+        facts["degraded"] = False
+        if facts["evidence_missing"]:
+            _add_lim(
+                "【模型等效性·未评估】缺少 %s，无法判定本件是否属薄壁/镂空 —— "
+                "包围盒等效模型的适用性【未知】，请结合真实几何复核"
+                % ("、".join(facts["evidence_missing"])))
+
+    # ── 【Bug⑩】本次实际使用的 part_load_share 必须写进 limitations ────────
+    _lm = (report.get("fea_result") or {}).get("load_model") or {}
+    _share = _lm.get("part_load_share")
+    if _share is not None:
+        try:
+            _share_f = float(_share)
+        except Exception:
+            _share_f = None
+        if _share_f is not None:
+            _src = _lm.get("load_share_source") or "未记录来源"
+            _add_lim(
+                "【载荷分担】本次校核使用 part_load_share=%.4f（来源 %s）—— "
+                "工况 magnitude_n 是整机级载荷，单件结论取决于该折减系数；"
+                "若本零件实际承担更大份额，请在工况里显式覆盖"
+                "（零件级 part_load_share）后重跑" % (_share_f, _src))
+            facts["part_load_share"] = _share_f
+            # 独立承力件但被折减 → WARNING 提示复核（Bug⑩）
+            if _lm.get("part_load_share_review_required"):
+                _add_warn(_lm.get("part_load_share_warning") or (
+                    "【载荷分担】本件为独立承力件，但校核按 "
+                    "part_load_share=%.4f 折减了整机载荷 —— 需复核载荷路径"
+                    % _share_f))
+                facts["part_load_share_review_required"] = True
+                if _guard_room and str(report.get("overall_status") or "").upper() == "PASS":
+                    report["overall_status"] = "REVIEW"
+                    _rr["status"] = "REVIEW_NEEDED"
+                    _rr["human_review_required"] = True
+                    report["part_load_share_forced_review"] = True
+    # 空 warnings 不落盘（保持老报告字段形状：无告警时没有 warnings 键）
+    if not _warns:
+        report.pop("warnings", None)
+    return report
+
+
 def build_report(
     run_id: str,
     load_case: dict,
@@ -176,6 +420,7 @@ def build_report(
     fea_result: dict,
     iteration: int = 1,
     parent_run_id: Optional[str] = None,
+    room_type: str = "",
 ) -> dict[str, Any]:
     """构建完整仿真报告。
 
@@ -187,6 +432,9 @@ def build_report(
         fea_result: fea_solver 输出
         iteration: 当前迭代轮次
         parent_run_id: 上一轮运行 ID（用于追踪链）
+        room_type: 【Bug⑦ 修复】本报告所属房间的类型。薄壁/镂空件在
+            structural/housing/transmission 等承力类房间里必须显式降级为
+            REVIEW（L0/L1 等效模型不适用），不得 PASS。
 
     Returns:
         完整报告字典，可 JSON 序列化保存
@@ -369,6 +617,22 @@ def build_report(
         warnings.append("疲劳/寿命校核未执行：%s" % _fat.get("error", "未知原因"))
     if warnings:
         report["warnings"] = warnings
+    # ── 【Bug⑦ / Bug⑩ 修复】模型等效性 + 载荷分担的真实性收口 ─────────────
+    # 必须在 overall_status / release_readiness 成型【之后】执行：本函数会
+    #   ① 把"薄壁/镂空 → L0/L1 等效模型不适用"写进 limitations；
+    #   ② 承力类房间命中薄壁/镂空时把 overall 强制降为 REVIEW（绝不放行 PASS）；
+    #   ③ 把本次实际使用的 part_load_share 写进 limitations，独立承力件
+    #      但被折减时追加 WARNING 提示复核。
+    # 约束：本函数【只降级、不新增 FAIL】，避免把现有房间全部判失败（现场安全）。
+    try:
+        report = _apply_physics_honesty(report, room_type)
+    except Exception as _e_eq:
+        # 诚实性收口自身异常不得静默：留下可追溯痕迹，且结论按"未复核"处理
+        _rr = report.setdefault("release_readiness", {})
+        _l = _rr.setdefault("limitations", [])
+        if isinstance(_l, list):
+            _l.append("【模型等效性】收口检查异常（%r）—— 薄壁/镂空适用性未评估"
+                      % (_e_eq,))
     return report
 
 

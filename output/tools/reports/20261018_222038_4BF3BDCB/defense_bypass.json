@@ -1,0 +1,10 @@
+{
+  "items": [
+    {
+      "at": "2026-10-19 20:27:22",
+      "where": "mode_gate.rooms-reset",
+      "reason": "清空房间/报告（会抹除防线凭据），已留痕",
+      "by": "rooms-reset"
+    }
+  ]
+}

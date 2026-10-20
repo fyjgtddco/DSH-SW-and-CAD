@@ -1,22 +1,25 @@
 {
   "mode": "2",
-  "rooms": {},
-  "declared_at": 1792331894.9250805,
+  "rooms": {
+    "结构件": {
+      "type": "structural",
+      "active": true
+    },
+    "出图": {
+      "type": "drafting"
+    },
+    "总装": {
+      "type": "assembly"
+    }
+  },
+  "declared_at": 1792506625.4660106,
   "mode_name": "大型复杂器械装配",
   "sw_lock": {
-    "owner": "room-02-轮组与传感器",
+    "owner": null,
     "queue": [],
-    "acquired_at": 1792333736.2906904,
-    "cmd_seq": 4,
-    "fair_start": 1792333599.0524812,
-    "hold_mode": "command",
-    "sw_by_room": false,
-    "prev_owner": "room-04-壳体与附件",
-    "purged_at": 1792333731.0710354,
-    "purged_by": "sw-release",
-    "purged_actions": [
-      "prev_owner='room-02-轮组与传感器' 随 sw-release 清除"
-    ]
+    "acquired_at": null,
+    "prev_owner": null,
+    "sw_by_room": false
   },
   "subagents": {},
   "subagent_history": [],

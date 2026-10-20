@@ -153,9 +153,27 @@ _BOOKKEEPING_FIELDS = ("reported_at",)
 # add_part 的必填字段（缺任一 → {"ok": False, "error": ...}）
 REQUIRED_FIELDS = ("name", "room", "file")
 
+# ══ 【Bug⑪】零件 origin（原点）约定：从 <零件>.origin.json 读取 ══════════
+# 现场缺陷（竞速小车任务，装配前必须人工换算坐标）：
+#   · 后轮 / 电机座：origin 在轮/电机轴心，z=0 为轴面；
+#   · 万向轮支架：origin 在【件角】（非中心），顶面 z=0 为装配面，叉口向下；
+#   · 底盘：origin 在底盘中心，z=3 为顶面。
+#   三种约定并存 → 总装房必须逐件换算，按"中心对称"直觉装配会全部错位。
+#
+# 约定来源：swapi 在 save()/save_as() 时把 origin 约定写到 <零件>.origin.json
+#   （见 swapi.ORIGIN_SCHEMA）。本模块【只读】它，把结论并入台账记录：
+#     · 台账里多一个 origin 字段，装配/一致性核对可直接消费；
+#     · 缺记录时显式标注 origin_missing=True 并给 warning —— 绝不假装已知。
+ORIGIN_RECORD_SUFFIX = ".origin.json"
+ORIGIN_STANDARD_MODE = "center_bottom"     # 标准约定：底面中心
+ORIGIN_STANDARD_CN = "底面中心（标准约定）"
+
 # update_part 允许被打补丁的字段白名单（name 不允许改：改名会撕裂邻接图）
+# 【Bug⑪】新增 origin：origin 约定是零件的事实之一，改约定必须走 update
+# 【Bug①】新增 material_consistency：材料一致性是客观事实，可显式覆盖（如人工核实后更正）
 PATCHABLE_FIELDS = ("room", "file", "dims", "bbox_mm", "material", "credentials",
-                    "interfaces", "adjacent", "reported_by", "reported_at")
+                    "interfaces", "adjacent", "reported_by", "reported_at",
+                    "origin", "material_consistency")
 
 # 接口类型同义词 → 归一化类型
 _TYPE_SYNONYMS = {
@@ -1193,6 +1211,196 @@ def _write_gate(data, name, reason, work_dir, action, allow_mismatch=False,
 #  写入接口
 # ══════════════════════════════════════════════════════════════════════════
 
+def origin_record_path(part_path):
+    """【Bug⑪】零件 origin 约定文件路径：<零件>.SLDPRT → <零件>.SLDPRT.origin.json。"""
+    if not part_path:
+        return None
+    return str(part_path) + ORIGIN_RECORD_SUFFIX
+
+
+def read_origin_record(part_path):
+    """【Bug⑪】读取零件旁的 <零件>.origin.json；不存在/损坏返回 None（只读、不抛异常）。
+
+    容忍两种入参：零件路径（<part>.SLDPRT）或 origin 文件路径本身。
+    """
+    if not part_path:
+        return None
+    _s = str(part_path)
+    _cands = ([_s] if _s.lower().endswith(ORIGIN_RECORD_SUFFIX)
+              else [_s + ORIGIN_RECORD_SUFFIX])
+    for p in _cands:
+        try:
+            if not os.path.isfile(p):
+                continue
+            with open(p, "r", encoding="utf-8-sig") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            continue
+    return None
+
+
+def material_consistency(part_path):
+    """【Bug①】从材料凭据里读出"请求材质 vs SW 实际生效材质"的一致性结论。
+
+    现场缺陷（竞速小车任务）：
+      用户确认 PETG（ρ1270 / σy≈40），但 SolidWorks 材质库【没有 PETG】
+      （只有 PET，ρ1420 / σy≈55）。set_custom_material("PETG", ...) 只写了
+      material.json 凭据签名，**没有**真正写进 SW 零件内部材质：
+        · 凭据层签名有效 → 防线①在签名层通过；
+        · .sldprt 属性栏显示的却是 PET(1420) → 用户拿零件直接打印/加工会被误导。
+      报告里只有一句"实测 1420 不一致"的 WARNING，看不出"要的是 PETG、实得 PET"。
+
+    本函数把凭据里【已经签名】的三组事实并列出来，让台账/交付物上能直接看到：
+      requested_material（设计要的）
+      applied_name      （SW 实际写入的牌号）
+      applied_density / expected_density（客观密度证据）
+
+    ⚠️ 本模块【只读凭据】，不验签、不改凭据、不阻断任何流程 ——
+       验签与门禁判定属于 defense_gate 的职责。
+
+    Returns:
+        {"available": bool, "credential_file": str,
+         "requested_material", "applied_material",
+         "requested_density_kg_m3", "applied_density_kg_m3",
+         "density_deviation_pct", "name_matches": bool|None,
+         "consistent": bool|None, "warning": str|None}
+    """
+    out = {"available": False, "credential_file": None,
+           "requested_material": None, "applied_material": None,
+           "requested_density_kg_m3": None, "applied_density_kg_m3": None,
+           "density_deviation_pct": None,
+           "name_matches": None, "consistent": None, "warning": None}
+    if not part_path:
+        return out
+    _p = str(part_path) + ".material.json"
+    out["credential_file"] = _p
+    try:
+        if not os.path.isfile(_p):
+            return out
+        with open(_p, "r", encoding="utf-8-sig") as f:
+            att = json.load(f)
+        if not isinstance(att, dict):
+            return out
+    except Exception:
+        return out
+    out["available"] = True
+    # ── 【Bug①】SW 内部实际材质：先看旁挂记录，再看凭据里可能带的字段 ────
+    # 旁挂记录由 swapi 写入（宿主签名白名单不含这些键，签后补字段会让
+    #   HMAC 失配，所以它们只能落在旁挂文件里）。
+    _side = None
+    try:
+        for _c in (str(part_path) + ".material.json.sw_internal.json",
+                   str(part_path) + ".sw_internal.json"):
+            if os.path.isfile(_c):
+                with open(_c, "r", encoding="utf-8-sig") as _f:
+                    _side = json.load(_f)
+                out["sw_internal_record_file"] = _c
+                break
+    except Exception:
+        _side = None
+    if isinstance(_side, dict):
+        out["sw_internal_material"] = _side.get("sw_internal_material")
+        out["sw_internal_matches_request"] = _side.get("sw_internal_matches_request")
+        out["sw_internal_density_kg_m3"] = _side.get("density_kg_m3")
+        if _side.get("sw_internal_warning"):
+            out["sw_internal_warning"] = _side.get("sw_internal_warning")
+    else:
+        out["sw_internal_material"] = att.get("sw_internal_material")
+        out["sw_internal_matches_request"] = att.get("sw_internal_matches_request")
+    _req = str(att.get("requested_material") or "").strip() or None
+    # applied_name 是 SW 真实写入的牌号；attested_material 是"校验通过的名字"
+    _app = str(att.get("applied_name") or att.get("attested_material") or "").strip() or None
+    out["requested_material"] = _req
+    out["applied_material"] = _app
+    try:
+        _ed = att.get("expected_density_kg_m3")
+        _ad = att.get("applied_density_kg_m3")
+        if _ad is None:
+            _ad = att.get("density_kg_m3")
+        out["requested_density_kg_m3"] = float(_ed) if _ed is not None else None
+        out["applied_density_kg_m3"] = float(_ad) if _ad is not None else None
+    except Exception:
+        pass
+    _name_match = (bool(_req) and bool(_app)
+                   and _req.casefold() == _app.casefold())
+    out["name_matches"] = _name_match if (_req and _app) else None
+    # ── 【Bug①】SW 内部实际材质 vs 请求材质（来自旁挂记录，最直接的证据）──
+    _sw_int = str(out.get("sw_internal_material") or "").strip() or None
+    out["sw_internal_material"] = _sw_int
+    if out.get("sw_internal_matches_request") is None and _req and _sw_int:
+        out["sw_internal_matches_request"] = (
+            _req.casefold() == _sw_int.casefold())
+    # 密度偏差：客观证据（名字可能被"标准化"成同一个，密度不会）
+    _dev = None
+    try:
+        if out["requested_density_kg_m3"] and out["applied_density_kg_m3"]:
+            _dev = abs(out["applied_density_kg_m3"]
+                       - out["requested_density_kg_m3"]) \
+                / float(out["requested_density_kg_m3"]) * 100.0
+            out["density_deviation_pct"] = round(_dev, 2)
+    except Exception:
+        _dev = None
+    # 一致性判定（三条独立证据，任一不成立即判"不一致"）：
+    #   ① 名字不同（requested_material vs applied_name）；
+    #   ② 密度偏差 >5%（客观物理证据，名字可能被"标准化"成同一个）；
+    #   ③ 【Bug① 核心】SW 内部实际材质与请求材质不同（来自旁挂记录）。
+    _consistent = True
+    if out["name_matches"] is False:
+        _consistent = False
+    if _dev is not None and _dev > 5.0:
+        _consistent = False
+    if out.get("sw_internal_matches_request") is False:
+        _consistent = False
+    out["consistent"] = _consistent
+    if not _consistent:
+        # 优先用旁挂记录里的 warning（它写清了"凭据认 A、SW 实际是 B"）
+        out["warning"] = out.get("sw_internal_warning") or (
+            "【Bug①】材料凭据与 SW 实际生效材质不一致：请求 %r"
+            "（ρ≈%s），SW 实际 %r（ρ≈%s），密度偏差 %s%%。"
+            "凭据按请求材质记录，但 .sldprt 打开后属性栏显示的是实际材质 ——"
+            "直接拿零件打印/加工请以 SW 实际材质为准，"
+            "或在 SW 材质库中指定精确存在的牌号。"
+            % (_req, out["requested_density_kg_m3"],
+               _app, out["applied_density_kg_m3"],
+               out["density_deviation_pct"]))
+    return out
+
+
+def origin_summary(part_path):
+    """【Bug⑪】把 origin 记录压成台账可用的精简结论。
+
+    Returns:
+        {"origin_mode", "origin_mode_cn", "is_standard", "assembly_note",
+         "origin_mm", "bbox_mm", "record_file", "missing": bool}
+        · 没有记录时仍返回对象，但 missing=True（由调用方决定是 warning 还是拦截）。
+    """
+    _rec = read_origin_record(part_path)
+    _p = origin_record_path(part_path)
+    if not _rec:
+        return {"origin_mode": None, "origin_mode_cn": None,
+                "is_standard": None, "assembly_note": None,
+                "origin_mm": None, "bbox_mm": None,
+                "record_file": _p, "missing": True}
+    _mode = _rec.get("origin_mode")
+    # ⚠️ 只取【稳定】字段：at/ts/revision/created_at 这类记账字段每次 save 都变，
+    #   若带进台账 payload，会让"重复登记同一份数据"被误判成"改过"——
+    #   与模块里 _BOOKKEEPING_FIELDS 的设计意图（空改动不落盘）直接冲突。
+    return {
+        "origin_mode": _mode,
+        "origin_mode_cn": _rec.get("origin_mode_cn"),
+        "is_standard": (bool(_mode == ORIGIN_STANDARD_MODE)
+                        if _mode is not None else None),
+        "assembly_note": _rec.get("assembly_note"),
+        "origin_mm": _rec.get("origin_mm"),
+        "bbox_mm": _rec.get("bbox_mm"),
+        "record_file": _p,
+        "missing": False,
+        "standard_mode": ORIGIN_STANDARD_MODE,
+    }
+
+
 def add_part(record, work_dir=None, reason=None, allow_mismatch=False,
              fields=None, skip_verification=False):
     """新增或更新一个零件（已存在则视为更新，rev 自增 + 追加修订记录）。
@@ -1308,6 +1516,49 @@ def add_part(record, work_dir=None, reason=None, allow_mismatch=False,
     if not os.path.isfile(file_path):
         warnings.append("模型文件当前不存在于磁盘：%s（允许先登记后建模）" % file_path)
 
+    # ── ②b 【Bug⑪】并入零件 origin 约定（来自 <零件>.origin.json）────────
+    # 为什么放在台账里：装配侧（总装/工程图/一致性核对）读的是【台账】。
+    #   origin 只躺在零件目录边上的 .origin.json 里没人读，等于没记录。
+    # 缺记录时不硬编造：origin_missing=True + warning，让调用方知道要补。
+    # ── 【Bug①】材料凭据一致性：把"要的材质 vs SW 实际生效的"并入台账 ──
+    # 凭据本身由 defense_gate 验签；这里只做【可见性】——让"零件属性栏显示 PET、
+    #   凭据却写 PETG"这种落差不只躺在 reports/ 里，而能随台账一起交付。
+    _mat_con = material_consistency(file_path)
+    if _mat_con.get("available") and _mat_con.get("consistent") is False:
+        warnings.append(_mat_con.get("warning")
+                        or "材料凭据与 SW 实际生效材质不一致")
+
+    origin = origin_summary(file_path)
+    origin_missing = bool(origin.get("missing"))
+    if origin_missing:
+        warnings.append(
+            "该零件缺少 origin 约定记录（%s）—— 装配时无法自动换算基准面。"
+            "请用 swapi.SWModel.set_origin_mode('%s') 声明后重新 save()，"
+            "或用 origin 参数显式登记。" % (os.path.basename(str(file_path))
+                                            + ORIGIN_RECORD_SUFFIX,
+                                            ORIGIN_STANDARD_MODE))
+    elif origin.get("is_standard") is False:
+        warnings.append(
+            "该零件 origin 非标准约定（%s）：装配请按台账 origin 字段里的"
+            " assembly_note 单独换算；标准约定为「%s」。"
+            % (origin.get("origin_mode"), ORIGIN_STANDARD_CN))
+    # 调用方也可显式覆盖（例如零件尚未落盘、先登记再建模的场景）
+    _rec_origin = record.get("origin")
+    if isinstance(_rec_origin, dict):
+        for _k, _v in _rec_origin.items():
+            if _v is not None:
+                origin[_k] = _v
+        origin["missing"] = False
+        origin["source"] = "explicit(add_part origin=)"
+    elif isinstance(_rec_origin, str) and _rec_origin.strip():
+        origin["origin_mode"] = _rec_origin.strip()
+        origin["mode_cn"] = None
+        origin["is_standard"] = (origin["origin_mode"] == ORIGIN_STANDARD_MODE)
+        origin["missing"] = False
+        origin["source"] = "explicit(add_part origin=)"
+    origin.pop("missing", None)
+    origin["standard_mode"] = ORIGIN_STANDARD_MODE
+
     # ── ③ 读台账 ──────────────────────────────────────────────────────
     data, path, err = _load_registry(work_dir)
     if err:
@@ -1330,6 +1581,21 @@ def add_part(record, work_dir=None, reason=None, allow_mismatch=False,
         payload["bbox_mm"] = bbox
     if record.get("material") is not None:
         payload["material"] = str(record.get("material") or "").strip()
+    # ── 【Bug⑪】origin 约定随零件记录落盘（装配/一致性核对的输入）────────
+    if origin:
+        payload["origin"] = origin
+    # ── 【Bug①】材料一致性结论随记录落盘（缺失凭据时不写，避免噪音）────────
+    if _mat_con.get("available"):
+        payload["material_consistency"] = {
+            "requested_material": _mat_con.get("requested_material"),
+            "applied_material": _mat_con.get("applied_material"),
+            "requested_density_kg_m3": _mat_con.get("requested_density_kg_m3"),
+            "applied_density_kg_m3": _mat_con.get("applied_density_kg_m3"),
+            "density_deviation_pct": _mat_con.get("density_deviation_pct"),
+            "name_matches": _mat_con.get("name_matches"),
+            "consistent": _mat_con.get("consistent"),
+            "credential_file": _mat_con.get("credential_file"),
+        }
     if credentials is not None:
         payload["credentials"] = credentials
     # interfaces 只在【显式给出】时覆盖 —— 否则 add_part 的常规更新
@@ -1562,6 +1828,29 @@ def update_part(name, patch, work_dir=None, reason=None, allow_mismatch=False,
                 "error": "update_part 不支持改名（%s → %s）" % (key, _norm_name(patch.get("name"))),
                 "hint": "改名会撕裂邻接图；请 remove_part 旧名后 add_part 新名，并重建 link"}
 
+    # ── 【Bug⑪】origin 补丁归一化 ─────────────────────────────────────
+    # 允许两种写法：字符串（只给 origin_mode）或 dict（完整结论）。
+    # 统一转成与 add_part 落盘同构的 dict，避免台账里出现两种 schema。
+    if "origin" in patch:
+        _po = patch.get("origin")
+        if isinstance(_po, str):
+            patch = dict(patch)
+            patch["origin"] = {"origin_mode": _po.strip(),
+                               "is_standard": (_po.strip() == ORIGIN_STANDARD_MODE),
+                               "standard_mode": ORIGIN_STANDARD_MODE,
+                               "source": "explicit(update origin=)"}
+        elif isinstance(_po, dict):
+            _nd = dict(_po)
+            _nd.setdefault("standard_mode", ORIGIN_STANDARD_MODE)
+            if _nd.get("origin_mode") is not None:
+                _nd.setdefault("is_standard",
+                               _nd.get("origin_mode") == ORIGIN_STANDARD_MODE)
+            patch = dict(patch)
+            patch["origin"] = _nd
+        elif _po is None:
+            patch = dict(patch)
+            patch.pop("origin", None)
+
     unknown = [k for k in patch.keys() if k not in PATCHABLE_FIELDS]
     if unknown:
         return {"ok": False,
@@ -1599,6 +1888,18 @@ def update_part(name, patch, work_dir=None, reason=None, allow_mismatch=False,
         if cr is not None and not isinstance(cr, dict):
             return {"ok": False, "error": "credentials 必须是 dict"}
         newvals["credentials"] = {str(k): str(v) for k, v in (cr or {}).items()}
+    if "origin" in patch:
+        # 【Bug⑪】已在上面归一化为 dict（字符串/None 都转过来了）
+        _ov = patch.get("origin")
+        if not isinstance(_ov, dict):
+            return {"ok": False, "error": "origin 必须是 dict 或 origin_mode 字符串"}
+        newvals["origin"] = _ov
+    if "material_consistency" in patch:
+        # 【Bug①】人工核实后更正材料一致性结论（如已换成 SW 库中精确牌号）
+        _mc = patch.get("material_consistency")
+        if not isinstance(_mc, dict):
+            return {"ok": False, "error": "material_consistency 必须是 dict"}
+        newvals["material_consistency"] = _mc
     if "interfaces" in patch:
         ifaces, dropped = _norm_interfaces(patch.get("interfaces"))
         for d in dropped:
@@ -1918,6 +2219,10 @@ def _part_brief(rec):
         "dims_text": _fmt_dims(dims),
         "bbox_mm": rec.get("bbox_mm"),
         "material": rec.get("material"),
+        # 【Bug⑪】origin 约定：装配换基准面的唯一依据（缺失时如实为 None）
+        "origin": rec.get("origin"),
+        "origin_mode": (rec.get("origin") or {}).get("origin_mode")
+                       if isinstance(rec.get("origin"), dict) else None,
         "adjacent": _parse_list_arg(rec.get("adjacent")),
         "interface_count": len(_norm_interfaces(rec.get("interfaces"))[0]),
         "interfaces": [{"id": i["id"], "type": i["type"],
@@ -3677,6 +3982,9 @@ def cmd_add(ns):
             return {"ok": False, "error": "--credentials 不是合法 JSON：%r" % (e,)}
     if ns.reported_by:
         rec["reported_by"] = ns.reported_by
+    # 【Bug⑪】origin 约定：显式给了就用；没给则 add_part 内部从 .origin.json 读
+    if getattr(ns, "origin", None):
+        rec["origin"] = ns.origin
 
     res = add_part(rec, work_dir=ns.work_dir, reason=ns.reason,
                    allow_mismatch=(ns.allow_mismatch or False),
@@ -3847,6 +4155,10 @@ def build_parser():
     s.add_argument("--room", required=True, help="所属房间")
     s.add_argument("--file", required=True, help="模型文件路径")
     s.add_argument("--material", default=None, help="材料牌号")
+    s.add_argument("--origin", default=None,
+                   help="【Bug⑪】origin 约定（如 center_bottom / center_center / "
+                        "corner_top）。不给则从零件旁 <零件>.origin.json 读取；"
+                        "缺记录会给出 warning（标准约定=底面中心）")
     s.add_argument("--dims", default=None, help="关键尺寸，如 \"120x40x40\"（长x宽x高，mm）")
     s.add_argument("--bbox", default=None, help="SW 真实包围盒 6 元组 xmin,xmax,ymin,ymax,zmin,zmax")
     s.add_argument("--adjacent", default=None, help="邻接零件名，逗号分隔（会双向建立）")

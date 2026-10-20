@@ -1918,6 +1918,73 @@ def save_custom_material(name, e_mpa=None, yield_mpa=None, uts_mpa=None,
         return {"ok": False, "error": repr(e)}
 
 
+# ══ 【Bug① 修复·落盘层】SW 内部材质事实的【旁挂记录】══════════════════
+# 为什么需要单独一份文件：
+#   材料凭据（<part>.material.json）由【宿主】签发，宿主的 /defense/sign 只会
+#   把【白名单里】的字段纳入待签体（见 plugins/dsh-engineering-ui/lib/index.js
+#   的 material 分支）。请求体里多带的字段会被静默丢弃 —— 实测：
+#     spec 里带 sw_internal_material="PET" → 签回来的凭据里【没有】该键。
+#   而凭据是 HMAC 签过的：签完再往里补字段必然导致验签失败（防线① 全灭），
+#   这是绝对不能做的。
+#   ⇒ 因此"SW 内部实际材质"不能塞进已签名凭据，改为写在【零件旁的旁挂记录】
+#     <part>.material.json.sw_internal.json（不参与验签，纯事实留痕），
+#     并与 return 体、part_registry 台账联动，保证可见、可审计。
+SW_INTERNAL_SUFFIX = ".sw_internal.json"
+
+
+def sw_internal_record_path(part_path):
+    """旁挂记录的路径：<零件>.SLDPRT → <零件>.SLDPRT.material.json.sw_internal.json。"""
+    if not part_path:
+        return None
+    return str(part_path) + ".material.json" + SW_INTERNAL_SUFFIX
+
+
+def read_sw_internal_record(part_path):
+    """读取旁挂的"SW 内部材质"事实；不存在/损坏返回 None（绝不抛异常）。"""
+    if not part_path:
+        return None
+    _s = str(part_path)
+    _cands = ([_s] if _s.endswith(SW_INTERNAL_SUFFIX)
+              else [_s + ".material.json" + SW_INTERNAL_SUFFIX,
+                    sw_internal_record_path(_s)])
+    for p in _cands:
+        try:
+            if not os.path.isfile(p):
+                continue
+            with open(p, "r", encoding="utf-8-sig") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            continue
+    return None
+
+
+def _write_sw_internal_record(part_path, info):
+    """把"请求材质 vs SW 内部实际材质"写成旁挂记录（失败只 warn，不阻断）。"""
+    try:
+        p = sw_internal_record_path(part_path)
+        if not p:
+            return {"ok": False, "error": "part_path 为空"}
+        rec = {
+            "schema": "dsh-engineering/sw-internal-material@1",
+            "part": os.path.abspath(str(part_path)),
+            "part_name": os.path.splitext(os.path.basename(str(part_path)))[0],
+            "note": ("本文件记录 SolidWorks 零件内部【实际生效】的材质，"
+                     "用于与 .material.json 里 requested_material 对照。"
+                     "它不参与验签，也不能替代材料凭据。"),
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ts": time.time(),
+        }
+        for k, v in (info or {}).items():
+            rec[k] = v
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+        return {"ok": True, "path": p, "record": rec}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+
+
 def _pick_attested_density(material_result, req_name):
     """选出凭据里该记录的【密度】。
 
@@ -2690,6 +2757,196 @@ def get_sw():
     return sw
 
 
+# ══ 【Bug⑪ 修复】零件 origin（原点）约定：落盘 + 可被 part_registry 读取 ══
+# 现场缺陷（竞速小车任务，装配前必须人工换算）：
+#   · 后轮 / 电机座：origin 在轮/电机轴心，z=0 为轴面；
+#   · 万向轮支架：origin 在【件角】（非中心），顶面 z=0 为装配面，叉口向下；
+#   · 底盘：origin 在底盘中心，z=3 为顶面。
+#   三种约定并存 → 总装房必须为每个零件单独换算坐标，按"中心对称"直觉装配
+#   会全部错位（配合的 distance/coincident 基准面都要按 origin 重定）。
+#
+# 本模块给出的【标准约定】= 底面中心（origin_mode = "center_bottom"）：
+#   XY 原点在零件底面轮廓的中心，Z=0 在底面，+Z 朝上。
+#   理由：装配时"把零件坐到某个平面上"是最常见的约束，底面中心让
+#   配合只需一次 coincident（底面）+ 两次 distance（X/Y），无需换算。
+#
+# ⚠️ 本模块【不强行改已建零件的几何】（那会破坏既有图纸/装配），
+#   只做两件事：
+#     ① 建模时把 origin 约定记进 <零件>.origin.json（与 <零件>.material.json 同目录）；
+#     ② 提供 read_origin_record()，供 part_registry 等下游读取。
+ORIGIN_SCHEMA = "dsh-engineering/part-origin@1"
+ORIGIN_STANDARD_MODE = "center_bottom"
+ORIGIN_MODES = {
+    # mode -> (中文说明, 装配含义)
+    "center_bottom": ("底面中心（标准约定）",
+                      "XY 原点=底面轮廓中心，Z=0 在底面，+Z 朝上"),
+    "center_center": ("几何中心", "origin 在包围盒中心"),
+    "corner_bottom": ("底角", "origin 在底面某个角点，Z=0 在底面"),
+    "corner_top": ("顶角", "origin 在顶面某个角点"),
+    "axis_center": ("轴心", "origin 在回转轴轴心，z=0 为轴端面"),
+    "custom": ("自定义", "由建模者显式说明"),
+}
+ORIGIN_RECORD_SUFFIX = ".origin.json"
+
+
+def origin_record_path(part_path):
+    """零件 origin 约定文件的路径：<零件>.SLDPRT → <零件>.SLDPRT.origin.json。
+
+    与材料凭据（defense_gate.attestation_path → <part>.material.json）
+    同一命名约定：直接追加后缀，保证与零件【同目录、同名基】。
+    """
+    if not part_path:
+        return None
+    return str(part_path) + ORIGIN_RECORD_SUFFIX
+
+
+def write_origin_record(part_path, origin_mode=ORIGIN_STANDARD_MODE,
+                        origin_mm=None, bbox_mm=None, note=None,
+                        extra=None):
+    """【Bug⑪】把零件的 origin 约定落到 <零件>.origin.json（幂等，失败不致命）。
+
+    Args:
+        part_path:  零件落盘路径（.SLDPRT）。None/空 → 不写，返回 ok=False。
+        origin_mode: 见 ORIGIN_MODES，默认标准约定 center_bottom。
+        origin_mm:  origin 在【全局坐标】中的位置 [x,y,z]（mm），可选。
+        bbox_mm:    零件真实包围盒 [xmin,xmax,ymin,ymax,zmin,zmax]（mm），可选。
+        note:       自由说明（如"万向轮支架为历史遗留件，origin 在件角"）。
+        extra:      额外字段（dict），原样并入记录。
+
+    Returns:
+        {"ok", "path", "record", "error"?}
+        写失败只返回 ok=False，【绝不抛异常】—— 记录 origin 不是建模的前置条件。
+    """
+    out = {"ok": False, "path": None, "record": None}
+    try:
+        p = origin_record_path(part_path)
+        if not p:
+            out["error"] = "part_path 为空，无法写 origin 记录"
+            return out
+        out["path"] = p
+        _mode = str(origin_mode or ORIGIN_STANDARD_MODE).strip()
+        _desc = ORIGIN_MODES.get(_mode, (None, None))
+        rec = {
+            "schema": ORIGIN_SCHEMA,
+            "part": os.path.abspath(str(part_path)),
+            "part_name": os.path.splitext(os.path.basename(str(part_path)))[0],
+            "origin_mode": _mode,
+            "origin_mode_cn": _desc[0],
+            "assembly_note": _desc[1],
+            "standard_mode": ORIGIN_STANDARD_MODE,
+            "is_standard": (_mode == ORIGIN_STANDARD_MODE),
+            "note": (str(note) if note else None),
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ts": time.time(),
+        }
+        # 幂等：文件已存在时保留首次记录的 created_at，只更新本次字段
+        _old = read_origin_record(part_path)
+        if _old:
+            rec["created_at"] = _old.get("created_at") or _old.get("at")
+            rec["revision"] = int(_old.get("revision") or 1) + 1
+        else:
+            rec["created_at"] = rec["at"]
+            rec["revision"] = 1
+        if origin_mm is not None:
+            try:
+                rec["origin_mm"] = [float(x) for x in origin_mm]
+            except Exception:
+                rec["origin_mm"] = None
+        if bbox_mm is not None:
+            try:
+                rec["bbox_mm"] = [round(float(x), 4) for x in bbox_mm]
+            except Exception:
+                rec["bbox_mm"] = None
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                if k not in rec:
+                    rec[k] = v
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+        out["ok"] = True
+        out["record"] = rec
+        return out
+    except Exception as e:
+        out["error"] = repr(e)
+        return out
+
+
+def read_origin_record(part_path):
+    """【Bug⑪】读取 <零件>.origin.json；不存在/损坏返回 None（绝不抛异常）。
+
+    part_path 可以直接传【零件路径】，也可以传 origin.json 路径本身
+    （part_registry 拿到的是零件 file 字段，两种都容忍）。
+    """
+    if not part_path:
+        return None
+    _cands = []
+    _s = str(part_path)
+    if _s.lower().endswith(ORIGIN_RECORD_SUFFIX):
+        _cands.append(_s)
+    _cands.append(_s + ORIGIN_RECORD_SUFFIX)
+    for p in _cands:
+        try:
+            if not os.path.isfile(p):
+                continue
+            with open(p, "r", encoding="utf-8-sig") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            continue
+    return None
+
+
+def _attach_origin_record(model_obj, target, out):
+    """【Bug⑪】保存成功后在零件旁写 origin 记录，并把结果挂到返回体。
+
+    - origin_mode 从未显式设置过 → 用标准约定 center_bottom，并标注
+      inferred=True（如实说明"这是规范默认值，不是实测推断"）；
+    - 模型的包围盒读得到就一并记上（供装配换算/一致性核对）；
+    - 任何异常只写 warning，绝不影响保存结果本身。
+    """
+    try:
+        _mode = getattr(model_obj, "_origin_mode", None) or ORIGIN_STANDARD_MODE
+        _inferred = not bool(getattr(model_obj, "_origin_mode", None))
+        _note = getattr(model_obj, "_origin_note", None)
+        if _inferred:
+            _note = (_note or "") + (
+                "" if _note else
+                "未显式声明 origin 约定，按标准约定（底面中心）记录。")
+        _bbox = None
+        try:
+            _bbox = model_obj.body_box_mm()
+        except Exception:
+            _bbox = None
+        _res = write_origin_record(
+            target, origin_mode=_mode,
+            bbox_mm=_bbox,
+            note=_note or None,
+            extra={"inferred": bool(_inferred),
+                   "origin_source": ("explicit" if not _inferred
+                                     else "standard_default"),
+                   "standard_mode": ORIGIN_STANDARD_MODE})
+        out["origin_record"] = {
+            "ok": bool(_res.get("ok")),
+            "file": _res.get("path"),
+            "origin_mode": _mode,
+            "inferred": bool(_inferred),
+            "error": _res.get("error"),
+        }
+        if not _res.get("ok"):
+            try:
+                model_obj._warn("写 origin 记录失败（不阻断保存）: %s"
+                                % _res.get("error"))
+            except Exception:
+                pass
+    except Exception as e:
+        try:
+            out["origin_record"] = {"ok": False, "error": repr(e)}
+        except Exception:
+            pass
+    return out
+
+
 def new_part(sw=None, material=None, density=None):
     """新建零件，返回 SWModel。
 
@@ -3438,7 +3695,50 @@ class SWModel:
         # 【Bug-01 修复】凭据写入抽为 _emit_material_attestation()，与 save_as() 共用，
         #   保证"最终落盘路径旁必有凭据"。
         self._emit_material_attestation(target, _out)
+        # ── 【Bug⑪ 修复】同一落盘路径旁写【origin 约定】记录 ───────────────
+        # 与材料凭据同目录、同命名基（<part>.origin.json），装配侧可直接读。
+        _attach_origin_record(self, target, _out)
         return _out
+
+    def set_origin_mode(self, origin_mode, note=None):
+        """【Bug⑪】显式声明本零件的 origin（原点）约定，保存时写进 .origin.json。
+
+        标准约定（默认）= center_bottom（底面中心）：
+          XY 原点在底面轮廓中心，Z=0 在底面，+Z 朝上。
+        装配时"把零件坐到某平面上"只需 coincident(底面) + distance(X/Y)，
+        不必为每个零件单独换算 —— 这正是 Bug⑪ 想解决的"装配需人工换算"。
+
+        为什么不做成"改几何"：强行移动已建零件的 origin 会让既有图纸、
+        装配配合、历史导出全部错位。本函数【只做记录】，不动几何。
+
+        Args:
+            origin_mode: ORIGIN_MODES 中的键，如 "center_bottom" /
+                         "center_center" / "corner_bottom" / "corner_top" /
+                         "axis_center" / "custom"。
+            note:        自由说明（custom 模式务必写明具体含义）。
+
+        Returns: {ok, origin_mode, note, warning?}
+        """
+        _m = str(origin_mode or "").strip()
+        if _m not in ORIGIN_MODES:
+            return {"ok": False,
+                    "error": "未知 origin_mode: %r（可选: %s）"
+                             % (_m, ", ".join(sorted(ORIGIN_MODES))),
+                    "choices": sorted(ORIGIN_MODES)}
+        self._origin_mode = _m
+        self._origin_note = str(note) if note else None
+        out = {"ok": True, "origin_mode": _m,
+               "origin_mode_cn": ORIGIN_MODES[_m][0],
+               "assembly_note": ORIGIN_MODES[_m][1],
+               "note": self._origin_note,
+               "standard_mode": ORIGIN_STANDARD_MODE}
+        if _m != ORIGIN_STANDARD_MODE:
+            out["warning"] = (
+                "本零件 origin 非标准约定（%s）：装配时需按 .origin.json 里的"
+                "说明单独换算基准面；建议新零件统一用 %s。"
+                % (_m, ORIGIN_STANDARD_MODE))
+            self._warn(out["warning"])
+        return out
 
     def _emit_material_attestation(self, target, out):
         """【三大防线 · 防线①材料】落盘【材料凭据】<part>.material.json。
@@ -3508,6 +3808,29 @@ class SWModel:
                 return out
             # [防伪造] 绑定零件本体的 size + md5：check 端会重算比对，
             #   让"随手造一个假文件 + 手写凭据"这条绕过路径失效。
+            # ── 【Bug① 修复】凭据必须同时记录"请求材质"与"SW 内部实际材质" ──
+            # 现场缺陷：请求 PETG（ρ1270/σy40），SW 材质库无此牌号 → 内部仍是
+            #   PET（ρ1420/σy≈55）。原凭据只写 requested_material="PETG"，
+            #   读凭据的人会以为零件就是 PETG —— 但 .sldprt 属性栏显示 PET。
+            # 现在把"SW 内部实际生效名 + 是否与请求一致"一并固化进凭据，
+            #   由 defense_gate.check_material_attestation 给出可见 WARNING。
+            # 注意：这些字段必须【申请签发时】提交（签后补会 HMAC 失配）。
+            _sw_internal_mat = None
+            try:
+                _sw_internal_mat = (_mr.get("sw_internal_material")
+                                    or self.get_material().get("name"))
+            except Exception:
+                _sw_internal_mat = _mr.get("sw_internal_material")
+            _sw_int_ok = _mr.get("sw_internal_matches_request")
+            if _sw_int_ok is None:
+                try:
+                    _sw_int_ok = bool(
+                        _sw_internal_mat and _orig_name
+                        and str(_sw_internal_mat).strip().casefold()
+                            == str(_orig_name).strip().casefold())
+                except Exception:
+                    _sw_int_ok = None
+            _sw_int_warn = _mr.get("warning") if _sw_int_ok is False else None
             _p_size, _p_md5 = None, None
             try:
                 _p_size = os.path.getsize(target)
@@ -3544,6 +3867,10 @@ class SWModel:
                 "requested_material": _orig_name or _req_name,
                 "attested_material_name": _name_used,
                 "applied_name": _mr.get("applied_name") or _mr.get("material"),
+                # ── 【Bug①】SW 内部实际材质（与请求材质并列，二者不可混淆）──
+                "sw_internal_material": _sw_internal_mat,
+                "sw_internal_matches_request": _sw_int_ok,
+                "sw_internal_warning": _sw_int_warn,
                 "database_name": _mr.get("database_name"),
                 "match_level": _mr.get("match_level"),
                 # ── 【Bug15 残留修复】密度不得记录 SW 的未生效默认值(1000) ──
@@ -3685,6 +4012,22 @@ class SWModel:
                 #   签名，defense_gate 即可在防线①做属性级对比并拦截。
                 "requested_material": _att_info.get("requested_material"),
                 "attested_material_name": _att_info.get("attested_material_name"),
+                # ── 【Bug① 修复】把"SW 内部实际材质"提交给宿主 ────────────
+                # 凭据要能回答两个不同问题：
+                #   ① 设计规格要的是什么材质（requested_material）；
+                #   ② SolidWorks 零件里【真实生效】的是什么材质（本字段）。
+                # 现场缺陷：二者不一致（PETG vs PET）时凭据只记前者，
+                #   材料防线据此判 PASS，而零件属性栏显示的是另一种材料。
+                #
+                # ⚠️ 实测：宿主 /defense/sign 只把【白名单里】的字段纳入待签体，
+                #   这三个键会被丢弃（plugins/dsh-engineering-ui/lib/index.js
+                #   的 material 分支没有它们）。由于凭据签完不能再补字段
+                #   （HMAC 必然失配 → 防线① 全灭），这里仍照常提交（宿主一旦
+                #   扩充白名单就会自动生效），同时另写一份【旁挂记录】
+                #   <part>.material.json.sw_internal.json 作为当前权威落点。
+                "sw_internal_material": _att_info.get("sw_internal_material"),
+                "sw_internal_matches_request": _att_info.get("sw_internal_matches_request"),
+                "sw_internal_warning": _att_info.get("sw_internal_warning"),
                 # ── 【Bug-C 修复】跨标准替代标记纳入待签体 ────────────────
                 #   Q235→AISI 1020 这类跨体系替代原先只标 approximate_match，
                 #   报告看起来像"精确匹配"。现在由 swapi 在申请签发时提交
@@ -3741,6 +4084,28 @@ class SWModel:
                 "family": _att.get("attested_family"),
                 "signed": bool(_att.get("_sig")),
             }
+            # ── 【Bug① 修复·落盘层】SW 内部材质事实写【旁挂记录】──────────
+            # 宿主 /defense/sign 只签白名单字段（实测 sw_internal_material 会被
+            # 丢弃），而签完再补字段会让 HMAC 失配。所以把这条事实单独落盘，
+            # 并在返回体里显式告知"凭据里没有它、它在哪里"。
+            _side = _write_sw_internal_record(target, {
+                "requested_material": _att_info.get("requested_material"),
+                "sw_internal_material": _sw_internal_mat,
+                "sw_internal_matches_request": _sw_int_ok,
+                "sw_internal_warning": _sw_int_warn,
+                "applied_name": _att_info.get("applied_name"),
+                "attested_material_name": _att_info.get("attested_material_name"),
+                "density_kg_m3": _att_info.get("density_kg_m3"),
+                "expected_density_kg_m3": _att_info.get("expected_density_kg_m3"),
+                "attested_family": _att_info.get("attested_family"),
+                "material_attestation_file": _dg.attestation_path(target),
+                "signed": bool(_att.get("_sig")),
+            })
+            out["material_attestation"]["sw_internal_material"] = _sw_internal_mat
+            out["material_attestation"]["sw_internal_matches_request"] = _sw_int_ok
+            out["material_attestation"]["sw_internal_record"] = _side.get("path")
+            if _sw_int_ok is False:
+                out["material_attestation"]["sw_internal_warning"] = _sw_int_warn
         except Exception as _e_att:
             out["material_attestation"] = {"ok": False, "error": repr(_e_att)}
 
@@ -4220,8 +4585,51 @@ class SWModel:
                 sw_write = self.set_material(nm)
         except Exception as ex:
             sw_write = {"ok": False, "error": repr(ex)}
+        # ── 【Bug① 修复】必须如实区分"请求的材质"与"SW 内部实际生效的材质" ──
+        # 现场缺陷（竞速小车任务）：用户确认 PETG（ρ1270 / σy≈40），但
+        #   SW 材质库【没有 PETG】（只有 PET，ρ1420 / σy≈55）。
+        #   set_custom_material("PETG", ...) 只写了 material.json 凭据签名，
+        #   完全没动 SW 零件内部材质 —— 结果：
+        #     · material.json 签名有效，防线①在签名层通过；
+        #     · 但 .sldprt 里真实材质仍是 PET(1420)，打开零件属性栏显示 PET，
+        #       用户拿零件直接打印/加工会被误导，打印件力学性能以 SW 为准。
+        #   原返回体只有 applied_name="PETG"（那是"我们登记的名字"，不是
+        #   SW 里真实生效的名字），调用方无从发现这个落差。
+        # 修复：单独回读 SW 内部材质名与 SW 侧密度，与请求值并列记录；
+        #   不一致时写 warning 字段（不阻断流程，但必须可见、可审计）。
+        _sw_internal = None
+        _sw_density = None
+        try:
+            _gm = self.get_material() or {}
+            _sw_internal = _gm.get("name") or (sw_write or {}).get("applied_name")
+            _sw_density = _gm.get("density_kg_m3")
+        except Exception:
+            _sw_internal = (sw_write or {}).get("applied_name")
+        if not _sw_internal:
+            try:
+                _sw_internal = self.model.GetMaterialPropertyName2("", "")
+            except Exception:
+                _sw_internal = None
+        _req_n = str(nm).strip()
+        _int_n = str(_sw_internal or "").strip()
+        # 名字比对：忽略大小写与空白；SW 常把"库名|材料名"或带前缀形式回读
+        _matches = bool(_int_n) and (
+            _int_n.casefold() == _req_n.casefold()
+            or _int_n.casefold().endswith("|" + _req_n.casefold())
+            or _int_n.casefold().split("|")[-1].strip() == _req_n.casefold())
+        _dens_ok = True
+        if _d is not None and _sw_density:
+            try:
+                _dens_ok = (abs(float(_sw_density) - float(_d))
+                            / float(_d) <= 0.05)
+            except Exception:
+                _dens_ok = True
         result = {
             "ok": True,
+            "requested_material": _req_n,      # 【Bug①】用户请求的材质（凭据口径）
+            "sw_internal_material": _sw_internal,   # 【Bug①】SW 零件内部真实材质
+            "sw_internal_density_kg_m3": _sw_density,
+            "sw_internal_matches_request": bool(_matches),
             "applied_name": nm,
             "density_kg_m3": _d,
             "e_mpa": _e,
@@ -4235,6 +4643,19 @@ class SWModel:
                                 "材料属性以本返回值/custom_materials.json 为准"),
             "registry": reg,
         }
+        if not _matches or not _dens_ok:
+            # 【Bug①】不阻断，但必须显式可见：凭据层认 PETG，SW 内部却是 PET。
+            _detail = ("【Bug①】SW 零件内部材质与请求不一致："
+                       "请求 %r（ρ=%s），SW 实际 %r（ρ=%s）。"
+                       "材料凭据按请求材质记录，但 .sldprt 打开后属性栏显示的"
+                       "是 SW 实际材质 —— 直接拿零件打印/加工请以 SW 实际材质为准，"
+                       "或先用 set_material() 指定 SW 库中存在的近似牌号。"
+                       % (_req_n, _d, _int_n or "<未知>", _sw_density))
+            result["warning"] = _detail
+            result["warnings"] = list(result.get("warnings") or []) + [_detail]
+            self._warn(_detail)
+        else:
+            result["warning"] = None
         # 让 physics 与出图能拿到"实际应用的材料"
         self.material_result = dict(result)
         return result
@@ -9854,6 +10275,13 @@ class SWModel:
                 self._warn("save_as 写材料凭据异常: %r" % (_e_att,))
             except Exception:
                 pass
+        # ── 【Bug⑪ 修复】origin 约定同样必须跟着【最终落盘路径】走 ──────────
+        # 否则小屋走 save() → save_as(最终路径) 时，.origin.json 会留在中间路径旁，
+        # 装配侧在真正的零件旁读不到约定（与 Bug-01 的材料凭据同一类缺陷）。
+        try:
+            _attach_origin_record(self, path, _out)
+        except Exception as _e_org:
+            _out["origin_record"] = {"ok": False, "error": repr(_e_org)}
         return _out
 
     # ══ 【新-5 修复】OpenDoc6 统一封装 ═══════════════════════════════════
@@ -10012,6 +10440,285 @@ def select_sketch_by_name(sw, model, name):
     return name if sel else None
 
 
+# ==================== 【Bug⑫】按名称/索引统一选草图 ====================
+
+# 草图特征的 GetTypeName2 取值（跨 SW 版本/locale 实测）：
+#   · "Sketch"          —— 未消费的草图；
+#   · "ProfileFeature"  —— 【最常见】：被拉伸/旋转消费过的草图特征，
+#                          SW 的 GetTypeName2 对草图返回的就是这个名字。
+#   ⚠️ 只认 "Sketch" 会漏掉绝大多数真实草图（原 select_sketch_by_index
+#      就踩在这个点上：按索引选草图经常"选不到第 1 个"）。
+#   以下两类【不是】可拉伸草图，必须排除：
+#     "SketchBlock"（草图块）/ "SketchPicture"（草图图片）。
+_SKETCH_TYPE_MARKERS = ("Sketch", "ProfileFeature")
+_SKETCH_TYPE_EXCLUDE = ("SketchBlock", "SketchPicture")
+
+
+def _is_sketch_feature(feat):
+    """判定一个 Feature 是否【可拉伸草图】特征（跨版本、跨 locale）。
+
+    同时看 GetTypeName2 与 GetTypeName：前者对已消费草图返回
+    "ProfileFeature"，后者多数情况下返回 "Sketch"。任一命中即认为是草图。
+    """
+    for _attr in ("GetTypeName2", "GetTypeName"):
+        try:
+            t = str(getattr(feat, _attr) or "")
+        except Exception:
+            t = ""
+        if not t:
+            continue
+        if any(x in t for x in _SKETCH_TYPE_EXCLUDE):
+            return False
+        if any(m in t for m in _SKETCH_TYPE_MARKERS):
+            return True
+    return False
+
+
+def _iter_sketch_features(model, limit=200):
+    """按特征树顺序产出草图特征 [(序号, 名称, feature)]（跨语言，不依赖草图名）。
+
+    为什么要遍历特征树而不是"用素描管理器查"：
+      · ISketchManager 没有枚举接口（只能拿到 ActiveSketch）；
+      · 中文名 "草图1" 在英文 locale / 某些 SW 版本里不存在，
+        直接 SelectByID2("草图1") 会抛 DISP_E_XXX —— 这正是 Bug⑫。
+    特征树（FeatureManager.FirstFeature → GetNextFeature）是唯一稳定的来源，
+    且 feat.Name 返回的是【本 locale 的真实名字】，因此遍历后按名字比对可靠。
+
+    类型判定见 _is_sketch_feature（兼容 "Sketch" 与 "ProfileFeature"）。
+    """
+    out = []
+    try:
+        feat = model.FeatureManager.FirstFeature
+    except Exception:
+        return out
+    n = 0
+    while feat is not None and n < limit:
+        n += 1
+        try:
+            nm = str(feat.Name or "")
+        except Exception:
+            nm = ""
+        try:
+            if _is_sketch_feature(feat):
+                out.append((len(out) + 1, nm, feat))
+        except Exception:
+            pass
+        try:
+            feat = feat.GetNextFeature
+        except Exception:
+            break
+    return out
+
+
+def _select_sketch_feature(model, name):
+    """用 SelectByID2 按【真实名字】选一个草图；成功返回 True。"""
+    import win32com.client as _wc
+    try:
+        model.ClearSelection2(True)
+        empty = _wc.VARIANT(pythoncom.VT_DISPATCH, None)
+        sel = model.Extension.SelectByID2(name, "SKETCH", 0, 0, 0,
+                                          False, 0, empty, 0)
+        return bool(sel)
+    except Exception:
+        return False
+
+
+def _select_sketch_by_number(model, index):
+    """按 1 基序号选草图（内部复用 select_sketch_by_index 的语义）。"""
+    feats = _iter_sketch_features(model)
+    if not feats:
+        return None
+    try:
+        idx = int(index)
+    except Exception:
+        return None
+    if idx < 1 or idx > len(feats):
+        return None
+    name = feats[idx - 1][1]
+    if _select_sketch_feature(model, name):
+        return name
+    return None
+
+
+def select_sketch(sw, model, name_or_idx, index_fallback=None):
+    """【Bug⑫ 修复】统一的"按名字或按索引"选草图入口（跨语言、带兜底）。
+
+    背景（现场实测）：
+      sw_bridge 的已知坑 —— 选草图【必须】用 select_sketch_by_index()。
+      用中文名（"草图1"）在部分 SW 版本 / locale 下会抛 DISP_E_XXX 找不到草图，
+      建模直接失败（零件建到一半，白跑一轮）。工具链文档提示了这一点，
+      但【代码里没有兜底】—— 全靠写脚本的人记住。
+
+    本函数把兜底内化，调用方不必再关心"该用名字还是索引"：
+      ① 解析输入类型：
+         · int / 纯数字字符串 → 直接按索引；
+         · 其它字符串       → 按名字找（含中文/英文前缀互换）；
+      ② 按名字查找的三级路径（任一成功即可）：
+         a) model.FeatureByName(name)
+         b) 遍历特征树，比对 feat.Name（忽略大小写/空白），
+            以及 "SketchN" ↔ "草图N" 的前缀互换形态
+         c) 兜底：用 SelectByID2 直接试原名
+      ③ 名字找不到 / 名字非法 → 【回退索引】：
+         · 显式给了 index_fallback 就用它；
+         · 否则从名字尾部数字推断（"草图2"/"Sketch2" → 2）；
+         · 再不行用 1；
+         并给出 warning（写进返回值 + stderr），绝不静默。
+      ④ 全程不改模型几何 —— 只做选择操作。
+
+    Args:
+        sw: SolidWorks Application（本函数不需要它，仅为与其它 API 签名一致）。
+        model: 零件/装配文档对象（IDocument）。
+        name_or_idx: 中文名 / 英文名 / 纯数字字符串 / 整数索引（1 基）。
+        index_fallback: 名字找不到时的回退索引（可选）。
+
+    Returns:
+        {"ok": bool, "selected": bool, "count": 0|1,
+         "method": "index"|"feature_by_name"|"tree_name"|"select_by_id"|"fallback_index",
+         "sketch_name": <实际选中的草图名>, "index": <实际使用的序号>,
+         "warnings": [...], "error"?: str}
+        · 与既有 select_sketch_by_index 的"数量语义"兼容：count 即选中数量。
+        · ok=False 时 error 说明为什么连索引回退都失败（不谎报成功）。
+    """
+    out = {"ok": False, "selected": False, "count": 0, "method": None,
+           "sketch_name": None, "index": None, "warnings": [],
+           "requested": name_or_idx, "fallback": False}
+
+    def _warn(msg):
+        out["warnings"].append(str(msg))
+        try:
+            _warn_stderr("select_sketch: " + str(msg))
+        except Exception:
+            pass
+
+    if model is None:
+        out["error"] = "model 为空（没有可操作的文档）—— 请先 new_part/open_part"
+        return out
+
+    # ── ① 解析输入：整数 / 纯数字串 / 名字 ──────────────────────────────
+    raw = name_or_idx
+    _want_index = None
+    _want_name = None
+    if isinstance(raw, bool):
+        _want_name = str(raw)
+    elif isinstance(raw, int):
+        _want_index = int(raw)
+    elif isinstance(raw, float) and float(raw).is_integer():
+        _want_index = int(raw)
+    else:
+        _s = str(raw or "").strip()
+        if not _s:
+            out["error"] = "草图标识为空（需要名字或 1 基索引）"
+            return out
+        if _s.isdigit():
+            _want_index = int(_s)
+        else:
+            _want_name = _s
+
+    # ── ② 纯索引：直接按序号选 ───────────────────────────────────────
+    if _want_index is not None:
+        _nm = _select_sketch_by_number(model, _want_index)
+        out["index"] = _want_index
+        if _nm:
+            out.update({"ok": True, "selected": True, "count": 1,
+                        "method": "index", "sketch_name": _nm})
+            return out
+        # 索引越界：列出真实可用的草图，方便调用方纠正
+        _feats = _iter_sketch_features(model)
+        out["error"] = ("按索引 %s 选草图失败（文档里共 %d 个草图）。"
+                        % (_want_index, len(_feats)))
+        out["available_sketches"] = [f[1] for f in _feats]
+        out["hint"] = ("索引是 1 基的（第 1 个草图 = 1）。请按 "
+                       "available_sketches 的顺序核对。")
+        return out
+
+    # ── ③ 按名字：FeatureByName → 特征树比对 → SelectByID2 原名 ────────
+    _cands = [_want_name]
+    # 中英文前缀互换（"草图2" ↔ "Sketch2"）—— 同一份脚本可跨 locale 复用
+    _tail = "".join(c for c in _want_name if c.isdigit())
+    if _tail:
+        for _p in ("Sketch", "草图"):
+            _c = _p + _tail
+            if _c not in _cands:
+                _cands.append(_c)
+
+    for _cand in _cands:
+        # a) FeatureByName（最快，且返回值可用于确认存在）
+        try:
+            _f = model.FeatureByName(_cand)
+            if _f is not None:
+                try:
+                    _real = str(_f.Name or _cand)
+                except Exception:
+                    _real = _cand
+                if _select_sketch_feature(model, _real):
+                    out.update({"ok": True, "selected": True, "count": 1,
+                                "method": "feature_by_name",
+                                "sketch_name": _real,
+                                "index": _index_of_sketch(model, _real)})
+                    return out
+        except Exception:
+            pass
+
+    # b) 遍历特征树，按真实名字比对（大小写/空白不敏感）
+    _norm = lambda s: str(s or "").strip().replace(" ", "").casefold()
+    _feats = _iter_sketch_features(model)
+    for _i, _nm, _feat in _feats:
+        if _norm(_nm) in (_norm(_want_name),) or _norm(_nm) in [_norm(c) for c in _cands]:
+            if _select_sketch_feature(model, _nm):
+                out.update({"ok": True, "selected": True, "count": 1,
+                            "method": "tree_name", "sketch_name": _nm,
+                            "index": _i})
+                return out
+
+    # c) 兜底：直接拿原名试 SelectByID2（有些情况 FeatureByName 取不到）
+    for _cand in _cands:
+        if _select_sketch_feature(model, _cand):
+            out.update({"ok": True, "selected": True, "count": 1,
+                        "method": "select_by_id", "sketch_name": _cand,
+                        "index": _index_of_sketch(model, _cand)})
+            return out
+
+    # ── ④ 名字彻底找不到 → 回退索引（并给出 warning）───────────────────
+    _fb = index_fallback
+    if _fb is None:
+        try:
+            _fb = int(_tail) if _tail else None
+        except Exception:
+            _fb = None
+    _why = ("按名字 %r 找不到草图（len(locale)=%r）。可用草图: %s"
+            % (_want_name, _tail, [f[1] for f in _feats]))
+    if _fb is not None:
+        _nm = _select_sketch_by_number(model, _fb)
+        if _nm:
+            _warn("%s → 已回退到索引 %s（选中 %r）。"
+                  "建议脚本改用索引选草图（Bug⑫：中文名不可靠）。"
+                  % (_why, _fb, _nm))
+            out.update({"ok": True, "selected": True, "count": 1,
+                        "method": "fallback_index", "sketch_name": _nm,
+                        "index": _fb, "fallback": True})
+            return out
+        _warn("%s → 回退索引 %s 同样失败。" % (_why, _fb))
+        out["error"] = ("名字和索引都没选到草图（回退索引=%s 越界）。" % _fb)
+    else:
+        out["error"] = "按名字找不到草图，且无法从名字推断回退索引。"
+    out["available_sketches"] = [f[1] for f in _feats]
+    out["index"] = _fb
+    out["hint"] = ("请二选一：① 传 1 基索引（推荐，Bug⑫）；"
+                   "② 传 available_sketches 里的真实名字。")
+    return out
+
+
+def _index_of_sketch(model, name):
+    """返回某草图在特征树中的 1 基序号；找不到返回 None（只读）。"""
+    try:
+        for i, nm, _f in _iter_sketch_features(model):
+            if nm == name:
+                return i
+    except Exception:
+        pass
+    return None
+
+
 # ==================== Bug-25: 安全退出 SolidWorks ====================
 
 # ── 【H 修复】模块级别名：让 swapi.new_assembly() 也能用 ──────────────
@@ -10064,17 +10771,95 @@ def _slworks_pids():
     return pids
 
 
-def close_all_and_exit(sw):
-    """安全关闭所有文档并退出 SolidWorks。
+def _sw_doc_count(sw):
+    """读取 SW 当前打开的文档数量（只读；取不到返回 None）。
+
+    late-binding 下 GetDocumentCount 是【无参属性】而非方法，因此两种绑定
+    约定都要兼容：先按属性取，失败再按方法调。
+    """
+    for _get in (lambda: getattr(sw, "GetDocumentCount", None),
+                 lambda: sw.GetDocumentCount()):
+        try:
+            _v = _get()
+            if _v is not None:
+                return int(_v)
+        except Exception:
+            continue
+    return None
+
+
+def close_all_documents(sw):
+    """【Bug⑧ 修复】只关闭 SolidWorks 里的全部文档，【不结束 SW 进程】。
+
+    背景（并行房间共用单台 SW，现场实测）：
+      三个房间（底盘/传动/传感器）共用同一台 SolidWorks（FIFO 排队）。任一
+      房间跑 close-all 就会 Quit + taskkill 结束 SW 进程，其它房间正在进行的
+      RPC 连接【立即失效】—— 主代理观察到 SW PID 频繁变化
+      （4148 → 30860 → 18388 → 23448 → 472 → 34744），每次都是冷启动：
+      并行模式实际退化成"串行 + 冷启动"，单零件建模耗时被放大。
+
+    正确语义（本函数）：
+      close-all 默认只做【文档级清场】—— 调 SldWorks.CloseAllDocuments，
+      保留 SW 进程存活，下一个房间/下一个零件复用同一进程（无需重新 Dispatch）。
+      需要真正退出进程时，由调用方显式传 quit=True
+      （见 close_all_and_exit / sw_bridge close-all --quit）。
+
+    Returns:
+        {"ok", "method": "close_all_documents", "keepalive": True,
+         "quit": False, "docs_before", "docs_after", "error"?, "hint"?}
+    """
+    out = {"ok": True, "method": "close_all_documents", "keepalive": True,
+           "quit": False, "sw_exited": False,
+           "docs_before": _sw_doc_count(sw), "docs_after": None}
+    _err = None
+    try:
+        # SW 2018~2024 通用的文档级关闭接口（参数 0 = 不弹保存提示）
+        sw.CloseAllDocuments(0)
+    except AttributeError as e:
+        _err = "当前 SW 版本没有 CloseAllDocuments: %r" % (e,)
+    except Exception as e:
+        _err = "CloseAllDocuments 调用异常: %r" % (e,)
+    # 关完再读一次文档数（这是本次动作是否真的生效的客观证据）
+    _after = _sw_doc_count(sw)
+    out["docs_after"] = _after
+    if _err:
+        out["ok"] = False
+        out["error"] = _err
+        out["hint"] = ("SW 进程【未】被结束（保活语义），其它房间的连接不受影响；"
+                       "可改用 sw_bridge.py close-all --quit 走完整的退出流程。")
+        return out
+    if _after is not None and _after > 0:
+        # 有后台任务/模态对话框时 CloseAllDocuments 可能没关干净 —— 如实报出
+        out["ok"] = False
+        out["error"] = ("CloseAllDocuments 返回后仍有 %d 个文档未关闭"
+                        "（可能有模态对话框或后台任务占用）。" % _after)
+        out["hint"] = "先处理 SW 里的对话框/保存提示，再重试 close-all。"
+        return out
+    out["note"] = ("已只关闭文档，SolidWorks 进程保持运行（保活）——"
+                   "并行房间的下一次调用可直接复用该实例，无需冷启动。")
+    return out
+
+
+def close_all_and_exit(sw, quit=True):
+    """安全关闭所有文档并退出 SolidWorks（原有行为）。
 
     Bug-25 修复: SW 2020 没有 Quit() 方法，直接使用会导致 AttributeError。
     本函数先关闭所有文档，再尝试 Quit()（可用时），最后依赖 GC 释放 COM 引用。
 
+    ── 【Bug⑧ 修复】新增 quit 参数（默认 True，保持既有调用方行为）──────────
+    并行房间共用单台 SW 时，close-all 的【默认语义已改为保活】（只关文档、
+    不杀进程，见 close_all_documents）；只有显式要求退出进程时（quit=True，
+    对应 sw_bridge.py close-all --quit）才走本函数原有的 Quit + taskkill 流程。
+
     Args:
         sw: SolidWorks Application 对象（win32com dispatch）
+        quit: True=退出 SW 进程（旧行为）；False=只关文档（等价
+              close_all_documents）
     Returns:
         {"ok": True, "method": "close_all"} 或 {"ok": False, "error": "..."}
     """
+    if not quit:
+        return close_all_documents(sw)
     try:
         # 第一步：关闭所有文档（SW 2018~2024 通用）
         sw.CloseAllDocuments(0)

@@ -1,0 +1,38 @@
+{
+  "items": [
+    {
+      "at": "2026-10-19 20:58:42",
+      "where": "mode_gate.rooms-reset",
+      "reason": "清空房间/报告（会抹除防线凭据），已留痕",
+      "by": "rooms-reset"
+    },
+    {
+      "at": "2026-10-19 21:09:10",
+      "where": "defense_gate.unsigned:C:\\Users\\j1877\\Desktop\\test\\20261019_202722_88C07F68\\scripts\\DSH_probe.sldprt",
+      "kind": "material",
+      "reason": "凭据路径越界被规范化: 'C:\\\\Users\\\\j1877\\\\Desktop\\\\test\\\\20261019_202722_88C07F68\\\\scripts\\\\..\\\\parts\\\\DSH_probe.sldprt' (含目录穿越成分(..))",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-19 21:09:10",
+      "where": "defense_gate.unsigned:C:\\Users\\j1877\\Desktop\\test\\20261019_202722_88C07F68\\scripts\\DSH_probe.sldprt",
+      "kind": "material",
+      "reason": "凭据路径越界被规范化: 'C:\\\\Users\\\\j1877\\\\Desktop\\\\test\\\\20261019_202722_88C07F68\\\\scripts\\\\..\\\\parts\\\\DSH_probe.sldprt' (含目录穿越成分(..))",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-19 22:17:14",
+      "where": "defense_gate.unsigned:底盘结构件",
+      "kind": "physics",
+      "reason": "物理凭据拒绝签发: report path outside managed physics_runs root",
+      "by": "fail-closed"
+    },
+    {
+      "at": "2026-10-19 22:20:46",
+      "where": "defense_gate.unsigned:底盘结构件",
+      "kind": "physics",
+      "reason": "物理凭据拒绝签发: report path outside managed physics_runs root",
+      "by": "fail-closed"
+    }
+  ]
+}

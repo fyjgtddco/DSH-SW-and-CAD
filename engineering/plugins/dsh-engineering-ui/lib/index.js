@@ -461,10 +461,54 @@ export function apply(ctx) {
         try { console.error('[dsh-engineering-ui] cwd prompt variable', e); } catch (e2) {}
       }
     };
-    // systemPrompt 是可选服务：缺失该服务的 profile 里本插件保持不激活，
-    // 而不是在 apply 阶段抛错（官方插件实践：可选服务走 ctx.inject）。
+    // ── 【本次修复·{{cwd}} 再次报错】必须【同步】注册，不能只依赖 ctx.inject ──
+    // 现象（用户第二次反馈）：
+    //   unknown prompt variable "{{cwd}}" in section "deployment:persona-prefix";
+    //   registered variables: provider, model
+    // 根因：ctx.inject(['systemPrompt'], cb) 的回调是【异步】的（要等服务就绪），
+    //   而工程模式人设的 persona 段在会话装配时就会被渲染 ——
+    //   若装配发生在回调执行之前，变量表里还没有 cwd → 整轮请求失败。
+    //   （这也解释了为什么"有时候好、有时候坏"：纯时序问题。）
+    //
+    // 修法（双保险，同一个 provider，不写重复逻辑）：
+    //   ① 【同步】直接取 ctx.systemPrompt（服务已就绪时立即可用）→ 立即注册；
+    //   ② 同时保留 ctx.inject 异步路径（服务稍后才就绪的 profile）。
+    //   两处注册的 provider 完全相同，重复注册无副作用（后者覆盖前者）。
+    //
+    // 取值优先级：workingDirectory.get → session.header.cwd → 空串（绝不 undefined）。
+    const _cwdProvider = (context) => {
+      try {
+        const agent = context && context.agent;
+        try {
+          const wd = ctx.workingDirectory;
+          if (wd && typeof wd.get === 'function' && agent && agent.session) {
+            const dir = wd.get(agent.session);
+            if (typeof dir === 'string' && dir.length > 0) return dir;
+          }
+        } catch (e) { /* 服务缺失 → 走兜底 */ }
+        const headerCwd = agent && agent.session && agent.session.header
+          ? agent.session.header.cwd : undefined;
+        if (typeof headerCwd === 'string' && headerCwd.length > 0) return headerCwd;
+        return '';
+      } catch (e) { return ''; }
+    };
+    const _registerCwdOn = (sp) => {
+      try {
+        if (!sp || typeof sp.variable !== 'function') return false;
+        sp.variable('cwd', _cwdProvider);
+        return true;
+      } catch (e) {
+        try { console.error('[dsh-engineering-ui] cwd register', e); } catch (e2) {}
+        return false;
+      }
+    };
+    // ① 同步注册（消除时序竞态 —— 这是本次报错的直接修复点）
+    _registerCwdOn(ctx.systemPrompt);
+    // ② 异步 inject 兜底（服务稍后就绪时再注册一次）
     if (typeof ctx.inject === 'function') {
-      const _fiber = ctx.inject(['systemPrompt'], _injectSystemPrompt);
+      const _fiber = ctx.inject(['systemPrompt'], function (scope) {
+        _registerCwdOn(scope && scope.systemPrompt);
+      });
       disposers.push(() => { try { if (_fiber && _fiber.dispose) _fiber.dispose(); } catch (e) {} });
     }
   } catch (e) {
@@ -2602,8 +2646,13 @@ export function apply(ctx) {
       if (_lim) return send(res, 413, { ok: false, error: _lim });
       const room = String(body.room || "").trim();
       if (!ROOM_RE.test(room)) return send(res, 400, { ok: false, error: "bad room" });
+      // 【本次修复·Bug⑤】把 task_id 透传给判定器 —— 凭据实际在
+      //   reports/<task_id>/ 子目录里，不带这个参数宿主只能读 flat 根，
+      //   于是"凭据明明存在"却被判 missing（room-end 永久被拒）。
       const result = defenseSigner.judgeDefense(room, String(body.kind || "room"), {
         requirePhysics: body.require_physics !== false,
+        taskId: String(body.task_id || body.taskId || "").trim(),
+        rooms: Array.isArray(body.rooms) ? body.rooms : undefined,
       });
       return send(res, 200, result);
     }

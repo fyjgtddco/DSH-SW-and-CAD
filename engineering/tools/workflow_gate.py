@@ -26,10 +26,30 @@ try:
 except Exception:
     STATE_DIR = BASE_DIR
 STATE_PATH = os.path.join(STATE_DIR, "workflow_state.json")
-if STATE_DIR and os.path.isdir(STATE_DIR) and STATE_DIR not in sys.path:
-    sys.path.insert(0, STATE_DIR)
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+# ── 【本次修复·双副本遮蔽】脚本目录必须【优先】于状态目录 ──────────────
+# 缺陷（fix-physics 实测）：原顺序是先把 STATE_DIR 插到 sys.path[0]，
+#   再"如果 BASE_DIR 不在 sys.path 才插入"。而 BASE_DIR 通常已在 sys.path
+#   （由 Python 启动时按脚本所在目录自动放入），于是条件不成立、
+#   也不会被提升到最前面 —— 最终 STATE_DIR（安装副本）排在 BASE_DIR 之前。
+# 后果：从工作区运行 workflow_gate.py 时，它内部 "import defense_gate"
+#   命中的是【安装副本里的旧 defense_gate】—— 同一进程里"门禁新、防线旧"，
+#   正是 Bug⑥/Bug⑤ 想消灭的"两套口径"再次出现，而且极难察觉。
+#
+# 正确语义：谁在执行我的代码，就以谁的目录为准（BASE_DIR 优先）；
+#   STATE_DIR 只用于读取状态文件/旁路模块，必须排在后面。
+if BASE_DIR in sys.path:
+    try:
+        sys.path.remove(BASE_DIR)
+    except ValueError:
+        pass
+sys.path.insert(0, BASE_DIR)
+if STATE_DIR and os.path.isdir(STATE_DIR) and STATE_DIR != BASE_DIR:
+    if STATE_DIR in sys.path:
+        try:
+            sys.path.remove(STATE_DIR)
+        except ValueError:
+            pass
+    sys.path.insert(1, STATE_DIR)
 MODE_GATE_PATH = os.path.join(BASE_DIR, "mode_gate.py")
 # ── 【固定两问】搭建方式(A/B/C) 与 并行策略(D/E) 的代码级强制 ──────────
 # 这两问是【两个独立问题】：本模块只核对"各自是否被系统问题问过"，
@@ -108,6 +128,56 @@ PARALLEL_CHOICES = {
 
 # 第一波 = 全部"建模类"房间类型。总装（assembly）必须在它们全部 room-end 之后才能开启。
 WAVE1_TYPES = ("structural", "transmission", "housing", "support", "spring", "thermal", "corrosion")
+
+# ── 【Bug⑥ 修复】房间类型别名映射（与 defense_gate.ROOM_TYPE_ALIAS 同源）────
+# 为什么需要：门禁（本文件）用规范名 transmission/housing/drafting，而
+#   mode_state.json / mode2_plan.json 的【快照】里可能仍是历史遗留名
+#   drivetrain/sensor/drawing（Bug③：set-subagent-plan 不刷新 rooms 快照）。
+#   若门禁与防线各按自己的一套名字判定，就会出现"同一房间：
+#     门禁按 transmission 放行、防线按 drivetrain 豁免物理校核"的互相矛盾。
+#   实测：传动房实际是 transmission，但 defense_gate 读到 drivetrain →
+#   require_physics=false → 含 2 项 CRITICAL 的领域凭据被静默放行（Bug⑥）。
+# 修复：两处共用同一张别名表，判定前先归一化，保证口径一致。
+ROOM_TYPE_ALIAS = {
+    "drivetrain": "transmission",
+    "drive_train": "transmission",
+    "transmission_system": "transmission",
+    "sensor": "housing",
+    "sensors": "housing",
+    "electronics": "housing",
+    "drawing": "drafting",
+    "drawings": "drafting",
+    "draft": "drafting",
+    "assembly_verify": "assembly",
+    "prime": "assembly",
+}
+
+# 纯出图 / 协调类房间类型：不产出零件级 FEA，豁免物理校核（与 defense_gate 同源）
+NON_PART_ROOM_TYPES = ("drafting", "drawing_export", "assembly",
+                       "assembly_verify", "prime", "coordination")
+
+
+def normalize_room_type(rtype):
+    """把房间类型别名归一化为规范名（未知类型小写后原样返回）。"""
+    _t = str(rtype or "").strip().lower()
+    if not _t:
+        return ""
+    return ROOM_TYPE_ALIAS.get(_t, _t)
+
+
+def room_type_is_modeling(rtype):
+    """房间类型是否属【建模类】（含零件 → 第一波 / 需物理校核）。
+
+    Bug⑥：所有含零件的类型（含 drivetrain/sensor 等历史别名）都算建模类；
+      只对纯出图/协调类（drafting/assembly/prime）豁免。
+      空类型按"建模类"处理（fail-closed，legacy 快照不得被静默豁免）。
+    """
+    _t = normalize_room_type(rtype)
+    if not _t:
+        return True
+    if _t in NON_PART_ROOM_TYPES:
+        return False
+    return True
 
 # C模式（步步确认）参数确认协议 —— 强制注入每个建模小屋的 prompt
 #
@@ -1675,39 +1745,6 @@ def cmd_confirm_assembly(parts_payload):
                         "零件清单，只做装配+干涉检查+整体验证，禁止重新建模/简化任何零件。")}
 
 
-# ── 第0题：参数需求强度（前置分流题）──────────────────────────────────────
-# 【问题2 修复】原方案一上来就抛 17 题，绝大多数用户被吓退或乱答。
-# 现改为两段式：先问 1 题判断"参数需求是否强"，再决定问全量还是精简。
-#
-#   强需求（需要精确出力学校核 / 有明确工况约束 / 要做强度与公差审查）
-#       → 问全量 QUESTION_SPEC（17 题，覆盖 99% 工业机械任务）
-#   不强（只是想先看到东西 / 结构示意 / 快速原型 / 无严格约束）
-#       → 只问 QUESTION_SPEC_LITE（5 题，覆盖决定性维度，其余由门禁取默认值）
-PARAM_DEPTH_SPEC = [
-    {
-        "id": "param_depth",
-        "group": "0 参数深度",
-        "title": "参数需求强度",
-        "hint": "本次设计是否需要严格把关参数（载荷/尺寸/公差/材料都要有据可依）？",
-        "options": [
-            "强需求：需要严格校核，参数要有设计依据（追问详细信息）",
-            "不强：先出大致结构即可，细节由你按经验定（只问关键几项）",
-        ],
-        "mech": False,
-        "depth": True,
-    },
-]
-
-# ── 精简问题集（参数需求不强时使用）────────────────────────────────────────
-# 【问题2 修复】从 QUESTION_SPEC 中精选 5 个"决定性维度"：
-#   不给这些就完全无法建模或必错；其余维度门禁都能按任务描述取合理默认值。
-#   · mech_type       —— 机构类型（决定整个拓扑结构，不给无法建模）
-#   · arm_lengths     —— 臂长/行程（决定尺寸链，不给无法定尺寸）
-#   · load_magnitude  —— 额定负载（决定强度校核基准）
-#   · load_type       —— 负载类型（决定安全系数取值）
-#   · open_extra      —— 开放补充（兜底，防止关键约束没处说）
-LITE_QUESTION_IDS = ("mech_type", "arm_lengths", "load_magnitude",
-                     "load_type", "open_extra")
 
 
 def infer_material(task, context=None):
@@ -2023,12 +2060,15 @@ def _wave1_room_names():
     state = load_state()
     cfg = state.get("subagent_config") or {}
     out = []
+    # ── 【Bug⑥ 修复】判定前先归一化类型别名（drivetrain→transmission、
+    #   sensor→housing、drawing→drafting），否则快照里的历史名会被判"非建模类"
+    #   → 房间被排除出第一波 → 总装门禁根本不去校验它的三防线（与防线互相矛盾）。
     for row in (cfg.get("rooms") or []):
         if isinstance(row, (list, tuple)) and len(row) >= 2:
-            if str(row[1]) in WAVE1_TYPES:
+            if room_type_is_modeling(row[1]):
                 out.append(str(row[0]))
         elif isinstance(row, dict):
-            if str(row.get("type") or "") in WAVE1_TYPES:
+            if room_type_is_modeling(row.get("type") or ""):
                 out.append(str(row.get("name") or row.get("room")))
     # 兜底：退化为 mode_state 里已登记的房间（排除总装/出图）
     # ── 【P1 修复】兜底必须真的排除非建模房间 ──────────────────────────
@@ -2054,9 +2094,9 @@ def _wave1_room_names():
                     _rt = {}
                 _all_names = [str(n) for n in (_ms.get("rooms") or {})]
                 if _rt:
-                    # 有类型信息：只保留建模类房间
+                    # 有类型信息：只保留建模类房间（【Bug⑥】同样先归一化别名）
                     out = [n for n in _all_names
-                           if str(_rt.get(n) or "") in WAVE1_TYPES]
+                           if room_type_is_modeling(_rt.get(n) or "")]
                     # 类型全为空（legacy）时退回"排除已知非建模名"的保守过滤
                     if not out:
                         _non_model = ("总装与验证", "工程图输出")
@@ -2080,7 +2120,8 @@ def _check_wave1_done():
     detail = _rooms_detail()
     not_ended, active, failed = [], [], []
     for name, rtype in rooms:
-        if rtype not in WAVE1_TYPES:
+        # 【Bug⑥】先归一化类型别名，避免 drivetrain/sensor 房间被跳过不校验
+        if not room_type_is_modeling(rtype):
             continue
         info = detail.get(name) or {}
         if info.get("failed_at"):
@@ -3093,7 +3134,10 @@ def cmd_provide_context(context_text):
                     "分析到哪个阶段、确实缺哪项信息，才问那一项；"
                     "每题必须挂到已推进的阶段并写理由（mode2_flow.py ask --stage --reason），"
                     "并逐题用 answer-question 记录用户真实答复。"
-                    "总题数必须落在 [%d,%d] 区间内。禁止用正文文字代替提问。")
+                    "总题数必须落在 [%d,%d] 区间内。禁止用正文文字代替提问。"
+                    "★ 答复一落盘，该阶段的产物会被标记为【过期(stale)】："
+                    "必须 refresh-stage 重做并提交新产物，"
+                    "否则 stage-status 判未完成、set-subagent-plan/select 均被拒。")
                     % ((_budget["min"] if _budget else 10),
                        (_budget["max"] if _budget else 50))),
             },
@@ -3731,10 +3775,30 @@ def cmd_select(choice, parallel=None, unknown=None):
                     _q_stale = True
         except Exception:
             _q_report = None
+        # ── 【Bug② 修复】把阶段新鲜度（stale/等答复）一并带进 select 的判据 ──
+        _stage_block = {}
+        try:
+            _st_now = _m2mod.stage_status(_wd3)
+            _stage_block = {
+                "ready": bool(_st_now.get("complete")),
+                "stale": _st_now.get("stale") or [],
+                "stale_rows": [r.get("stage") for r in (_st_now.get("rows") or [])
+                               if r.get("stale")],
+                "awaiting_answer": _st_now.get("awaiting_answer") or [],
+                "missing": _st_now.get("missing") or [],
+                "done_count": _st_now.get("done_count"),
+                "total": _st_now.get("total"),
+            }
+        except Exception as _ste:
+            _stage_block = {"ready": None, "error": repr(_ste)}
         _m2_block = {
             "plan_file": _m2mod.plan_path(_wd3),
             "subagent_plan_ready": _sp_ok,
             "subagent_plan_stale": _sp_stale,
+            # 注意：下面还有一个 "stages"（阶段 id 列表，历史字段）。
+            # 阶段新鲜度必须用【不同键名】，否则会被后者覆盖 —— 实测踩到过：
+            # 覆盖后 stale 判据永远读不到，select 照常放行过期产物。
+            "stage_freshness": _stage_block,
             "question_ledger_stale": _q_stale,
             "question_report": _q_report,
             "subagent_plan_error": (None if _sp.get("ok") else _sp.get("error")),
@@ -3828,6 +3892,30 @@ def cmd_select(choice, parallel=None, unknown=None):
                     state["subagent_config"]["rooms"] = rooms
                     state["subagent_config"]["total_rooms"] = len(rooms)
                 state["subagent_config"]["prime_room"] = _prime_room
+                # ── 【Bug③ 修复】把【最终生效的】房间表回写 plan 快照 ────────
+                # 说明：set-subagent-plan 写的是"编制"快照（不含固定追加的总理
+                #   子代理）；此处 select 追加总理后，必须把最终表回写，
+                #   否则 mode2_plan 快照与 workflow_state 永远差一个房间，
+                #   三处一致性自检会给出假告警、掩盖真不一致。
+                #   同时把本任务 task_id 写进 plan，避免跨任务污染。
+                try:
+                    _sync = _m2mod.sync_rooms_snapshot(
+                        rooms, _m2_work_dir(state),
+                        source="workflow_gate.select", task_id=state.get("task_id"))
+                    if _sync.get("ok"):
+                        state["subagent_config"]["rooms_synced_to_plan"] = True
+                        state["subagent_config"]["rooms_sync_changes"] = (
+                            _sync.get("changes") or [])
+                        state["subagent_config"]["plan_snapshot_file"] = (
+                            _sync.get("path"))
+                    else:
+                        # 同步失败必须显式暴露（不能"看起来对齐了"）
+                        state["subagent_config"]["rooms_synced_to_plan"] = False
+                        state["subagent_config"]["rooms_sync_error"] = (
+                            _sync.get("error") or "未知原因")
+                except Exception as _se:
+                    state["subagent_config"]["rooms_synced_to_plan"] = False
+                    state["subagent_config"]["rooms_sync_error"] = repr(_se)
         except Exception as _e:
             state["subagent_config"]["rooms_source"] = (
                 "总计子代理编制应用失败（%r）—— 已回退代码默认表" % (_e,))
@@ -4122,6 +4210,30 @@ def cmd_select(choice, parallel=None, unknown=None):
                 "3) 再调 select。",
             ],
         }
+    # ── 【Bug② 修复 · 补充拦截】已登记编制但阶段产物过期 → 同样拒绝开工 ──
+    # set-subagent-plan 的前置会拦"登记那一刻"的 stale；但用户之后仍可能改答，
+    # 于是编制还在、阶段却过期了。此时放行 = 拿着过期结论去建模。
+    if _m2_block and _m2_block.get("subagent_plan_ready"):
+        _st = _m2_block.get("stage_freshness") or {}
+        if (_st.get("stale") or []):
+            return {
+                "ok": False,
+                "gate": "MODE2_STAGES_STALE",
+                "step": "mechanics_done",
+                "error": ("【模式二强制】编制所依据的十阶段产物已过期（%s）—— "
+                          "用户答复改变了设计输入，禁止据此开工。"
+                          % "、".join(_st.get("stale") or [])),
+                "stale_stages": _st.get("stale"),
+                "awaiting_answer": _st.get("awaiting_answer") or [],
+                "how": (["1) 逐阶段重做（会要求提交与过期前不同的新产物）："]
+                        + ["     python mode2_flow.py refresh-stage %s" % _sid
+                           for _sid in (_st.get("stale_rows") or [])][:12]
+                        + ["2) 若还有『产物依赖未答题目』，先回答："
+                           "python mode2_flow.py answer-question <seq> \"<答复>\"",
+                           "3) 重做完成后再次执行 select。"]),
+                "plan_file": _m2_block.get("plan_file"),
+            }
+
     if _m2_block and not _m2_block.get("subagent_plan_ready"):
         return {
             "ok": False,

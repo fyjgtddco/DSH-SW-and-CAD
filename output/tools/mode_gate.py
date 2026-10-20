@@ -1813,6 +1813,169 @@ def cmd_room_report(room, stage, detail=""):
             "hint": "已上报并刷新心跳"}
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  【Bug⑨】长任务自动推进房间阶段（幂等 / 不覆盖终态 / 失败不阻断）
+# ══════════════════════════════════════════════════════════════════════════
+
+# 长任务（物理校核 / 疲劳 / 领域校验 / 看图矫正）进入执行时应推进到的阶段。
+VALIDATING_STAGE = "validating"
+
+# 这些阶段是【终态】：一旦上报过，任何自动推进都不得覆盖。
+_TERMINAL_STAGES = ("done", "failed")
+
+
+def _room_active(name):
+    """该房间当前是否处于 active（已 room-start 且未 room-end）。
+
+    只读判断，失败一律返回 False —— 宁可不推进阶段，也不要在没有房间上下文
+    的场合凭空造出一份进度报告。
+    """
+    try:
+        st = load_state()
+        if str(st.get("mode", "1")) != "2":
+            return False
+        _v = (st.get("rooms") or {}).get(name) or {}
+        return bool(_v.get("active"))
+    except Exception:
+        return False
+
+
+def _report_is_terminal(room):
+    """该房间是否已上报过 done / failed（终态）。
+
+    两个来源都要看：latest.stage（最新一条）与 history 全量 —— 因为
+    「先 done、后被某条迟到的建模上报覆盖成 modeling」是真实发生过的时序，
+    只看 latest 会让 done 被悄悄抹掉。
+    """
+    try:
+        data = _read_json_file(_report_path(room)) or {}
+        stages = []
+        _latest = data.get("latest") or {}
+        if isinstance(_latest, dict):
+            stages.append(str(_latest.get("stage") or ""))
+        for _h in (data.get("history") or []):
+            if isinstance(_h, dict):
+                stages.append(str(_h.get("stage") or ""))
+        return any(s in _TERMINAL_STAGES for s in stages if s)
+    except Exception:
+        return False
+
+
+def push_room_stage(room=None, stage=VALIDATING_STAGE, detail="",
+                    only_if_active=True, force=False):
+    """【Bug⑨】长命令在【房间上下文】里被调用时，自动把 stage 推进一次。
+
+    ── 要解决的真实缺陷（竞速小车任务现场）────────────────────────────
+    底盘结构件房从 21:08 到 22:22（约 74 分钟），room-report.json 的 stage
+    长期停在「modeling / 开始建DSH_底盘」：
+      · 21:42 三件零件全部建完 → 之后进入物理校核、看图矫正、prime-report；
+      · 但房间从未把 stage 推进到 part_done → validating → done。
+    后果：主代理无法可靠判断房间「是在跑 FEA 还是已死机」，只能靠
+      「SW CPU 是否活跃 + 文件是否新产生」这两条旁路推断（Bug⑨ 原文）。
+    根因：physics-optimize / physics-validate-domain / physics-fatigue /
+      visual_check 等【长任务】执行期间完全不碰 room-report；而
+      room-heartbeat 只刷新时间戳，不推 stage。
+
+    ── 本函数的行为契约（三条硬约束）──────────────────────────────────
+      ① 【只在房间上下文里生效】only_if_active=True 时，房间必须真的
+         room-start 过且仍 active；否则原样返回 skipped 原因，绝不写文件
+         （否则主代理/全局脚本一跑就凭空多出一个房间的进度）。
+      ② 【幂等】若最新 stage 已经是目标 stage，直接 skipped=already，
+         不重复追加 history（长任务可能被调多次，不能把 history 刷爆）。
+      ③ 【不覆盖终态】房间一旦上报过 done / failed，自动推进一律让步
+         （force=True 也不行：终态是事实，不该被「自动」改写；
+          真要改只能人工 room-report）。
+
+    ── 失败绝不阻断主流程 ────────────────────────────────────────────
+    本函数【永不抛异常】：所有失败都折成 {"ok": False, "skipped": 原因} 返回。
+    调用方（物理校核 / 看图矫正）只管 try: push(...) except: pass ——
+    进度上报坏了不能把真正的校核任务带崩。
+
+    Args:
+        room:           房间名；None → 依次取 DSH_ROOM 环境变量。
+        stage:          目标阶段，默认 validating。
+        detail:         详情文本（建议写「物理校核中 / 看图矫正中」这类可读状态）。
+        only_if_active: 是否要求房间 active（默认 True）。
+        force:          显式覆盖「最新 stage 已相同」的幂等短路（仍不覆盖终态）。
+
+    Returns:
+        {"ok": bool, "pushed": bool, "skipped": str|None, "room": str,
+         "stage": str, "reason"?: str}
+    """
+    out = {"ok": False, "pushed": False, "skipped": None, "room": None,
+           "stage": str(stage or VALIDATING_STAGE)}
+    try:
+        _room = (room or os.environ.get("DSH_ROOM") or "").strip()
+        out["room"] = _room or None
+        if not _room:
+            out["skipped"] = "no-room-context"
+            out["reason"] = ("未提供房间名且 DSH_ROOM 未设置 —— 本命令不在"
+                             "任何房间上下文里执行，不推进任何房间的进度。")
+            return out
+        _stage = str(stage or VALIDATING_STAGE).strip() or VALIDATING_STAGE
+        out["stage"] = _stage
+        # ── ① 房间上下文 ────────────────────────────────────────────
+        if only_if_active and not _room_active(_room):
+            out["skipped"] = "no-active-room"
+            out["reason"] = ("房间 %r 未登记为 active（没 room-start 或已 "
+                             "room-end）—— 不凭空写进度报告。" % _room)
+            return out
+        # ── ③ 终态保护（先于幂等判断：done/failed 一律不让步）────────
+        if _report_is_terminal(_room):
+            out["skipped"] = "terminal-stage"
+            out["reason"] = ("房间 %r 已上报过终态（done/failed）—— 自动推进"
+                             "不覆盖终态，避免把「已完成」改回「进行中」。"
+                             % _room)
+            out["ok"] = True
+            return out
+        # ── ② 幂等：最新 stage 已是目标阶段 → 不重复追加 ─────────────
+        try:
+            _data = _read_json_file(_report_path(_room)) or {}
+            _latest = _data.get("latest") or {}
+            if (not force and isinstance(_latest, dict)
+                    and str(_latest.get("stage") or "") == _stage):
+                out["ok"] = True
+                out["skipped"] = "already"
+                out["reason"] = ("最新 stage 已是 %r，幂等跳过（不重复追加 "
+                                 "history）。" % _stage)
+                return out
+        except Exception:
+            pass
+        # ── 真正写一条进度（复用 room-report 的落盘/心跳逻辑）────────
+        _res = cmd_room_report(_room, _stage, detail or "")
+        out["ok"] = bool(_res.get("ok"))
+        out["pushed"] = bool(_res.get("ok"))
+        if not _res.get("ok"):
+            out["reason"] = _res.get("error") or "room-report 写入失败"
+        else:
+            out["reported_at"] = _res.get("reported_at")
+        return out
+    except Exception as e:
+        # 绝不把进度上报的异常抛给主流程
+        out["ok"] = False
+        out["skipped"] = "exception"
+        out["reason"] = repr(e)
+        return out
+
+
+def cmd_room_stage(room, stage=None, detail=""):
+    """CLI 包装：任何工具（含未来新增的长任务）都能 shell 调它推进阶段。
+
+    用法：
+        python mode_gate.py room-stage "<房间名>" [阶段] [详情...]
+        （阶段缺省 = validating；房间名也可由 DSH_ROOM 环境变量提供）
+
+    设计意图：physics_bridge / visual_check 等模块与 mode_gate 之间【不建立
+    反向依赖】—— 它们只需 subprocess 调本命令，或 import 后调
+    push_room_stage()（推荐后者：零进程开销、失败语义明确）。
+    """
+    _stage = (stage or VALIDATING_STAGE).strip() or VALIDATING_STAGE
+    _detail = detail or ({
+        "validating": "进入校核阶段（物理/领域/看图），长任务执行中",
+    }.get(_stage, ""))
+    return push_room_stage(room, _stage, _detail)
+
+
 def cmd_room_report_read(room=None):
     """【bug6修复】主对话旁路读取小屋进度报告（零干扰，绝不打断小屋干活）。"""
     os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -4874,7 +5037,7 @@ def cmd_sw_release(name):
             "note": "该房间未持有 SW 锁" + ("（已顺带清理残留标志）" if _purged else "")}
 
 
-def cmd_close_all():
+def cmd_close_all(quit=False):
     """关闭全部 SolidWorks 并释放 SW 锁（流程清场用）。
 
     为什么要在这里提供：
@@ -4882,20 +5045,37 @@ def cmd_close_all():
       sw_bridge.py 里，mode_gate.py 没有 → 流程中按文档调用会得到「未知命令」，
       表现为"SW 只能确认无进程，没法用命令清场"。
       本命令 = sw_bridge.close-all + 释放本机全部房间的 SW 锁（同一件事的两半）。
+
+    ── 【Bug⑧ 修复】默认语义改为【保活】：只关文档，不结束 SW 进程 ─────────
+    现场缺陷：三个并行房间共用同一台 SW（FIFO 排队），任一房间调 close-all
+    就会 Quit + taskkill 结束进程，其它房间正在进行的 RPC 连接【立即失效】
+    （主代理观察到 SW PID 频繁变化：4148→30860→18388→23448→472→34744，
+    每次都是冷启动）。并行模式实际退化成"串行 + 冷启动"。
+
+    现在的分级语义：
+      · 默认（quit=False）→ 只调 SldWorks.CloseAllDocuments，SW 进程【保活】，
+        下一个房间/下一个零件直接复用，无需重新 Dispatch；
+      · --quit           → 走原有完整的退出流程（Quit + taskkill + 轮询确认）。
+    SW 锁【始终】释放（那是"使用权"层面的清场，与进程生死无关）。
     """
-    out = {"ok": True, "command": "close-all", "steps": []}
-    # ① 关闭 SW
+    out = {"ok": True, "command": "close-all", "steps": [],
+           "keepalive": (not quit), "quit": bool(quit)}
+    # ① 关闭 SW（默认只关文档、保活）
     try:
         import subprocess as _sp
         import sys as _sys
         import os as _os
         _bridge = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
                                 "sw_bridge.py")
-        _r = _sp.run([_sys.executable, _bridge, "close-all"],
+        _cmdline = [_sys.executable, _bridge, "close-all"]
+        if quit:
+            _cmdline.append("--quit")
+        _r = _sp.run(_cmdline,
                      capture_output=True, text=True, encoding="utf-8",
                      errors="replace", timeout=120)
         _txt = (_r.stdout or "").strip()
-        out["steps"].append({"step": "sw_bridge close-all",
+        out["steps"].append({"step": ("sw_bridge close-all --quit" if quit
+                                      else "sw_bridge close-all (keepalive)"),
                              "ok": _r.returncode == 0,
                              "detail": _txt[-400:] if _txt else ""})
     except Exception as e:
@@ -4920,19 +5100,35 @@ def cmd_close_all():
     except Exception as e:
         out["steps"].append({"step": "release_sw_locks", "ok": False,
                              "error": repr(e)})
-    # ③ 复查进程是否真的归零（close-all 是异步的）
+    # ③ 复查进程状态 —— 两种语义下"预期结果"是相反的，不能混为一谈
+    #   · --quit（旧行为）：预期【无】SLDWORKS.exe，残留即失败；
+    #   · 默认保活：预期【仍有】SLDWORKS.exe（这正是"没打断别的房间"的证据），
+    #     进程没了反而要提示"下次调用需冷启动"（不判失败：文档已关干净，
+    #     保活是"尽量"，SW 也可能因自身原因退出）。
     try:
         import subprocess as _sp2
         _r2 = _sp2.run(["tasklist", "/FI", "IMAGENAME eq SLDWORKS.exe"],
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=20)
         _remain = "SLDWORKS.EXE" in (_r2.stdout or "").upper()
-        out["steps"].append({"step": "verify_exited", "ok": not _remain,
-                             "detail": ("仍有残留进程" if _remain
-                                        else "进程已全部退出")})
-        if _remain:
-            out["ok"] = False
-            out["hint"] = "SW 进程未完全退出，稍后重试或手动结束。"
+        out["sw_running"] = bool(_remain)
+        if quit:
+            out["steps"].append({"step": "verify_exited", "ok": not _remain,
+                                 "detail": ("仍有残留进程" if _remain
+                                            else "进程已全部退出")})
+            if _remain:
+                out["ok"] = False
+                out["hint"] = "SW 进程未完全退出，稍后重试或手动结束。"
+        else:
+            out["steps"].append({"step": "verify_keepalive", "ok": True,
+                                 "detail": ("SW 进程保持运行（保活生效，"
+                                            "其它房间的 RPC 连接不受影响）"
+                                            if _remain else
+                                            "SW 进程已自行退出（文档已关干净；"
+                                            "下次调用会自动冷启动）")})
+            if not _remain:
+                out["note"] = ("保活未生效（SW 已退出），下次建模需重新 Dispatch；"
+                               "不影响正确性，只影响启动耗时。")
     except Exception as e:
         out["steps"].append({"step": "verify_exited", "ok": False,
                              "error": repr(e)})
@@ -5140,6 +5336,9 @@ def main():
                   "room-fail <房间名>": "小屋失败回退，待重做",
                   "room-heartbeat <房间名>": "心跳保活（【Bug-23】已非必需，仅兼容）",
                   "room-report <房间> <阶段> <详情>": "进度旁路上报（小屋可调）",
+                  "room-stage <房间> [阶段] [详情]": "【Bug⑨】长任务推进阶段"
+                                                       "（默认 validating；幂等、不覆盖"
+                                                       " done/failed、失败不阻断）",
                   "room-report-read [房间名]": "旁路读取小屋进度（只读）",
                   "room-artifact <房间> <文件> [零件]": "【Bug-16/17】登记房间产物归属",
                   "room-status": "所有房间精确状态（只读；含平台权威状态）",
@@ -5152,6 +5351,8 @@ def main():
                   "stale-artifacts [目录] [--quarantine]": "扫描/隔离上一轮遗留件",
                   "residue-check [--clean] [--force]": "子对话残留体检与清理",
                   "rooms-reset": "清空房间/子代理/锁/报告",
+                  "close-all [--quit]": "【Bug⑧】默认只关文档、SW 进程保活；"
+                                       "--quit 才真正退出 SW",
                   "lock-doctor [--auto]": "锁体检：检测/清理失效锁",
                   "doctor [--sync|--clean|--migrate]": "状态文件多副本一致性体检"
                                                         "（--migrate 把副本更新的状态搬到权威目录，Bug-08）",
@@ -5214,6 +5415,43 @@ def main():
         result = cmd_room_report(args[1] if len(args) > 1 else "unknown",
                                  args[2] if len(args) > 2 else "unknown",
                                  " ".join(args[3:]) if len(args) > 3 else "")
+    elif cmd == "room-stage":
+        # 【Bug⑨】长任务（物理校核/疲劳/领域/看图）在房间上下文里推进阶段。
+        # 用法（阶段可省略，省略即 validating）：
+        #   room-stage <房间名> [阶段] [详情...]
+        #   room-stage --room <房间名>              （从 DSH_ROOM 取房间亦可）
+        # 阶段名必须 ∈ REPORT_STAGES；不合法时【不静默当房间名】，而是明确报错，
+        #   否则 room-stage 房间 validatingX 会被误当成"房间=validatingX"。
+        _rs_rest = [a for a in args[1:] if not a.startswith("--")]
+        _rs_room = (os.environ.get("DSH_ROOM") or "").strip()
+        _rs_stage = VALIDATING_STAGE
+        _rs_detail = ""
+        _rs_bad_stage = None
+        if _rs_rest:
+            if _rs_rest[0] in REPORT_STAGES:
+                _rs_stage = _rs_rest[0]
+                _rs_detail = " ".join(_rs_rest[1:])
+            else:
+                _rs_room = _rs_room or _rs_rest[0]
+                if len(_rs_rest) >= 2:
+                    if _rs_rest[1] in REPORT_STAGES:
+                        _rs_stage = _rs_rest[1]
+                        _rs_detail = " ".join(_rs_rest[2:])
+                    else:
+                        _rs_bad_stage = _rs_rest[1]
+                elif len(_rs_rest) > 1:
+                    _rs_detail = " ".join(_rs_rest[1:])
+        if _rs_bad_stage is not None:
+            result = {
+                "ok": False, "command": "room-stage",
+                "room": _rs_room, "stage": _rs_bad_stage,
+                "error": "未知阶段: %r" % _rs_bad_stage,
+                "allowed_stages": list(REPORT_STAGES),
+                "hint": ("用法: room-stage <房间名> [阶段] [详情...]，"
+                         "阶段缺省=validating。"),
+            }
+        else:
+            result = cmd_room_stage(_rs_room, _rs_stage, _rs_detail)
     elif cmd == "room-report-read":
         result = cmd_room_report_read(args[1] if len(args) > 1 else None)
     elif cmd == "whoami":
@@ -5317,7 +5555,8 @@ def main():
     elif cmd in ("sw-guard-status", "sw-guard"):
         result = cmd_sw_guard_status()
     elif cmd == "close-all":
-        result = cmd_close_all()
+        # 【Bug⑧】默认保活（只关文档、不退出 SW）；--quit 走完整退出流程
+        result = cmd_close_all(quit=("--quit" in args))
     elif cmd == "sw-proc":
         result = cmd_sw_proc()
     elif cmd == "sw-status":

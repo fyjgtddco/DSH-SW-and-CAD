@@ -1,37 +1,11 @@
 {
-  "step": "mode_confirm_asked",
-  "task": "测试：强制清空",
+  "step": "idle",
+  "task": "",
   "context": null,
   "mechanics_result": null,
   "user_choice": null,
   "choice_detail": null,
-  "parallel_mode": "parallel",
+  "parallel_mode": null,
   "subagent_config": null,
-  "created_at": "2026-10-18 22:20:38",
-  "session_started_ts": 1792333238.7913089,
-  "depth_asked_ts": null,
-  "context_asked_ts": null,
-  "mechanics_done_ts": null,
-  "task_id": "20261018_222038_4BF3BDCB",
-  "work_dir": "C:\\Users\\j1877\\Desktop\\test\\20261018_222038_4BF3BDCB",
-  "assembly_confirmed": false,
-  "assembly_inputs": null,
-  "finished_at": null,
-  "param_depth": null,
-  "parallel_mode_reconciled_at": "2026-10-18 22:10:57",
-  "legacy_state_archived": {
-    "ok": true,
-    "moved": [
-      "artifacts_registry.json"
-    ],
-    "archived_to": "C:\\Users\\j1877\\.dsh\\.agent-presets\\engineering\\tools\\reports\\_legacy_20261018-221740"
-  },
-  "legacy_state_purged": {
-    "ok": true,
-    "purged": [],
-    "count": 0,
-    "purged_to": null,
-    "errors": [],
-    "note": "无旧凭证需要清空。"
-  }
+  "created_at": null
 }

@@ -1,31 +1,89 @@
 {
   "ok": true,
-  "pid": 15964,
-  "started_at": "2026-10-18 22:28:50",
-  "updated_at": "2026-10-18 22:29:00",
-  "ticks": 2,
-  "interval": 10.0,
-  "cpu_limit": 85.0,
-  "mem_limit": 85.0,
-  "kill_enabled": true,
+  "pid": 10512,
+  "started_at": "2026-10-20 21:18:22",
+  "updated_at": "2026-10-20 21:18:24",
+  "ticks": 3,
+  "interval": 1.0,
+  "cpu_limit": 0.1,
+  "mem_limit": 0.1,
+  "kill_enabled": false,
   "stop_after_kill": true,
   "last": {
-    "tick": 2,
-    "time": "2026-10-18 22:29:00",
-    "cpu_pct": 30.54,
-    "mem_pct": 82.52,
+    "tick": 3,
+    "time": "2026-10-20 21:18:24",
+    "cpu_pct": 46.17,
+    "mem_pct": 93.93,
     "cpu_ok": true,
     "mem_ok": true,
     "cpu_error": null,
     "mem_error": null,
     "total_mb": 15986.68,
-    "available_mb": 2794.37,
-    "used_mb": 13192.31,
-    "breach": false,
-    "reasons": [],
-    "errors": []
+    "available_mb": 970.14,
+    "used_mb": 15016.54,
+    "breach": true,
+    "reasons": [
+      "CPU 占用 46.2% 超过阈值 0.1%",
+      "内存占用 93.9% 超过阈值 0.1%"
+    ],
+    "errors": [],
+    "kill": {
+      "ok": true,
+      "method": "skipped",
+      "note": "演练模式：未执行 taskkill"
+    }
   },
-  "alerts": [],
+  "alerts": [
+    {
+      "time": "2026-10-20 21:18:22",
+      "tick": 1,
+      "reasons": [
+        "CPU 占用 44.6% 超过阈值 0.1%",
+        "内存占用 94.7% 超过阈值 0.1%"
+      ],
+      "cpu_pct": 44.63,
+      "mem_pct": 94.67,
+      "message": "[sw-guard][ALERT] 2026-10-20 21:18:22 CPU 占用 44.6% 超过阈值 0.1%；内存占用 94.7% 超过阈值 0.1% → 演练模式（--no-kill）不执行关闭",
+      "kill": {
+        "ok": true,
+        "method": "skipped",
+        "note": "演练模式：未执行 taskkill"
+      }
+    },
+    {
+      "time": "2026-10-20 21:18:23",
+      "tick": 2,
+      "reasons": [
+        "CPU 占用 51.0% 超过阈值 0.1%",
+        "内存占用 94.7% 超过阈值 0.1%"
+      ],
+      "cpu_pct": 51.03,
+      "mem_pct": 94.66,
+      "message": "[sw-guard][ALERT] 2026-10-20 21:18:23 CPU 占用 51.0% 超过阈值 0.1%；内存占用 94.7% 超过阈值 0.1% → 演练模式（--no-kill）不执行关闭",
+      "kill": {
+        "ok": true,
+        "method": "skipped",
+        "note": "演练模式：未执行 taskkill"
+      }
+    },
+    {
+      "time": "2026-10-20 21:18:24",
+      "tick": 3,
+      "reasons": [
+        "CPU 占用 46.2% 超过阈值 0.1%",
+        "内存占用 93.9% 超过阈值 0.1%"
+      ],
+      "cpu_pct": 46.17,
+      "mem_pct": 93.93,
+      "message": "[sw-guard][ALERT] 2026-10-20 21:18:24 CPU 占用 46.2% 超过阈值 0.1%；内存占用 93.9% 超过阈值 0.1% → 演练模式（--no-kill）不执行关闭",
+      "kill": {
+        "ok": true,
+        "method": "skipped",
+        "note": "演练模式：未执行 taskkill"
+      }
+    }
+  ],
   "killed": false,
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "stopped_reason": "max_ticks"
 }

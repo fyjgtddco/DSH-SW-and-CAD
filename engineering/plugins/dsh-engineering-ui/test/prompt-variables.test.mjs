@@ -68,18 +68,32 @@ test('① 插件必须为 cwd 注册 prompt 变量（否则人设里的 {{cwd}} 
     '缺少 cwd 变量注册');
 });
 
-test('② 注册必须挂在 ctx.inject([\'systemPrompt\'], ...) 上（可选服务不硬依赖）', () => {
-  const idx = HOST_SRC.indexOf("variable('cwd'");
-  assert.ok(idx > 0, '找不到 cwd 注册点');
-  // 注册点本身在回调里，真正调用 ctx.inject 的语句在它之后若干行内。
-  const after = HOST_SRC.slice(idx, idx + 2000);
-  const m = /ctx\.inject\(\s*\[([^\]]*)\]\s*,/.exec(after);
-  assert.ok(m !== null, 'cwd 注册之后应出现 ctx.inject([...], callback)');
+test('② 注册必须有 ctx.inject([\'systemPrompt\'], ...) 兜底路径（可选服务不硬依赖）', () => {
+  // 【本次修订】注册点已改为"同步优先 + inject 兜底"两段式：
+  //   ① 同步直接取 ctx.systemPrompt 注册（消除 persona 先渲染的时序竞态）；
+  //   ② 再用 ctx.inject(['systemPrompt'], cb) 兜底服务稍后就绪的 profile。
+  //   因此断言要同时覆盖这两条路径，而不是要求"注册点必须在 inject 回调里"。
+  // 锚定【真实的 ctx.inject 调用】而不是注释里提到的字符串：
+  //   注释里也写了 "ctx.inject(['systemPrompt'], cb)" 这段文字，
+  //   若按 variable('cwd') 附近切片会把注释一起算进来 → 断言误判。
+  // 只看【代码行】，剔除注释行 —— 否则注释里提到的示例代码会让断言误判。
+  const codeLines = HOST_SRC.split(/\r?\n/)
+    .filter((ln) => !/^\s*(\/\/|\*|\/\*)/.test(ln));
+  const code = codeLines.join('\n');
+  const injectIdx = code.indexOf("ctx.inject(['systemPrompt']");
+  assert.ok(injectIdx > 0, '找不到 ctx.inject([\'systemPrompt\'], ...) 调用（代码行中）');
+  const region = code.slice(Math.max(0, injectIdx - 1500), injectIdx + 600);
+  // 必须有 inject 兜底
+  const m = /ctx\.inject\(\s*\[([^\]]*)\]\s*,/.exec(region);
+  assert.ok(m !== null, '应保留 ctx.inject([...], callback) 兜底路径');
   assert.match(m[1], /['"]systemPrompt['"]/,
     'ctx.inject 的服务列表应包含 systemPrompt，实际为 [' + m[1].trim() + ']');
   // 而且必须做能力判断，缺失该服务时不得在 apply 阶段抛错
-  assert.match(after, /typeof\s+ctx\.inject\s*===\s*['"]function['"]/,
+  assert.match(region, /typeof\s+ctx\.inject\s*===\s*['"]function['"]/,
     '调用前应判断 ctx.inject 是否存在');
+  // 同步注册路径必须存在（本次 {{cwd}} 复发的直接修复点）
+  assert.match(region, /ctx\.systemPrompt/,
+    '应有同步注册路径（直接读 ctx.systemPrompt），否则 persona 先渲染时仍会报 unknown prompt variable');
 });
 
 test('③ 取值必须优先 workingDirectory.get（同步、无 I/O）', () => {

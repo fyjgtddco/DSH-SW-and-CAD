@@ -812,10 +812,71 @@ export class DefenseSigner {
    * @param opts - { requirePhysics, rooms } 等上下文，由 Python 传入。
    * @returns 判定结果（结构同 defense_gate.check_room_defense）。
    */
+  /**
+   * 【本次修复·Bug⑤】解析"本次判定应当读取的 reports 目录"。
+   *
+   * 工程模式的凭据实际落在 reports/<task_id>/ 子目录（按任务隔离），
+   * 而旧实现只读 reports/ 根 → 凭据存在却判 missing（致命 Bug⑤）。
+   *
+   * @param {object} opts - { taskId } 可显式指定任务 id。
+   * @returns {string} 实际要读的 reports 目录绝对路径。
+   */
+  _resolveReportsDir(opts = {}) {
+    const flat = pathSync.join(this.toolsDir, 'reports');
+    // ① 显式传入
+    const explicit = String((opts && opts.taskId) || '').trim();
+    if (explicit) {
+      const p = pathSync.join(flat, explicit);
+      try { if (fsSync.existsSync(p) && fsSync.statSync(p).isDirectory()) return p; }
+      catch (e) { /* 继续尝试下一来源 */ }
+    }
+    // ② workflow_state.json 的当前 task_id
+    try {
+      const sf = pathSync.join(this.toolsDir, 'workflow_state.json');
+      if (fsSync.existsSync(sf)) {
+        const st = JSON.parse(fsSync.readFileSync(sf, 'utf8'));
+        const tid = String((st && (st.task_id || (st.state && st.state.task_id))) || '').trim();
+        if (tid) {
+          const p = pathSync.join(flat, tid);
+          if (fsSync.existsSync(p) && fsSync.statSync(p).isDirectory()) return p;
+        }
+      }
+    } catch (e) { /* 继续尝试下一来源 */ }
+    // ③ reports/ 下最新的子目录（按 mtime）
+    try {
+      if (fsSync.existsSync(flat)) {
+        const subs = fsSync.readdirSync(flat, { withFileTypes: true })
+          .filter((d) => d && d.isDirectory && d.isDirectory())
+          .map((d) => {
+            const full = pathSync.join(flat, d.name);
+            let mt = 0;
+            try { mt = fsSync.statSync(full).mtimeMs || 0; } catch (e) { mt = 0; }
+            return { name: d.name, full, mt };
+          })
+          .sort((a, b) => b.mt - a.mt);
+        if (subs.length) return subs[0].full;
+      }
+    } catch (e) { /* 继续尝试下一来源 */ }
+    // ④ flat 根（旧布局）
+    return flat;
+  }
+
   judgeDefense(room, kind, opts = {}) {
     const out = { ok: false, room, blockers: [], warnings: [], details: {}, judged_by: 'host' };
     try {
-      const reportsDir = pathSync.join(this.toolsDir, 'reports');
+      // ══ 【本次修复·Bug⑤ 根治】宿主必须能读 reports/<task_id>/ 子目录 ══════
+      // 缺陷：Python 侧凭据落在 reports/<task_id>/<房间>.physics.json，
+      //   而这里【只读 flat 的 reports/】→ 凭据明明存在却判 missing →
+      //   room-end 被永久拒绝（用户实测的致命 Bug⑤）。
+      //   Python 侧已用"候选集合 + 转本地验签"兜住，但那只是绕行；
+      //   根治点是这里也要认 task 子目录。
+      // 解析顺序（命中即用，全部未命中再退回 flat）：
+      //   ① opts.taskId 显式传入（Python 侧 check_room_defense 一定带上）
+      //   ② workflow_state.json 里的当前 task_id（真实运行时的权威来源）
+      //   ③ reports/ 下【最新修改】的子目录（兜底：状态文件缺失/跨副本时）
+      //   ④ flat reports/ 根（旧布局，保持兼容）
+      const reportsDir = this._resolveReportsDir(opts);
+      out.reports_dir = reportsDir;
       const requirePhysics = opts.requirePhysics !== false;
       // ── 物理凭据 ──
       if (requirePhysics) {

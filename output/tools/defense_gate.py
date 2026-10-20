@@ -100,6 +100,141 @@ def reports_dir(task_id=None):
     return os.path.join(STATE_DIR, "reports")
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  【Bug⑤ 修复】reports 目录必须按【候选集合】解析，而不是只认第一个
+# ══════════════════════════════════════════════════════════════════════
+#  现象（实测致命）：凭据明明存在，check-room 仍报 "凭据文件不存在（missing）"，
+#    room-end 被永久拒绝；而直接 import defense_gate 读同一个路径却完全正常。
+#  根因有三层，任一层都会让"读到的目录"≠"写下的目录"：
+#    ① 工程模式有【两份副本】：工作区 <repo>/engineering/tools 与安装副本
+#       %DSH_HOME%/.agent-presets/engineering/tools；
+#    ② reports 又按【任务】分子目录（reports/<task_id>/），而宿主判定
+#       （judgeDefense）只读 <它自己那份 tools>/reports/ 的【flat】路径；
+#    ③ 写入侧固定 STATE_DIR，万一 _store 不可用就落到 _BASE_DIR（工作区）。
+#  修复原则（严格 fail-closed，不放宽任何判定）：
+#    · 解析 reports 目录时给出【有序候选集合】：① STATE_DIR ② _BASE_DIR
+#      ③ 安装副本（DSH_HOME / DSH_ENGINEERING_ROOT 推导）；
+#    · 【任一候选里存在该房间凭据即视为有效】（不是只看第一个）；
+#    · 所有候选都找不到 → 仍然判 missing（真找不到就拒绝，绝不放水）；
+#    · 宿主判定报 missing 但本地候选确有凭据 → 转本地验签（见
+#      check_room_defense 的 HOST_MISSING_LOCAL_CREDENTIAL 分支），
+#      并把【宿主实际读的 reports_dir】回传，便于排障。
+def _safe_room_stem(room):
+    """房间名 → 文件名安全词干（与宿主 readCredentialDetailed 同口径）。"""
+    return "".join(c for c in str(room) if c.isalnum() or c in " _-").strip()
+
+
+def _dsh_home():
+    """DSH 主目录（宿主安装位置）；缺失时返回空串。"""
+    try:
+        v = (os.environ.get("DSH_HOME") or "").strip()
+        if v:
+            return os.path.abspath(v)
+    except Exception:
+        pass
+    try:
+        home = os.path.expanduser("~")
+    except Exception:
+        home = ""
+    if home:
+        return os.path.abspath(os.path.join(home, ".dsh"))
+    return ""
+
+
+def _installed_tools_dir_candidates():
+    """【安装副本】tools 目录候选（宿主加载插件的那份目录）。"""
+    out = []
+    dh = _dsh_home()
+    if dh:
+        out.append(os.path.join(dh, ".agent-presets", "engineering", "tools"))
+        out.append(os.path.join(dh, "engineering", "tools"))
+    try:
+        eng = (os.environ.get("DSH_ENGINEERING_ROOT") or "").strip()
+        if eng:
+            a = os.path.abspath(eng)
+            out.append(a if os.path.basename(a).lower() == "tools"
+                       else os.path.join(a, "tools"))
+    except Exception:
+        pass
+    return out
+
+
+def _tools_dir_roots():
+    """reports 目录解析的【根目录候选】（按可信度递减，已归一化去重）。"""
+    out, seen = [], set()
+    for d in [STATE_DIR, _BASE_DIR] + _installed_tools_dir_candidates():
+        try:
+            a = os.path.abspath(d)
+        except Exception:
+            continue
+        if not a:
+            continue
+        k = os.path.normcase(a)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(a)
+    return out
+
+
+def reports_dir_candidates(task_id=None):
+    """凭据目录【候选集合】（顺序 = 优先级）。
+
+    有 task_id 时逐根拼 reports/<task_id>（与写入侧同构）；
+    取不到 task_id 时退回 flat reports/（向后兼容，与 reports_dir() 一致）。
+    """
+    tid = task_id or _current_task_id()
+    out, seen = [], set()
+    for root in _tools_dir_roots():
+        p = (os.path.join(root, "reports", str(tid)) if tid
+             else os.path.join(root, "reports"))
+        try:
+            a = os.path.abspath(p)
+        except Exception:
+            continue
+        k = os.path.normcase(a)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(a)
+    return out
+
+
+def reports_dir_effective(task_id=None):
+    """候选里第一个【已存在】的目录（排障用）；都不存在时返回首选写入位。"""
+    cands = reports_dir_candidates(task_id)
+    for c in cands:
+        try:
+            if os.path.isdir(c):
+                return c
+        except Exception:
+            continue
+    return cands[0] if cands else reports_dir(task_id)
+
+
+def room_credential_candidates(room, suffix, task_id=None):
+    """某房间凭据在【所有候选目录】下的路径（顺序 = 优先级）。"""
+    stem = _safe_room_stem(room) + str(suffix)
+    return [os.path.join(d, stem) for d in reports_dir_candidates(task_id)]
+
+
+def resolve_room_credential(room, suffix, task_id=None):
+    """在候选目录中定位房间凭据。
+
+    Returns: (path|None, tried_paths)
+      · 命中【任一】候选即返回该路径（Bug⑤ 的核心修复：不再只看第一个）；
+      · 全部未命中返回 (None, 所有尝试过的路径) —— 调用方必须 fail-closed。
+    """
+    cands = room_credential_candidates(room, suffix, task_id)
+    for p in cands:
+        try:
+            if os.path.isfile(p):
+                return p, cands
+        except Exception:
+            continue
+    return None, cands
+
+
 REPORTS_DIR = reports_dir()
 def artifact_registry_file(task_id=None):
     """产物登记表同样按任务隔离（否则新任务会看到上一局的零件清单）。"""
@@ -115,9 +250,72 @@ def bypass_log_file(task_id=None):
 
 BYPASS_LOG_FILE = bypass_log_file()
 
-# 需要物理/领域校核的【建模类】房间类型（与 workflow_gate.WAVE1_TYPES 对齐）
+# ── 【Bug⑥ 修复】require_physics 白名单：凡【含零件】的房间类型一律强制校核 ──
+# 实测缺陷（本任务三房间）：
+#   · 底盘结构件 structural → require_physics=true（缺凭据被拦）；
+#   · 传动与轮组 drivetrain → require_physics=false（**放行**，含 2 项 CRITICAL）；
+#   · 传感器与电子件 sensor → require_physics=false（**放行**，从未校核）。
+#   drivetrain/sensor 只是历史遗留的类型名，它们【同样产出零件】，
+#   却因为不在白名单里被判"非建模类"→ 物理/领域凭据均不强制 → 门禁形同虚设。
+# 现在：白名单覆盖全部含零件类型（含 drivetrain / sensor / drawing 这些旧名），
+#   只对【纯出图/协调类】豁免（见 NON_PART_ROOM_TYPES）。
 MODELING_ROOM_TYPES = ("structural", "transmission", "housing",
-                       "support", "spring", "thermal", "corrosion")
+                       "support", "spring", "thermal", "corrosion",
+                       # ── 【Bug⑥】历史遗留 / 别名类型：同样含零件，必须校核 ──
+                       # 注意：'drawing' 不在此列 —— 它由 ROOM_TYPE_ALIAS 归一化为
+                       #   'drafting'（纯出图类），按 NON_PART_ROOM_TYPES 豁免。
+                       "drivetrain", "sensor",
+                       "mechanism", "bracket", "enclosure", "plate",
+                       "frame", "shaft", "gear", "bearing")
+
+# ── 【Bug⑥】纯出图 / 协调类房间：本就不产出零件级 FEA，豁免物理校核 ──────
+# 仅这些类别可豁免（drafting / assembly / prime）；其余一律按"含零件"处理，
+#   避免再出现"新类型名一出现就被静默豁免"的漏洞（fail-closed 语义）。
+NON_PART_ROOM_TYPES = ("drafting", "drawing_export", "assembly",
+                       "assembly_verify", "prime", "coordination")
+
+# ── 【Bug⑥ 修复】房间类型别名映射（与 workflow_gate.ROOM_TYPE_ALIAS 同步）──
+# 为什么需要：门禁用规范名 transmission/housing/drafting，而 defense_gate 从
+#   mode_state / mode2_plan.json 快照里读到的可能是历史名 drivetrain/sensor/
+#   drawing。两边口径不一致 → 同一房间"门禁放行、防线豁免"（Bug③+⑥ 成因）。
+#   先归一化再判定，保证两条链路结论一致。
+ROOM_TYPE_ALIAS = {
+    "drivetrain": "transmission",
+    "drive_train": "transmission",
+    "transmission_system": "transmission",
+    "sensor": "housing",
+    "sensors": "housing",
+    "electronics": "housing",
+    "drawing": "drafting",
+    "drawings": "drafting",
+    "draft": "drafting",
+    "assembly_verify": "assembly",
+    "prime": "assembly",
+}
+
+
+def normalize_room_type(rtype):
+    """把房间类型别名归一化为规范名（未知类型小写后原样返回）。"""
+    _t = str(rtype or "").strip().lower()
+    if not _t:
+        return ""
+    return ROOM_TYPE_ALIAS.get(_t, _t)
+
+
+def room_type_requires_physics(rtype):
+    """房间类型是否需要物理/领域校核（Bug⑥：含零件即需要）。
+
+    规则：
+      · 空类型（legacy 快照无类型）→ 需要（fail-closed，保持旧行为）；
+      · 纯出图/协调类别名 → 不需要（drafting / assembly / prime）；
+      · 其余（含 drivetrain / sensor 等别名）→ 需要。
+    """
+    _t = normalize_room_type(rtype)
+    if not _t:
+        return True
+    if _t in NON_PART_ROOM_TYPES:
+        return False
+    return True
 
 # 房间类型 → DSVA 领域 ID
 TYPE_TO_DOMAIN = {
@@ -991,20 +1189,35 @@ def check_material_attestation(part_path):
 # ══════════════════════════════════════════════════════════════════════
 
 def _room_file(room, suffix):
-    """凭据文件路径 —— 落在【当前任务】的 reports 子目录下（按局隔离）。
+    """凭据【写入】路径 —— 落在【当前任务】的 reports 子目录下（按局隔离）。
 
     每次调用都现取目录（不缓存），这样中途换任务也不会写错地方。
+
+    【Bug⑤ 补充】写入位仍是唯一首选（STATE_DIR 派生），但【读取】一律走
+      resolve_room_credential()：只要任一副本里有该房间凭据就算有效，
+      避免"写在工作区、宿主读安装副本 → 恒判 missing"。
     """
-    safe = "".join(c for c in str(room) if c.isalnum() or c in " _-").strip()
-    return os.path.join(reports_dir(), safe + suffix)
+    return os.path.join(reports_dir(), _safe_room_stem(room) + suffix)
 
 
 def physics_attest_path(room):
+    """物理凭据【写入】路径。"""
     return _room_file(room, ".physics.json")
 
 
 def domain_attest_path(room):
+    """领域凭据【写入】路径。"""
     return _room_file(room, ".domain.json")
+
+
+def physics_attest_read_path(room, task_id=None):
+    """物理凭据【读取】路径（候选集合里第一个真实存在的；都无则 None）。"""
+    return resolve_room_credential(room, ".physics.json", task_id)[0]
+
+
+def domain_attest_read_path(room, task_id=None):
+    """领域凭据【读取】路径（候选集合里第一个真实存在的；都无则 None）。"""
+    return resolve_room_credential(room, ".domain.json", task_id)[0]
 
 
 def _seal_attestation(payload, kind, room, extra_meta=None):
@@ -1368,19 +1581,69 @@ def _get_port():
     return (_read_runtime() or {}).get("port")
 
 
+def _host_tools_dir():
+    """【宿主实际加载的 tools 目录】—— 由宿主自己写下的 runtime.json 反推。
+
+    宿主启动时把 runtime.json 写进它自己的 <toolsDir>/.defense/，
+    （见 defense-sign.js 的 runtimePath / status().runtime_file 实测值：
+      C:\\Users\\<user>\\.dsh\\.agent-presets\\engineering\\tools\\.defense\\runtime.json）
+    因此 dirname(dirname(runtime_file)) 就是宿主的 toolsDir —— 它 judgeDefense
+    读凭据用的正是 <toolsDir>/reports/。返回值可能为空串（未装配/无 runtime）。
+    """
+    p = _find_runtime_file()
+    if not p:
+        return ""
+    try:
+        return os.path.dirname(os.path.dirname(os.path.abspath(p)))
+    except Exception:
+        return ""
+
+
+def host_reports_dir():
+    """【宿主实际读取的】reports 目录（Bug⑤ 排障关键字段）。"""
+    _td = _host_tools_dir()
+    return os.path.join(_td, "reports") if _td else ""
+
+
 def host_judge_room(room, require_physics=True):
     """请求【宿主】执行完整防线判定（C 方案）。
 
     Returns: {ok, blockers, warnings, details, judged_by} 或 None（宿主不可用）。
+
+    ── 【Bug⑤ 修复】响应必须回传【宿主实际读的 reports_dir】──────────────
+    原实现只把宿主的 blockers 原样返回，"missing" 时完全看不出宿主读的是
+    哪一份 reports（工作区 vs 安装副本 × 是否按 task_id 分目录），排障只能靠猜。
+    现在无论宿主是否回传该字段，都补上：
+      · reports_dir_host —— 宿主实际读的目录（由它自己的 runtime.json 反推，
+        与 judgeDefense 的 pathSync.join(this.toolsDir,'reports') 同源）；
+      · credential_host_path —— 宿主本次会去读的凭据绝对路径；
+      · reports_dir_local_candidates —— 本地候选集合（写入侧用的那几个）。
     """
     base = _host_base()
     if not base:
         return None
+    # ── 【Bug⑤ 根治·宿主侧】必须把 task_id 一起发给宿主 ──────────────────
+    # 凭据实际落在 reports/<task_id>/ 子目录；宿主 judgeDefense 原先只读
+    #   flat 的 reports/ 根 → 凭据存在却判 missing（room-end 永久被拒）。
+    #   宿主侧已改为按 task_id 解析子目录（_resolveReportsDir），
+    #   这里负责把 id 送过去；取不到就传空串，宿主会自行兜底。
+    _tid = _current_task_id() or ""
     res = _post_json(base + "/dsh-engineering-ui/defense/judge",
                      {"room": str(room), "kind": "room",
+                      "task_id": str(_tid),
                       "require_physics": bool(require_physics)}, timeout=8.0)
     if not isinstance(res, dict) or "blockers" not in res:
         return None
+    # ── 【Bug⑤】回传宿主实际读的目录（宿主自身未回传时由本地推导补齐）──
+    _hrd = str(res.get("reports_dir") or "").strip() or host_reports_dir()
+    res["host_reports_dir"] = _hrd
+    if _hrd:
+        res.setdefault("credential_host_path", {
+            "physics": os.path.join(_hrd, _safe_room_stem(room) + ".physics.json"),
+            "domain": os.path.join(_hrd, _safe_room_stem(room) + ".domain.json"),
+        })
+        res.setdefault("host_reports_dir_exists", os.path.isdir(_hrd))
+    res.setdefault("reports_dir_local_candidates", reports_dir_candidates())
     return res
 
 
@@ -1530,6 +1793,79 @@ def _real_physics_runs(case_path=None):
     return out
 
 
+def _report_room_of(path):
+    """读一份仿真报告的房间归属（无则空串）。"""
+    rep = _read_json(path)
+    if not isinstance(rep, dict):
+        return ""
+    return str(rep.get("room") or "").strip()
+
+
+def run_attribution_for_room(run_id, room, report_path=None):
+    """【Bug④ 修复】校验 run_id 是否真的属于 room。
+
+    为什么必须校验：实测 房间 domain/physics 凭据的 run_id 引用的是
+      【主代理历史仿真】的 run（opt_iter_3，10 月 11 日遗留），而 run_id 在
+      磁盘上【不唯一】（opt_iter_1 有 7 份，opt_iter_3 有 31 份，分属
+      结构件/壳体机架/传动机构…），所以"run_id 存在"完全无法证明
+      "它是这个房间的这次运行"。凭据于是借到别人的 FEA 结论 →
+      报出与本房零件无关的虚假 CRITICAL（TR-001 轴径 1.5 / TR-005 变形 45mm）。
+    现在按【房间归属】校验，且 fail-closed：
+      ① 有 report_path 且文件存在 → 报告必须带 room 且 room == 本房，
+         报告 run_id（若有）必须与凭据一致；
+      ② 否则在受管 output/physics_runs 下按 run_id 找报告，必须存在
+         【属于本房】的至少一份；
+      ③ 都找不到 / 只找到别的房间 → 判不可信并给出明确原因。
+
+    Returns: (ok: bool, why: str, evidence: dict)
+    """
+    rid = str(run_id or "").strip()
+    rm = str(room or "").strip()
+    rp = str(report_path or "").strip()
+    if not rid:
+        return False, ("凭据未绑定 run_id —— 无法证明物理数据属于本次、本房间"
+                       "（fail-closed；请用本房本次运行重新签发）"), {}
+    if not rm:
+        return False, "未提供房间名，无法校验 run_id 归属", {}
+    # ① 凭据自带 report_path：最强证据
+    if rp and os.path.isfile(rp):
+        rep = _read_json(rp)
+        if isinstance(rep, dict):
+            _rroom = str(rep.get("room") or "").strip()
+            _rrun = str(rep.get("run_id") or "").strip()
+            if _rrun and _rrun != rid:
+                return False, ("report_path 报告的 run_id=%r 与凭据 run_id=%r 不一致"
+                               "（凭据被改写或指向了别的运行）" % (_rrun, rid)), {}
+            if not _rroom:
+                return False, ("report_path 报告未记录房间归属，无法证明属于本房 %r"
+                               "（Bug④ fail-closed）" % rm), {}
+            if _rroom != rm:
+                return False, ("【跨房间污染】凭据 run_id=%r 引用的报告属于房间 %r，"
+                               "与本房 %r 不一致（Bug④）" % (rid, _rroom, rm)), {}
+            return True, "report_path 报告房间/run_id 与本房一致", {"report_path": rp}
+    # ② 回退：在受管根下按 run_id 找报告，核对 room
+    hits = [r for r in _real_physics_runs()
+            if str(r.get("run_id") or "") == rid]
+    if not hits:
+        return False, ("凭据声明的 run_id=%r 在受管 output/physics_runs 下找不到"
+                       "任何运行记录（run_id 不真实）" % rid), {}
+    rooms, paths = set(), []
+    for h in hits:
+        _p = str(h.get("path") or "")
+        _r = _report_room_of(_p)
+        if _r:
+            rooms.add(_r)
+            paths.append(_p)
+    if rm in rooms:
+        return True, "受管根下存在属于本房的同 run_id 报告", {"report_path": paths[0]}
+    if not rooms:
+        return False, ("run_id=%r 的所有报告都未记录房间归属，无法证明属于本房 %r"
+                       "（Bug④ fail-closed）" % (rid, rm)), {}
+    return False, ("【跨房间污染】run_id=%r 在磁盘上只属于房间 %s，"
+                   "与凭据房间 %r 不一致（Bug④）"
+                   % (rid, "/".join(sorted(rooms)[:4]), rm)), {"rooms": sorted(rooms)}
+
+
 def _attestation_is_backed_by_real_run(att):
     """凭据是否【有真实运行记录背书】（防手写伪造）。
 
@@ -1662,11 +1998,17 @@ def _attestation_is_backed_by_real_run(att):
 
 def check_physics_attestation(room):
     out = {"ok": False, "level": "BLOCK", "reasons": [], "room": str(room)}
-    att = _read_json(physics_attest_path(room))
+    # ── 【Bug⑤ 修复】按【候选集合】找凭据（任一副本存在即视为存在）──────
+    _cred_path, _tried = resolve_room_credential(room, ".physics.json")
+    out["credential_path"] = _cred_path
+    out["credential_searched"] = _tried
+    att = _read_json(_cred_path) if _cred_path else None
     if not att:
         out["reasons"].append(
             "缺少物理校核凭据（reports/%s.physics.json）—— 该房间未做过 FEA/疲劳校核。"
             % str(room))
+        # 真找不到时如实回报搜索过的目录（多为两份副本各一份，便于排障）
+        out["searched_dirs"] = sorted({os.path.dirname(_p) for _p in _tried})
         out["hint"] = ("在房间内执行: python sw_bridge.py physics-optimize "
                        "<load_case.json> --room %s" % str(room))
         return out
@@ -1683,6 +2025,20 @@ def check_physics_attestation(room):
         out["reasons"].append(
             "物理凭据归属房间为 %r，与被校验房间 %r 不一致 —— 疑似挪用其他房间的凭据"
             % (_att_room, str(room)))
+    # ── 【Bug④ 修复】room ↔ run_id 一致性（凭据 run_id 必须属于本房本次运行）──
+    # 实测缺陷：房间凭据的 run_id 引用的是【主代理历史仿真】的 run（opt_iter_3），
+    #   而 run_id 跨房间/跨任务复用，单看"存在"无法证明归属 → 借到别人的 FEA
+    #   结论 → 报与本房零件无关的虚假 CRITICAL。
+    _run_ok, _run_why, _run_ev = run_attribution_for_room(
+        att.get("run_id"), str(room), att.get("report_path"))
+    out["run_id_attributed_to_room"] = bool(_run_ok)
+    out["run_id_attribution_note"] = _run_why
+    if _run_ev:
+        out["run_id_evidence"] = _run_ev
+    if not _run_ok:
+        out["reasons"].append(
+            "物理凭据的 run_id 无法归属到本房间本次运行（%s）—— 凭据不可信（Bug④）"
+            % _run_why)
     out["attestation"] = {
         "overall": att.get("overall"),
         "safety_factor": att.get("safety_factor"),
@@ -1719,11 +2075,16 @@ def check_physics_attestation(room):
 
 def check_domain_attestation(room):
     out = {"ok": False, "level": "BLOCK", "reasons": [], "room": str(room)}
-    att = _read_json(domain_attest_path(room))
+    # ── 【Bug⑤ 修复】按【候选集合】找凭据（任一副本存在即视为存在）──────
+    _cred_path, _tried = resolve_room_credential(room, ".domain.json")
+    out["credential_path"] = _cred_path
+    out["credential_searched"] = _tried
+    att = _read_json(_cred_path) if _cred_path else None
     if not att:
         out["reasons"].append(
             "缺少领域校验凭据（reports/%s.domain.json）—— 未跑 DSVA/GB 规则校验。"
             % str(room))
+        out["searched_dirs"] = sorted({os.path.dirname(_p) for _p in _tried})
         out["hint"] = ("在房间内执行: python sw_bridge.py physics-validate-domain "
                        "<domain> --room %s" % str(room))
         return out
@@ -1773,6 +2134,33 @@ def check_domain_attestation(room):
     # run_id/时间戳：领域校验同样要有可追溯标识
     if not str(att.get("run_id") or "").strip() and not str(att.get("checked_at") or "").strip():
         out["reasons"].append("领域凭据缺少 run_id/checked_at 之类的可追溯标识（疑似伪造）")
+    # ── 【Bug④ 修复】领域凭据的 run_id 必须属于本房本次运行 ──────────────
+    # 实测缺陷：传动与轮组房的 domain 凭据 run_id 引用主代理历史 run（opt_iter_3），
+    #   规则于是在【别人的仿真数据】上跑出 TR-001/TR-005 两条虚假 CRITICAL，
+    #   与本房零件（轴孔 Ø5）无关。domain 校验器原实现只验签/验 room/验
+    #   rules_file，从不校验 run_id 归属 —— 这里补上，且 fail-closed：
+    #     · 有 run_id → 必须能在受管根下找到【属于本房】的同 run_id 运行；
+    #     · 只有 checked_at 没有 run_id → 明确告警（没有仿真数据来源可校验），
+    #       但不在此处硬拦（领域校验可基于人工参数，见 domain_validator）。
+    _drun = str(att.get("run_id") or "").strip()
+    if _drun:
+        _d_ok, _d_why, _d_ev = run_attribution_for_room(
+            _drun, str(room),
+            ((att.get("data_source") or {}) or {}).get("report_path")
+            if isinstance(att.get("data_source"), dict) else None)
+        out["run_id_attributed_to_room"] = bool(_d_ok)
+        out["run_id_attribution_note"] = _d_why
+        if _d_ev:
+            out["run_id_evidence"] = _d_ev
+        if not _d_ok:
+            out["reasons"].append(
+                "领域凭据的 run_id 无法归属到本房间本次运行（%s）—— "
+                "该结论可能基于别的房间/历史运行的仿真数据（Bug④）" % _d_why)
+            out["run_id_mismatch"] = True
+    else:
+        out["run_id_attributed_to_room"] = None
+        out["warnings_for_operator"] = list(out.get("warnings_for_operator") or []) + [
+            "领域凭据只有 checked_at 没有 run_id：无法核对仿真数据是否属于本房本次运行"]
     out["attestation"] = {
         "domain": att.get("domain"),
         "score": att.get("score"),
@@ -1836,6 +2224,74 @@ def _room_types():
     return out
 
 
+def _host_judge_missing_credentials(hj):
+    """宿主判定里，哪些防线被判为【凭据缺失（missing）】。
+
+    只认 reason_code/失败标记为 missing 的那些；其余一律不认
+    （验签失败、结论 FAIL、材料缺失等都必须保留宿主结论，不得转本地）。
+    Returns: 缺失的防线 kind 列表，如 ["physics", "domain"]
+    """
+    out = []
+    _det = (hj or {}).get("details") or {}
+    for _kind in ("physics", "domain"):
+        _d = _det.get(_kind)
+        if not isinstance(_d, dict):
+            continue
+        if str(_d.get("failure") or "").strip() == "missing":
+            out.append(_kind)
+        elif _d.get("verified") is False and "不存在" in str(_d.get("reason") or ""):
+            out.append(_kind)
+    return out
+
+
+def _host_missing_but_local_has_credentials(room, hj):
+    """【Bug⑤ 修复】宿主判 missing、但本地候选确实找到凭据 → 转本地验签。
+
+    判据（任一不满足即【不转】，保持宿主结论 = fail-closed）：
+      ① 宿主给出的 blockers 全部来自"凭据缺失"（没有别的实质阻断，
+         例如结论 FAIL / 验签失败 / 材料缺失 —— 那些必须保留宿主判定）；
+      ② 对每一个判 missing 的防线，本地【候选集合】里确实存在该房间的
+         凭据文件（不是"猜"存在，而是 os.path.isfile 命中）。
+
+    Returns: {convert: bool, note: str, kinds: [...], local_paths: {...}}
+    """
+    _out = {"convert": False, "note": "", "kinds": [], "local_paths": {}}
+    _kinds = _host_judge_missing_credentials(hj)
+    if not _kinds:
+        _out["note"] = "宿主未判'凭据缺失'，保留宿主判定"
+        return _out
+    # ① 宿主 blockers 必须【只】由"凭据缺失"构成
+    _blk = [str(b) for b in ((hj or {}).get("blockers") or [])]
+    _miss_prefix = {"physics": "【防线②物理】未做", "domain": "【防线③领域】未做"}
+    _others = [b for b in _blk
+               if not any(b.startswith(_miss_prefix[k]) for k in _kinds)]
+    if _others:
+        _out["note"] = ("宿主判定含非'凭据缺失'的阻断（%s），不得转本地判定"
+                        % ("; ".join(_others)[:200]))
+        return _out
+    # ② 每一个 missing 的防线，本地候选都必须真的找到凭据文件
+    _suffix = {"physics": ".physics.json", "domain": ".domain.json"}
+    _found = {}
+    for k in _kinds:
+        fp, _tried = resolve_room_credential(room, _suffix[k])
+        if not fp:
+            _out["note"] = ("宿主判 %s 凭据缺失，且本地候选集合也未找到（已搜索 %d 处）"
+                            "—— 维持 fail-closed 拒绝" % (k, len(_tried)))
+            return _out
+        _found[k] = fp
+    # ③ 宿主 blockers 必须不含【不止 missing】的东西 —— 已由 ① 保证
+    _out["convert"] = True
+    _out["kinds"] = list(_kinds)
+    _out["local_paths"] = _found
+    _hdir = str((hj or {}).get("host_reports_dir") or "").strip() or host_reports_dir()
+    _out["note"] = (
+        "【Bug⑤】宿主判定用的是 %s（未找到凭据），但本地候选集合在 %s 找到同名凭据 "
+        "—— 已转本地验签（签名校验力度不变）。若仍被拒，请核对两份副本/任务子目录是否分裂。"
+        % (_hdir or "未知目录",
+           "; ".join(sorted({os.path.dirname(v) for v in _found.values()}))))
+    return _out
+
+
 def check_room_defense(room, require_physics=None):
     """校验一个房间的三大防线。
 
@@ -1848,7 +2304,13 @@ def check_room_defense(room, require_physics=None):
     rtypes = _room_types()
     rtype = rtypes.get(room, "")
     if require_physics is None:
-        require_physics = (rtype in MODELING_ROOM_TYPES) or (rtype == "")
+        # ── 【Bug⑥ 修复】按【归一化后的类型】判定是否强制物理校核 ──────────
+        # 原实现只看 MODELING_ROOM_TYPES 白名单：drivetrain / sensor 这类
+        #   历史别名不在表里 → require_physics=False → 含零件房间被静默豁免
+        #   （实测传动房 2 项 CRITICAL、传感器房从未校核，全部放行）。
+        # 现在统一走 room_type_requires_physics()：先归一化别名，再只对
+        #   纯出图/协调类（drafting/assembly/prime）豁免，其余含零件类型一律强制。
+        require_physics = room_type_requires_physics(rtype)
 
     details = {}
     blockers = []
@@ -1879,19 +2341,52 @@ def check_room_defense(room, require_physics=None):
                     _hj.setdefault("room", room)
                     _hj.setdefault("room_type", rtype if "rtype" in dir() else None)
                     _hj["judged_by"] = "host"
-                    return {
-                        "ok": bool(_hj.get("ok")),
-                        "room": room,
-                        "room_type": (rtypes.get(room, "") or None),
-                        "require_physics": bool(require_physics),
-                        "blockers": _hj.get("blockers") or [],
-                        "warnings": _hj.get("warnings") or [],
-                        "details": _hj.get("details") or {},
+                    # ── 【Bug⑤ 修复】宿主报 missing、本地候选却有凭据 → 转本地验签 ──
+                    # 原实现无条件 return 宿主结论，于是"凭据写在工作区/任务子目录、
+                    #   宿主只读安装副本 flat reports/" 的场景下，凭据【存在即失效】，
+                    #   room-end 被永久拒绝（Bug⑤ 致命项）。
+                    # 现在：仅在【宿主全部阻断都是'凭据缺失'】且【本地候选集合里
+                    #   确实 os.path.isfile 命中】时才转本地验签；其余情况一律保留
+                    #   宿主结论 —— 也就是 fail-closed 语义没有放松，验签仍由宿主
+                    #   verify-gate 完成（本地判定不改任何签名强度）。
+                    _conv = _host_missing_but_local_has_credentials(room, _hj)
+                    if not _conv.get("convert"):
+                        _res = {
+                            "ok": bool(_hj.get("ok")),
+                            "room": room,
+                            "room_type": (rtypes.get(room, "") or None),
+                            "require_physics": bool(require_physics),
+                            "blockers": _hj.get("blockers") or [],
+                            "warnings": _hj.get("warnings") or [],
+                            "details": _hj.get("details") or {},
+                            "judged_by": "host",
+                        }
+                        # 排障字段（Bug⑤ 要求）：宿主实际读的 reports 目录
+                        _res["host_reports_dir"] = _hj.get("host_reports_dir") or host_reports_dir()
+                        _res["reports_dir_local_candidates"] = (
+                            _hj.get("reports_dir_local_candidates")
+                            or reports_dir_candidates())
+                        if _conv.get("note"):
+                            _res["host_judge_note"] = _conv["note"]
+                        return _res
+                    # 转到本地验签：把宿主 missing 的成因与本地命中的路径都留痕
+                    _degrade_code = "HOST_MISSING_LOCAL_CREDENTIAL"
+                    _host_note = _conv.get("note")
+                    details["host_judge"] = {
                         "judged_by": "host",
+                        "blockers": _hj.get("blockers") or [],
+                        "host_reports_dir": _hj.get("host_reports_dir") or host_reports_dir(),
+                        "converted_to_local": True,
+                        "converted_kinds": _conv.get("kinds") or [],
+                        "local_credential_paths": _conv.get("local_paths") or {},
+                        "reason": _conv.get("note"),
+                        # 宿主的 warnings 不丢：转本地判定后仍须留痕
+                        "host_warnings": list(_hj.get("warnings") or []),
                     }
-                _degrade_code = "HOST_JUDGE_NO_RESPONSE"
-                _host_note = ("宿主判定端点无响应（可能端口不通/宿主重启中），"
-                              "已回落本地判定；本地判定对签名同样严格（fail-closed）")
+                else:
+                    _degrade_code = "HOST_JUDGE_NO_RESPONSE"
+                    _host_note = ("宿主判定端点无响应（可能端口不通/宿主重启中），"
+                                  "已回落本地判定；本地判定对签名同样严格（fail-closed）")
             else:
                 _degrade_code = "PORT_OWNER_MISMATCH"
                 _host_note = ("宿主端口归属校验未通过（%s），已回落本地判定 —— "
