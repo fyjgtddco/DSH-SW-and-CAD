@@ -1,9 +1,9 @@
 {
-  "kid": "7943cff8819a7873",
-  "port": 49670,
+  "kid": "eaedc7387e26fb27",
+  "port": 61214,
   "host": "127.0.0.1",
-  "pid": 32208,
+  "pid": 1936,
   "process_title": "Z:\\DSH\\DeepSeek Harness.exe",
-  "startedAt": 1792503608392,
+  "startedAt": 1793091733948,
   "style": "hmac-host-mediated"
 }

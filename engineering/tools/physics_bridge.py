@@ -19,7 +19,12 @@ DSH 工程模式物理验证子系统的统一命令入口。
   python sw_bridge.py physics-recommend <run_id>
 
 所有命令返回 dict（直接运行时会 JSON 打印），供 sw_bridge.py 路由调用。
+
+【兼容性】本文件不用任何 3.9+ 专有语法（如 list[str] 注解），
+  保证在被机器上"随机的旧版 Python"调用时不会因注解求值而崩。
 """
+from __future__ import annotations
+
 import sys
 import os
 import json
@@ -307,7 +312,7 @@ def _find_output_base() -> str:
     return os.path.abspath(os.path.join(_HERE, "..", "output"))
 
 
-def _find_reports(run_id: str) -> list[str]:
+def _find_reports(run_id: str) -> list[str]:  # noqa: 3.8 兼容由 __future__ annotations 保证
     """在 output 目录下搜索匹配 run_id 的报告文件。"""
     out_base = _find_output_base()
     candidates = []

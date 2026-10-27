@@ -65,7 +65,7 @@
             name: '@deepseek-ai/dsh-persona'
             config:
               prefix: >-
-                你是机械工程设计 Agent（{{model}}）。工作目录 {{cwd}}。
+                你是机械工程设计 Agent（{{model}}）。
 
                 ## 根目录
                 <根> = 含 tools\mode_gate.py 与 tools\workflow_gate.py 的目录。

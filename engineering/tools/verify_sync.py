@@ -22,7 +22,23 @@ try:
 except Exception:
     pass
 
-REPO = r"C:\Users\j1877\Desktop\DSH-SW-and-CAD-main"
+# ── 【换机修复】不写死作者本机桌面路径 ──────────────────────────────────
+# 旧写法 REPO = r"C:\Users\j1877\Desktop\DSH-SW-and-CAD-main"
+# 换台电脑 / 别人 clone 后必然比对失败（报"仓库不存在"或比到别处）。
+# 现在：argv[1] > 环境变量 DSH_REPO_ROOT > 由本文件位置向上两级推导
+#       （tools/ -> engineering/ -> 仓库根）。
+def _find_repo():
+    import sys as _sys
+    if len(_sys.argv) > 1 and os.path.isdir(_sys.argv[1]):
+        return os.path.abspath(_sys.argv[1])
+    env = (os.environ.get("DSH_REPO_ROOT") or "").strip()
+    if env and os.path.isdir(env):
+        return os.path.abspath(env)
+    here = os.path.dirname(os.path.abspath(__file__))      # .../engineering/tools
+    return os.path.dirname(os.path.dirname(here))          # .../           
+
+
+REPO = _find_repo()
 DSH = os.path.expanduser(r"~\.dsh")
 DATA = os.path.join(DSH, ".agent-presets", "engineering")
 
@@ -32,6 +48,8 @@ RUNTIME_NAMES = {
     'platform_status.json', 'artifacts_registry.json', 'TASK_FINISHED.json',
     'connection_state.json', 'design_params.json', 'defense_bypass.json',
     'violations.json', 'guard.json', 'runtime.json',
+    # -- [换机修复] 本机设置（交付目录 / 各软件路径）按运行时数据处理 --
+    'settings.json',
 }
 RUNTIME_DIRS = {'reports', 'heartbeats', 'load_cases', 'physics_runs',
                 'mode_logs', '.defense', '__pycache__', 'output'}
@@ -40,6 +58,13 @@ BIN_EXT = ('.sldprt', '.sldasm', '.slddrw', '.dwg', '.dxf', '.step', '.stp',
 
 
 def skip(name, parts):
+    # -- 【换机修复·降噪】按任务的运行时快照也算现场数据 ------------------
+    # 实测：安装副本里有 artifacts_registry.20261019_202722_88C07F68.json
+    #   这类【带时间戳的历史台账快照】，属于会话现场数据，本来就不该
+    #   从仓库同步过去，也不该被算成差异（否则每次比对都红一片，
+    #   真正的代码差异被淹掉）。
+    if name.startswith("artifacts_registry.") and name.endswith(".json"):
+        return True
     if name in RUNTIME_NAMES:
         return True
     if '.bak' in name or name.endswith('.pyc') or name.startswith('~$'):

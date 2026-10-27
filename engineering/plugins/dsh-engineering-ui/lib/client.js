@@ -665,6 +665,28 @@ window.__ModuleLoader__.load({
       '.eng-conn-log-tg{cursor:pointer;font-size:11.5px;font-weight:600}',
       '.eng-conn-log-sent{color:#b91c1c;font-size:11px;margin-top:4px}',
       '.eng-conn-log-pre{background:rgba(15,23,42,.06);border-radius:6px;font-family:ui-monospace,Consolas,monospace;font-size:10.5px;line-height:1.5;margin:6px 0 0;max-height:190px;overflow:auto;padding:7px 9px;white-space:pre-wrap;word-break:break-word}',
+      // ── 【工程环境检查】连接区上方的新栏目（用户需求 3）───────────────
+      '.eng-env{display:flex;flex-direction:column;gap:8px}',
+      '.eng-env-top{align-items:center;display:flex;gap:8px;justify-content:space-between}',
+      '.eng-env-sum{font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#8b95a3);flex:1;min-width:0}',
+      '.eng-env-list{display:flex;flex-direction:column;gap:4px;margin-top:2px}',
+      '.eng-env-item{align-items:flex-start;display:flex;gap:8px;padding:5px 0;border-top:1px dashed var(--dsw-alias-border-tertiary,rgba(148,163,184,.35))}',
+      '.eng-env-item:first-child{border-top:0}',
+      '.eng-env-dot{border-radius:50%;flex:none;height:7px;width:7px;margin-top:5px}',
+      '.eng-env-dot.ok{background:#16a34a}',
+      '.eng-env-dot.warn{background:#f59e0b}',
+      '.eng-env-dot.missing{background:#dc2626}',
+      '.eng-env-dot.unknown{background:#94a3b8}',
+      '.eng-env-txt{flex:1;min-width:0}',
+      '.eng-env-name{font-size:12.5px;font-weight:600}',
+      '.eng-env-name .opt{font-size:10.5px;font-weight:500;opacity:.65;margin-left:5px}',
+      '.eng-env-det{font-size:11px;line-height:1.55;color:var(--dsw-alias-label-tertiary,#8b95a3);word-break:break-all;margin-top:1px}',
+      '.eng-env-fix{font-size:11px;line-height:1.55;color:#b45309;margin-top:2px}',
+      '.eng-env-prompt{background:rgba(15,23,42,.05);border-radius:8px;font-family:ui-monospace,Consolas,monospace;font-size:10.5px;line-height:1.55;margin:6px 0 0;max-height:240px;overflow:auto;padding:8px 10px;white-space:pre-wrap;word-break:break-word}',
+      '.eng-env-acts{display:flex;flex-wrap:wrap;gap:6px}',
+      '.eng-env-note{font-size:11px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#8b95a3)}',
+      '.eng-path-row{align-items:center;display:flex;gap:8px;margin-top:6px}',
+      '.eng-path-in{background:var(--dsw-alias-bg-layer-2,#fff);border:1px solid var(--dsw-alias-border-secondary,#cbd5e1);border-radius:7px;flex:1;font-size:11.5px;min-width:0;padding:5px 9px;color:inherit}',
       // 开关行（行内只放开关本体，标签由 .eng-row 提供）
       '.eng-row.sw{align-items:center}',
       '.eng-row.sw .eng-sw{flex:none}',
@@ -4549,6 +4571,232 @@ window.__ModuleLoader__.load({
           : null);
     }
 
+    // ══ 【工程环境检查】栏目（用户需求 3）══════════════════════════════════
+    // 用户原话：
+    //   「在设置 → 工程模式中，连接区上面再加一个『检查电脑是否有对应的环境』，
+    //    然后写一段提示词自己发给新的对话，新的 Agent 对话就自己去查看看少啥，
+    //    自己安装。」
+    //
+    // 设计要点（对着用户的三条现场问题逐条落地）：
+    //   ① 为什么必须有这个栏目 —— 用户说「当电脑缺少一些该插件需要的内容的时候，
+    //      一些设置将失效」。缺 pywin32 / 缺 numpy / python 是 3.5，界面上都看不出
+    //      区别，只表现为「某些设置没反应」。这里把每一项都摊开：绿/黄/红三色 +
+    //      「怎么修」一行命令。
+    //   ② 「自己发给新的对话」—— 提示词由后端（tools/env_check.py）现场生成，
+    //      内含本机实测结论、正确的解释器路径、逐条 pip 命令与验收标准；
+    //      前端只负责把它塞进一个新工程会话（复用既有 engSendToWorkSession）。
+    //   ③ 判定逻辑【一行都不写在 JS】：/env-check 与 /env-prompt 都转调 env_check.py，
+    //      保证「设置页看到的」与「Agent 跑出来的」是同一套结论。
+    function EngEnvPanel() {
+      var st = useState({
+        phase: 'idle',      // idle | busy | done | err
+        data: null,
+        err: null,
+        prompt: null,
+        promptBusy: false,
+        sent: null,
+        promptOpen: false,
+        root: '',
+        rootSaving: false,
+        rootMsg: null,
+      });
+      var S = st[0];
+      var mounted = useRef(true);
+      function patch(o) {
+        if (!mounted.current) return;
+        st[1](function (prev) {
+          var n = {};
+          for (var k in prev) if (Object.prototype.hasOwnProperty.call(prev, k)) n[k] = prev[k];
+          for (var k2 in o) if (Object.prototype.hasOwnProperty.call(o, k2)) n[k2] = o[k2];
+          return n;
+        });
+      }
+      function runCheck() {
+        patch({ phase: 'busy', err: null });
+        try {
+          fetch('/dsh-engineering-ui/env-check')
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              if (!mounted.current) return;
+              if (j && j.items) {
+                patch({ phase: 'done', data: j, err: null });
+                // 顺带把交付目录回填到输入框（只填一次，用户改过就不覆盖）
+                var dr = null;
+                for (var i = 0; i < j.items.length; i++) {
+                  if (j.items[i].id === 'delivery_root') { dr = j.items[i].detail || ''; break; }
+                }
+                if (dr && !S.root) {
+                  var m = /^(.+?)（来源：/.exec(dr);
+                  patch({ root: m ? m[1] : dr });
+                }
+              } else {
+                patch({ phase: 'err', data: j || null,
+                        err: (j && (j.error || j.hint)) || '自检没有返回结果' });
+              }
+            })
+            .catch(function (e) {
+              patch({ phase: 'err', err: String((e && e.message) || e) });
+            });
+        } catch (e) {
+          patch({ phase: 'err', err: String((e && e.message) || e) });
+        }
+      }
+      useEffect(function () {
+        mounted.current = true;
+        runCheck();
+        return function () { mounted.current = false; };
+      }, []);
+      function makePrompt() {
+        patch({ promptBusy: true, sent: null });
+        try {
+          fetch('/dsh-engineering-ui/env-prompt')
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              if (!mounted.current) return;
+              if (j && j.prompt) patch({ promptBusy: false, prompt: j.prompt, promptOpen: true });
+              else patch({ promptBusy: false,
+                           err: (j && (j.error || j.hint)) || '没能生成提示词' });
+            })
+            .catch(function (e) {
+              patch({ promptBusy: false, err: String((e && e.message) || e) });
+            });
+        } catch (e) { patch({ promptBusy: false, err: String((e && e.message) || e) }); }
+      }
+      function sendPrompt() {
+        if (!S.prompt || S.sent === 'sending') return;
+        patch({ sent: 'sending' });
+        var head = '【工程环境修复】请照下面这份清单逐项处理，处理后把结果告诉我。\n\n';
+        engSendToWorkSession(head + S.prompt)
+          .then(function (res) {
+            patch({ sent: (res && res.sent) ? 'ok' : (res && res.drafted ? 'drafted' : 'ok') });
+          })
+          .catch(function (e) {
+            patch({ sent: 'err:' + String((e && e.message) || e) });
+          });
+      }
+      function saveRoot() {
+        if (S.rootSaving) return;
+        patch({ rootSaving: true, rootMsg: null });
+        try {
+          fetch('/dsh-engineering-ui/settings', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ key: 'delivery_root', value: S.root })
+          })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              if (!mounted.current) return;
+              patch({ rootSaving: false,
+                      rootMsg: (j && j.ok) ? '已保存（换电脑会自动忽略，不会误用）'
+                                           : ('保存失败：' + ((j && j.error) || '未知')) });
+            })
+            .catch(function (e) {
+              patch({ rootSaving: false, rootMsg: '保存失败：' + String((e && e.message) || e) });
+            });
+        } catch (e) { patch({ rootSaving: false, rootMsg: String((e && e.message) || e) }); }
+      }
+
+      var D = S.data;
+      var items = (D && D.items) || [];
+      var chipState = !D ? 'idle' : (D.status === 'ok' ? 'on' : (D.status === 'bad' ? 'off' : 'idle'));
+      var chipText = !D ? '未检测'
+        : (D.status === 'ok' ? '环境完整'
+          : (D.status === 'warn' ? '部分可选缺失' : '缺必需项'));
+      var rows = [];
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        var cls = (it.state === 'ok') ? 'ok'
+          : (it.state === 'missing' ? 'missing'
+            : (it.state === 'unknown' ? 'unknown' : 'warn'));
+        rows.push(h('div', { className: 'eng-env-item', key: 'env-' + it.id },
+          h('span', { className: 'eng-env-dot ' + cls }),
+          h('div', { className: 'eng-env-txt' },
+            h('div', { className: 'eng-env-name' }, it.name,
+              it.optional ? h('span', { className: 'opt' }, '（可选）') : null),
+            it.detail ? h('div', { className: 'eng-env-det' }, it.detail) : null,
+            (it.fix && it.state !== 'ok')
+              ? h('div', { className: 'eng-env-fix' }, '怎么修：' + it.fix) : null)));
+      }
+      return h('div', { className: 'eng-env' },
+        h('div', { className: 'eng-env-top' },
+          h('div', { className: 'eng-env-sum' },
+            S.phase === 'busy' ? '正在检查本机环境…'
+              : (S.err ? ('检查失败：' + S.err)
+                : (D ? (D.summary || chipText) : '点右侧按钮检查本机是否装了工程模式需要的东西'))),
+          h(EngStatusChip, { state: S.phase === 'busy' ? 'busy' : chipState, title: chipText }),
+          h('button', {
+            className: 'eng-conn-btn',
+            type: 'button',
+            disabled: S.phase === 'busy',
+            title: '重新检查本机环境（Python / pywin32 / numpy / ezdxf / SW / CAD / 交付目录）',
+            onClick: runCheck
+          }, S.phase === 'busy' ? '检查中' : '重新检查')),
+
+        // ── 交付目录（问题1 的根治点：不再写死 桌面\test）──────────────
+        h('div', { className: 'eng-env-note' },
+          '交付目录：以前固定落在桌面 test，换台电脑就会在那台桌面凭空建一个 test。'
+          + '现在可在这里指定；设置只在本机生效，换电脑自动忽略。'),
+        h('div', { className: 'eng-path-row' },
+          h('input', {
+            className: 'eng-path-in',
+            type: 'text',
+            value: S.root,
+            placeholder: 'C:\\Users\\你的用户名\\Documents\\dsh-out',
+            onChange: function (ev) { patch({ root: ev.target.value, rootMsg: null }); }
+          }),
+          h('button', {
+            className: 'eng-conn-btn tiny',
+            type: 'button',
+            disabled: S.rootSaving,
+            onClick: saveRoot
+          }, S.rootSaving ? '保存中' : '保存到本机')),
+        S.rootMsg ? h('div', { className: 'eng-env-note' }, S.rootMsg) : null,
+
+        rows.length ? h('div', { className: 'eng-env-list' }, rows) : null,
+
+        h('div', { className: 'eng-env-acts' },
+          h('button', {
+            className: 'eng-conn-btn',
+            type: 'button',
+            disabled: S.promptBusy,
+            title: '把本机实测结果写进一段提示词，交给一个新的工程模式对话去修',
+            onClick: makePrompt
+          }, S.promptBusy ? '生成中…' : '生成修复提示词')),
+        // ── 【弹窗修复】给「设置提醒弹窗」一条确定性手动入口 ──────────────
+        // 自动弹出要等会话列表订阅 + 保留 scope，时序不巧就静默失效；
+        // 这里让用户随时能把那条提醒调出来（内容与自动弹出完全一致）。
+        h('div', { className: 'eng-env-note' },
+          '子智能体上限提醒：默认在进入工程模式时自动弹出；若没看到，可点右边按钮立即调出。'),
+        h('div', { className: 'eng-env-acts' },
+          h('button', {
+            className: 'eng-conn-btn tiny',
+            type: 'button',
+            title: '把「把最大递进深度与子智能体并行上限设为 999」的提醒弹出来',
+            onClick: function () { showEngLimitReminder(); }
+          }, '立即查看提醒')),
+
+        S.prompt ? h('div', null,
+          h('div', { className: 'eng-conn-log-hd' },
+            h('span', {
+              className: 'eng-conn-log-tg',
+              onClick: function () { patch({ promptOpen: !S.promptOpen }); }
+            }, (S.promptOpen ? '▾ ' : '▸ ') + '修复提示词（可原样发给新对话）'),
+            h('button', {
+              className: 'eng-conn-btn tiny',
+              type: 'button',
+              disabled: S.sent === 'sending',
+              title: '新建一个「工程模式」会话，把这段提示词作为首轮发出去',
+              onClick: sendPrompt
+            }, S.sent === 'sending' ? '发送中'
+               : (S.sent === 'drafted' ? '✓ 已填入新会话'
+                 : (S.sent === 'ok' ? '✓ 已发送' : '发给新对话')))
+          ),
+          S.sent && S.sent.indexOf('err:') === 0
+            ? h('div', { className: 'eng-conn-log-sent' }, '发送失败：' + S.sent.slice(4))
+            : null,
+          S.promptOpen ? h('pre', { className: 'eng-env-prompt' }, S.prompt) : null) : null
+      );
+    }
     /** 一个开关（自绘，不依赖官方组件库）。
      *
      * bare=true 时【只渲染开关本体】，标签由外层 .eng-row 提供 ——
@@ -4599,6 +4847,13 @@ window.__ModuleLoader__.load({
           // 启动失败 → 行内展示错误日志，并可用「发给模型诊断」把日志
           //   作为消息投给当前会话，由 DSH 模型判断根因。
           // 结果统一落盘 connection_state.json（UI 与 AI 流程共读）。
+          // ── 主栏目0：工程环境检查（用户需求 3：放在「连接区」上面）──────────
+          // 为什么排在最前：用户遇到的「设置静默失效」，根因几乎都在这一层
+          //   （Python 3.5 / 缺 pywin32 / SW 装在别的盘）。先自检再看连接，
+          //   顺序反了会让人一直以为「是连接没连上」，白排查。
+          h(EngGroup, { title: '工程环境检查' },
+            h(EngEnvPanel, {})),
+
           h(EngGroup, { title: '连接区' },
             h(EngConnRow, { target: 'sw', label: 'SOLIDWORKS连接' }),
             h(EngConnRow, { target: 'cad', label: 'AutoCAD 连接' }),
@@ -7315,15 +7570,48 @@ window.__ModuleLoader__.load({
       return null;
     }
 
+    // ── 【弹窗修复 · 第2轮】同一会话允许【失败后重试】，成功后才封顶 ────────
+    // 现场问题：「我记得里面搞了一个弹窗的，但是没搞出来」。
+    // 根因：旧实现一 tick 就写 _engLimitLastSession，无论成败 →
+    //   apply() 那一刻会话往往【还没被保留】（sessions.scope 拿不到）、
+    //   document.body 也可能还没就绪 → 第一次注定失败，
+    //   而这一次失败就把该会话的【唯一机会】烧掉了，之后再也不弹。
+    // 现在：失败计入 _engLimitTries，最多重试 3 次（仍是防轰炸）；
+    //   成功一次即封顶（值为 3），后续 tick 一律放行不再弹。
+    var _engLimitTries = {};
     function engLimitAutoTick(sessionId) {
       try {
         _engLimitTickCount++;
         if (!sessionId) return false;
         if (_engLimitNeverShow()) return false;
-        // 同一会话只 tick 一次（避免会话列表每次刷新都重试）
-        if (_engLimitLastSession === sessionId) return false;
-        _engLimitLastSession = sessionId;
-        return tryAutoOpenEngLimitPopup(sessionId);
+        var tried = _engLimitTries[sessionId] || 0;
+        if (tried >= 3) return false;          // 成功过 或 已用完重试额度
+        var same = (_engLimitLastSession === sessionId);
+        if (same && tried === 0) return false; // 已弹过，不再打扰
+        var ok = tryAutoOpenEngLimitPopup(sessionId);
+        _engLimitTries[sessionId] = ok ? 3 : (tried + 1);
+        if (!same) _engLimitLastSession = sessionId;
+        return ok;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /**
+     * 【弹窗修复 · 手动入口】用户要求「弹窗必须能出来」。
+     *
+     * 自动弹出依赖会话列表订阅 + 保留 scope，任一时序不巧就静默失效。
+     * 这里给一条【永远可用】的确定性路径：设置页里一个按钮 →
+     *   ① 先试官方弹窗外壳（popupFor().open）；
+     *   ② 失败则直接渲染自绘降级卡片（同一套两按钮语义）。
+     * 返回 true 表示用户至少【看得见】这个提醒。
+     */
+    function showEngLimitReminder(session) {
+      try {
+        var sid = (session && session.sessionId) || _engLimitCurrentSessionId();
+        // 先给一次自动通道的机会（会写 _engLimitTried/_engLimitTries）
+        try { if (tryAutoOpenEngLimitPopup(sid, session)) return true; } catch (e) {}
+        return showEngLimitFallbackCard(session || { sessionId: sid }, true);
       } catch (e) {
         return false;
       }
@@ -7374,6 +7662,8 @@ window.__ModuleLoader__.load({
     }
     exports.engLimitAutoTick = engLimitAutoTick;
     exports.startEngLimitAutoTrigger = startEngLimitAutoTrigger;
+    // 【弹窗修复】手动入口（设置页「工程环境检查」里的「立即查看」按钮用它）
+    exports.showEngLimitReminder = showEngLimitReminder;
     exports._sessionIsEngineering = _sessionIsEngineering;
     exports.showEngLimitFallbackCard = showEngLimitFallbackCard;
     exports.installEngLimitPopup = installEngLimitPopup;
@@ -7394,6 +7684,8 @@ window.__ModuleLoader__.load({
     exports.EngGroup = EngGroup;
     exports.EngRow = EngRow;
     exports.EngConnRow = EngConnRow;
+    // 【工程环境检查】栏目（设置页「连接区」上方）
+    exports.EngEnvPanel = EngEnvPanel;
     exports.EngStatusChip = EngStatusChip;
     // 【需求1】模式说明 / 如何使用弹窗（供回归测试与外部复用）
     exports.EngGuideDialog = EngGuideDialog;

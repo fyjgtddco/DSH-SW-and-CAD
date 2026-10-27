@@ -3,7 +3,13 @@
 """【Bug-38 回归测试】零件归属清单 + 越界校验 + 去重。"""
 import sys, os, json, tempfile, shutil
 sys.stdout.reconfigure(encoding='utf-8')
-TOOLS = r'C:\Users\j1877\Desktop\DSH-SW-and-CAD-main\engineering\tools'
+# ── 【换机修复】不要写死作者本机路径：按本文件位置推导 tools 目录 ────────
+# 旧写法 TOOLS = r'C:\Users\j1877\Desktop\DSH-SW-and-CAD-main\engineering\tools'
+# 换一台电脑（微机房/别人 clone）直接 FileNotFoundError，回归测试全废。
+# 现按 __file__ 推导；仍可用 argv[1] 或 DSH_ENGINEERING_ROOT 覆盖。
+TOOLS = (sys.argv[1] if len(sys.argv) > 1 and os.path.isdir(sys.argv[1])
+         else os.environ.get('DSH_ENGINEERING_ROOT') or
+         os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, TOOLS)
 import importlib.util as ilu
 spec = ilu.spec_from_file_location('wg38', os.path.join(TOOLS,'workflow_gate.py'))

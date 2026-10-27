@@ -1516,7 +1516,29 @@ def _task_id(task, created_at=None):
 
 
 def _default_delivery_root():
-    """交付根目录：优先环境变量，其次桌面 test，最后工程模式根目录/output。"""
+    """交付根目录 —— 统一由 tools/settings.py 决定（不再写死桌面 test）。
+
+    ── 【换机事故修复】─────────────────────────────────────────────────────
+    旧实现：只要 <用户桌面> 存在，就返回 desktop\test，并在首次建任务时
+      【创建它】。于是任何一台电脑第一次用工程模式，桌面上都会凭空多出
+      一个 test 文件夹 —— 用户在学校微机房实测到"莫名出现 test"。
+    且目录不可配置：用户想改也改不了。
+
+    新实现（优先级从高到低，全部可解释）：
+      ① 环境变量 DSH_DELIVERY_ROOT
+      ② settings.json 的 delivery_root（设置页「工程环境检查」里可改，本机有效）
+      ③ 桌面 test —— 仅当它【本来就存在】时沿用（老用户不丢历史成果）
+      ④ <工程模式根>/output
+    详细语义与跨机指纹校验见 tools/settings.py 的 delivery_root()。
+    """
+    try:
+        import settings as _settings
+        root, _src = _settings.delivery_root()
+        if root:
+            return root
+    except Exception:
+        pass
+    # settings 模块不可用（旧副本 / 半拷贝）→ 保守回退，但仍【不创建】桌面 test
     try:
         env = (os.environ.get("DSH_DELIVERY_ROOT") or "").strip()
         if env:
@@ -1527,7 +1549,7 @@ def _default_delivery_root():
     if home:
         cand = os.path.join(home, "Desktop", "test")
         try:
-            if os.path.isdir(os.path.join(home, "Desktop")):
+            if os.path.isdir(cand):
                 return cand
         except Exception:
             pass

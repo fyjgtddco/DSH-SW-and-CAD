@@ -951,9 +951,27 @@ def _default_work_dir():
                 return _wd2
     except Exception:
         pass
+    # ── 【换机事故修复】不再无条件回落到 <桌面>\test / <桌面> ──────────────
+    # 旧实现：读不到 work_dir 就返回桌面 test 或桌面本身。换一台电脑后，
+    #   这两个目录要么不存在（于是 getcwd）、要么就是【别人的桌面】——
+    #   扫描产物会把与本任务无关的桌面文件也算进来。
+    # 新实现：交回 settings.delivery_root()（可配置、跨机忽略、不凭空建 test）。
+    try:
+        import settings as _settings
+        _root, _src = _settings.delivery_root()
+        if _root and os.path.isdir(_root):
+            return _root
+        if _root:
+            try:
+                os.makedirs(_root, exist_ok=True)
+                return _root
+            except Exception:
+                pass
+    except Exception:
+        pass
     home = os.path.expanduser("~")
-    for c in (os.path.join(home, "Desktop", "test"),
-              os.path.join(home, "Desktop")):
+    for c in (os.path.join(home, "Desktop", "test"),):
+        # 仅当【本来就存在】时沿用（不再把"桌面存在"当成理由去用桌面）
         if os.path.isdir(c):
             return c
     return os.getcwd()

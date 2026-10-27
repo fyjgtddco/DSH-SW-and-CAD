@@ -288,6 +288,8 @@ engineering/
 │   ├── swapi.py               # 高层建模 API
 │   ├── ac_bridge.py           # AutoCAD 桥接
 │   ├── ac_validate.py         # DXF 几何验证
+│   ├── settings.py            # 【换机修复】本机设置（交付目录/软件路径，带机器指纹）
+│   ├── env_check.py           # 【换机修复】环境自检 + 给新对话的修复提示词
 │   ├── physics/               # 物理仿真（GB/T 规则库）
 │   └── examples/              # 建模样例
 └── plugins/
@@ -330,6 +332,11 @@ engineering/
 | 18 | **skill 文档路径约定错误**（假设脚本在 cwd） | 全部改为绝对路径占位符 |
 | 19 | **设计依据薄弱**（尺寸与载荷不符、公差不规范） | 参数表强制量化依据 + 标准配合代号 |
 | 20 | **前端"伪交互"与真实通信脱节** | 提问经 `/ask-child` 绑定 pendingId → tool_result |
+| 21 | **桌面凭空多出 `test` 文件夹**（换台电脑同样发生） | 交付目录改由 `settings.py` 决定；桌面 `test` 仅当**已存在**时沿用 |
+| 22 | **连接区沿用上一台电脑的 Z 盘路径** | 设置与 `connection_state.paths` 均带机器指纹，跨机自动忽略并重探 |
+| 23 | **缺依赖时「设置静默失效」**（python 3.5 → SyntaxError） | 新增 `env_check.py` 自检 + `sw_bridge.py` 版本闸门 + 插件 `resolvePython` 版本校验 |
+| 24 | **提醒弹窗不出现** | 失败可重试（成功才封顶）+ 设置页「立即查看提醒」确定性入口 |
+| 25 | 设置页中文乱码（Python 子进程按 GBK 输出） | 所有 Python 调用注入 `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1` |
 
 ---
 
@@ -381,6 +388,89 @@ python "$T\sw_bridge.py" doctor          # SW 环境自检
 > 运行时状态文件（`mode_state.json` / `workflow_state.json` / `sw_state.json`
 > / `connection_state.json`）
 > 是会话现场数据，**三处保持独立**，不要互相同步，否则会覆盖现场导致流程误判。
+
+## 工程环境检查（设置页「工程环境检查」，在「连接区」上方）
+
+> 这条栏目是为**换电脑**场景加的。用户在学校微机房实测到三件事：
+> ① 桌面莫名其妙多了个 `test` 文件夹；② 连接区记着上一台电脑的 Z 盘路径；
+> ③ 缺依赖时「某些设置静默失效」，界面上看不出少了什么。
+
+### 它做什么
+
+一次扫描 8~10 项，逐项给**绿/黄/红**三色 + 一行「怎么修」：
+
+| 项 | 判据 |
+|----|------|
+| 工程模式核心脚本 | `tools/` 下 8 个关键 .py 是否齐全 |
+| Python 解释器 | **用目标解释器起子进程跑探针**，≥ 3.6 才采纳 |
+| pywin32 / numpy / ezdxf / shapely / Pillow | 由**同一个解释器**真 import |
+| SolidWorks / AutoCAD | 注册表 → 环境变量 → 本机设置 → 全盘符扫描 |
+| 交付目录 | 存在且**可写**（实地写一个探针文件再删） |
+| 跨机残留设置 | 指纹不符的设置会被列出来并说明「已忽略」 |
+
+### 「生成修复提示词」怎么用
+
+点一下 → 后端 `tools/env_check.py prompt` 用**本机实测结果**现场生成一段提示词
+（含缺失项、正确的解释器绝对路径、逐条 pip 命令、验收标准），
+再点「发给新对话」→ 复用既有通道新建一个**工程模式**会话并把这段作为首轮发出，
+新的 Agent 就照着清单自己去查、自己去装。
+
+### 交付目录（不再写死桌面 test）
+
+旧行为：只要用户桌面存在就返回 `桌面\test`，并在首次建任务时**创建它** ——
+于是任何人第一次用工程模式，桌面都会多一个 `test`。
+
+现在的优先级（`tools/settings.py: delivery_root()`）：
+
+```
+① 环境变量 DSH_DELIVERY_ROOT
+② settings.json 的 delivery_root（设置页可改，带机器指纹）
+③ 桌面 test —— 【仅当它本来就存在】时沿用（老用户不丢历史成果）
+④ <工程模式根>/output
+```
+
+### 本机设置与「跨机器自动忽略」
+
+`tools/settings.py` 把「跟这台电脑有关」的设置收敛到**一份** `settings.json`
+（交付目录 / SW / CAD / Python 路径），每条都带 `machine` 指纹
+（主机名 + 用户名 + 盘符集合）。**指纹不符 = 这条设置来自别的电脑 → 自动忽略**，
+并在报告里明说原因。于是：
+
+- 不会把 A 电脑的 `Z:\...\SLDWORKS.exe` 带到没有 Z 盘的 B 电脑；
+- `connection_state.json` 的 `paths` 也带同一枚指纹，跨机自动作废并重新探测；
+- 设置页里能直接改，改完**下一轮**就生效（无需重启）。
+
+```powershell
+python tools/settings.py report                 # 每条设置在本机的生效状态
+python tools/settings.py set delivery_root D:/dsh-out
+python tools/settings.py set python_exe C:/Python312/python.exe
+python tools/env_check.py probe                 # 完整自检（JSON）
+python tools/env_check.py prompt                # 生成给新对话的修复提示词
+```
+
+### Python 版本闸门
+
+`sw_bridge.py` 使用 f-string（3.6+）。微机房实测：默认 `python` 若是 3.5.x，
+会在**第一行**就 `SyntaxError`，stdout 没有任何 JSON —— 上层只看到「解析失败」，
+根因完全看不出来。因此 `sw_bridge.py` 顶部加了一段**不依赖 f-string** 的版本闸门：
+旧解释器上也会打印中文说明 + 机读 JSON（`hint` 指向 `py -3` / 安装 3.11+）。
+
+插件侧 `resolvePython()` 同步加固：
+
+- 候选顺序改为 `py`（Windows 官方启动器，会挑最新 3.x）**先于** `python`；
+- 每个候选都跑真探针（打印版本 + `import win32com.client`），**≥3.6 才采纳**；
+- 旧实现只看 `--version` 的 exitCode（3.5 也返回 0）→ 永远选中跑不起来的那个。
+
+### 提醒弹窗（第5项）为什么之前没出来
+
+两条真实缺陷，均已修：
+
+1. **一次性机会被烧掉**：旧 `engLimitAutoTick` 无论成败都写 `_engLimitLastSession`。
+   而 `apply()` 那一刻会话往往还没被保留、`sessions.scope` 拿不到 → 首次注定失败，
+   之后**再也不弹**。现在失败计入重试额度（最多 3 次），**成功才封顶**。
+2. **没有确定性入口**：自动弹窗依赖会话列表订阅 + 保留 scope，时序不巧就静默失效。
+   现在设置页「工程环境检查」里有「立即查看提醒」按钮，随时能把同一条提醒调出来
+   （官方弹窗外壳 → 不可用时自动降级为自绘卡片，两按钮语义不变）。
 
 ## 连接区（设置页「连接区」）
 

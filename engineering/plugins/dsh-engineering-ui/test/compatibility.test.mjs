@@ -110,7 +110,7 @@ function harness(handles = {}) {
   return { ctx, root, routes, hooks, asks, dispose, request };
 }
 
-test('全部 24 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
+test('全部 27 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
   const h = harness();
   try {
     // 9 条基础/提问/通知路由
@@ -127,7 +127,13 @@ test('全部 24 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
     //   + 1 条【第4项·SW 健康看护】ctx.jobs 版路由（/sw-guard-job）= 24
     // 注：/defense/verify-gate 是宿主侧"不消费 nonce"的只读验签入口
     //   （门禁 verify-gate 用），原先漏计，已补入清单。
-    assert.equal(h.routes.size, 24, '路由数量应为 24（新增 /sw-guard-job）');
+    // ── 【工程环境检查（用户需求 3）】新增 3 条 → 24 + 3 = 27 ────────────
+    //   /env-check  —— 跑一次 tools/env_check.py probe（只读，不装东西）
+    //   /env-prompt —— 生成可发给新对话的修复提示词
+    //   /settings   —— 本机设置（交付目录 / 各软件路径）读写
+    // 判定逻辑全部在 Python 侧，JS 只做 HTTP 转接，保证"设置页看到的"
+    //   与"Agent 跑出来的"是同一套结论。
+    assert.equal(h.routes.size, 27, '路由数量应为 27（新增 env-check/env-prompt/settings）');
     for (const p of [
       '/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
       '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
@@ -143,6 +149,8 @@ test('全部 24 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/conn-launch', '/dsh-engineering-ui/conn-diagnose',
       '/dsh-engineering-ui/suggest', '/dsh-engineering-ui/side-chat',
       '/dsh-engineering-ui/persona', '/dsh-engineering-ui/chat-mode',
+      '/dsh-engineering-ui/env-check', '/dsh-engineering-ui/env-prompt',
+      '/dsh-engineering-ui/settings',
     ]) {
       assert.ok(h.routes.has(p), 'missing route ' + p);
     }

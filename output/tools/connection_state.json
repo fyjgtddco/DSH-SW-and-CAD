@@ -1,14 +1,14 @@
 {
   "schema": "dsh-connection-state/1",
-  "updated_at": 1792415005.9671555,
-  "updated_at_str": "2026-10-19 21:03:25",
+  "updated_at": 1793077994.2494545,
+  "updated_at_str": "2026-10-27 13:13:14",
   "sw": {
     "running": false,
     "pid": null,
     "processes": [],
     "connected": false,
     "error": null,
-    "checked_at": "2026-10-19 21:03:25"
+    "checked_at": "2026-10-27 13:13:14"
   },
   "cad": {
     "running": false,
@@ -16,7 +16,7 @@
     "processes": [],
     "connected": false,
     "error": null,
-    "checked_at": "2026-10-18 17:48:33"
+    "checked_at": "2026-10-22 09:52:14"
   },
   "paths": {
     "sldworks_exe": "Z:\\Program Files\\SOLIDWORKS Corp2025\\SOLIDWORKS\\SLDWORKS.exe",
@@ -35,8 +35,8 @@
   "launch": {
     "sw": {
       "ok": true,
-      "at": 1792317013.0388832,
-      "at_str": "2026-10-18 17:50:13",
+      "at": 1792918464.4529183,
+      "at_str": "2026-10-25 16:54:24",
       "error": null,
       "steps": [
         {
@@ -60,7 +60,7 @@
           "step": "connect",
           "ok": true,
           "detail": "COM 连接成功",
-          "pid": 24744,
+          "pid": 18480,
           "error": null,
           "revision": "33.5.0",
           "binding": "static"
@@ -127,7 +127,7 @@
     "interface": "process-only（Abaqus 无 COM 自动化接口）",
     "integration": "`abaqus python <脚本>` 或 `abaqus cae noGUI=<脚本>`",
     "note": "未检测到 Abaqus 进程或安装",
-    "checked_at": "2026-10-18 17:48:33"
+    "checked_at": "2026-10-22 09:52:14"
   },
   "nx": {
     "running": false,
@@ -138,7 +138,7 @@
     "interface": "process-only（NX 无 COM 自动化接口）",
     "integration": "`run_journal <脚本.py>`（NX Open 批处理） 或 NX Nastran 求解器命令行",
     "note": "未检测到 NX 进程或安装",
-    "checked_at": "2026-10-18 17:48:33"
+    "checked_at": "2026-10-22 09:52:14"
   },
   "webots": {
     "running": false,
@@ -151,6 +151,6 @@
     "exe": "D:\\Webots\\msys64\\mingw64\\bin\\webots.exe",
     "revision": null,
     "note": "检测到 Webots 安装：D:\\Webots\\msys64\\mingw64\\bin\\webots.exe。Webots 无 COM 接口，集成方式为 `webots --mode=fast <世界文件.wbt>` 启动仿真，外部控制走 webots-controller（TCP 控制器协议）。",
-    "checked_at": "2026-10-18 17:48:33"
+    "checked_at": "2026-10-27 13:08:07"
   }
 }

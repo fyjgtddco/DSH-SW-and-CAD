@@ -180,6 +180,10 @@ function isCrossSiteRequest(req) {
  */
 const SENSITIVE_ROUTES = new Set([
   PREFIX + '/persona',
+  // 【本机设置写入口】POST /settings 能改"交付目录 / 各软件路径"，
+  //   属高副作用（可让宿主后续按任意路径启动进程）→ 与 /persona 同级加固。
+  //   只读的 GET（自检、读设置）不在此列，避免设置页一打开就 403。
+  PREFIX + '/settings',
   PREFIX + '/chat-mode',
   PREFIX + '/conn-launch',
   PREFIX + '/conn-diagnose',
@@ -385,135 +389,21 @@ async function parentOf(ctx, childId) {
 export function apply(ctx) {
   const disposers = [];
 
-  // ══════════════════════════════════════════════════════════════════════
-  // 【DSH 0.2.1 适配 · 为 {{cwd}} 注册 prompt 变量】
-  // ══════════════════════════════════════════════════════════════════════
-  // 故障现象（2026-10-17 实测）：
-  //   切到工程模式后一发送消息就报
-  //     unknown prompt variable "{{cwd}}" in section "deployment:persona-prefix";
-  //     registered variables: provider, model
-  //   → 整轮请求失败，工程模式完全不可用。
+  // ── cwd prompt 变量 · 已彻底移除 ──────────────────────────────────────
+  // 历史：0.2.1 移除了 dsh-agent-loop 对 cwd 变量的注册，而工程模式人设首行
+  //   写了「工作目录 {{cwd}}(已废弃)」，于是每次装配都抛：
+  //     unknown prompt variable "{{cwd}}(已废弃)" in section "deployment:persona-prefix"
+  //   导致整轮请求失败、工程模式完全不可用。当时的修法是由本插件补注册。
   //
-  // 根因：
-  //   · 0.2.0 的 dsh-agent-loop 注册过三个 prompt 变量：provider / model / cwd；
-  //   · 0.2.1-rc.2 只保留 provider 与 model
-  //     （dsh-agent-loop/lib/index.js:1591-1592），**cwd 被移除**；
-  //     全仓核实：0.2.1 里 `systemPrompt.variable(` 只有这两处调用；
-  //   · dsh-system-prompt 的 interpolate() 遇到未注册变量【直接抛错】
-  //     （dsh-system-prompt/lib/index.js:172-175），不是降级为空串 ——
-  //     所以只要人设里写了 {{cwd}}，整个会话就发不出消息。
+  // 为什么现在改为【人设里不写、插件不注册】：
+  //   · 补注册依赖 systemPrompt.variable() 的调用时机 —— 全局注册与 agent
+  //     作用域装配之间存在竞态，实测仍会概率性复发（用户两次反馈）；
+  //   · 工作目录本就由 DSH 的 working-directory 运行时上下文自动注入
+  //     （"Current working directory: ..."），人设里再写一遍是冗余的；
+  //   · 少一个自定义变量 = 少一个能让整轮请求失败的故障点。
   //
-  // 为什么不改成"人设里不写 {{cwd}}"：
-  //   工作目录是工程模式人设的必要信息（模型要知道自己在哪建模）。
-  //   0.2.1 虽然用 working-directory 运行时上下文自动注入了一份
-  //   ("Current working directory: ...")，但人设里显式点名更稳，且
-  //   我们不应为了规避一个变量就删掉用户要的功能。
-  //
-  // 维修方案：由本插件注册 cwd 变量，把 0.2.0 的行为补回来。
-  //
-  // 为什么注册在【插件全局 ctx】而不是 agent.ctx：
-  //   · assembleContextFor(agent) 恒为 { agent, scope: agent }
-  //     （dsh-agent/lib/index.js:291-297），所以 provider 一定能拿到 context.agent；
-  //   · 变量装配是 global 先、scope 后覆盖（dsh-system-prompt/lib/index.js:360-362），
-  //     全局注册对每个会话都生效，且【不依赖 agent/created 的时序】——
-  //     否则可能出现在 persona section 已渲染、变量还没注册的竞态里。
-  //
-  // 取值优先级：
-  //   ① ctx.workingDirectory.get(session)：0.2.1 的权威同步值（无 I/O，
-  //      dsh-working-directory/lib/index.js:76-78）；
-  //   ② session.header.cwd：会话创建时的原始目录（兜底）；
-  //   ③ 都没有 → 返回【空字符串】（不是 undefined）。
-  // 为什么强调这一点：官方 interpolate() 对 value === undefined 会抛
-  //   'prompt variable "{{cwd}}" has no value for this assembly'
-  //   （dsh-system-prompt/lib/index.js:176-177），而空串是合法值。
-  //   取不到目录时让 {{cwd}} 渲染成空白，远好过让整轮请求失败。
-  let _cwdVariableDisposer = null;
-  try {
-    const _injectSystemPrompt = (scope) => {
-      try {
-        _cwdVariableDisposer = scope.systemPrompt.variable('cwd', (context) => {
-          try {
-            const agent = context && context.agent;
-            // ① 权威值：workingDirectory 服务的已提交目录（同步、无 I/O）
-            try {
-              const wd = ctx.workingDirectory;
-              if (wd && typeof wd.get === 'function' && agent && agent.session) {
-                const dir = wd.get(agent.session);
-                if (typeof dir === 'string' && dir.length > 0) return dir;
-              }
-            } catch (e) { /* 服务缺失 → 走兜底 */ }
-            // ② 会话头记录的创建目录
-            const headerCwd = agent && agent.session && agent.session.header
-              ? agent.session.header.cwd : undefined;
-            if (typeof headerCwd === 'string' && headerCwd.length > 0) return headerCwd;
-            // ③ 都没有：必须返回【空字符串】，绝不能返回 undefined。
-            //    官方语义（dsh-system-prompt/lib/index.js:176-177）：
-            //      value === undefined → 抛 'has no value for this assembly'
-            //    空串是合法值，只会让 {{cwd}} 渲染成空白，
-            //    不会把整轮请求打挂。这是本兜底的最后一层保险。
-            return '';
-          } catch (e) {
-            // 任何异常也只降级为空串，绝不让 prompt 装配失败
-            return '';
-          }
-        });
-      } catch (e) {
-        try { console.error('[dsh-engineering-ui] cwd prompt variable', e); } catch (e2) {}
-      }
-    };
-    // ── 【本次修复·{{cwd}} 再次报错】必须【同步】注册，不能只依赖 ctx.inject ──
-    // 现象（用户第二次反馈）：
-    //   unknown prompt variable "{{cwd}}" in section "deployment:persona-prefix";
-    //   registered variables: provider, model
-    // 根因：ctx.inject(['systemPrompt'], cb) 的回调是【异步】的（要等服务就绪），
-    //   而工程模式人设的 persona 段在会话装配时就会被渲染 ——
-    //   若装配发生在回调执行之前，变量表里还没有 cwd → 整轮请求失败。
-    //   （这也解释了为什么"有时候好、有时候坏"：纯时序问题。）
-    //
-    // 修法（双保险，同一个 provider，不写重复逻辑）：
-    //   ① 【同步】直接取 ctx.systemPrompt（服务已就绪时立即可用）→ 立即注册；
-    //   ② 同时保留 ctx.inject 异步路径（服务稍后才就绪的 profile）。
-    //   两处注册的 provider 完全相同，重复注册无副作用（后者覆盖前者）。
-    //
-    // 取值优先级：workingDirectory.get → session.header.cwd → 空串（绝不 undefined）。
-    const _cwdProvider = (context) => {
-      try {
-        const agent = context && context.agent;
-        try {
-          const wd = ctx.workingDirectory;
-          if (wd && typeof wd.get === 'function' && agent && agent.session) {
-            const dir = wd.get(agent.session);
-            if (typeof dir === 'string' && dir.length > 0) return dir;
-          }
-        } catch (e) { /* 服务缺失 → 走兜底 */ }
-        const headerCwd = agent && agent.session && agent.session.header
-          ? agent.session.header.cwd : undefined;
-        if (typeof headerCwd === 'string' && headerCwd.length > 0) return headerCwd;
-        return '';
-      } catch (e) { return ''; }
-    };
-    const _registerCwdOn = (sp) => {
-      try {
-        if (!sp || typeof sp.variable !== 'function') return false;
-        sp.variable('cwd', _cwdProvider);
-        return true;
-      } catch (e) {
-        try { console.error('[dsh-engineering-ui] cwd register', e); } catch (e2) {}
-        return false;
-      }
-    };
-    // ① 同步注册（消除时序竞态 —— 这是本次报错的直接修复点）
-    _registerCwdOn(ctx.systemPrompt);
-    // ② 异步 inject 兜底（服务稍后就绪时再注册一次）
-    if (typeof ctx.inject === 'function') {
-      const _fiber = ctx.inject(['systemPrompt'], function (scope) {
-        _registerCwdOn(scope && scope.systemPrompt);
-      });
-      disposers.push(() => { try { if (_fiber && _fiber.dispose) _fiber.dispose(); } catch (e) {} });
-    }
-  } catch (e) {
-    try { console.error('[dsh-engineering-ui] cwd variable setup', e); } catch (e2) {}
-  }
+  // 现状：preset-engineering.patch.yml 与 agent.cordis.yml 均已删除 {{cwd}}(已废弃)，
+  //   本插件也不再注册该变量。工作目录信息始终由运行时上下文提供。
 
   // ── 【Bug2】会话预设解析（同步缓存，供 turn-stopping 钩子零延迟查询）──────
   // 钩子必须同步返回，不能 await，所以这里预先把 sessionId → preset 缓存起来；
@@ -2720,18 +2610,131 @@ export function apply(ctx) {
     };
   }
 
-  /** 找到 Python 解释器（优先 python，回退 py -3 / python3）。 */
-  function resolvePython() {
-    const cands = [];
-    if (process.env.DSH_PYTHON) cands.push(process.env.DSH_PYTHON);
-    cands.push('python', 'python3', 'py');
-    for (const c of cands) {
-      try {
-        const r = spawnSync(c, ['--version'], { encoding: 'utf8', timeout: 15000 });
-        if (r && r.status === 0) return c;
-      } catch (e) { /* 试下一个 */ }
+  // ══════════════════════════════════════════════════════════════════════
+  //  【换机事故修复】Python 解释器解析：必须校验【版本 >= 3.6】
+  // ══════════════════════════════════════════════════════════════════════
+  // 微机房实测（用户提供的现场结论）：
+  //   · 默认 python 指向 Python 3.5.3 (32-bit)；
+  //   · sw_bridge.py 用了 f-string（3.6+），直接 SyntaxError；
+  //   · stderr 有错误信息、stdout 没有任何 JSON →
+  //     插件解析失败 → 界面表现成「某些设置静默失效」。
+  // 旧实现只跑 python --version 看 exitCode==0 就认它 —— 3.5 也会返回 0，
+  //   于是永远挑中那个跑不起来的解释器。
+  //
+  // 新实现（三重）：
+  //   ① 顺序改为 py 在前：Windows 的 py.exe 是官方启动器，会挑最新 3.x；
+  //   ② 逐候选跑【真探针】（打印版本 + 能否 import pywin32），
+  //      >=3.6 才采纳 —— 只认「真的能跑」，不认「存在」；
+  //   ③ 结果缓存 5 分钟；详情模式（settings 页环境检查）不吃缓存，
+  //      并把被拒的候选一并返回，直接告诉用户「为什么没用那个 python」。
+  const PYTHON_MIN_MAJOR = 3;
+  const PYTHON_MIN_MINOR = 6;
+  let pyCache = null, pyCacheAt = 0;
+  const PY_CACHE_MS = 5 * 60 * 1000;
+
+  /** 把 '3.13.15' 解析成 [3,13]；解析不了返回 null。 */
+  function parsePyVersion(v) {
+    const parts = String(v || '').trim().split('.');
+    if (parts.length < 2) return null;
+    const a = Number(parts[0]), b = Number(parts[1]);
+    if (!isFinite(a) || !isFinite(b)) return null;
+    return [a, b];
+  }
+
+  /** py.exe 需要显式 -3 才是 Python 3。 */
+  function pyArgsFor(c) {
+    return c === 'py' ? ['-3'] : [];
+  }
+
+  /** 用某解释器跑一次探针，返回 {exe, version, ok, pywin32, error}。 */
+  function probePythonExe(c) {
+    const pre = [c].concat(pyArgsFor(c));
+    let version = null, error = null, pywin32 = null;
+    try {
+      const r = spawnSync(pre[0], pre.slice(1).concat(['-c',
+        'import sys;print("%d.%d.%d" % sys.version_info[:3])']),
+        { encoding: 'utf8', timeout: 15000, windowsHide: true, env: pyEnv() });
+      if (r && r.status === 0) {
+        version = String((r.stdout || '')).trim() || null;
+      } else {
+        error = 'exit=' + (r && r.status) + ' ' +
+          String(((r && r.stderr) || '') + ((r && r.stdout) || '')).trim().slice(0, 200);
+      }
+    } catch (e) {
+      error = String((e && e.message) || e);
     }
-    return null;
+    const ver = parsePyVersion(version);
+    const okVer = !!ver && (ver[0] > PYTHON_MIN_MAJOR ||
+      (ver[0] === PYTHON_MIN_MAJOR && ver[1] >= PYTHON_MIN_MINOR));
+    if (okVer) {
+      try {
+        const r2 = spawnSync(pre[0], pre.slice(1).concat(['-c',
+          'import win32com.client;print("ok")']),
+          { encoding: 'utf8', timeout: 15000, windowsHide: true, env: pyEnv() });
+        pywin32 = !!(r2 && r2.status === 0);
+      } catch (e) { pywin32 = false; }
+    }
+    return { exe: c, version, ok: okVer, pywin32, error };
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  //  【中文乱码修复】所有 Python 子进程必须强制 UTF-8 输出
+  // ══════════════════════════════════════════════════════════════════════
+  // 实测（本机 Windows + 中文系统）：env_check.py / settings.py 用
+  //   ensure_ascii=False 打印中文，Python 默认按【系统 ANSI 代码页(GBK)】
+  //   写 stdout，而 Node 按 UTF-8 解码 → 设置页上整段中文变成乱码。
+  // 修法：给子进程注入 PYTHONIOENCODING=utf-8 / PYTHONUTF8=1，
+  //   让 Python 自己就用 UTF-8 输出（与 Python 侧 sys.stdout.reconfigure
+  //   双保险；后者在旧版本 Python 上可能不可用）。
+  function pyEnv() {
+    const env = Object.assign({}, process.env);
+    env.PYTHONIOENCODING = 'utf-8';
+    env.PYTHONUTF8 = '1';
+    return env;
+  }
+
+  /** 候选解释器顺序：本机设置 > DSH_PYTHON > py > python > python3。 */
+  function pythonCandidates() {
+    const out = [];
+    try {
+      const dir0 = findToolsDir();
+      if (dir0) {
+        const j = readJsonSafe(path.join(dir0, 'settings.json'));
+        const e = j && j.paths && j.paths.python_exe;
+        if (e && typeof e.value === 'string' && e.value) out.push(e.value);
+      }
+    } catch (e) { /* 读不到就当没设置 */ }
+    if (process.env.DSH_PYTHON) out.push(String(process.env.DSH_PYTHON));
+    out.push('py', 'python', 'python3');
+    const seen = new Set();
+    return out.filter((c) => {
+      if (!c || typeof c !== 'string') return false;
+      const k = c.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }
+
+  /**
+   * 找到【真的能跑】的 Python 解释器（>= 3.6）。
+   * @param {boolean} detail true = 详情模式（每次真探测、返回全部候选，供环境检查页）
+   * @returns {string|null|object} 详情模式返回 {chosen, tried}
+   */
+  function resolvePython(detail) {
+    const cands = pythonCandidates();
+    if (detail) {
+      const tried = cands.map(probePythonExe);
+      const hit = tried.filter((t) => t.ok)[0] || null;
+      return { chosen: hit ? hit.exe : null, tried };
+    }
+    if (pyCache !== null && (Date.now() - pyCacheAt) < PY_CACHE_MS) return pyCache;
+    pyCache = null;
+    for (const c of cands) {
+      if (probePythonExe(c).ok) { pyCache = c; break; }
+    }
+    pyCacheAt = Date.now();
+    return pyCache;
   }
 
   /** 触发一次真实探测（会调 Python，可能连接 SW/CAD）。 */
@@ -2753,7 +2756,7 @@ export function apply(ctx) {
     try {
       const r = spawnSync(py, args, {
         encoding: 'utf8', timeout: 120000, cwd: dir,
-        windowsHide: true,
+        windowsHide: true, env: pyEnv(),
       });
       const out = String((r && r.stdout) || '');
       const errOut = String((r && r.stderr) || '');
@@ -2778,6 +2781,157 @@ export function apply(ctx) {
       return { ok: false, error: '探测执行异常: ' + String((e && e.message) || e) };
     }
   }
+
+  // ══ 【工程环境检查】设置页「连接区」上方的新栏目（用户需求 3）═══════════
+  // 用户原话：
+  //   「在设置 → 工程模式中，连接区上面再加一个『检查电脑是否有对应的环境』，
+  //    然后写一段提示词自己发给新的对话，新的 Agent 对话就自己去查看看少啥，
+  //    自己安装。」
+  //
+  // 落点设计（为什么不放在 Python 侧只放 CLI）：
+  //   设置页是浏览器，读不到 Python 的 stdout；必须由宿主把它转成 HTTP。
+  //   但**判定逻辑一行都不在 JS 里** —— 全部委托给 tools/env_check.py，
+  //   保证「设置页看到的」和「Agent 跑出来的」是同一套结论（同一个事实源）。
+  function runEnvCheck(args, timeoutMs) {
+    const dir = findToolsDir();
+    if (!dir) return { ok: false, error: '未定位到 tools 目录' };
+    const script = path.join(dir, 'env_check.py');
+    if (!fs.existsSync(script)) {
+      return { ok: false, error: '未找到 env_check.py: ' + script,
+               hint: '请重新安装/同步工程模式（install-0.2.0.ps1 或 sync-to-dsh.ps1）' };
+    }
+    const py = resolvePython();
+    if (!py) {
+      // 这里必须给出【可操作】的结论：没有能跑的 Python，本身就是最重要的自检结果。
+      const detail = resolvePython(true);
+      return {
+        ok: false,
+        status: 'bad',
+        error: '没有找到 Python 3.6+ 解释器',
+        hint: 'PATH 里排在最前的 python 可能是 3.5 一类旧版本（不支持 f-string）。' +
+              '请在设置页指定 python.exe，或安装 Python 3.11/3.12 并加入 PATH。',
+        python: detail,
+      };
+    }
+    try {
+      const r = spawnSync(py, [script].concat(args || []), {
+        encoding: 'utf8', timeout: timeoutMs || 120000, cwd: dir, windowsHide: true,
+        env: pyEnv(),
+      });
+      const out = String((r && r.stdout) || '');
+      const errOut = String((r && r.stderr) || '');
+      const start = out.indexOf('{');
+      let parsed = null;
+      if (start >= 0) { try { parsed = JSON.parse(out.slice(start)); } catch (e) { parsed = null; } }
+      if (!parsed) {
+        return {
+          ok: false, status: 'bad',
+          error: '环境自检没有返回可解析的 JSON',
+          stdout_tail: out.slice(-1200),
+          stderr_tail: errOut.slice(-1200),
+          hint: '典型原因：Python 版本过低导致 env_check.py 一起 SyntaxError。' +
+                '请先确认 python -c "import sys;print(sys.version)" 能正常输出。',
+        };
+      }
+      parsed.python_used = py;
+      return parsed;
+    } catch (e) {
+      return { ok: false, status: 'bad',
+               error: '环境自检执行异常: ' + String((e && e.message) || e) };
+    }
+  }
+
+  // GET：跑一次完整自检（只读，不装任何东西）
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/env-check',
+    handler: async (req, res) => {
+      try {
+        return send(res, 200, runEnvCheck(['probe'], 180000));
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  })));
+
+  // GET：生成【可发给新对话】的修复提示词（--json 便于前端原样展示）
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/env-prompt',
+    handler: async (req, res) => {
+      try {
+        const r = runEnvCheck(['prompt', '--json'], 180000);
+        if (!r || r.ok === false || !r.prompt) {
+          // 连 env_check 都跑不了时，也要给用户一段【能自救】的说明，不能空手
+          const detail = resolvePython(true);
+          return send(res, 200, {
+            ok: false, error: (r && r.error) || '无法生成提示词',
+            python: detail,
+            hint: '请在设置页指定一个 Python 3.6+ 的 python.exe 后重试。',
+          });
+        }
+        r.python_used = resolvePython();
+        return send(res, 200, r);
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  })));
+
+  /** 读/写本机设置（交付目录、各软件路径）—— 转发 tools/settings.py。 */
+  function runSettings(args) {
+    const dir = findToolsDir();
+    if (!dir) return { ok: false, error: '未定位到 tools 目录' };
+    const script = path.join(dir, 'settings.py');
+    if (!fs.existsSync(script)) {
+      return { ok: false, error: '未找到 settings.py: ' + script };
+    }
+    const py = resolvePython();
+    if (!py) return { ok: false, error: '没有找到 Python 3.6+ 解释器' };
+    try {
+      const r = spawnSync(py, [script].concat(args), {
+        encoding: 'utf8', timeout: 60000, cwd: dir, windowsHide: true,
+        env: pyEnv(),
+      });
+      const out = String((r && r.stdout) || '');
+      const start = out.indexOf('{');
+      if (start >= 0) {
+        try { return JSON.parse(out.slice(start)); } catch (e) { /* 落到下面 */ }
+      }
+      return { ok: false, error: '设置命令没有返回 JSON',
+               stdout_tail: out.slice(-600),
+               stderr_tail: String((r && r.stderr) || '').slice(-600) };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  // GET/POST：本机设置（交付目录、SW/CAD/python 路径）
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/settings',
+    handler: async (req, res) => {
+      if (req.method === 'GET') {
+        try { return send(res, 200, runSettings(['report'])); }
+        catch (error) { return send(res, 200, { ok: false, error: String((error && error.message) || error) }); }
+      }
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'GET or POST only' });
+      let payload;
+      try { payload = JSON.parse(await readBody(req)); } catch {
+        return send(res, 400, { ok: false, error: 'bad json' });
+      }
+      const key = String((payload && payload.key) || '').trim();
+      const value = String((payload && payload.value) || '').trim();
+      // 白名单：只允许机器级路径设置，防止这条路由被用来改别的状态文件
+      const ALLOWED = ['delivery_root', 'sw_exe', 'cad_exe', 'python_exe',
+                       'abaqus_exe', 'webots_exe'];
+      if (ALLOWED.indexOf(key) < 0) {
+        return send(res, 400, { ok: false, error: '不允许的设置项: ' + key,
+                                allowed: ALLOWED });
+      }
+      return send(res, 200, runSettings(['set', key, value]));
+    }
+  })));
 
   // GET：只读状态（零副作用）—— 设置页打开时轮询用
   disposers.push(ctx.webServer.register(guardRoute({
@@ -2848,7 +3002,7 @@ export function apply(ctx) {
         // 超时给得比 conn-probe 短得多：纯 tasklist 检测是秒级的，
         //   卡住就说明环境有问题，不该拖住设置页。
         const r = spawnSync(py, [bridge, 'conn-probe-process-only'], {
-          encoding: 'utf8', timeout: 30000, cwd: dir, windowsHide: true,
+          encoding: 'utf8', timeout: 30000, cwd: dir, windowsHide: true, env: pyEnv(),
         });
         const out = String((r && r.stdout) || '');
         const errOut = String((r && r.stderr) || '');
@@ -2906,7 +3060,7 @@ export function apply(ctx) {
       if (!py) return send(res, 200, { ok: false, error: '未找到可用的 Python 解释器' });
       try {
         const r = spawnSync(py, [bridge, 'conn-launch', '--target', target], {
-          encoding: 'utf8', timeout: 240000, cwd: dir, windowsHide: true,
+          encoding: 'utf8', timeout: 240000, cwd: dir, windowsHide: true, env: pyEnv(),
         });
         const out = String((r && r.stdout) || '');
         const errOut = String((r && r.stderr) || '');
@@ -2955,7 +3109,7 @@ export function apply(ctx) {
           if (dir0 && py0) {
             const rr = spawnSync(py0, [path.join(dir0, 'sw_bridge.py'),
                                        'conn-log', '--target', target],
-                                 { encoding: 'utf8', timeout: 60000, cwd: dir0, windowsHide: true });
+                                 { encoding: 'utf8', timeout: 60000, cwd: dir0, windowsHide: true, env: pyEnv() });
             const oo = String((rr && rr.stdout) || '');
             const st0 = oo.indexOf('{');
             if (st0 >= 0) {

@@ -43,7 +43,12 @@ $RuntimeNames = @(
     'mode_state.json', 'workflow_state.json', 'sw_state.json',
     'platform_status.json', 'artifacts_registry.json', 'TASK_FINISHED.json',
     'connection_state.json', 'design_params.json', 'defense_bypass.json',
-    'violations.json', 'guard.json', 'runtime.json'
+    'violations.json', 'guard.json', 'runtime.json',
+    # -- [换机修复] 本机设置绝不跟着同步 ----------------------------------
+    # settings.json 记的是【这台电脑】的交付目录 / SW-CAD-Python 路径，
+    # 带着机器指纹。同步到别的电脑毫无意义（会被指纹判为外来而忽略），
+    # 还可能误导排障，因此按运行时数据处理。
+    'settings.json'
 )
 $RuntimeDirs = @('reports', 'heartbeats', 'load_cases', 'physics_runs',
                  'mode_logs', '.defense', '__pycache__', 'output')

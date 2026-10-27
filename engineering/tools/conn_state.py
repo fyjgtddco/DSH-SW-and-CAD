@@ -214,6 +214,15 @@ def _find_acad_exe():
       用户照着提示设了也没用。⇒ 修法：本函数与
       `_find_sldworks_exe_env()` 真正读取它们。
     """
+    # ── ⓪ 本机设置 settings.json 的 cad_exe（设置页「工程环境检查」可指定）──
+    #   带机器指纹：换电脑自动忽略，不会把别机的盘符带过来。
+    try:
+        import settings as _settings_mod
+        _sv = _settings_mod.cad_exe()
+        if _sv and os.path.isfile(_sv):
+            return os.path.abspath(_sv)
+    except Exception:
+        pass
     # ── ① 环境变量：用户显式指定（最高优先，用于非常规安装）──────────
     _env = (os.environ.get("DSH_ACAD_EXE") or "").strip().strip('"')
     if _env:
@@ -393,9 +402,32 @@ def discover_paths(force=False):
 
     缓存策略：已解析过且未 force 时，直接复用文件里的结果 ——
       除非该路径已不存在（例如软件被卸载/换盘），那时才重新扫描。
+
+    ── 【换机事故修复】缓存必须绑定【本机指纹】────────────────────────────
+    实测缺陷：connection_state.json 会随仓库/安装副本一起被拷到另一台电脑，
+      里面记着原作者机器的 Z 盘路径（Program Files 下的 SOLIDWORKS）。
+      旧实现只要任意一个已解析路径仍存在就沿用整份缓存，于是那台电脑
+      永远拿不到自己的正确路径，每次连接都先撞一次不存在的 Z 盘。
+    现在：paths 里多存一个 machine（本机指纹）；指纹不符 = 整份缓存作废，
+      按本机重新探测，并把旧值留在 ignored_stale_paths 里备查。
     """
     st = load()
     paths = st.get("paths") or {}
+    # ── 跨机缓存作废 ───────────────────────────────────────────────────
+    try:
+        import settings as _settings_mod
+        _mine = _settings_mod.machine_fingerprint()
+        _owner = paths.get("machine")
+        if _owner and _owner != _mine:
+            _stale = {k: paths.get(k) for k in
+                      ("sldworks_exe", "acad_exe", "abaqus_exe", "nx_exe", "webots_exe")
+                      if paths.get(k)}
+            paths = {"ignored_stale_paths": _stale,
+                     "ignored_reason": ("这份路径记录来自另一台电脑"
+                                        "（指纹 %s，本机 %s）" % (_owner, _mine))}
+            force = True
+    except Exception:
+        pass
     sw_exe = paths.get("sldworks_exe")
     acad_exe = paths.get("acad_exe")
     abq_exe = paths.get("abaqus_exe")
@@ -446,6 +478,7 @@ def discover_paths(force=False):
         _drives = swapi._all_drive_letters()
     except Exception:
         _drives = []
+    _prev_ignored = (paths or {}).get("ignored_stale_paths")
     paths = {
         "sldworks_exe": _sw,
         "acad_exe": _ac,
@@ -455,7 +488,12 @@ def discover_paths(force=False):
         "scanned_drives": _drives,
         "resolved_at": time.time(),
         "resolved_at_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+        # ★ 本机指纹：换电脑后整份路径缓存作废（见函数开头）
+        "machine": _mine,
+        "host": (os.environ.get("COMPUTERNAME") or ""),
     }
+    if _prev_ignored:
+        paths["ignored_stale_paths"] = _prev_ignored
     st["paths"] = paths
     save(st)
     return paths

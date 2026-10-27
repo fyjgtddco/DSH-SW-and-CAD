@@ -52,8 +52,29 @@ python sw_bridge.py ac-export [输出.dxf]   # 导出当前 AutoCAD 图纸为 DX
   2. 坐标写入必须使用 pythoncom.VARIANT 封送（VT_ARRAY | VT_R8）；
   3. 禁止使用 CreateDrawViewFromModelView 的锚点参数；
   4. 修改代码前必须先读取旧代码防止回归测试失败。
+
+【Python 版本要求】>= 3.6（本文件使用 f-string）。
+  微机房实测：默认 python 若是 3.5.x，会在这里直接 SyntaxError，
+  stdout 没有任何 JSON —— 上层只看到「插件解析失败 / 没有输出」，
+  根因完全看不出来。因此下面先放一段【版本闸门】：
+  它刻意不用 f-string，保证在旧解释器上也能正常执行并把话说清楚。
 """
 import sys
+
+# -- Python 版本闸门（必须在任何 f-string 之前执行）----------------------
+if sys.version_info < (3, 6):
+    sys.stderr.write(
+        "Python 版本过低：需要 3.6+，当前 %d.%d.%d\n"
+        "sw_bridge.py 使用了 f-string 语法，旧版本会直接 SyntaxError。\n"
+        "解决：用 py -3 调用；或安装 Python 3.11+；"
+        "也可在 DSH 设置页 工程模式 -> 工程环境检查 里指定 python.exe\n"
+        % (sys.version_info[0], sys.version_info[1], sys.version_info[2]))
+    print('{"ok": false, "error": "Python < 3.6 (no f-string support)", '
+          '"python": "%d.%d.%d", '
+          '"hint": "use py -3 or install Python 3.11+"}'
+          % (sys.version_info[0], sys.version_info[1], sys.version_info[2]))
+    sys.exit(2)
+
 import os
 import re
 import json

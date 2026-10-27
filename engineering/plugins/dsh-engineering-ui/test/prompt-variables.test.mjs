@@ -1,27 +1,31 @@
 /**
  * prompt-variables.test.mjs — 守住工程模式人设的 prompt 变量契约
  *
- * 真实故障（2026-10-17 实测）：
- *   切到工程模式后一发送消息就报
- *     unknown prompt variable "{{cwd}}" in section "deployment:persona-prefix";
+ * ── 真实故障史（两次复发，2026-10-17 / 2026-10-20）─────────────────────
+ *   切到工程模式后一发送消息就报：
+ *     unknown prompt variable "{{cwd}}(已废弃)" in section "deployment:persona-prefix";
  *     registered variables: provider, model
  *   → 整轮请求失败，工程模式完全不可用。
  *
  * 根因：
  *   0.2.0 的 dsh-agent-loop 注册过 provider / model / cwd 三个 prompt 变量；
- *   0.2.1-rc.2 只保留 provider 与 model
- *   （dsh-agent-loop/lib/index.js:1591-1592），cwd 被移除。
- *   而 dsh-system-prompt 的 interpolate() 对未注册变量【直接抛错】
+ *   0.2.1-rc.2 只保留 provider 与 model（dsh-agent-loop/lib/index.js:1591-1592），
+ *   cwd 被移除；而 dsh-system-prompt 的 interpolate() 对未注册变量【直接抛错】
  *   （dsh-system-prompt/lib/index.js:172-175），不是降级为空串。
  *
- * 维修：人设仍保留 {{cwd}}（工作目录是工程模式的必要信息），
- *   由本插件在全局 ctx 注册 cwd 变量把 0.2.0 的行为补回来。
+ * ── 两次修法的对比（这是本测试的核心教训）──────────────────────────────
+ *   第一次：人设保留 {{cwd}}(已废弃)，由本插件补注册 cwd 变量。
+ *     → 失败。补注册依赖 systemPrompt.variable() 的调用时机，
+ *       全局注册与 agent 作用域装配之间存在竞态，实测仍概率性复发。
+ *   第二次（现行）：人设里【删除】{{cwd}}(已废弃)，插件也【不再注册】。
+ *     → 工作目录本就由 DSH 的 working-directory 运行时上下文自动注入
+ *       （"Current working directory: ..."），人设里再写一遍是冗余的。
+ *     → 少一个自定义变量 = 少一个能让整轮请求失败的故障点。
  *
- * 本测试守四件事：
- *   ① 插件必须真的注册 cwd 变量；
- *   ② 取值必须走 workingDirectory.get 并回落 session.header.cwd；
- *   ③ 取不到时必须返回空串（undefined 会让整轮请求抛 has no value）；
- *   ④ 人设文本引用的每个变量都必须能被解析（provider/model 官方提供，cwd 本插件提供）。
+ * 本测试守三件事：
+ *   ① 人设文本里【绝不能】再出现 {{cwd}}(已废弃)（否则 0.2.1 下必然抛错）；
+ *   ② 插件里也【不应】再注册 cwd 变量（留死代码会误导后人加回 {{cwd}}(已废弃)）；
+ *   ③ 人设引用的每个变量都必须由官方提供（provider / model）。
  *
  * 运行：node --test test/prompt-variables.test.mjs
  */
@@ -32,19 +36,19 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const HOST_SRC = readFileSync(join(__dirname, '..', 'lib', 'index.js'), 'utf8');
+const PLUGIN_DIR = join(__dirname, '..');
+const HOST_SRC = readFileSync(join(PLUGIN_DIR, 'lib', 'index.js'), 'utf8');
 
 /** 官方（dsh-agent-loop）在 0.2.1-rc.2 注册的变量。 */
 const OFFICIAL_VARIABLES = new Set(['provider', 'model']);
-/** 本插件补注册的变量（0.2.0 曾有、0.2.1 移除）。 */
-const PLUGIN_VARIABLES = new Set(['cwd']);
 
 /** 定位 preset-engineering.patch.yml，兼容仓库与安装副本两种布局。 */
 function findPreset() {
   const candidates = [
     resolve(__dirname, '..', 'preset-engineering.patch.yml'),
     process.env.DSH_HOME
-      ? resolve(process.env.DSH_HOME, '.agent-presets', 'engineering', 'plugins', 'dsh-engineering-ui', 'preset-engineering.patch.yml')
+      ? resolve(process.env.DSH_HOME, '.agent-presets', 'engineering', 'plugins',
+                'dsh-engineering-ui', 'preset-engineering.patch.yml')
       : null,
   ].filter(Boolean);
   for (const c of candidates) if (existsSync(c)) return c;
@@ -56,96 +60,52 @@ function promptRefs(text) {
   return [...new Set([...text.matchAll(/\{\{\s*([a-z][a-z0-9_]*)\s*\}\}/g)].map((m) => m[1]))];
 }
 
-/** 取出 cwd 变量注册那段源码（从 variable('cwd' 起 1600 字符）。 */
-function cwdRegistrationSource() {
-  const start = HOST_SRC.indexOf("variable('cwd'");
-  assert.ok(start > 0, 'lib/index.js 里找不到 systemPrompt.variable(\'cwd\', ...) 注册');
-  return HOST_SRC.slice(start, start + 1600);
+/** 只看代码行，剔除注释 —— 注释里提到 {{cwd}}(已废弃) 属正常说明，不该判失败。 */
+function codeOnly(src) {
+  return src.split(/\r?\n/)
+    .filter((ln) => !/^\s*(\/\/|\*|\/\*)/.test(ln))
+    .join('\n');
 }
 
-test('① 插件必须为 cwd 注册 prompt 变量（否则人设里的 {{cwd}} 会让整轮请求失败）', () => {
-  assert.match(HOST_SRC, /systemPrompt\.variable\(\s*['"]cwd['"]/,
-    '缺少 cwd 变量注册');
-});
-
-test('② 注册必须有 ctx.inject([\'systemPrompt\'], ...) 兜底路径（可选服务不硬依赖）', () => {
-  // 【本次修订】注册点已改为"同步优先 + inject 兜底"两段式：
-  //   ① 同步直接取 ctx.systemPrompt 注册（消除 persona 先渲染的时序竞态）；
-  //   ② 再用 ctx.inject(['systemPrompt'], cb) 兜底服务稍后就绪的 profile。
-  //   因此断言要同时覆盖这两条路径，而不是要求"注册点必须在 inject 回调里"。
-  // 锚定【真实的 ctx.inject 调用】而不是注释里提到的字符串：
-  //   注释里也写了 "ctx.inject(['systemPrompt'], cb)" 这段文字，
-  //   若按 variable('cwd') 附近切片会把注释一起算进来 → 断言误判。
-  // 只看【代码行】，剔除注释行 —— 否则注释里提到的示例代码会让断言误判。
-  const codeLines = HOST_SRC.split(/\r?\n/)
-    .filter((ln) => !/^\s*(\/\/|\*|\/\*)/.test(ln));
-  const code = codeLines.join('\n');
-  const injectIdx = code.indexOf("ctx.inject(['systemPrompt']");
-  assert.ok(injectIdx > 0, '找不到 ctx.inject([\'systemPrompt\'], ...) 调用（代码行中）');
-  const region = code.slice(Math.max(0, injectIdx - 1500), injectIdx + 600);
-  // 必须有 inject 兜底
-  const m = /ctx\.inject\(\s*\[([^\]]*)\]\s*,/.exec(region);
-  assert.ok(m !== null, '应保留 ctx.inject([...], callback) 兜底路径');
-  assert.match(m[1], /['"]systemPrompt['"]/,
-    'ctx.inject 的服务列表应包含 systemPrompt，实际为 [' + m[1].trim() + ']');
-  // 而且必须做能力判断，缺失该服务时不得在 apply 阶段抛错
-  assert.match(region, /typeof\s+ctx\.inject\s*===\s*['"]function['"]/,
-    '调用前应判断 ctx.inject 是否存在');
-  // 同步注册路径必须存在（本次 {{cwd}} 复发的直接修复点）
-  assert.match(region, /ctx\.systemPrompt/,
-    '应有同步注册路径（直接读 ctx.systemPrompt），否则 persona 先渲染时仍会报 unknown prompt variable');
-});
-
-test('③ 取值必须优先 workingDirectory.get（同步、无 I/O）', () => {
-  const seg = cwdRegistrationSource();
-  assert.match(seg, /workingDirectory/, '应读取 ctx.workingDirectory');
-  assert.match(seg, /\.get\(/, '应调用 workingDirectory.get(...)');
-});
-
-test('④ 必须有 session.header.cwd 兜底', () => {
-  assert.match(cwdRegistrationSource(), /header/, '应回落 session.header.cwd');
-});
-
-test('⑤ 取不到目录时必须返回空字符串，绝不能返回 undefined', () => {
-  // 官方语义：value === undefined → 抛 'has no value for this assembly'
-  // （dsh-system-prompt/lib/index.js:176-177）；空串是合法值。
-  const seg = cwdRegistrationSource();
-  assert.match(seg, /return\s+''/, "兜底分支必须 return ''");
-  assert.ok(!/return\s+undefined/.test(seg),
-    'cwd provider 不得 return undefined（会让整轮请求抛 has no value）');
-});
-
-test('⑥ provider 内任何异常都只降级为空串，不得抛出', () => {
-  const seg = cwdRegistrationSource();
-  const catches = (seg.match(/catch/g) || []).length;
-  assert.ok(catches >= 2, 'provider 内应有至少两层 catch（服务读取 + 整体）');
-});
-
-test('⑦ 人设文本引用的每个变量都必须有人提供（官方 或 本插件）', (t) => {
+test('① 人设里绝不能出现 {{cwd}}(已废弃)（0.2.1 未注册该变量，必然抛错）', () => {
   const presetPath = findPreset();
-  if (presetPath === null) { t.skip('未找到 preset-engineering.patch.yml'); return; }
+  assert.ok(presetPath, '找不到 preset-engineering.patch.yml');
+  const preset = readFileSync(presetPath, 'utf8');
+  const refs = promptRefs(preset);
+  assert.ok(!refs.includes('cwd'),
+    '人设里仍有 {{cwd}}(已废弃) —— 0.2.1 未注册该变量，会导致 "unknown prompt variable" 整轮失败。' +
+    '工作目录由运行时上下文自动注入，不需要写 {{cwd}}(已废弃)。');
+});
+
+test('② 插件不应再注册 cwd 变量（留死代码会误导后人加回 {{cwd}}(已废弃)）', () => {
+  const code = codeOnly(HOST_SRC);
+  assert.ok(!/variable\(\s*['"]cwd['"]/.test(code),
+    'lib/index.js 里仍有 systemPrompt.variable(\'cwd\', ...) 注册。' +
+    '既然人设已不引用 cwd，这段注册属于死代码，应删除以免后人误以为可以加回 {{cwd}}(已废弃)。');
+});
+
+test('③ 人设引用的每个变量都必须由官方提供', () => {
+  const presetPath = findPreset();
+  assert.ok(presetPath, '找不到 preset-engineering.patch.yml');
   const refs = promptRefs(readFileSync(presetPath, 'utf8'));
-  const unresolved = refs.filter((r) => !OFFICIAL_VARIABLES.has(r) && !PLUGIN_VARIABLES.has(r));
-  assert.deepEqual(unresolved, [],
-    '人设引用了没人注册的变量 ' + JSON.stringify(unresolved) +
-    '；官方提供 ' + JSON.stringify([...OFFICIAL_VARIABLES]) +
-    '，本插件提供 ' + JSON.stringify([...PLUGIN_VARIABLES]));
+  const unknown = refs.filter((r) => !OFFICIAL_VARIABLES.has(r));
+  assert.deepEqual(unknown, [],
+    '人设引用了官方未注册的变量: ' + unknown.join(', ') +
+    '（官方仅注册 provider / model）');
 });
 
-test('⑧ 人设必须保留 {{cwd}}（工作目录是工程模式的必要信息，不得为规避报错而删除）', (t) => {
+test('④ 人设仍应告知模型它在做机械设计（不能把整段人设删空）', () => {
   const presetPath = findPreset();
-  if (presetPath === null) { t.skip('未找到 preset-engineering.patch.yml'); return; }
-  const refs = promptRefs(readFileSync(presetPath, 'utf8'));
-  assert.ok(refs.includes('cwd'), '人设应显式告知工作目录（{{cwd}}）');
-  assert.ok(refs.includes('model'), '人设应保留 {{model}}');
+  const preset = readFileSync(presetPath, 'utf8');
+  assert.match(preset, /机械工程设计 Agent/, '人设首行应保留角色声明');
+  assert.match(preset, /\{\{\s*model\s*\}\}/, '人设应保留 {{model}}');
 });
 
-test('⑨ agent.cordis.yml（历史对照）与 preset 的变量集合必须一致', (t) => {
-  const presetPath = findPreset();
-  if (presetPath === null) { t.skip('未找到 preset'); return; }
-  const cordis = resolve(__dirname, '..', '..', '..', 'agent.cordis.yml');
-  if (!existsSync(cordis)) { t.skip('agent.cordis.yml 不在安装副本里，跳过'); return; }
-  const a = promptRefs(readFileSync(presetPath, 'utf8')).sort();
-  const b = promptRefs(readFileSync(cordis, 'utf8')).sort();
-  assert.deepEqual(a, b, '两份文件的变量集合应一致，避免后人照抄到废弃变量');
+test('⑤ 插件源码里不得残留 cwd 变量注册的实现细节', () => {
+  const code = codeOnly(HOST_SRC);
+  for (const bad of ['_cwdProvider', '_registerCwdOn', 'cwd variable setup',
+                     '_cwdVariableDisposer']) {
+    assert.ok(!code.includes(bad),
+      '插件里仍残留 cwd 注册实现: ' + bad + '（应整体删除）');
+  }
 });

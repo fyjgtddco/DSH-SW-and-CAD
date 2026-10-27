@@ -521,7 +521,17 @@ def find_sldworks_exe():
     但全代码库【没有任何地方读取该变量】—— 用户照做也无效，属空头承诺。
     现真正支持：DSH_SW_EXE 可指向 exe 本身或其所在目录。
     """
-    # 0) 环境变量显式指定（最高优先，用于非常规安装位置）
+    # 0) 本机设置 settings.json 的 sw_exe（设置页「工程环境检查」里指定）
+    #    ── 【换机事故修复】设置里存的值带"机器指纹"，换电脑自动忽略；
+    #       因此这条路径不会把 A 电脑的 Z: 盘带到 B 电脑上。
+    try:
+        import settings as _settings_mod
+        _sv = _settings_mod.sw_exe()
+        if _sv and os.path.isfile(_sv):
+            return os.path.abspath(_sv)
+    except Exception:
+        pass
+    # 0b) 环境变量显式指定（最高优先，用于非常规安装位置）
     _env = (os.environ.get("DSH_SW_EXE") or "").strip().strip('"')
     if _env:
         for _c in (_env,

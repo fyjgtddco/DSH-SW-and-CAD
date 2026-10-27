@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "at": "2026-10-22 09:49:28",
+      "where": "mode_gate.rooms-reset",
+      "reason": "清空房间/报告（会抹除防线凭据），已留痕",
+      "by": "rooms-reset"
+    },
+    {
+      "at": "2026-10-22 10:03:30",
+      "where": "mode_gate.room-fail:结构件",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/结构件.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/结构件.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
+    },
+    {
+      "at": "2026-10-22 10:03:36",
+      "where": "mode_gate.room-fail:壳体",
+      "reason": "房间回退留痕；当前防线缺口: 【防线②物理】未做物理校核：凭据文件不存在（凭据文件不存在（reports/壳体.physics.json）） —— 请先跑对应的 physics 校核命令生成凭据; 【防线③领域】未做领域校核：凭据文件不存在（凭据文件不存在（reports/壳体.domain.json）） —— 请先跑对应的 physics 校核命令生成凭据",
+      "by": "room-fail"
+    }
+  ]
+}
