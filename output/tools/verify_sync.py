@@ -50,6 +50,10 @@ RUNTIME_NAMES = {
     'violations.json', 'guard.json', 'runtime.json',
     # -- [换机修复] 本机设置（交付目录 / 各软件路径）按运行时数据处理 --
     'settings.json',
+    # -- [2026-10-28] 与 sync 脚本同步扩充的运行时数据 --
+    'platform_agents.json', 'part_registry.json', 'custom_materials.json',
+    # 插件/AI 写入的现场文件（不属于代码）
+    'persona.json', 'sw_guard.log', 'sw_guard.pid', 'sw_monitor.pid',
 }
 RUNTIME_DIRS = {'reports', 'heartbeats', 'load_cases', 'physics_runs',
                 'mode_logs', '.defense', '__pycache__', 'output'}
@@ -70,6 +74,11 @@ def skip(name, parts):
     if '.bak' in name or name.endswith('.pyc') or name.startswith('~$'):
         return True
     if name.startswith('_probe_'):
+        return True
+    # 调试/一次性脚本（_tmp_ 前缀）与日志/pid 都不属于代码
+    if name.startswith('_tmp_'):
+        return True
+    if name.endswith('.log') or name.endswith('.pid'):
         return True
     if '%' in name:
         return True

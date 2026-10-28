@@ -259,26 +259,170 @@ def _save_platform_status(data):
         return False
 
 
-def _platform_liveness(room):
-    """【Bug-23】取房间的平台侧存活结论。
+# ══ 【阶段 C · 状态可信化】插件自动维护的子代理注册表 ═══════════════════
+# 背景（用户会话实测）：主对话分不清子代理死活 —— 它手动跑 while(true)
+#   platform-sync running 造假心跳，subagent-assign 从没调用，recover 把还在跑
+#   的房间判成"僵尸残留"，紧接着 reset 把三个正在建模的子代理全杀了。
+# 根因：存活结论靠【主对话猜/手写】，而不是平台事实。
+# 修复：宿主插件 dsh-engineering-ui 在 agent/created、agent/turn-stopping、
+#   agent/disposed 时【自动】维护 <STATE_DIR>/platform_agents.json：
+#     {"updatedAt": ..., "source": "dsh-engineering-ui",
+#      "agents": [{id, label, parentId, createdAt, status, lastEventAt}]}
+#   这份文件是平台事实，主对话不需要（也不允许）再手工喂假心跳。
+PLATFORM_AGENTS_FILE = os.path.join(STATE_DIR, "platform_agents.json")
 
-    Returns: (status|None, age_sec|None)
-      "running"  -> 平台确认仍在跑（权威：禁止判死/禁止重启）
-      "inactive" -> 平台确认已停止（可判 stale）
-      "missing"  -> 平台侧无此子代理（登记丢失，Bug-32 场景）
-      None       -> 无登记或登记过期（证据不足，退回证据链）
+
+def _parse_ts_any(value):
+    """把插件写的时间戳解析为 epoch 秒（兼容 ISO 字符串 / 秒 / 毫秒）。
+
+    为什么必须兼容：插件侧可能写 ISO（new Date().toISOString()），旧版本可能
+      写毫秒整数。任何解析失败都返回 None —— 宁可"年龄未知"，也不猜成"很旧"。
     """
-    rec = _load_platform_status().get(room)
-    if not isinstance(rec, dict):
-        return None, None
+    if value is None:
+        return None
     try:
-        _ts = float(rec.get("ts") or 0)
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            v = float(value)
+            return v / 1000.0 if v > 1e11 else v
+        s = str(value).strip()
+        if not s:
+            return None
+        try:
+            v = float(s)
+            return v / 1000.0 if v > 1e11 else v
+        except Exception:
+            pass
+        import datetime as _dt
+        import re as _re
+        _s = s.replace("Z", "+00:00")
+        _s = _re.sub(r"(\.\d{6})\d+", r"\1", _s)   # 截断超出微秒的精度
+        return _dt.datetime.fromisoformat(_s).timestamp()
     except Exception:
-        return None, None
-    _age = time.time() - _ts
-    if _age > PLATFORM_FRESH_SEC:
-        return None, _age
-    return str(rec.get("status") or "").lower() or None, _age
+        return None
+
+
+def _load_plugin_registry():
+    """读取插件自动维护的子代理注册表（失败返回 {}，绝不抛异常）。"""
+    try:
+        if not os.path.exists(PLATFORM_AGENTS_FILE):
+            return {}
+        with open(PLATFORM_AGENTS_FILE, "r", encoding="utf-8-sig") as f:
+            d = json.load(f)
+        if not isinstance(d, dict):
+            return {}
+        if not isinstance(d.get("agents"), list):
+            d["agents"] = []
+        return d
+    except Exception:
+        return {}
+
+
+def _plugin_agents():
+    """注册表里有效的子代理记录（只保留带 id 的 dict 项）。"""
+    try:
+        return [a for a in (_load_plugin_registry().get("agents") or [])
+                if isinstance(a, dict) and a.get("id")]
+    except Exception:
+        return []
+
+
+def _plugin_agent_for_room(room, sub_rec=None):
+    """把房间匹配到插件注册表里的子代理记录（不猜：多条匹配返回 None）。
+
+    匹配顺序（契约见 docs/redesign-prime-and-status.md 二·C）：
+      ① mode_state.subagents[room].id 与 agents[].id 【精确相等】—— 最可靠；
+      ② label 包含房间名（或房间名包含 label）且【唯一】命中；
+      ③ 都没命中 / 多条命中 → None（宁可报 unbound，也不瞎认一个 id）。
+    """
+    agents = _plugin_agents()
+    if not agents:
+        return None
+    _sid = None
+    try:
+        if isinstance(sub_rec, dict):
+            _sid = sub_rec.get("id")
+        elif isinstance(sub_rec, str):
+            _sid = sub_rec
+    except Exception:
+        _sid = None
+    _sid = str(_sid or "").strip()
+    if _sid:
+        for a in agents:
+            if str(a.get("id") or "").strip() == _sid:
+                return a
+    _room = str(room or "").strip()
+    if not _room:
+        return None
+    hits = []
+    for a in agents:
+        _label = str(a.get("label") or "").strip()
+        if not _label:
+            continue
+        if (_room in _label) or (_label in _room):
+            hits.append(a)
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def _plugin_liveness(room, sub_rec=None):
+    """插件注册表给出的存活结论 (status, age_sec, agent)。
+
+    语义（关键，别改错）：
+      · 命中且 status != disposed → ("running", age)：
+        子代理对象【仍然存在】。agent/turn-stopping 只是"本回合结束"，
+        子代理还活着 → 绝不能当成死亡（这正是用户被误杀的根因）。
+      · status == disposed → ("inactive", age)：平台已确认释放；
+      · 未命中 → (None, None)：不猜，退回证据链。
+    """
+    a = _plugin_agent_for_room(room, sub_rec)
+    if not a:
+        return None, None, None
+    _st = str(a.get("status") or "").strip().lower()
+    _ts = _parse_ts_any(a.get("lastEventAtMs"))
+    if _ts is None:
+        _ts = _parse_ts_any(a.get("lastEventAt"))
+    if _ts is None:
+        _ts = _parse_ts_any(a.get("createdAt"))
+    _age = (time.time() - _ts) if _ts else None
+    if _st == "disposed":
+        return "inactive", _age, a
+    return "running", _age, a
+
+
+def _platform_liveness(room, sub_rec=None):
+    """取房间的平台侧存活结论（返回值保持旧契约 (status|None, age_sec|None)）。
+
+    Returns:
+      "running"  -> 平台确认仍在跑（权威：禁止判死/禁止重启）
+      "inactive" -> 平台确认已停止/已释放（才允许判死）
+      "missing"  -> 平台侧无此子代理（登记丢失，Bug-32 场景）
+      None       -> 无平台事实（证据不足，退回证据链，绝不当成"死亡"）
+
+    读取顺序（【阶段 C】契约，顺序不可颠倒）：
+      ① 手动 platform_status.json（PLATFORM_FRESH_SEC 内）—— 人工覆盖优先；
+      ② 插件自动注册表 platform_agents.json（按绑定 id 或 label 唯一匹配）；
+      ③ (None, None) —— 无平台事实。
+    """
+    _stale_manual_age = None
+    rec = _load_platform_status().get(room)
+    if isinstance(rec, dict):
+        try:
+            _ts = float(rec.get("ts") or 0)
+        except Exception:
+            _ts = 0.0
+        if _ts:
+            _age = time.time() - _ts
+            if _age <= PLATFORM_FRESH_SEC:
+                return str(rec.get("status") or "").lower() or None, _age
+            # 手动记录已过期 → 不再作权威结论；保留年龄仅用于展示
+            _stale_manual_age = _age
+    _pst, _page, _pa = _plugin_liveness(room, sub_rec)
+    if _pst:
+        return _pst, _page
+    return None, _stale_manual_age
 
 
 def cmd_platform_sync(room, status, by="main"):
@@ -404,6 +548,46 @@ def cmd_subagent_assign(room, subagent_id):
             "note": "已绑定并持久化（room-status 的 subagent 字段可见）"}
 
 
+def cmd_whoami_self_bind(room=None):
+    r"""BUG-9: whoami 时顺手补上 subagent 绑定。
+
+    room-start 本身不记录哪个子代理占着这个房间；主对话若忘了
+    subagent-assign，room-status 就显示 subagent=null，小屋上报可能失败。
+
+    现在两条路并存：显式 assign 优先；没有绑定时 whoami 从
+    DSH_SESSION_ID / DSH_SESSION_JSONL 反解并自动绑上；
+    已有绑定则不覆盖（避免抢掉主对话的明确指派）。
+    """
+    _room = str(room or os.environ.get("DSH_ROOM") or "").strip()
+    if not _room:
+        return {"ok": False, "error": "缺少房间名（也没有 DSH_ROOM）"}
+    state = load_state()
+    rooms = state.get("rooms") or {}
+    if _room not in rooms:
+        return {"ok": False, "room": _room,
+                "error": "房间尚未 room-start，无法自查绑定",
+                "registered_rooms": sorted(rooms.keys())}
+    _sid = _register_self_identity(_room)
+    if not _sid:
+        return {"ok": False, "room": _room,
+                "error": "无法从环境变量反解 sessionId",
+                "hint": "请在 DSH 会话内运行，而不是裸终端"}
+    subs = state.setdefault("subagents", {})
+    _exist = subs.get(_room)
+    if isinstance(_exist, dict) and _exist.get("id"):
+        return {"ok": True, "room": _room,
+                "subagent_id": _exist.get("id"),
+                "action": "kept",
+                "note": "已由主对话绑定，本命令不覆盖"}
+    subs[_room] = {"id": _sid, "assigned_at": time.time(),
+                   "assigned_by": "whoami-self-bind"}
+    save_state(state)
+    return {"ok": True, "room": _room, "subagent_id": _sid,
+            "action": "bound",
+            "note": "已由 whoami 自动绑定（BUG-9）"}
+
+
+
 def cmd_subagent_free(room):
     """清除房间对应的 subagent 记录（房间被杀/重启时使用）。"""
     state = load_state()
@@ -461,6 +645,12 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
     now = time.time()
 
     alive, zombie, stale, orphan = [], [], [], []
+    # ── 【阶段 C】新增 unbound：平台确认存活、但房间没绑 subagent ──────────
+    # 用户会话实测的误杀链：subagent-assign 从没调用 → 房间"没有 subagent 登记"
+    #   → 旧逻辑归入 zombie → recover 判"僵尸残留" → reset 把正在建模的小屋杀了。
+    # 现在这类房间单列 unbound，并明确写"平台侧仍存活，禁止 reset；补
+    #   subagent-assign 即可"。它们【不参与清理】，也不计入 has_residue。
+    unbound = []
 
     # ── 1) 房间维度分类 ─────────────────────────────────────────────────
     for name, info in rooms.items():
@@ -470,23 +660,51 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
             continue
         if not info.get("active"):
             continue
-        st = _room_status_of(name, info, subs)
+        st = _room_status_of(name, info, subs, state=state)
         status = st.get("status")
+        # ── 【阶段 C】看板判定优先：dead 只在平台【明确】说不在时出现 ──────
+        try:
+            _b = _board_entry(name, info, subs, state=state, st=st)
+            _bstate = str(_b.get("state") or "")
+        except Exception:
+            _b = {}
+            _bstate = ""
         rec = (
-            "房间[%s] 状态=%s 心跳=%ss 报告=%ss 产物=%s"
-            % (name, status, st.get("heartbeat_age_sec"),
-               st.get("report_age_sec"),
+            "房间[%s] 状态=%s 平台=%s 心跳=%ss 报告=%ss 产物=%s"
+            % (name, _bstate or status, st.get("platform_status"),
+               st.get("heartbeat_age_sec"), st.get("report_age_sec"),
                bool((st.get("evidence") or {}).get("disk_artifact")))
         )
-        # running / starting / running_unverified 都视为活着的子对话
-        if status in ("running", "starting", "running_unverified"):
+        if _bstate == "unbound" or (not _bstate and status == "running"
+                                    and not st.get("subagent_id")):
+            unbound.append({
+                "room": name, "status": status, "detail": rec,
+                "platform_status": st.get("platform_status"),
+                "note": ("平台侧仍存活，禁止 reset；补 subagent-assign 即可："
+                         "python mode_gate.py subagent-assign %s <subagent_fork 返回的 id>"
+                         % name),
+                "next_action": _b.get("next_action") or UNBOUND_NEXT_ACTION,
+            })
+        elif _bstate in ("running", "starting", "waiting_sw", "idle"):
+            # waiting_sw / idle 同样是【活着的子对话】：禁止判死、禁止清理
+            alive.append({"room": name, "status": status, "state": _bstate,
+                          "detail": rec})
+        elif _bstate == "dead":
+            stale.append({"room": name, "status": status, "state": _bstate,
+                          "detail": rec})
+        elif _bstate == "done":
+            continue
+        elif _bstate == "failed":
+            continue
+        elif _bstate:
+            zombie.append({"room": name, "status": status, "state": _bstate,
+                           "detail": rec})
+        elif status in ("running", "starting", "running_unverified"):
             alive.append({"room": name, "status": status, "detail": rec})
         elif status == "stale":
             stale.append({"room": name, "status": status, "detail": rec})
-        elif status == "no_heartbeat":
-            # 可疑：无心跳也无佐证 —— 归入僵尸（登记了却没真正跑起来）
-            zombie.append({"room": name, "status": status, "detail": rec})
         else:
+            # 没有看板结论时的最后兜底：仍按旧规则（保守：不动活着的）
             zombie.append({"room": name, "status": status, "detail": rec})
 
     # ── 2) 孤儿映射：subagents 里有、rooms 里没有（或房间已收尾）────────
@@ -507,7 +725,9 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
                 wf = json.load(f) or {}
             step = str(wf.get("step") or "")
             ADVANCED = ("providing", "mechanics_done", "user_selected")
-            no_alive_room = (len(alive) == 0)
+            # unbound 的房间【也是活着的】—— 只要平台说它还在跑，门禁推进态
+            #   就不能算"没有任何活着的房间"（否则会把正在进行的工作流清成残留）
+            no_alive_room = (len(alive) == 0 and len(unbound) == 0)
             if step in ADVANCED and no_alive_room:
                 gate_residue = {
                     "step": step,
@@ -529,12 +749,15 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
         "ok": True,
         "has_residue": has_residue,
         "alive": alive,
+        # 【阶段 C】unbound = 平台存活但未绑定 subagent：不是残留，禁止 reset
+        "unbound": unbound,
         "zombie": zombie,
         "stale": stale,
         "orphan": orphan,
         "gate_residue": gate_residue,
-        "counts": {"alive": len(alive), "zombie": len(zombie),
-                   "stale": len(stale), "orphan": len(orphan)},
+        "counts": {"alive": len(alive), "unbound": len(unbound),
+                   "zombie": len(zombie), "stale": len(stale),
+                   "orphan": len(orphan)},
         "cleaned": False,
         "actions": [],
     }
@@ -566,6 +789,12 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
         elif alive:
             actions.append("保留 %d 个活动房间（未加 --force，不清理）: %s"
                            % (len(alive), ", ".join(x["room"] for x in alive)))
+        # 4b-2) unbound 房间【永不清理】：平台说它还活着，清掉就是误杀。
+        if unbound:
+            actions.append("保留 %d 个 unbound 房间（平台存活但未绑定 subagent，"
+                           "禁止 reset；请补 subagent-assign）: %s"
+                           % (len(unbound),
+                              ", ".join(x["room"] for x in unbound)))
 
         # 4c) 重置 SW 锁（残留死房间会把队列永久阻塞）
         _st["sw_lock"] = {"owner": None, "queue": [], "acquired_at": None,
@@ -620,34 +849,43 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
         result["gate_residue"] = None
         # counts 也要同步归零，否则调用方读 counts 仍会看到"清理前"的残留数
         result["counts"] = {"alive": len(result.get("alive") or []),
+                            "unbound": len(result.get("unbound") or []),
                             "zombie": 0, "stale": 0, "orphan": 0}
         if force:
             result["alive"] = []
             result["counts"]["alive"] = 0
 
     # ── 5) 提示文案 ────────────────────────────────────────────────────
+    # 【阶段 C】unbound 的文案必须与"残留"区分开：平台说它还活着，
+    #   正确动作是补 subagent-assign，【不是】reset/清理。
+    _unbound_hint = (
+        ("；另有 %d 个 unbound 房间（平台侧仍存活，禁止 reset；补 subagent-assign 即可）: %s"
+         % (len(unbound), ", ".join(x["room"] for x in unbound))) if unbound else "")
     if not quiet:
         if result.get("cleaned"):
             # 清理后按"实际结果"给文案，而不是按清理前的分类
             _ci = result.get("cleaned_items") or {}
             _kept = len(result.get("alive") or [])
-            result["hint"] = ("清理完成。清除项：僵尸 %d / 陈旧 %d / 孤儿 %d / 门禁残留 %s%s。"
+            result["hint"] = ("清理完成。清除项：僵尸 %d / 陈旧 %d / 孤儿 %d / 门禁残留 %s%s%s。"
                               % (len(_ci.get("zombie") or []), len(_ci.get("stale") or []),
                                  len(_ci.get("orphan") or []),
                                  ("step=%s" % _ci["gate_residue_step"])
                                  if _ci.get("gate_residue_step") else "无",
                                  ("；保留 %d 个活动房间（未加 --force）" % _kept)
-                                 if _kept else ""))
-        elif not has_residue and not alive:
+                                 if _kept else "",
+                                 _unbound_hint))
+        elif not has_residue and not alive and not unbound:
             result["hint"] = "干净：未检出任何子对话/任务残留。"
         elif not has_residue and alive:
             result["hint"] = ("未检出残留，但有 %d 个活动房间正在运行 —— "
-                              "新任务请等其结束或显式 --force。" % len(alive))
+                              "新任务请等其结束或显式 --force。%s" % (len(alive), _unbound_hint))
+        elif not has_residue and unbound:
+            result["hint"] = ("未检出残留。%s" % (_unbound_hint.lstrip("；"),))
         else:
-            result["hint"] = ("检出残留：僵尸 %d / 陈旧 %d / 孤儿 %d / 门禁残留 %s。"
-                              "执行 mode_gate.py residue-check --clean 自动清理。"
+            result["hint"] = ("检出残留：僵尸 %d / 陈旧 %d / 孤儿 %d / 门禁残留 %s%s。"
+                              "执行 mode_gate.py residue-check --clean 自动清理（unbound 不会被清）。"
                               % (len(zombie), len(stale), len(orphan),
-                                 "有" if gate_residue else "无"))
+                                 "有" if gate_residue else "无", _unbound_hint))
     return result
 
 
@@ -2040,6 +2278,241 @@ def cmd_room_report_read(room=None):
                      "send_message 没有立即回复不代表小屋死了（消息会排队）")}
 
 
+# ══ 【阶段 C · 状态可信化】SW 使用窗口快照 + 唯一权威看板 room-board ══════
+# 用户实测痛点（原文）：「SW 锁排队中的小屋和"死了"看起来一样」——
+#   房间明明在 FIFO 队列里正常等锁，主对话看到"没产出/没心跳"就判死重启。
+# 对策：waiting_sw 成为【一等状态】，看板直接给出 safe_to_restart=False
+#   与一句"严禁判死/重启"的理由，主对话不需要自己推理。
+ROOM_BOARD_STATES = ("starting", "running", "waiting_sw", "idle",
+                     "done", "failed", "dead", "unbound")
+#: 多久没有【可观察改动】（报告/产物/待确认/刚绑定）就算"活着但当前没动作"
+BOARD_IDLE_SEC = 300
+#: waiting_sw 的统一阻断理由（契约文案，勿改）
+WAITING_SW_BLOCK_REASON = "正在排队等 SolidWorks 锁，属正常等待，严禁判死/重启"
+UNBOUND_NEXT_ACTION = ("python mode_gate.py subagent-assign <房间> <id>"
+                       "（subagent_fork 返回值）")
+
+
+def _sw_lock_snapshot(state=None):
+    """读取 SW 使用窗口的【真实排队情况】（owner / queue / 持锁时长）。
+
+    数据来源：
+      · mode_state.sw_lock —— owner / queue / acquired_at（sw_bridge 排队时写）；
+      · sw_state.json      —— 只有进程级事实（SLDWORKS.EXE 在不在），用于印证。
+    绝不修改任何状态（纯只读快照）。
+    """
+    out = {"owner": None, "queue": [], "age_sec": None,
+           "sw_running": None, "source": None}
+    try:
+        _st = state if isinstance(state, dict) else load_state()
+        _lk = (_st or {}).get("sw_lock") or {}
+        if isinstance(_lk, dict):
+            out["owner"] = _lk.get("owner") or None
+            _q = _lk.get("queue")
+            out["queue"] = [str(x) for x in _q] if isinstance(_q, list) else []
+            _acq = _lk.get("acquired_at")
+            if _acq:
+                try:
+                    out["age_sec"] = round(time.time() - float(_acq), 1)
+                except Exception:
+                    out["age_sec"] = None
+            out["source"] = "mode_state.sw_lock"
+    except Exception:
+        pass
+    try:
+        if os.path.exists(_SW_STATE_FILE):
+            with open(_SW_STATE_FILE, "r", encoding="utf-8") as f:
+                _sw = json.load(f) or {}
+            out["sw_running"] = _sw.get("sw_running")
+            out["sw_count"] = _sw.get("sw_count")
+            out["sw_state_updated_at"] = _sw.get("updated_at")
+    except Exception:
+        pass
+    return out
+
+
+def _room_type_map():
+    """房间 → 类型（来自总计子代理登记的编制；读不到返回 {}，绝不抛异常）。
+
+    编制是"该开哪几间、每间什么类型"的唯一来源（docs 二·B）；这里只读。
+    """
+    out = {}
+    try:
+        import mode2_flow as _m2
+        _plan = _m2.get_subagent_plan(_mode2_work_dir()) or {}
+        for _r in (_plan.get("rooms") or []):
+            if isinstance(_r, dict) and _r.get("name"):
+                out[str(_r["name"])] = _r.get("type")
+    except Exception:
+        return out
+    return out
+
+
+def _board_guidance(board_state, room):
+    """看板状态 → (safe_to_restart, restart_block_reason, next_action)。
+
+    唯一合法可重启集合：done / failed / dead（平台已确认不在运行）。
+    其余一律 False —— 并把"为什么不能动"写成机器可读的理由。
+    """
+    if board_state == "done":
+        return True, None, "已收尾（ended_at）；无需动作，如需清理由人工 rooms-reset"
+    if board_state == "failed":
+        return True, None, ("python mode_gate.py room-start %s（重开后再 fork 小屋）"
+                            % room)
+    if board_state == "dead":
+        return True, None, ("平台已确认不在运行：可 python mode_gate.py room-fail %s "
+                            "后重新 room-start/fork" % room)
+    if board_state == "unbound":
+        return False, ("平台侧仍存活，禁止 reset；只是缺 subagent-assign 登记"), \
+            ("python mode_gate.py subagent-assign %s <id>（subagent_fork 返回值）"
+             % room)
+    if board_state == "waiting_sw":
+        return False, WAITING_SW_BLOCK_REASON, \
+            ("等待 SolidWorks 锁（正常排队），禁止重启；"
+             "python mode_gate.py sw-status 查看队列")
+    if board_state == "idle":
+        return False, ("平台侧确认仍存活（当前无可观察动作），禁止判死/重启"), \
+            ("平台存活但当前没动作：send_message 问进度或继续等待，禁止 reset")
+    if board_state == "starting":
+        return False, ("刚登记、仍在 %d 秒启动宽限内，等待即可" % SW_START_GRACE), \
+            "等待启动宽限期结束（禁止判死）"
+    return False, "正在运行，严禁判死/重启", "无需动作（正在跑）"
+
+
+def _board_entry(name, info, subs, state=None, type_map=None, st=None):
+    """单个房间的看板行（room-board / room-status / residue-check 共用判定）。
+
+    state 映射规则（契约见 docs/redesign-prime-and-status.md 二·C）：
+      ended_at → done；failed_at → failed；
+      平台 alive 但房间无 subagent 绑定 → unbound；
+      平台 inactive/disposed/missing + 无任何证据 + 超宽限 → dead；
+      active 且平台 alive 但无改动 → idle；
+      其余按 _room_status_of（其内部已含 waiting_sw / 平台优先）。
+    """
+    info = info or {}
+    now = time.time()
+    if st is None:
+        st = _room_status_of(name, info, subs, state=state)
+    _subs = subs or {}
+    _sub_rec = _subs.get(name)
+    _sid = None
+    if isinstance(_sub_rec, dict):
+        _sid = _sub_rec.get("id")
+    elif _sub_rec:
+        _sid = _sub_rec
+    _agent = _plugin_agent_for_room(name, _sub_rec) or {}
+    _plat = st.get("platform_status")
+    _legacy = str(st.get("status") or "")
+    _swe = st.get("sw_lock") or {}
+    _owner = _swe.get("owner")
+    _queue = _swe.get("queue") or []
+    _sw_pos = (_queue.index(name) + 1) if name in _queue else None
+    _ev = st.get("evidence") or {}
+    _report_age = st.get("report_age_sec")
+    _art = st.get("artifact") if isinstance(st.get("artifact"), dict) else {}
+    _art_age = _art.get("age_sec") if isinstance(_art, dict) else None
+    _assigned_age = st.get("subagent_assigned_age_sec")
+    _started = info.get("started_at")
+    # "超宽限" = 房间登记已超过 SW_STALE_GRACE（刚起来的房间不判死）
+    try:
+        _beyond_grace = (_started is None) or ((now - float(_started)) > SW_STALE_GRACE)
+    except Exception:
+        _beyond_grace = (_started is None)
+    # "当前有可观察改动"（用于 idle 判定；窗口比证据窗口更短、更诚实）
+    _fresh_activity = bool(
+        (_report_age is not None and _report_age <= BOARD_IDLE_SEC)
+        or (_art_age is not None and _art_age <= BOARD_IDLE_SEC)
+        or _ev.get("pending_confirm")
+        or (_assigned_age is not None and _assigned_age <= BOARD_IDLE_SEC)
+    )
+    # ── state 推导（顺序即优先级，勿随意调整）────────────────────────────
+    if info.get("ended_at"):
+        board_state = "done"
+    elif info.get("failed_at"):
+        board_state = "failed"
+    elif _plat == "running" and not _sid:
+        # 平台说活着，只是房间没绑 subagent —— 这是 assign 漏了，不是死
+        board_state = "unbound"
+    elif (_plat in ("inactive", "missing") and not _ev.get("any")
+          and _beyond_grace):
+        # 只有平台【明确】说不在 + 无任何证据 + 超宽限，才允许判死
+        board_state = "dead"
+    elif _legacy == "waiting_sw":
+        board_state = "waiting_sw"
+    elif _plat == "running" and not _fresh_activity:
+        board_state = "idle"          # 活着，但当前没有可观察的动作
+    elif _legacy in ("starting", "running", "running_unverified"):
+        board_state = "starting" if _legacy == "starting" else "running"
+    elif _legacy == "completed":
+        board_state = "done"
+    elif _legacy == "failed":
+        board_state = "failed"
+    elif _legacy in ("stale", "no_heartbeat"):
+        # 判死必须【同时】满足：平台明确说不在 + 超过宽限（_beyond_grace）。
+        #   · 平台无结论 → 报 idle（不许纯靠心跳判死，这正是误杀源头）；
+        #   · 平台说不在了，但房间刚起来还在宽限内 → 报 starting（再等等）。
+        if _plat and _beyond_grace:
+            board_state = "dead"
+        elif _plat:
+            board_state = "starting"
+        else:
+            board_state = "idle"
+    else:
+        board_state = "running" if _legacy == "running" else "idle"
+    _safe, _block, _next = _board_guidance(board_state, name)
+    _latest = st.get("latest_report") if isinstance(st.get("latest_report"), dict) else {}
+    _detail_bits = ["state=%s" % board_state, "legacy=%s" % (_legacy or "?")]
+    if _plat:
+        _detail_bits.append("平台=%s(%ss)" % (
+            _plat, st.get("platform_age_sec") if st.get("platform_age_sec") is not None
+            else "?"))
+    else:
+        _detail_bits.append("平台=未知")
+    if _report_age is not None:
+        _detail_bits.append("报告=%ss" % _report_age)
+    if isinstance(_art, dict) and _art.get("name"):
+        _detail_bits.append("产物=%s(%ss)" % (_art.get("name"), _art_age))
+    if _sw_pos:
+        _detail_bits.append("SW队列第%s位" % _sw_pos)
+    if _owner == name:
+        _detail_bits.append("SW锁持有中(%ss)" % _swe.get("age_sec"))
+    if _sid:
+        _detail_bits.append("已绑定子代理=%s" % _sid)
+    elif _plat == "running":
+        _detail_bits.append("未绑定子代理(unbound)")
+    _type = (type_map or {}).get(name) or info.get("type") or None
+    return {
+        "room": name,
+        "type": _type,
+        "state": board_state,
+        "status_legacy": _legacy or None,
+        "detail": " / ".join(str(x) for x in _detail_bits),
+        "subagent_id": _sid or None,
+        "subagent_label": (_agent.get("label") or None),
+        "platform_status": _plat,
+        "platform_age_sec": st.get("platform_age_sec"),
+        "report_stage": (_latest.get("stage") if isinstance(_latest, dict) else None),
+        "report_age_sec": _report_age,
+        "artifact_newest": _art or None,
+        "sw_queue_pos": _sw_pos,
+        "sw_owner": _owner,
+        "safe_to_restart": bool(_safe),
+        "restart_block_reason": _block,
+        "next_action": _next,
+    }
+
+
+ROOM_BOARD_HINT = (
+    "room-board 是【唯一权威看板】：状态由代码 + 平台事实推导，禁止靠猜。"
+    "state 语义：starting=刚登记在启动宽限内；running=确认在跑；"
+    "waiting_sw=在 SW 队列里正常等锁（严禁判死/重启）；"
+    "idle=平台确认存活但当前没有可观察动作；done/failed=已收尾；"
+    "dead=平台明确 inactive/disposed/missing 且无证据且超宽限（才可重启）；"
+    "unbound=平台还活着但房间没绑 subagent（补 subagent-assign，禁止 reset）。"
+    "只读：不要再用 platform-sync 造假心跳，平台状态由插件自动登记。"
+)
+
+
 def _restart_verdict(status):
     """【BUG-观察-6 修复】把房间状态翻译成"可否安全重启"的机器可判定结论。
 
@@ -2056,10 +2529,14 @@ def _restart_verdict(status):
       no_heartbeat→ 无心跳 + 无平台佐证 + 超宽限，可疑，需先 list_agents 核对
       其余（starting / running / running_unverified）→ 一律禁止重启。
 
+    【阶段 C】新增 waiting_sw：在 SW 队列里正常等锁，不是死 —— 禁重启。
+
     Returns: (safe_to_restart: bool, block_reason: str|None)
     """
     if status in ("completed", "failed", "stale", "no_heartbeat"):
         return True, None
+    if status == "waiting_sw":
+        return False, WAITING_SW_BLOCK_REASON
     if status == "running":
         return False, "心跳/平台判定为运行中，严禁重启（会误杀正在建模的小屋）"
     if status == "running_unverified":
@@ -2071,15 +2548,22 @@ def _restart_verdict(status):
     return False, "状态未知，禁止重启（先核对 room-status / list_agents）"
 
 
-def _room_status_of(name, info, subs):
-    """推导单个房间的精确状态（六态）。
+def _room_status_of(name, info, subs, state=None):
+    """推导单个房间的精确状态（六态 + 【阶段 C】waiting_sw）。
 
     completed   : 已正常收尾（ended_at 有值）
     failed      : 已回退待重做（failed_at 有值）
-    running     : active 且心跳新鲜（<=SW_HEARTBEAT_TIMEOUT 秒）
+    waiting_sw  : 在 SW 队列里排队等锁（或自己正持锁）—— 正常等待，严禁判死/重启
+    running     : active 且（平台判定在跑 / 心跳新鲜）
     starting    : active 且无心跳但登记未超过 SW_START_GRACE 秒 —— 正常启动中，禁止判死
-    stale       : active 且心跳超时 —— 判定死亡，需要重启
+    stale       : active 且心跳超时 + 无证据 + 超宽限 —— 判定死亡，需要重启
     no_heartbeat: active 且登记超过宽限期仍无任何心跳 —— 可疑，需人工核对
+
+    ── 【阶段 C 修复】waiting_sw 是一等状态 ────────────────────────────────
+    用户实测原文：「SW 锁排队中的小屋和"死了"看起来一样」。房间在 FIFO 队列里
+    等锁时没有心跳、没有产物，旧逻辑会把它判成 stale/no_heartbeat → 主对话
+    recover/restart → 误杀。现在只要还在 mode_state.sw_lock.queue 里，就明确
+    报 waiting_sw 并给出禁重启理由；owner==自己则报 running（正在用 SW）。
     """
     now = time.time()
     hb_path = _heartbeat_path(name)
@@ -2155,12 +2639,29 @@ def _room_status_of(name, info, subs):
     # 因此：平台说 running  → 直接判 running（心跳/证据一律不看）；
     #       平台说 inactive → 允许进入 stale 判定（不再被证据无限期兜住）；
     #       平台说 missing  → 明确报出"登记丢失"（Bug-32 场景），不猜。
-    _plat_status, _plat_age = _platform_liveness(name)
+    #
+    # ── 【阶段 C】平台结论来源扩展为两层（手动 platform_status.json 优先，
+    #    插件自动注册表 platform_agents.json 兜底），且把【已绑定的 subagent】
+    #    一起传进去做精确 id 匹配 —— 主对话不用手动喂状态也不会误判。
+    _plat_status, _plat_age = _platform_liveness(name, _sub_rec_raw)
+    # ── 【阶段 C】SW 使用窗口排队情况（waiting_sw 的依据）─────────────────
+    _sw = _sw_lock_snapshot(state)
+    _sw_owner = _sw.get("owner")
+    _sw_queue = _sw.get("queue") or []
+    _sw_pos = (_sw_queue.index(name) + 1) if name in _sw_queue else None
+    # 平台说【明确不在】时不再把"还在队列里"当成活着（那是队列残影）
+    _plat_confirmed_gone = _plat_status in ("inactive", "missing")
 
     if info.get("failed_at"):
         status = "failed"
     elif info.get("ended_at"):
         status = "completed"
+    elif _sw_owner and str(_sw_owner) == name and not _plat_confirmed_gone:
+        # 自己正持有 SW 锁 → 正在用 SW（就是"在干活"的直接证据）
+        status = "running"
+    elif _sw_pos and not _plat_confirmed_gone:
+        # 在 FIFO 队列里等锁 → 正常等待，严禁判死/重启（用户点名痛点）
+        status = "waiting_sw"
     elif _plat_status == "running":
         # 平台确认在跑 —— 权威结论，禁止判死（心跳过期也不影响）
         status = "running"
@@ -2229,6 +2730,10 @@ def _room_status_of(name, info, subs):
         "platform_status": _plat_status,
         "platform_age_sec": (round(_plat_age, 1) if _plat_age is not None else None),
         "authority": ("platform(list_agents)" if _plat_status else "evidence/heartbeat"),
+        # ── 【阶段 C】SW 队列事实（waiting_sw 的依据，只读）──
+        "sw_lock": _sw,
+        "sw_queue_pos": _sw_pos,
+        "sw_owner": _sw_owner,
         "evidence": {
             "platform": _platform_evidence,
             "recent_report": _has_report,
@@ -2248,6 +2753,8 @@ ROOM_STATUS_HINT = (
     " → 视为运行中,严禁判死、严禁重启(心跳只是小屋没主动上报而已); "
     "stale=【Bug3】心跳超%d秒 + 无任何近期证据 + 超过%d秒滞后宽限 三者同时成立才判死; "
     "no_heartbeat=无心跳+无平台佐证+超宽限期(此时才可疑,先用 list_agents 核对); "
+    "waiting_sw=【阶段C】在 SW 队列里正常等锁(平台结论压过心跳,严禁判死/重启); "
+    "unbound=【阶段C】平台还活着但房间没绑 subagent(补 subagent-assign,严禁 reset); "
     "completed=已完成(可 room-end 对账+interrupt_agent 清理); "
     "failed=已回退待重做(重新 room-start 后开新小屋); "
     "⚠️【Bug3】心跳过期但有近期报告/平台证据时一律判 running_unverified——"
@@ -2367,8 +2874,22 @@ def cmd_room_status():
     subs = state.get("subagents", {})
     out = []
     counts = {}
+    # ── 【阶段 C】内部复用 room-board 的判定，但【保留旧字段】不破坏现有调用 ──
+    #   旧字段：status / safe_to_restart / evidence / platform_status / ...
+    #   新增字段：state（看板八态）/ next_action（下一步该干什么）
+    _type_map = _room_type_map()
     for name, info in rooms.items():
-        rec = _room_status_of(name, info, subs)
+        rec = _room_status_of(name, info, subs, state=state)
+        try:
+            _b = _board_entry(name, info, subs, state=state,
+                              type_map=_type_map, st=rec)
+            rec["state"] = _b.get("state")
+            rec["next_action"] = _b.get("next_action")
+            rec["subagent_label"] = _b.get("subagent_label")
+            rec["sw_queue_pos"] = _b.get("sw_queue_pos")
+        except Exception:
+            rec["state"] = rec.get("status")
+            rec["next_action"] = None
         counts[rec["status"]] = counts.get(rec["status"], 0) + 1
         out.append(rec)
 
@@ -2440,6 +2961,12 @@ def cmd_room_status():
     _blocked = [r["room"] for r in out if not r.get("safe_to_restart")]
     _restartable = [r["room"] for r in out if r.get("safe_to_restart")]
 
+    # ── 【阶段 C】看板态聚合（state 是新的权威口径，status 保留兼容）──────
+    _state_counts = {}
+    for _r0 in out:
+        _s0 = str(_r0.get("state") or _r0.get("status") or "unknown")
+        _state_counts[_s0] = _state_counts.get(_s0, 0) + 1
+
     return {"ok": True, "mode": _mode_internal, "mode_name": state.get("mode_name"),
             "mode_note": _mode_note,
             "workflow_step": _wf_step,
@@ -2448,9 +2975,192 @@ def cmd_room_status():
             "restartable_rooms": _restartable,
             "restart_blocked_by": _blocked,
             "rooms": out, "counts": counts,
+            # 【阶段 C】看板口径（与 room-board 完全一致，避免两套说法）
+            "state_counts": _state_counts,
             "source": _src,
             "consistency": _consistency,
-            "hint": ROOM_STATUS_HINT}
+            "hint": ROOM_STATUS_HINT + " 【阶段C】权威看板请用 room-board --json。"}
+
+
+def cmd_room_board(room=None, as_json=True):
+    """【阶段 C】唯一权威看板：每个房间"到底怎么了"由代码 + 平台事实给出。
+
+    ── 为什么必须有它 ────────────────────────────────────────────────────
+    用户会话实测：主对话分不清子代理死活 —— 手动 while(true) platform-sync
+      造假心跳、subagent-assign 从没调用、recover 把还在跑的房间判成"僵尸残留"、
+      reset 紧跟其后把三个正在建模的子代理全杀了；SW 排队中的小屋和"死了"
+      看起来一模一样。根因是"状态判断靠主对话猜"。
+    本命令把判断收进代码：平台事实（插件注册表）> SW 队列事实 > 报告/产物证据，
+      并直接给出 safe_to_restart / restart_block_reason / next_action，
+      调用方（含总理子代理）【不需要也不允许】自己再推断死活。
+
+    Args:
+        room: 只看看某个房间（None = 全部）。
+        as_json: 保留参数；本命令【始终】输出 JSON（便于模型直接读）。
+
+    Returns:
+        {"ok", "generated_at", "rooms":[{room,type,state,status_legacy,detail,
+          subagent_id,subagent_label,platform_status,report_stage,report_age_sec,
+          artifact_newest,sw_queue_pos,safe_to_restart,restart_block_reason,
+          next_action}], "sw_lock":{owner,queue,age_sec}, "summary":{counts,...},
+         "hint"}
+    """
+    state = load_state()
+    rooms = state.get("rooms") or {}
+    subs = state.get("subagents") or {}
+    _type_map = _room_type_map()
+    _sw = _sw_lock_snapshot(state)
+    _only = str(room).strip() if room else None
+    if _only and _only not in rooms:
+        return {"ok": False, "error": "房间未登记（未 room-start）或名称写错",
+                "room": _only, "known_rooms": sorted(rooms.keys()),
+                "hint": ("只读看板不会凭空造房间；先确认 room-start 已执行，"
+                         "或核对 select 返回的房间表。")}
+    names = [_only] if _only else sorted(rooms.keys())
+    rows = []
+    for _name in names:
+        try:
+            rows.append(_board_entry(_name, rooms.get(_name) or {}, subs,
+                                     state=state, type_map=_type_map))
+        except Exception as _e:
+            # 单个房间判定失败不能拖垮整张看板（宁可按"未知"报告，也不崩）
+            rows.append({"room": _name, "type": None, "state": "idle",
+                         "status_legacy": None,
+                         "detail": "判定异常: %r" % (_e,),
+                         "subagent_id": None, "subagent_label": None,
+                         "platform_status": None, "report_stage": None,
+                         "report_age_sec": None, "artifact_newest": None,
+                         "sw_queue_pos": None, "safe_to_restart": False,
+                         "restart_block_reason": "判定异常，禁止重启（先人工核对）",
+                         "next_action": "先跑 mode_gate.py doctor / room-status 核对状态文件"})
+    _counts = {}
+    for _r in rows:
+        _counts[_r["state"]] = _counts.get(_r["state"], 0) + 1
+    _alive_states = ("running", "starting", "waiting_sw", "idle", "unbound")
+    _attention = [r["room"] for r in rows if r["state"] in ("unbound", "dead", "failed")]
+    _reg = _load_plugin_registry()
+    return {
+        "ok": True,
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at_ts": time.time(),
+        "rooms": rows,
+        "sw_lock": {"owner": _sw.get("owner"), "queue": _sw.get("queue") or [],
+                    "age_sec": _sw.get("age_sec"),
+                    "sw_running": _sw.get("sw_running")},
+        "summary": {
+            "rooms": len(rows),
+            "counts": _counts,
+            "alive": sum(1 for r in rows if r["state"] in _alive_states),
+            "need_attention": _attention,
+            "restartable": [r["room"] for r in rows if r["safe_to_restart"]],
+        },
+        "platform_registry": {
+            "file": PLATFORM_AGENTS_FILE,
+            "exists": os.path.exists(PLATFORM_AGENTS_FILE),
+            "updated_at": _reg.get("updatedAt"),
+            "source": _reg.get("source"),
+            "agent_count": len(_reg.get("agents") or []),
+        },
+        "hint": ROOM_BOARD_HINT,
+    }
+
+
+def cmd_platform_refresh():
+    """【阶段 C】把插件注册表【合成】进 platform_status.json（人工记录优先）。
+
+    ── 为什么要合成而不是让主对话手动写 ──────────────────────────────────
+    旧流程靠主对话 list_agents 后手工 platform-sync；实测它不但没写，反而开了
+    一个 while(true) 假心跳 —— 主对话的手写状态本身就是不可信来源。
+    现在平台事实由插件自动落 platform_agents.json，本命令把它【只读地】合成
+    成 mode_gate 已在用的 platform_status.json 视图：
+      · 人工记录（platform-sync）更新的项【不覆盖】—— 人比机器更该有最终话语权；
+      · 每房间打印匹配结果（id 精确匹配 / label 包含匹配 / 未匹配）；
+      · 平台说 disposed 的项合成 inactive（才允许后续判死）。
+
+    Returns: {"ok", "file", "registry", "rooms":[...], "unmatched_agents":[...],
+              "counts", "hint"}
+    """
+    state = load_state()
+    rooms = state.get("rooms") or {}
+    subs = state.get("subagents") or {}
+    reg = _load_plugin_registry()
+    agents = [a for a in (reg.get("agents") or []) if isinstance(a, dict) and a.get("id")]
+    manual = _load_platform_status()
+    merged = dict(manual)
+    rows, updated, kept = [], [], []
+    matched_ids = set()
+    for _name in sorted(rooms.keys()):
+        _sub_raw = subs.get(_name)
+        _sid = (_sub_raw.get("id") if isinstance(_sub_raw, dict) else _sub_raw) or None
+        _a = _plugin_agent_for_room(_name, _sub_raw)
+        _row = {"room": _name, "subagent_id": _sid, "matched_by": None,
+                "agent_id": None, "agent_label": None, "agent_status": None,
+                "platform_status": None, "age_sec": None, "action": "unmatched"}
+        if not _a:
+            rows.append(_row)
+            continue
+        matched_ids.add(str(_a.get("id")))
+        _row["agent_id"] = _a.get("id")
+        _row["agent_label"] = _a.get("label")
+        _row["agent_status"] = _a.get("status")
+        _row["matched_by"] = ("id" if (_sid and str(_a.get("id")) == str(_sid))
+                              else "label")
+        _pst, _page, _ = _plugin_liveness(_name, _sub_raw)
+        _ts = _parse_ts_any(_a.get("lastEventAtMs"))
+        if _ts is None:
+            _ts = _parse_ts_any(_a.get("lastEventAt"))
+        if _ts is None:
+            _ts = _parse_ts_any(_a.get("createdAt"))
+        _row["platform_status"] = _pst
+        _row["age_sec"] = round(_page, 1) if _page is not None else None
+        _old = manual.get(_name)
+        _old_ts = 0.0
+        if isinstance(_old, dict):
+            try:
+                _old_ts = float(_old.get("ts") or 0)
+            except Exception:
+                _old_ts = 0.0
+        # 人工记录更【新】→ 保留（不覆盖人）
+        if _old_ts and _old_ts >= (_ts or 0):
+            _row["action"] = "kept_manual"
+            _row["manual_status"] = _old.get("status")
+            kept.append(_name)
+        elif _pst:
+            merged[_name] = {
+                "status": _pst,
+                "ts": _ts or time.time(),
+                "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "by": "plugin-registry",
+                "agent": {"id": _a.get("id"), "label": _a.get("label"),
+                          "status": _a.get("status")},
+            }
+            _row["action"] = "updated"
+            updated.append(_name)
+        rows.append(_row)
+    _unmatched = []
+    for _a in agents:
+        if str(_a.get("id")) in matched_ids:
+            continue
+        _unmatched.append({"id": _a.get("id"), "label": _a.get("label"),
+                           "status": _a.get("status")})
+    _saved = _save_platform_status(merged)
+    return {
+        "ok": bool(_saved),
+        "file": PLATFORM_STATUS_FILE,
+        "registry": {"file": PLATFORM_AGENTS_FILE,
+                     "exists": os.path.exists(PLATFORM_AGENTS_FILE),
+                     "updated_at": reg.get("updatedAt"),
+                     "source": reg.get("source"),
+                     "agent_count": len(agents)},
+        "rooms": rows,
+        "unmatched_agents": _unmatched[:30],
+        "counts": {"updated": len(updated), "kept_manual": len(kept),
+                   "unmatched_rooms": len(rooms) - len(updated) - len(kept),
+                   "unmatched_agents": len(_unmatched)},
+        "hint": ("只读合成：人工 platform-sync 记录更新时不会被覆盖；"
+                 "未匹配到房间的子代理只是「房间名/绑定缺失」，"
+                 "请先 subagent-assign 再刷新。"),
+    }
 
 
 def cmd_subagent_status():
@@ -2731,7 +3441,9 @@ def load_state():
     if not os.path.exists(STATE_PATH):
         return _fresh_state()
     try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
+        # 【BOM 容错】用 utf-8-sig：PowerShell 5.1 的 Set-Content -Encoding UTF8
+        #   会写 BOM，按 utf-8 读会抛异常 → 房间表被当成空 → 状态全丢。
+        with open(STATE_PATH, "r", encoding="utf-8-sig") as f:
             state = json.load(f)
         # ── 【健壮性修复】空文件/非 dict 时回落到全新状态 ──────────────
         # 实测 mode_state.json 可能被写成 {}（rooms-reset 或外部脚本误写），
@@ -5361,7 +6073,14 @@ def main():
                   "room-artifact <房间> <文件> [零件]": "【Bug-16/17】登记房间产物归属",
                   "room-status": "所有房间精确状态（只读；含平台权威状态）",
                   "platform-sync <房间> <running|inactive|missing>":
-                      "【Bug-23】登记 DSH 平台真实存活状态（主对话执行）",
+                      "【Bug-23】手工覆盖平台状态（保留；但不要再拿它造假心跳）",
+                  "room-board [--room X] [--json]": "【阶段C】唯一权威看板"
+                                                    "（别名 board）：state=starting/"
+                                                    "running/waiting_sw/idle/done/"
+                                                    "failed/dead/unbound，"
+                                                    "含 safe_to_restart/next_action",
+                  "platform-refresh": "【阶段C】把插件注册表 platform_agents.json"
+                                      "合成进 platform_status.json（人工记录优先）",
                   "whoami <房间名> [--session-id <sid>]": "子代理自查身份",
                   "confirm-part <房间> <零件>": "C模式：用户确认后授权该零件",
                   "sw-request/sw-wait/sw-release": "SW 使用权排队/等待/释放",
@@ -5415,6 +6134,22 @@ def main():
         result = cmd_subagent_assign(args[1] if len(args) > 1 else "", args[2] if len(args) > 2 else "")
     elif cmd == "subagent-free":
         result = cmd_subagent_free(args[1] if len(args) > 1 else "unknown")
+    elif cmd in ("room-board", "board"):
+        # 【阶段 C】唯一权威看板：状态由代码 + 平台事实推导，不靠主对话猜。
+        # 用法: mode_gate.py room-board [--room 房间名] [--json]
+        #   --json 只是显式表达"我要 JSON"；本命令【始终】输出 JSON。
+        _rb_room = None
+        _i = 1
+        while _i < len(args):
+            _a = args[_i]
+            if _a in ("--room", "-r", "--room-name") and _i + 1 < len(args):
+                _rb_room = args[_i + 1]
+                _i += 2
+                continue
+            if not _a.startswith("-") and _rb_room is None:
+                _rb_room = _a
+            _i += 1
+        result = cmd_room_board(room=_rb_room, as_json=True)
     elif cmd == "room-status":
         result = cmd_room_status()
     elif cmd == "room-artifact":
@@ -5427,6 +6162,9 @@ def main():
         result = cmd_platform_sync(args[1] if len(args) > 1 else "",
                                    args[2] if len(args) > 2 else "",
                                    " ".join(args[3:]) if len(args) > 3 else "main")
+    elif cmd == "platform-refresh":
+        # 【阶段 C】把插件自动注册表合成进 platform_status.json（人工记录优先）
+        result = cmd_platform_refresh()
     elif cmd == "subagent-status":
         result = cmd_subagent_status()
     elif cmd == "room-report":
@@ -5503,6 +6241,17 @@ def main():
             else:
                 _i += 1
         result = cmd_whoami(_room, session_id=_sid, wait_sec=_wait, interval=_intv)
+        # ── 【BUG-9 修复】自查身份时【顺手】把房间的 subagent 绑定补上 ────
+        # 主对话若忘了 subagent-assign，room-status 会显示 subagent=null，
+        # 小屋上报可能失败。这里只在【尚未绑定】时补，不覆盖主对话的显式指派。
+        try:
+            _sb = cmd_whoami_self_bind(_room)
+            if isinstance(result, dict):
+                result["subagent_binding"] = _sb
+                if _sb.get("action") == "bound":
+                    result["self_bound"] = True
+        except Exception:
+            pass
     elif cmd == "confirm-part":
         # 【Bug1 修复】由用户确认后授权某零件，之后 params_confirmed 才会被接受
         result = cmd_confirm_part(args[1] if len(args) > 1 else "",

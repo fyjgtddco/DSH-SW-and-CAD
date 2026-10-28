@@ -65,8 +65,18 @@ def section(t):
     print("=" * 74)
 
 
+# 【2026-10-28 重构】十阶段/编制必须由真实绑定的总计子代理执行；
+# 测试用一个固定身份，并在每个临时工作目录里先 bind。
+os.environ["DSH_SESSION_ID"] = "test-analyst"
+
+
 def fresh():
-    return tempfile.mkdtemp(prefix="m2bug3_")
+    d = tempfile.mkdtemp(prefix="m2bug3_")
+    try:
+        mf.analyst_bind("test-analyst", d)
+    except Exception:
+        pass
+    return d
 
 
 def prime_all_stages(d):
@@ -356,6 +366,7 @@ def main():
             _wd = (json.load(f) or {}).get("work_dir")
         check("端到端：拿到本任务 work_dir", bool(_wd), _wd)
 
+        _run(_M2, "analyst-bind", "--work-dir", _wd)
         _run(_M2, "set-depth", "full", "--work-dir", _wd)
         for _sid in mf.STAGE_IDS:
             _run(_M2, "begin-stage", _sid, "--work-dir", _wd)

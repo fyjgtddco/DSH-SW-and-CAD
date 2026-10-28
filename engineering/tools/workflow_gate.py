@@ -110,6 +110,82 @@ def _m2_work_dir(state=None):
         pass
     return None
 
+# ══════════════════════════════════════════════════════════════════════════
+# 【2026-10-28 重构】根会话校验：编排命令禁止在【子代理】里执行
+# ══════════════════════════════════════════════════════════════════════════
+# 实测缺陷（会话 session-31c56a28）：三个建模小屋加载 mode-selection 后，
+#   各自又跑了一遍 init / provide_context / begin-stage / ask —— 把主对话
+#   的门禁状态反复覆盖，十个阶段被四份会话各写一通。
+# 根因：skill 说"每个设计任务都必须先过门禁"，但没有任何代码区分
+#   "主对话（root）"与"子代理（delegated）"。
+# 现在：init / provide_context / select / confirm-assembly / reset / recover /
+#   restart 一律要求【root 会话】；子代理调用返回 ROOT_SESSION_REQUIRED。
+# 判定来源（任一命中即视为子代理）：
+#   ① 插件自动登记 <STATE_DIR>/platform_agents.json 里出现本会话 id；
+#   ② mode_state.subagents 里某个房间绑定的 id == 本会话 id。
+# 注意：总计子代理不受影响 —— 它只调 mode2_flow 的阶段命令（workflow_gate
+#   mode2 透传），不调这些编排命令。
+def _current_session_id():
+    try:
+        return str(os.environ.get("DSH_SESSION_ID") or "").strip() or None
+    except Exception:
+        return None
+
+
+def _subagent_identity():
+    """当前进程若运行在子代理会话里，返回身份信息；否则 None。"""
+    cur = _current_session_id()
+    if not cur:
+        return None
+    try:
+        _p = os.path.join(STATE_DIR, "platform_agents.json")
+        if os.path.exists(_p):
+            with open(_p, "r", encoding="utf-8") as _f:
+                _d = json.load(_f) or {}
+            for _a in (_d.get("agents") or []):
+                if str(_a.get("id") or "") == cur:
+                    return {"session_id": cur, "label": _a.get("label"),
+                            "status": _a.get("status"),
+                            "source": "platform_agents.json"}
+    except Exception:
+        pass
+    try:
+        _p = os.path.join(STATE_DIR, "mode_state.json")
+        if os.path.exists(_p):
+            with open(_p, "r", encoding="utf-8") as _f:
+                _d = json.load(_f) or {}
+            for _room, _rec in (_d.get("subagents") or {}).items():
+                if isinstance(_rec, dict) and str(_rec.get("id") or "") == cur:
+                    return {"session_id": cur, "label": _room,
+                            "source": "mode_state.subagents"}
+    except Exception:
+        pass
+    return None
+
+
+def _require_root_session(op):
+    """编排命令的根会话闸门。返回错误 dict 或 None。"""
+    who = _subagent_identity()
+    if not who:
+        return None
+    return {
+        "ok": False,
+        "gate": "ROOT_SESSION_REQUIRED",
+        "op": op,
+        "session_id": who.get("session_id"),
+        "identity": who,
+        "error": ("【越权】%s 是【编排命令】，只能在主对话（root 会话）执行；"
+                  "检测到当前是子代理会话（%s）。" % (op, who.get("label") or "未命名")),
+        "how": [
+            "建模小屋只做本房间建模/验证 + room-report / room-artifact；",
+            "总计子代理只调 mode2_flow 的阶段命令（python workflow_gate.py mode2 ...）；",
+            "init / provide_context / select / confirm-assembly 一律回主对话执行。",
+        ],
+        "note": ("这正是 2026-10-28 会话里出错的地方：三个建模小屋各自重跑了一遍门禁，"
+                 "把主对话的状态覆盖掉了。"),
+    }
+
+
 # 任务交付目录在 state 里的键名（work_dir）。
 # 这个常量被 _m2_work_dir / prepare_task_workdir / select 等多处引用，
 # 一旦缺失会 NameError，并导致 mode2 计划文件落到错误目录、
@@ -691,6 +767,7 @@ _GENERIC_ROOM_SCOPE = {
     "spring": "弹簧等弹性元件",
     "thermal": "耐热/隔热部件",
     "corrosion": "防腐处理件",
+    "prime": "不建模：统一关键尺寸、收各屋上报、相邻尺寸一致性校验、汇总 docx",
 }
 
 
@@ -1636,6 +1713,9 @@ def cmd_confirm_assembly(parts_payload):
       再回头改单个零件就要重做总装 —— 所以这是"最后一个能便宜地拦下
       材料/强度/领域问题"的时刻，必须在这里把三道防线全部卡住。
     """
+    _root_guard = _require_root_session("confirm-assembly")
+    if _root_guard:
+        return _root_guard
     if not bypass_requested():
         try:
             import defense_gate as _dg
@@ -2561,6 +2641,9 @@ def cmd_init(task_desc):
       · 此时【拒绝】init，除非显式传 --force（或调用方明确要重来）。
       · 拒绝时返回当前状态与正确的前进方式，让调用方知道该调什么。
     """
+    _root_guard = _require_root_session("init")
+    if _root_guard:
+        return _root_guard
     state = load_state()
     _step_now = str(state.get("step") or "")
     # ── 【僵尸门禁修复】区分"真进行中"与"僵尸残留" ────────────────────────
@@ -3047,6 +3130,9 @@ def cmd_provide_context(context_text):
     载荷数值只认用户明确写出的量（`100N` / `10kg` / `0.1kN`）；
       "冲击/动态"这类关键词**只决定动载系数**，不会放大用户给的额定值。
     """
+    _root_guard = _require_root_session("provide_context")
+    if _root_guard:
+        return _root_guard
     state = load_state()
     step = state.get("step")
     nl = chr(10)
@@ -3176,7 +3262,14 @@ def cmd_provide_context(context_text):
                 "★ 用户要求：『取消之前的一股脑全部问，交由 AI 在分析机械时，",
                 "  思考到那里，然后就问对应的问题』。因此：",
                 "",
-                "  1) 先启动【总计子代理】，让它按【十阶段流水线】分析本任务：",
+                "  1) ★ 用 subagent_fork 真正创建【总计子代理】——不是主对话自己跑阶段：",
+                "       subagent_fork(description=\"总计子代理（十阶段分析）\", prompt=<见下>)",
+                "     它开工第一件事必须绑定自己的身份（代码强制，主对话无法代劳）：",
+                "       python mode2_flow.py analyst-bind",
+                "       （自动读取它自己的 DSH_SESSION_ID；之后主对话再调阶段命令会被",
+                "         ANALYST_ACTOR_REQUIRED 拒绝）",
+                "",
+                "  2) 总计子代理按【十阶段流水线】分析本任务：",
                 "       TaskUnderstanding → FunctionalDecomposition → PhysicsReasoning",
                 "       → PrincipleSynthesis → MechanismSynthesis → RecursivePartReasoning",
                 "       → PartSynthesis → EngineeringValidation → DesignIteration",
@@ -3184,16 +3277,20 @@ def cmd_provide_context(context_text):
                 "     推进阶段（必须按序，跳阶段会被拒）：",
                 "       python mode2_flow.py begin-stage TaskUnderstanding",
                 "",
-                "  2) 分析到【确实缺某个信息】时，才登记并提问（不允许开头就把题抛完）：",
-                "       python mode2_flow.py ask \"<问题>\" --stage <当前阶段> --reason \"<为什么现在要问>\"",
-                "     硬性约束：① 该阶段必须先 begin-stage；② 必须写理由；③ 总题数不超上界。",
+                "  3) 分析到【确实缺某个信息】时才提问（不许开头一股脑抛题）。",
+                "     子代理不能直接调 ask_user_question，必须走宿主代问桥：",
+                "       python \"<根>\\tools\\ask_user.py\" --room 总计子代理 --child <自己的 sessionId> \\",
+                "              --header <标题> --question <问题> --option <选项> ...",
+                "     答案以 stdout JSON 返回后，再落盘：",
+                "       python mode2_flow.py answer-question <seq> \"<答复原文>\"",
                 "",
-                "  3) 总计子代理分析完后，用 set-subagent-plan 登记【本轮开几个子代理】：",
+                "  4) 总计子代理分析完后，用它自己的身份登记【本轮开几个子代理】：",
                 "       python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
                 "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
                 "     数量不再固定为 3 —— 由它按分析结论决定。",
                 "",
-                "  4) 同时固定增设【总理子代理】（统一尺寸、校验相邻一致性、汇总 docx）。",
+                "  5) 固定增设【总理子代理】（统一尺寸、校验相邻一致性、汇总 docx），"
+                "与建模小屋同波同时启动、持续盯 room-board。",
                 "",
                 "查看进度：python workflow_gate.py stage-status",
                 "查看题数：python workflow_gate.py mode2 questions --final",
@@ -3215,6 +3312,32 @@ def cmd_provide_context(context_text):
     # ── 第二段：收齐背景信息，做力学估算 ─────────────────────────────
     if step != "context_asked":
         return {"ok": False, "error": "请先调用 init 命令！（当前 step=%s）" % step}
+    # ══ 【BUG-7 修复】进入 mechanics_done 之前，必须确认"按需提问"真的走过 ═══
+    # 现场：用户照文档只调两次 provide_context，第三次就直接拿到了力学估算 +
+    #   A/B/C 选项 —— 而"按需提问"（强 10~50 / 弱 5~10）根本没发生：
+    #   题数在 FunctionalDecomposition 阶段被一次性登记后就算"已回答"，
+    #   于是"已回答"状态不真实，门禁也没拦住。
+    # 处理：这里做一次【软校验】——
+    #   · 若 mode2_flow 的题数不达标（低于区间下限），不阻断（否则首次用会卡死），
+    #     但把 warn 字段与"必须先按需提问"的说明一并回传，让主对话看见；
+    #   · 若已达到区间，正常放行。
+    # 这样既保留了"不因门禁细节卡死新用户"，又把"跳过按需提问"这件事显式化，
+    # 避免"以为问了 10 题、实际只问了 1 题"的错觉。
+    _budget_warn = None
+    try:
+        _m2_mod, _m2_err2 = _m2_require()   # 用模块级入口，避免局部别名遮蔽
+        if _m2_mod is None:
+            raise RuntimeError(_m2_err2)
+        _qr = _m2_mod.question_report(None) or {}
+        _min = int(_lim.get("min") or 0)
+        if _min and _asked < _min:
+            _budget_warn = (
+                "按需提问尚未达标：已登记 %d 题，本档要求至少 %d 题。"
+                "本次已放行（不阻断），但请补足提问或用 "
+                "mode2_flow.py ask 逐条登记，否则 select 之后的审计会判不通过。"
+                % (_asked, _min))
+    except Exception:
+        _budget_warn = None
     # 第0题答案 + 第二段答案拼在一起，保证力学估算能看到全部关键词
     merged = ((state.get("depth_answer") or "") + " " + (context_text or "")).strip()
     state["context"] = merged
@@ -3227,6 +3350,8 @@ def cmd_provide_context(context_text):
     # magnitude_n），彻底消除"门禁 1000N / physics 100N"的口径分裂。
     _lc = write_load_case_file(state, state["mechanics_result"])
     state["load_case_file"] = _lc.get("path") if _lc.get("ok") else None
+    if _budget_warn:
+        state["question_budget_warning"] = _budget_warn
     save_state(state)
     m = state["mechanics_result"]
     depth = state.get("param_depth")
@@ -3262,6 +3387,15 @@ def cmd_provide_context(context_text):
     else:
         msg += nl + nl + "⚠️ 载荷工况落盘失败: %s（请手工确保 physics 使用额定载荷 %s N）" % (
             _lc.get("error"), m.get("nominal_load_n"))
+    # ── 【BUG-7】把"按需提问未达标"显式写进回传正文，不能只藏在 state 里 ──
+    if _budget_warn:
+        msg += nl + nl + nl.join([
+            "⚠️【按需提问未达标 · 已放行但需补】",
+            "  %s" % _budget_warn,
+            "  正确时序：mode2_flow.py begin-stage <阶段> → 分析到缺信息时 ask "
+            "→ 用户回答 → answer-question。",
+            "  跳过 ask 直接 provide_context 会被记为『虚假已回答』。",
+        ])
     # ── 【BUG-01 修复】粗估必须显著提示，避免把估算值当用户给定值 ────────
     if m.get("load_is_estimate"):
         msg += nl + nl + nl.join([
@@ -3609,6 +3743,9 @@ def _parse_choice_args(raw_args):
 
 
 def cmd_select(choice, parallel=None, unknown=None):
+    _root_guard = _require_root_session("select")
+    if _root_guard:
+        return _root_guard
     state = load_state()
     # ── 【FL-06 修复】无法识别的参数必须显式拒绝，不得静默忽略 ──────────────
     # 实测：`select C X`（多余参数）原本被静默丢弃并放行 —— 调用方以为自己的
@@ -3813,8 +3950,15 @@ def cmd_select(choice, parallel=None, unknown=None):
             }
         except Exception as _ste:
             _stage_block = {"ready": None, "error": repr(_ste)}
+        # ── 【2026-10-28 重构】总计子代理必须是【真实子代理】（analyst-bind）──
+        try:
+            _an_now = _m2mod.analyst_status(_wd3)
+        except Exception as _ane:
+            _an_now = {"ok": False, "bound": False, "error": repr(_ane)}
         _m2_block = {
             "plan_file": _m2mod.plan_path(_wd3),
+            "analyst": _an_now,
+            "analyst_ready": bool(_an_now.get("bound")),
             "subagent_plan_ready": _sp_ok,
             "subagent_plan_stale": _sp_stale,
             # 注意：下面还有一个 "stages"（阶段 id 列表，历史字段）。
@@ -3827,10 +3971,12 @@ def cmd_select(choice, parallel=None, unknown=None):
             "authority": _m2mod.SUBPLAN_AUTHORITY,
             "prime_room": _m2mod.PRIME_ROOM_NAME,
             "stages": [s[0] for s in _m2mod.STAGES],
-            "rule": ("子代理数量不再固定为 3 —— 必须由【%s】先走十阶段分析，"
+            "rule": ("子代理数量不再固定为 3 —— 必须由【真实的 %s 子代理】先走十阶段分析，"
                      "再调 mode2_flow.py set-subagent-plan 登记编制；"
-                     "另有一个固定角色【%s】负责统一尺寸、校验相邻一致性、"
-                     "汇总 docx。未登记编制前不得创建建模小屋。"
+                     "另有一个固定角色【%s】与建模小屋同波同时启动，"
+                     "负责统一尺寸、校验相邻一致性、盯住所有建模小屋、汇总 docx。"
+                     "总计子代理未创建（未 analyst-bind）或未登记编制前，"
+                     "都不得创建任何建模小屋。"
                      % (_m2mod.SUBPLAN_AUTHORITY, _m2mod.PRIME_ROOM_NAME)),
         }
     save_state(state)
@@ -3956,7 +4102,14 @@ def cmd_select(choice, parallel=None, unknown=None):
 
     if pmode == "sequential":
         done = _get_done_rooms()
-        pending = [r for r in rooms if r[0] not in done]
+        # ── 【2026-10-28 重构】串行顺序：建模 → 总理（核数据）→ 总装 → 出图 ──
+        # select 会把固定的总理子代理追加到表尾；串行模式下它若排到最后，
+        # 就永远没机会在总装前核对零件数据。这里按类型显式定序。
+        _SEQ_ORDER = {"structural": 0, "transmission": 0, "housing": 0,
+                      "support": 0, "spring": 0, "thermal": 0, "corrosion": 0,
+                      "prime": 1, "assembly": 2, "drafting": 3}
+        pending = sorted([r for r in rooms if r[0] not in done],
+                         key=lambda r: _SEQ_ORDER.get(r[1], 4))
         if not pending:
             return _archive_finished(state, len(done), len(rooms),
                                      "所有 %d 个房间已全部完成！执行收尾协议（只做一遍）。" % len(rooms))
@@ -3988,6 +4141,8 @@ def cmd_select(choice, parallel=None, unknown=None):
             "--- 执行步骤（严格按顺序）---",
             '  步骤1: python mode_gate.py room-start "%s"' % next_room[0],
             '  步骤2: subagent_fork(description="%s")' % next_room[0],
+            "        prompt 必须写：只做本房间零件；禁止调 mode-selection 技能、"
+            "禁止 workflow_gate.py init/provide_context/select（门禁已在主对话完成）",
             "  步骤3: 等待该小屋完成",
             '  步骤4: python mode_gate.py room-end "%s"' % next_room[0],
             '  步骤5: 重新调用 workflow_gate.py select %s %s 获取下一个房间' % (choice, parallel),
@@ -4000,11 +4155,18 @@ def cmd_select(choice, parallel=None, unknown=None):
     else:
         # ===== 并行模式：三波式推进（波内同时启动，波间必须等上一波全部完成）=====
         done = _get_done_rooms()
+        # ── 【2026-10-28 重构】总理子代理与建模小屋【同波同时启动】──────────
+        # 原实现里 prime 类型不在任何一波 → 总理子代理永远不会被创建。
+        # 现在放进 wave1，但它是【长生命周期监工】：一旦 room-start 过就不再
+        # 阻塞波次推进（否则 wave1 要等总理收尾，建模反而被卡住）。
         waves = [
-            (1, "独立爆发期", ["structural", "transmission", "housing", "support", "spring", "thermal", "corrosion"]),
+            (1, "独立爆发期", ["structural", "transmission", "housing", "support",
+                               "spring", "thermal", "corrosion", "prime"]),
             (2, "收敛汇合期", ["assembly"]),
             (3, "出图期", ["drafting"]),
         ]
+        #: 长生命周期房间类型：参加启动，但不参与"本波完成"判定
+        _LONG_LIVED_TYPES = ("prime",)
         # ── 【Bug#19 修复】判 finished 前必须确认总装/出图波次"确实存在且已完成" ──
         # 测试反馈：三房间 completed 后门禁直接 step=finished，跳过总装与出图，
         #   导致磁盘总装仍是上一轮的遗留（带未修正 K=0.24 FAIL）、本轮 0 张新图纸。
@@ -4017,11 +4179,12 @@ def cmd_select(choice, parallel=None, unknown=None):
         #   有缺失则明确报错并给出修复指引，绝不静默 finished。
         _configured_waves = []
         for _wn, _wname, _wtypes in waves:
-            if any(r[1] in _wtypes for r in rooms):
+            if any(r[1] in _wtypes and r[1] not in _LONG_LIVED_TYPES for r in rooms):
                 _configured_waves.append((_wn, _wname, _wtypes))
         _missing_waves = []
         for _wn, _wname, _wtypes in _configured_waves:
-            _wr = [r for r in rooms if r[1] in _wtypes]
+            _wr = [r for r in rooms
+                   if r[1] in _wtypes and r[1] not in _LONG_LIVED_TYPES]
             if not _wr:
                 continue
             _all_done = all(
@@ -4061,6 +4224,17 @@ def cmd_select(choice, parallel=None, unknown=None):
             for r in wave_rooms:
                 _rn = r[0]
                 _info = _rooms_detail().get(_rn) or {}
+                # ── 【2026-10-28 重构】长生命周期监工（总理子代理）──────────
+                # 它必须在本波被创建，但创建后不再"阻塞"本波完成：
+                #   已登记/已结束/已失败 → 视为已就位，跳过；
+                #   完全没有登记 → 放进 pending，逼主对话本波把它 fork 出来。
+                if r[1] in _LONG_LIVED_TYPES:
+                    _started = bool(_info.get("active") or _info.get("ended_at")
+                                    or _info.get("failed_at") or (_rn in done))
+                    if _started:
+                        continue
+                    pending.append(r)
+                    continue
                 _finished = (_rn in done) or bool(_info.get("ended_at")) or bool(_info.get("failed_at"))
                 _still_active = bool(_info.get("active")) and not _info.get("ended_at")
                 if (not _finished) or _still_active:
@@ -4091,6 +4265,29 @@ def cmd_select(choice, parallel=None, unknown=None):
                         "每一步完成后都要调 mode_gate.py room-end <房间名>。",
                     ]),
                 }
+            # ── 【2026-10-28 重构】总理子代理必须收尾（它不阻塞波次，但不能不关）──
+            _prime_names = [r[0] for r in rooms if r[1] == "prime"]
+            _prime_open = [n for n in _prime_names
+                           if n not in done
+                           and not ((_rooms_detail().get(n) or {}).get("ended_at"))]
+            if _prime_open:
+                return {
+                    "ok": False,
+                    "gate": "PRIME_ROOM_NOT_CLOSED",
+                    "prime_rooms": _prime_open,
+                    "completed_rooms": sorted(done),
+                    "error": ("总理子代理尚未 room-end：%s —— 它必须完成统一核实"
+                              "（prime-verify）与 docx 汇总后才能收尾。"
+                              % "、".join(_prime_open)),
+                    "message": nl.join([
+                        "=== 收尾前拦截：总理子代理还没关 ===", "",
+                        "  1) 确认所有零件已 prime-report（mode2_flow.py prime-board 看缺口）",
+                        "  2) 跑 check-consistency + prime-verify（必须 verified=true）",
+                        "  3) 导出 docx（export-docx）",
+                        '  4) python mode_gate.py room-end "%s"' % _prime_open[0],
+                        "  5) 再调 select 收尾。",
+                    ]),
+                }
             return _archive_finished(state, len(done), len(rooms),
                                      "所有 %d 个房间已全部完成！汇总交付，执行收尾协议（只做一遍）。"
                                      "（只有看到本消息才能宣告任务完成，其他任何情况都禁止说已完成）" % len(rooms))
@@ -4102,17 +4299,36 @@ def cmd_select(choice, parallel=None, unknown=None):
                 "=== 门禁确认 | 部分小屋并行 · 第%d波【%s】===" % (wnum, wname), "",
                 "本波 %d 个房间【同时启动】: %s" % (len(pending), " ".join("[%s]" % r[0] for r in pending)), "",
                 "--- 每个房间的零件范围（小屋 prompt 必须写明，严禁越界）---",
-            ] + [("  [%s] 只做: %s" % (r[0], _room_parts_scope(state.get("task", ""), state.get("context")).get(r[1], "按房间名含义判断"))) for r in pending] + [
+            ] + [("  [%s] 只做: %s" % (
+                    r[0],
+                    ("不建模：统一尺寸/收上报/一致性校验/docx 汇总，并持续盯 room-board"
+                     if r[1] == "prime" else
+                     _room_parts_scope(state.get("task", ""), state.get("context")).get(r[1], "按房间名含义判断"))
+                 )) for r in pending] + [
                 "--- 执行步骤 ---",
                 "  步骤1: 对每个房间分别调用 mode_gate.py room-start <房间名>",
-                "  步骤2: 在同一条回复里连续调用 subagent_fork 一次性创建本波全部小屋！",
-                "       每个小屋的 prompt 必须包含: 房间名 + 上面写明的零件范围 + 『只做本房间零件，禁止做其他房间的零件』",
-                "       + 进度上报协议: 每个关键节点调 mode_gate.py room-report <房间名> <阶段> <详情>",
+                "  步骤2: 在同一条回复里连续调用 subagent_fork 一次性创建本波全部小屋"
+                "（建模小屋 + 总理子代理，一个都不能少）！",
+                "  ★ 步骤2.5【必做】每 fork 一个就立刻绑定，否则平台侧无法把 id 对到房间：",
+                "       python mode_gate.py subagent-assign <房间名> <subagent_fork 返回的 id>",
+                "       漏做 = room-status 显示 unbound（不是死），但会挡住一切状态核对。",
+                "       每个小屋的 prompt 必须包含: 房间名 + 上面写明的零件范围 + "
+                "『只做本房间零件，禁止做其他房间的零件』"
+                " + 『你是建模小屋：禁止调 mode-selection 技能、禁止 workflow_gate.py "
+                "init/provide_context/select、禁止 mode2 阶段命令；门禁已在主对话完成』",
+                "       + 进度上报协议: 关键节点调 mode_gate.py room-report <房间名> <阶段> <详情>",
                 "         (阶段: registered/params_shown/params_confirmed/modeling/part_done/validating/done/failed)",
+                "  ★ 总理子代理 prompt 必须写明：与建模同波启动、长生命周期；",
+                "     每轮读 python mode_gate.py room-board --json 盯住所有建模小屋，",
+                "     并调 python mode2_flow.py prime-board 看上报缺口；",
+                "     state=waiting_sw/running/idle/starting 都算活着，严禁判死；",
+                "     只有 dead 才上报父代理走 recover/restart；unbound 让父代理补 assign。",
                 "  ⚠️ 严禁只创建一个小屋！本波房间一个都不能少，必须同时启动！",
                 "  ⚠️ 各小屋的 SW 调用自带互斥锁自动排队（FIFO 先到先用），无需人工协调",
                 "  ⚠️ 小屋允许调用的 mode_gate.py 命令仅限: room-report / room-heartbeat（进度上报通道）；",
                 "     room-start / room-end / sw-* / declare / check 等编排命令由大屋独占，小屋禁止调用。",
+                "  🚫 禁止用 parts 目录有没有文件、或 tasklist 里 SW 是否在跑来判断小屋死活；",
+                "     唯一判据是 mode_gate.py room-board 的 state / safe_to_restart / next_action。",
 
                 "  ⚠️ 小屋内建模必须写单个脚本用 sw_bridge.py run 一次性执行多步操作（一次调用规划多步）",
                 "  步骤3: 每个小屋完成后调用 mode_gate.py room-end <房间名>（会自动释放SW锁）",
@@ -4129,8 +4345,9 @@ def cmd_select(choice, parallel=None, unknown=None):
                             "=== 【总装确认门禁】拦截：禁止直接开启『总装与验证』 ===", "",
                             "第一波建模房间已全部 room-end，但主对话尚未完成『开总装前确认』。", "",
                             "强制流程（不可跳过）:",
-                            "  步骤1: 调 mode_gate.py room-status 核对——全部建模房间必须为 completed；",
-                            "         配合 list_agents 对照小屋真实状态，已停止的小屋用 interrupt_agent 清理",
+                            "  步骤1: 调 mode_gate.py room-board --json 核对——全部建模房间 state 必须为 done；",
+                            "         （waiting_sw/running/idle/starting 都算活着，禁止判死；unbound 补 assign）",
+                            "         已 done 的小屋用 interrupt_agent 清理",
                             "  步骤2: 汇总全部产出零件清单（文件路径+零件名）",
                             '  步骤3: 调 workflow_gate.py confirm-assembly "<零件清单>" 提交确认',
                             "  步骤4: 确认通过（gate=ASSEMBLY_CONFIRMED）后再调 select 获取总装房间", "",
@@ -4255,6 +4472,32 @@ def cmd_select(choice, parallel=None, unknown=None):
                            "3) 重做完成后再次执行 select。"]),
                 "plan_file": _m2_block.get("plan_file"),
             }
+
+    # ── 【2026-10-28 重构】总计子代理没真正创建 → 一律不许开工 ────────────
+    # 实测缺陷：主对话自己跑完十阶段、自己写 --decided-by "总计子代理"，
+    #   然后 select 直接放行 → 总计子代理从未存在过。
+    # 现在 analyst-bind 未执行就没有 analyst.session_id，这里 fail-closed。
+    if _m2_block and not _m2_block.get("analyst_ready"):
+        return {
+            "ok": False,
+            "gate": "MODE2_ANALYST_REQUIRED",
+            "step": "mechanics_done",
+            "error": ("【模式二强制】总计子代理尚未真实创建（plan 里没有 analyst.session_id）——"
+                      "拒绝放行创建建模小屋。"),
+            "why": ("十阶段分析、按需提问、子代理编制都必须发生在【总计子代理】内部；"
+                    "主对话自己跑阶段、自己写 --decided-by 不算 —— "
+                    "analyst-bind 会记录它的真实 sessionId，阶段命令只认这个身份。"),
+            "how": [
+                "1) 主对话用 subagent_fork 创建【总计子代理】，prompt 要求它：",
+                "     · 第一步运行 python mode2_flow.py analyst-bind",
+                "     · 按序跑十阶段（begin-stage / mark-stage-done）",
+                "     · 缺信息时用 ask_user.py --room 总计子代理 --child <自己的 sessionId> 提问",
+                "     · 完成后 set-subagent-plan --decided-by \"总计子代理\"",
+                "2) 等它结束（wait_agent / list_agents），再回来执行 select。",
+            ],
+            "analyst": _m2_block.get("analyst"),
+            "plan_file": _m2_block.get("plan_file"),
+        }
 
     if _m2_block and not _m2_block.get("subagent_plan_ready"):
         return {
@@ -4751,6 +4994,84 @@ def _mg_const(name, default):
         return default
 
 
+def _mg_call(name, default=None, *args, **kwargs):
+    """调用 mode_gate 里的函数（同一份源码），用于复用权威判定。
+
+    与 _mg_const 同理：口径只允许在 mode_gate 定义一次。
+    失败返回 default，绝不把 recover 弄崩。
+    """
+    try:
+        import importlib.util as _ilu
+        _p = os.path.join(BASE_DIR, "mode_gate.py")
+        _spec = _ilu.spec_from_file_location("_mg_for_call", _p)
+        _m = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_m)
+        _fn = getattr(_m, name, None)
+        if not callable(_fn):
+            return default
+        return _fn(*args, **kwargs)
+    except Exception:
+        return default
+
+
+def _recover_from_board(board):
+    """把 room-board 的 state 映射成 recover 的六态 + unbound（2026-10-28 重构）。"""
+    buckets = {"running": [], "starting": [], "stale": [], "no_heartbeat": [],
+               "completed": [], "failed": [], "unbound": [], "waiting_sw": []}
+    for row in (board.get("rooms") or []):
+        room = row.get("room")
+        st = str(row.get("state") or "")
+        item = {"room": room, "state": st, "detail": row.get("detail"),
+                "next_action": row.get("next_action"),
+                "safe_to_restart": row.get("safe_to_restart")}
+        if st == "done":
+            buckets["completed"].append({"room": room})
+        elif st == "failed":
+            buckets["failed"].append(dict(item, reason="曾 room-fail，待重做"))
+        elif st == "dead":
+            buckets["stale"].append(dict(item, reason=row.get("restart_block_reason")
+                                          or "平台确认已停止且无近期证据"))
+        elif st == "unbound":
+            buckets["unbound"].append(dict(item, reason=(
+                "平台侧仍存活，但没有 subagent-assign 绑定 —— 不是僵尸，"
+                "补 python mode_gate.py subagent-assign <房间> <id> 即可，禁止 reset")))
+        elif st == "waiting_sw":
+            buckets["waiting_sw"].append(dict(item, note=(
+                "正在排队等 SolidWorks 锁（正常等待），严禁判死/重启")))
+        elif st == "starting":
+            buckets["starting"].append(dict(item, note="刚登记正在启动，等待即可"))
+        elif st in ("running", "idle"):
+            buckets["running"].append(dict(item, note=(
+                "活着" if st == "running" else "活着，当前没有动作")))
+        else:
+            buckets["starting"].append(dict(item, note="状态未知但不算死亡"))
+    rooms_to_restart = buckets["stale"]
+    parts = ["running=%d waiting_sw=%d starting=%d stale=%d unbound=%d "
+             "completed=%d failed=%d"
+             % (len(buckets["running"]), len(buckets["waiting_sw"]),
+                len(buckets["starting"]), len(buckets["stale"]),
+                len(buckets["unbound"]), len(buckets["completed"]),
+                len(buckets["failed"]))]
+    if buckets["stale"]:
+        parts.append("发现 %d 个房间确认死亡，可 restart：%s"
+                     % (len(buckets["stale"]),
+                        ", ".join(x["room"] for x in buckets["stale"])))
+    else:
+        parts.append("没有确认死亡的房间 —— 禁止 recover/restart，禁止说它们没反应。")
+    if buckets["waiting_sw"]:
+        parts.append("排队等 SW 锁（正常）: " + ", ".join(
+            x["room"] for x in buckets["waiting_sw"]))
+    if buckets["unbound"]:
+        parts.append("★ unbound（平台活着但没绑定，补 subagent-assign，禁止 reset）: "
+                     + ", ".join(x["room"] for x in buckets["unbound"]))
+    return {"ok": True, **buckets, "zombie": [],
+            "rooms_to_restart": rooms_to_restart,
+            "count": len(rooms_to_restart),
+            "source": "mode_gate.cmd_room_board",
+            "board_summary": board.get("summary"),
+            "message": " | ".join(parts)}
+
+
 def _heartbeat_timeout():
     return _mg_const("SW_HEARTBEAT_TIMEOUT", 180)
 
@@ -4771,6 +5092,18 @@ def cmd_recover():
     no_heartbeat       : 登记超宽限期仍无心跳 —— 可疑，先 list_agents 核对再决定；
     completed / failed : 非活动状态，不在重启范围。
     """
+    _root_guard = _require_root_session("recover")
+    if _root_guard:
+        return _root_guard
+    # ── 【2026-10-28 重构】优先用 mode_gate 的权威看板 ──────────────────
+    # 原实现自己维护一套僵尸判定：active 且无 subagent 登记 → zombie → 建议 reset。
+    # 实测后果：主对话漏调 subagent-assign（三个小屋全漏），recover 把仍在跑
+    #   的屋子判成僵尸，主对话照做 reset → 三个正在建模的子代理被清掉。
+    # 现在：存活/死亡只认 room-board（合并了插件平台注册表 + SW 锁 + 产物证据）；
+    #   unbound（平台活着但没绑定）单独列出，明确禁止 reset。
+    _board = _mg_call("cmd_room_board", None, as_json=True)
+    if isinstance(_board, dict) and _board.get("ok") and isinstance(_board.get("rooms"), list):
+        return _recover_from_board(_board)
     hb_dir = os.path.join(STATE_DIR, "heartbeats")
     ms_path = os.path.join(STATE_DIR, "mode_state.json")
     empty = {"ok": True, "running": [], "starting": [], "stale": [], "no_heartbeat": [],
@@ -4823,11 +5156,23 @@ def cmd_recover():
         # 僵尸判定：active 但没有子代理登记 → 不是"死掉需要重启"，
         #   而是"登记了却没拉起"，应当走 reset/清理，而非 restart。
         if not _has_sub and info.get("active") and not info.get("ended_at"):
-            zombie.append({
-                "room": room,
-                "reason": "房间登记为 active，但没有对应的 subagent 记录（未真正拉起子代理）",
-                "note": "这不是需要重启的死亡房间，而是僵尸残留 —— 用 reset 清理，不要 restart",
-            })
+            # 先问平台：若平台侧仍存活 → unbound（补 assign），严禁 reset
+            _plat = _mg_call("_plugin_liveness", None, room, None)
+            _alive = bool(_plat and _plat[0] == "running")
+            if _alive:
+                no_hb.append({
+                    "room": room,
+                    "reason": "平台侧仍存活，但房间没有 subagent-assign 绑定",
+                    "note": ("unbound：补 python mode_gate.py subagent-assign <房间> <id>；"
+                             "【严禁 reset】—— 会杀掉正在建模的小屋"),
+                    "state": "unbound",
+                })
+            else:
+                zombie.append({
+                    "room": room,
+                    "reason": "房间登记为 active，但没有 subagent 记录，且平台侧无存活证据",
+                    "note": "疑似僵尸残留 —— 先核对 list_agents / room-board，再决定；不要直接 restart",
+                })
             continue
         if hb_age is not None:
             if hb_age > _HB_TIMEOUT:
@@ -4862,10 +5207,13 @@ def cmd_recover():
         parts.append("可疑房间（先核对后处理）: " + ", ".join(x["room"] for x in no_hb))
     # 【僵尸复活修复】僵尸房间绝不进入 restart 队列
     if zombie:
-        parts.append("★ 发现 %d 个僵尸房间（登记了房间但没拉起子代理）: %s"
+        parts.append("★ 发现 %d 个疑似僵尸房间（登记了房间但既无 subagent 记录、"
+                     "平台侧也无存活证据）: %s"
                      % (len(zombie), ", ".join(x["room"] for x in zombie)))
-        parts.append("处理方式：workflow_gate.py reset 清理残留；"
-                     "【严禁】对僵尸房间调 restart —— 那只会让空房间反复复活。")
+        parts.append("处理方式：先用 mode_gate.py room-board --json 核对；"
+                     "确认平台侧也没这个子代理后再清；"
+                     "【严禁】对它调 restart —— 那只会让空房间反复复活。"
+                     "若平台侧仍存活（unbound），补 subagent-assign，禁止 reset。")
     return {"ok": True, "running": running, "starting": starting, "stale": stale,
             "no_heartbeat": no_hb, "completed": completed, "failed": failed,
             "zombie": zombie,
@@ -4875,6 +5223,9 @@ def cmd_recover():
 
 def cmd_restart(room):
     """一键重启房间：释放旧 subagent 记录 + 将房间重新加入待处理队列。"""
+    _root_guard = _require_root_session("restart")
+    if _root_guard:
+        return _root_guard
     import subprocess as _sp
     mg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode_gate.py")
     try:
@@ -4913,6 +5264,9 @@ def cmd_reset():
     修复：reset 同步调 mode_gate.py rooms-reset 清空房间/子代理/锁，
       让 reset 真正回到"干净可开新任务"的状态。
     """
+    _root_guard = _require_root_session("reset")
+    if _root_guard:
+        return _root_guard
     state = _fresh_state()
     save_state(state)
     _rooms_cleared = None

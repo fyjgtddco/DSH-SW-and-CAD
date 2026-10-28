@@ -1,14 +1,22 @@
 {
   "schema": "dsh-connection-state/1",
-  "updated_at": 1793077994.2494545,
-  "updated_at_str": "2026-10-27 13:13:14",
+  "updated_at": 1793108947.0084364,
+  "updated_at_str": "2026-10-27 21:49:07",
   "sw": {
-    "running": false,
-    "pid": null,
-    "processes": [],
-    "connected": false,
+    "running": true,
+    "pid": 19888,
+    "processes": [
+      {
+        "pid": 19888,
+        "name": "SLDWORKS.exe",
+        "mem": "403,344 K"
+      }
+    ],
+    "connected": true,
     "error": null,
-    "checked_at": "2026-10-27 13:13:14"
+    "revision": "33.5.0",
+    "binding": "static",
+    "checked_at": "2026-10-27 21:49:03"
   },
   "cad": {
     "running": false,
@@ -16,7 +24,7 @@
     "processes": [],
     "connected": false,
     "error": null,
-    "checked_at": "2026-10-22 09:52:14"
+    "checked_at": "2026-10-27 21:49:03"
   },
   "paths": {
     "sldworks_exe": "Z:\\Program Files\\SOLIDWORKS Corp2025\\SOLIDWORKS\\SLDWORKS.exe",
@@ -127,7 +135,7 @@
     "interface": "process-only（Abaqus 无 COM 自动化接口）",
     "integration": "`abaqus python <脚本>` 或 `abaqus cae noGUI=<脚本>`",
     "note": "未检测到 Abaqus 进程或安装",
-    "checked_at": "2026-10-22 09:52:14"
+    "checked_at": "2026-10-27 21:49:03"
   },
   "nx": {
     "running": false,
@@ -138,7 +146,7 @@
     "interface": "process-only（NX 无 COM 自动化接口）",
     "integration": "`run_journal <脚本.py>`（NX Open 批处理） 或 NX Nastran 求解器命令行",
     "note": "未检测到 NX 进程或安装",
-    "checked_at": "2026-10-22 09:52:14"
+    "checked_at": "2026-10-27 21:49:03"
   },
   "webots": {
     "running": false,
@@ -151,6 +159,6 @@
     "exe": "D:\\Webots\\msys64\\mingw64\\bin\\webots.exe",
     "revision": null,
     "note": "检测到 Webots 安装：D:\\Webots\\msys64\\mingw64\\bin\\webots.exe。Webots 无 COM 接口，集成方式为 `webots --mode=fast <世界文件.wbt>` 启动仿真，外部控制走 webots-controller（TCP 控制器协议）。",
-    "checked_at": "2026-10-27 13:08:07"
+    "checked_at": "2026-10-27 21:49:03"
   }
 }

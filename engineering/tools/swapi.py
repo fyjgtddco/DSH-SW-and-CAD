@@ -2420,6 +2420,443 @@ def _version_major(sw):
         return 0
 
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# 早期绑定（early binding）核心基础设施
+# ──────────────────────────────────────────────────────────────────────────
+# 为什么需要（来源：SW2025_COM_API_完整摸底报告 1.1 / 1.2 / 2.3 / 4）：
+#   实机 SW 2025 SP5.0 (Rev 33.5.0) 上，win32com 的【晚期绑定】只能做少数
+#   简单属性访问，大量 API 直接失败：
+#       GetModelDoc2    晚期"找不到成员"     → 早期成功
+#       SelectByID2     晚期"类型不匹配"     → 早期成功（Callout 必须传 None）
+#       CreateMate      晚期"参数数量错误"   → 早期成功（新版仅 1 参数）
+#       AddMate5        晚期 float() 报错     → 早期成功（15 参数全必需）
+#       GetFeatureCount 晚期"参数数量错误"   → 早期成功（新版无参数）
+#   报告 1.2 给出的正规做法：
+#       mod = gencache.EnsureModule(GUID, 0, <major>, 0)
+#       sw  = mod.ISldWorks(raw._oleobj_)
+#       im  = mod.IModelDoc2(model._oleobj_)
+#       ia  = mod.IAssemblyDoc(model._oleobj_)
+#       ic  = mod.IComponent2(component._oleobj_)
+#
+# 本层的【硬约束】（不可违反）：
+#   ① 早期绑定只是【可选增强】。任何一步失败都必须静默回退到晚期绑定，
+#      不得抛异常、不得让 import 阶段崩掉 —— 仓库仍要能在 SW 2018~2024
+#      以及【没装 SW 的机器】上照旧工作。
+#   ② major 版本号【不写死 33】：先从 sw.RevisionNumber 推导，再退到注册表，
+#      最后才依次试 33/32/31/30/29/28。
+#   ③ 失败结论必须缓存（_EARLY_STATE["failed"]），避免每次调用都重试
+#      拖慢启动（未注册类型库时 gencache.EnsureModule 会抛 com_error）。
+#   ④ 源码保持 Python 3.6 兼容（不用海象运算符 / 3.9+ 语法）。
+# ══════════════════════════════════════════════════════════════════════════
+
+# SolidWorks 类型库 GUID（报告 1.2 原文常量；与既有 SW_TLB_IID 同值，
+# 这里用报告里的名字，便于和现场文档一一对照）
+_SLDWORKS_TLB_GUID = "{83A33D31-27C5-11CE-BFD4-00400513BB57}"
+
+# 推导不出 major 时的兜底尝试序列（报告 1.2：SW2025 = 33，逐版本向前回退）。
+# 注意：这是【最后手段】，正常情况下走 sw.RevisionNumber / 注册表推导。
+_EARLY_MAJOR_FALLBACK = (33, 32, 31, 30, 29, 28)
+
+# 早期绑定进程内状态（模块级单例，只为诊断统计，不做线程同步）。
+#   module        : 已解析的 gen_py 模块（成功时缓存，None=尚未成功）
+#   major         : 实际生效的类型库 major（0=未知）
+#   error         : 最近一次"不可用"的原因（人类可读，供 early_status 展示）
+#   failed        : 失败结论缓存标志 —— True 时不再无谓重试
+#   tried_majors  : 已尝试过的 major 列表（避免对同一 major 反复重试）
+#   wrapped_count : 成功包装次数（诊断用）
+#   failed_count  : 包装失败/回退次数（诊断用）
+#   last_wrap_error: 最近一次包装失败原因
+_EARLY_STATE = {
+    "module": None,
+    "major": 0,
+    "error": None,
+    "failed": False,
+    "tried_majors": [],
+    "wrapped_count": 0,
+    "failed_count": 0,
+    "last_wrap_error": None,
+}
+
+
+def _early_major_from_sw(sw):
+    """从 sw.RevisionNumber 推导类型库 major（报告 1.2：33.5.0 → 33）。
+
+    为什么优先用它：类型库的 major 号跟随 SolidWorks 版本，从已连接的
+    Application 上读是最准的（注册表可能残留旧版本或其它产品的同名键）。
+    任何异常（未连接/属性不存在/格式异常）都返回 0，由上层继续退。
+    """
+    if sw is None:
+        return 0
+    rev = None
+    try:
+        rev = getattr(sw, "RevisionNumber", None)
+    except Exception:
+        # 晚期绑定访问不存在的成员会抛 com_error，这里必须吞掉
+        rev = None
+    # 少数环境下 RevisionNumber 是方法而非属性
+    try:
+        if callable(rev):
+            rev = rev()
+    except Exception:
+        rev = None
+    try:
+        if rev is None:
+            return 0
+        _major = int(float(str(rev).split(".")[0]))
+        return _major if _major > 0 else 0
+    except Exception:
+        return 0
+
+
+def _early_major_from_registry():
+    """注册表兜底推导 major：SOLIDWORKS <年份> → major = 年份 - 1992。
+
+    为什么需要这条退路：报告 1.1 的结论是"早期绑定必需"，但很多场景下
+    get_early_module() 会在【还没有 sw 对象】时被调用（例如 is_early_available()
+    的启动自检）。此时没有 RevisionNumber 可读，只能从注册表找已安装版本。
+    失败（无注册表/无权限/非 Windows）一律返回 0，不抛异常。
+    """
+    if sys.platform != "win32":
+        return 0
+    try:
+        import winreg
+    except Exception:
+        return 0
+    _years = []
+    for _hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for _base in (r"SOFTWARE\SolidWorks",
+                      r"SOFTWARE\WOW6432Node\SolidWorks"):
+            _k = None
+            try:
+                _k = winreg.OpenKey(_hive, _base)
+            except Exception:
+                continue
+            try:
+                _i = 0
+                while True:
+                    try:
+                        _sub = winreg.EnumKey(_k, _i)
+                        _i += 1
+                    except OSError:
+                        break
+                    _s = str(_sub).upper().replace("-", " ").replace("_", " ")
+                    if "SOLIDWORKS" not in _s:
+                        continue
+                    for _tok in _s.split():
+                        if len(_tok) == 4 and _tok.isdigit():
+                            _y = int(_tok)
+                            # 允许 2010~2100：2018=26 ... 2025=33
+                            if 2010 <= _y <= 2100:
+                                _years.append(_y)
+            finally:
+                try:
+                    winreg.CloseKey(_k)
+                except Exception:
+                    pass
+    if not _years:
+        return 0
+    try:
+        # 取【最高】年份：多版本共存时，类型库 major 也以新版本为准
+        return int(max(_years)) - 1992
+    except Exception:
+        return 0
+
+
+def _early_major_candidates(sw=None):
+    """给出待尝试的 major 列表：sw 版本 → 注册表 → 兜底序列。
+
+    Returns: list[int]（有序去重；兜底序列始终追加，因此非空）。
+    """
+    _out = []
+    try:
+        _m = _early_major_from_sw(sw)
+        if not _m:
+            _m = _early_major_from_registry()
+        if _m and _m not in _out:
+            _out.append(_m)
+    except Exception:
+        pass
+    for _m in _EARLY_MAJOR_FALLBACK:
+        if _m not in _out:
+            _out.append(_m)
+    return _out
+
+
+def get_early_module(sw=None):
+    """取 SolidWorks 类型库的 gen_py 模块（早期绑定入口）；失败返回 None。
+
+    来源：报告 1.2 —— SW2025 必须 ``gencache.EnsureModule(GUID, 0, 33, 0)``。
+
+    Args:
+        sw: 晚期绑定的 Application 对象（可选）。给了就从 sw.RevisionNumber
+            推导类型库 major（33.5.0 → 33），避免把版本号写死成 33。
+
+    Returns:
+        gen_py 模块对象；不可用（类型库未注册 / 版本不符 / gen_py 目录无写
+        权限 / 没装 pywin32）时返回 None。【任何情况下都不抛异常】。
+
+    失败缓存（很重要）：
+        gencache.EnsureModule 在"类型库未注册"的机器上会抛 com_error
+        （实机 -2147319779 '库没有注册'）；逐个候选 major 试完是本层最慢的
+        分支。因此把"不可用"结论连同已试过的 major 一起缓存，后续调用直接
+        返回 None，不再重试 —— 满足"不要每次重试拖慢启动"的硬性要求。
+        唯一的例外：调用方后来给了一个【没试过】的 major（例如先无 sw
+        自检失败，之后连上 SW 2023 得到 31），则允许再试一次。
+    """
+    _st = _EARLY_STATE
+    if _st["module"] is not None:
+        return _st["module"]
+    try:
+        _majors = _early_major_candidates(sw)
+    except Exception as _e_cand:
+        _st["failed"] = True
+        _st["error"] = "推导类型库 major 失败: %r" % (_e_cand,)
+        return None
+    # ── 失败缓存：没有"没试过的 major"就直接返回 None，不再重试 ────────
+    if _st["failed"]:
+        _pending = [m for m in _majors if m not in _st["tried_majors"]]
+        if not _pending:
+            return None
+        _majors = _pending
+    # ── gencache 依赖：导入失败就给结论、缓存、回退 ────────────────────
+    try:
+        from win32com.client import gencache as _gencache
+    except Exception as _e_imp:
+        _st["failed"] = True
+        _st["error"] = "无法导入 win32com.client.gencache: %r" % (_e_imp,)
+        return None
+    # COM 未初始化时 EnsureModule 也可能失败，这里尽力初始化（重复调用安全）
+    try:
+        import pythoncom as _pyc
+        try:
+            _pyc.CoInitialize()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    _errors = []
+    for _maj in _majors:
+        try:
+            _st["tried_majors"].append(_maj)
+        except Exception:
+            pass
+        try:
+            _mod = _gencache.EnsureModule(_SLDWORKS_TLB_GUID, 0, _maj, 0)
+        except Exception as _e_em:
+            _errors.append("major %s: %r" % (_maj, _e_em))
+            continue
+        if _mod is None:
+            _errors.append("major %s: EnsureModule 返回 None" % (_maj,))
+            continue
+        # ── 成功：缓存模块与 major，清掉失败标记 ──────────────────────
+        _st["module"] = _mod
+        _st["major"] = _maj
+        _st["error"] = None
+        _st["failed"] = False
+        return _mod
+    _st["failed"] = True
+    _st["major"] = 0
+    # 只保留最近 3 条原因，避免错误串过长；完整现象见 last_wrap_error
+    _st["error"] = ("; ".join(_errors[-3:]) if _errors
+                    else "所有候选 major 的 EnsureModule 均失败")
+    return None
+
+
+def early(obj, iface_name="IDispatch"):
+    """把晚期绑定 COM 对象包装成【指定接口】的早期绑定对象（失败原样返回）。
+
+    来源：报告 1.2 —— ``mod.ISldWorks(raw._oleobj_)`` /
+    ``mod.IModelDoc2(model._oleobj_)`` / ``mod.IAssemblyDoc(model._oleobj_)`` /
+    ``mod.IComponent2(component._oleobj_)``。
+
+    Args:
+        obj: 晚期绑定对象（CDispatch / <unknown> 等）。
+        iface_name: gen_py 模块里的接口类名，如 'ISldWorks'、'IModelDoc2'、
+            'IAssemblyDoc'、'IComponent2'。
+
+    Returns:
+        包装后的早期绑定对象；模块不可用、接口名不存在、包装抛异常时
+        【原样返回 obj】—— 调用方永远可以继续按晚期绑定方式使用它，
+        因此本函数是"可失败的增强"，绝不中断建模流程。
+    """
+    if obj is None:
+        return None
+    _st = _EARLY_STATE
+    _mod = None
+    try:
+        _mod = get_early_module(None)
+    except Exception:
+        _mod = None
+    if _mod is None:
+        # 模块不可用 → 回退（计入 failed_count，诊断时能看出回退发生频率）
+        try:
+            _st["failed_count"] = int(_st.get("failed_count") or 0) + 1
+            _st["last_wrap_error"] = ("%s: 早期绑定模块不可用（已回退晚期绑定）"
+                                      % (iface_name,))
+        except Exception:
+            pass
+        return obj
+    try:
+        _cls = getattr(_mod, iface_name, None)
+        if _cls is None:
+            raise AttributeError("类型库中没有接口 %s" % (iface_name,))
+        _raw = getattr(obj, "_oleobj_", None)
+        if _raw is None:
+            raise AttributeError("对象没有 _oleobj_（不是 COM 对象？）")
+        _wrapped = _cls(_raw)
+        if _wrapped is None:
+            raise RuntimeError("接口构造返回 None")
+        try:
+            _st["wrapped_count"] = int(_st.get("wrapped_count") or 0) + 1
+        except Exception:
+            pass
+        return _wrapped
+    except Exception as _e_wrap:
+        try:
+            _st["failed_count"] = int(_st.get("failed_count") or 0) + 1
+            _st["last_wrap_error"] = "%s: %r" % (iface_name, _e_wrap)
+        except Exception:
+            pass
+        # ★ 硬性要求：包装失败必须静默回退到晚期绑定对象
+        return obj
+
+
+def is_early_available():
+    """当前进程内早期绑定是否可用（bool）。【绝不抛异常】。"""
+    try:
+        return get_early_module(None) is not None
+    except Exception:
+        return False
+
+
+def early_status():
+    """早期绑定状态摘要（供日志/自检/CLI 直接打印）。
+
+    Returns: dict，字段固定为
+        available (bool) / major (int) / error (str|None) /
+        wrapped_count (int) / failed_count (int)
+    """
+    try:
+        _avail = is_early_available()
+    except Exception:
+        _avail = False
+    _st = _EARLY_STATE
+    try:
+        _major = int(_st.get("major") or 0)
+    except Exception:
+        _major = 0
+    try:
+        _wrapped = int(_st.get("wrapped_count") or 0)
+    except Exception:
+        _wrapped = 0
+    try:
+        _failed = int(_st.get("failed_count") or 0)
+    except Exception:
+        _failed = 0
+    return {
+        "available": bool(_avail),
+        "major": _major,
+        "error": _st.get("error"),
+        "wrapped_count": _wrapped,
+        "failed_count": _failed,
+    }
+
+
+def early_diagnose():
+    """早期绑定诊断详情（CLI 友好：一键看"为什么不可用"）。
+
+    Returns: dict —— 在 early_status() 的五个字段之外，补充：
+        guid / major_candidates / tried_majors / last_wrap_error /
+        tlb_path / gen_py_dir / summary / hint
+    任何子项取不到都置 None，【绝不抛异常】（排障工具不能自己先崩）。
+    """
+    try:
+        _status = early_status()
+    except Exception:
+        _status = {"available": False, "major": 0, "error": "early_status 异常",
+                   "wrapped_count": 0, "failed_count": 0}
+    _tlb = None
+    try:
+        _tlb = _find_sldworks_tlb()
+    except Exception:
+        _tlb = None
+    _cache_dir = None
+    try:
+        from win32com.client import gencache as _g
+        try:
+            _cache_dir = _g.GetGeneratePath()
+        except Exception:
+            _cache_dir = None
+    except Exception:
+        _cache_dir = None
+    _d = dict(_status)
+    _d["guid"] = _SLDWORKS_TLB_GUID
+    _d["major_candidates"] = list(_EARLY_MAJOR_FALLBACK)
+    _d["tried_majors"] = list(_EARLY_STATE.get("tried_majors") or [])
+    _d["last_wrap_error"] = _EARLY_STATE.get("last_wrap_error")
+    _d["tlb_path"] = _tlb
+    _d["gen_py_dir"] = _cache_dir
+    if _d.get("available"):
+        _d["summary"] = ("早期绑定可用（类型库 major=%s）"
+                         % (_d.get("major") or "?",))
+        _d["hint"] = "可直接用 early(obj, 'IModelDoc2'/'IAssemblyDoc' 等) 包装。"
+    else:
+        _d["summary"] = ("早期绑定不可用，已回退晚期绑定：%s"
+                         % (_d.get("error") or "原因未知"))
+        _d["hint"] = ("检查 ① 是否安装 SolidWorks 与 pywin32；"
+                      "② sldworks.tlb 是否注册（看 tlb_path）；"
+                      "③ gen_py 目录是否可写（看 gen_py_dir）。")
+    return _d
+
+
+def _attach_early_probe(sw):
+    """连接成功后探测一次早期绑定，并把结论尽力挂到 sw 上（挂不上就忽略）。
+
+    为什么【不改变 get_sw 的返回值】：get_sw 必须继续返回晚期 Dispatch 对象
+    —— SW 2018~2024 上大量既有代码依赖晚期绑定行为（swapi 内大量 VARIANT
+    传参），把返回值换成 mod.ISldWorks 会破坏兼容性。
+    本函数只做"探测 + 诊断"，供 B/C 子任务按需 early() 包装。
+
+    Args:
+        sw: get_sw() 刚连上的 Application 对象。
+    Returns: bool（早期绑定是否可用）。绝不抛异常。
+    """
+    _mod = None
+    try:
+        _mod = get_early_module(sw)
+    except Exception:
+        _mod = None
+    _ok = _mod is not None
+    # "属性可能挂不上"：pywin32 的 CDispatch 一般有 __dict__，但不同绑定方式
+    # 下可能拒绝赋值 —— 一律 try/except，挂不上就静默忽略，绝不影响连接。
+    try:
+        sw.__dict__["_dsh_early_available"] = _ok
+        sw.__dict__["_dsh_early_module"] = _mod
+        sw.__dict__["_dsh_early_major"] = _EARLY_STATE.get("major", 0)
+    except Exception:
+        pass
+    return _ok
+
+
+def _early_reset_cache():
+    """清空早期绑定缓存（仅排障/自测用，正常运行无需调用）。
+
+    为什么留这个口子：失败结论是【进程内永久缓存】的（见 get_early_module），
+    修好环境（补 gen_py 写权限 / 注册类型库 / 先启动 SW）后需要能重新探测。
+    """
+    _st = _EARLY_STATE
+    _st["module"] = None
+    _st["major"] = 0
+    _st["error"] = None
+    _st["failed"] = False
+    _st["tried_majors"] = []
+    _st["wrapped_count"] = 0
+    _st["failed_count"] = 0
+    _st["last_wrap_error"] = None
+    return early_status()
+
+
 # ==================== 版本相关枚举（自动适配） ====================
 
 def _get_midplane_enum(sw):
@@ -2759,6 +3196,16 @@ def get_sw():
             setattr(sw, "_dsh_binding", _binding)
         except Exception:
             pass
+    # ── 【早期绑定】连接成功后顺手探测一次（失败不影响连接）─────────────
+    # 来源：报告 1.1 / 1.2 —— SW2025 大批 API（GetModelDoc2 / SelectByID2 /
+    #   CreateMate / AddMate5 / GetFeatureCount）必须早期绑定才能调用。
+    # 注意：这里【不改变 get_sw 的返回值】，仍然返回晚期 Dispatch 对象
+    #   （SW 2018~2024 及既有代码依赖它）；只把探测结论尽力挂到 sw 上，
+    #   挂不上（属性不可写）也静默忽略。探测本身绝不抛异常。
+    try:
+        _attach_early_probe(sw)
+    except Exception:
+        pass
     _disable_snapping(sw)
     if VISUAL_MODE:
         _wait_sw_window(timeout=60)
@@ -3242,6 +3689,22 @@ class SWModel:
         self._last_begin_plane = None
         self._plane_generation = 0
         self._sketch_open_count = 0
+
+    def early(self, iface_name="IModelDoc2"):
+        """把 self.model 包装成【早期绑定接口】对象（失败原样返回 self.model）。
+
+        供 B/C 子任务使用（来源：报告 1.1 / 1.2）：
+            im = m.early("IModelDoc2")      # 之后可正常调 GetFeatureCount()
+            asm = m.early("IAssemblyDoc")   # 装配配合必须走这个
+        为什么是方法而不是属性：包装要能失败回退，调用方需要知道拿到的是
+        "可能没绑定成功"的对象 —— 回退时就是原 model，旧代码照旧可用。
+        实现完全委托给模块级 early()，不在 SWModel 里重复一套缓存逻辑。
+        """
+        try:
+            return early(getattr(self, "model", None), iface_name)
+        except Exception:
+            # 极端情况下连 early() 本身都异常：必须回退，不能中断建模
+            return getattr(self, "model", None)
 
     def _has_solid_body(self):
         """零件当前是否已有实体（IBody2）。材质必须等到这时才能写入。"""
@@ -3760,7 +4223,27 @@ class SWModel:
         现在两条保存路径都写凭据，且写到【最终落盘路径】旁。
 
         写凭据绝不改变保存结果本身：任何异常只记 warning。
+
+        ── 【BUG-15 修复】装配体（.sldasm）【不写材料凭据】──────────────
+        现场：保存 .sldasm 时 save() 仍走材料凭据签发流程，于是报
+          "[swapi][WARN] 非法合规：未签发凭据: 材料不能为空"
+        —— 装配体本来就没有"材料"这个概念（材料在零件上），这条告警
+          是纯噪声，还会被误判成错误。
+        现在：目标扩展名是 .sldasm 时直接跳过，并在返回里标明
+          material_attestation.skipped="assembly"，语义如实。
         """
+        # ── 【BUG-15】装配体不需要材料凭据 ──────────────────────────────
+        try:
+            _ext = os.path.splitext(str(target))[1].lower()
+        except Exception:
+            _ext = ""
+        if _ext in (".sldasm",):
+            out["material_attestation"] = {
+                "skipped": "assembly",
+                "note": ("装配体（.sldasm）不承载材料属性，"
+                         "材料凭据只在零件（.sldprt）上签发 —— 这不是错误。"),
+            }
+            return out
         _mr = self.material_result if isinstance(self.material_result, dict) else {}
         try:
             import defense_gate as _dg
@@ -8893,33 +9376,23 @@ class SWModel:
                 out["error"] = "未找到组件: %s" % comp_name
                 out["hint"] = "用 list_components() 查看可用组件名。"
                 return out
-            # 加选参考基准面
-            try:
-                self.ext.SelectByID2(ref_plane, "PLANE", 0, 0, 0,
-                                     True, 0, self._empty, 0)
-            except Exception:
-                pass
+            # 加选参考基准面（装配链路：早期绑定下 Callout 必须传 None）
+            self._select_by_id_asm(ref_plane, "PLANE", 0, 0, 0, True, 0)
             # 建立配合
-            _mt = {"distance": 5, "coincident": 0}.get(
-                str(mate_type).lower(), 5)
-            _val = float(distance_mm) * MM if mate_type == "distance" else 0.0
+            # ── 【BUG-11 修复】原来这里同样调 AddMate5 的 8 参旧签名，在
+            # SW2025 必然报"类型不匹配"；统一改走 _add_mate_early（内部按
+            # 专用 API → AddMate5 全参 → CreateMate → 晚期旧签名 逐级回退）。
+            _mt, _mt_err = self._parse_mate_type(mate_type)
+            if _mt is None:
+                _mt = 5
             mate = None
             last = None
-            for _sig, _args in (
-                ("AddMate5", (_mt, 0, False, False, False, _val, _val, "")),
-                ("AddMate3", (_mt, 0, False, False, False, _val, 0, "")),
-            ):
-                try:
-                    fn = getattr(self.model, _sig, None)
-                    if fn is None:
-                        continue
-                    mate = fn(*_args)
-                    if mate is not None:
-                        out["mate_api"] = _sig
-                        break
-                except Exception as e:
-                    last = e
-                    continue
+            mate, _api, last = self._add_mate_early(
+                _mt, align=0, flip=False,
+                distance_mm=(distance_mm if str(mate_type) == "distance"
+                             else None))
+            if mate is not None:
+                out["mate_api"] = _api
             if mate is None:
                 out["error"] = "配合创建失败: %r" % (last,)
                 out["hint"] = ("确认组件与参考面都已选中；"
@@ -8935,6 +9408,828 @@ class SWModel:
         except Exception as e:
             out["error"] = "place_component_by_mate 异常: %r" % (e,)
             return out
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  【子任务 B · 装配/配合】早期绑定增强块（BUG-11 / BUG-12 / BUG-14）
+    # ----------------------------------------------------------------------
+    #  这里的模块级常量与辅助函数服务于本文件下面的装配/配合代码。
+    #  基础设施（get_early_module / early / is_early_available / SWModel.early）
+    #  由【子任务 A】提供（本文件 ~2455 行，已落盘），本块【不重复实现】它，
+    #  只补充"装配配合专属"的三样东西：
+    #    ① 正确的 swMateType_e 枚举表 —— 原 MATE_TYPES 表是错的（把
+    #       'concentric' 映射成 4，而 4 在 SW 里是 swMateTANGENT；'lock' 映射成 9，
+    #       而 9 是 swMateCAMFOLLOWER，真锁是 16）。错表 + 早期绑定同样建错配合，
+    #       必须一并修正；
+    #    ② 组件 → 实体/文档的访问器（BUG-12：GetModelDoc2 / GetBody2 在晚期
+    #       绑定下恒为 None，必须 early(component, 'IComponent2') 后再调；
+    #       而 GetBody 不存在，只能 GetBodies() 再 list()）；
+    #    ③ 装配链路的 SelectByID2 调用器（早期绑定下 Callout 只能传 None，
+    #       传 VARIANT / pythoncom.Missing 都失败；晚期绑定仍走原 _empty）。
+    #
+    #  枚举值来源：【本机实测】SW 2025 SP5.0 的 swconst.tlb 里 swMateType_e /
+    #  swMateAlign_e / swAddMateError_e / swBodyType_e（用 comtypes.GetModule
+    #  读出全部成员）。这几张表在 SW 2018~2025 上稳定（SW API 常量表绝大多数
+    #  多年未变），且失败一律回退晚期绑定，因此不会影响老版本。
+    # ══════════════════════════════════════════════════════════════════════
+
+    # swMateType_e（来源：swconst.tlb 实测）
+    _MATE_TYPE_E = {
+        "coincident": 0,        # swMateCOINCIDENT
+        "concentric": 1,        # swMateCONCENTRIC
+        "perpendicular": 2,     # swMatePERPENDICULAR
+        "parallel": 3,          # swMatePARALLEL
+        "tangent": 4,           # swMateTANGENT
+        "distance": 5,          # swMateDISTANCE
+        "angle": 6,             # swMateANGLE
+        "unknown": 7,
+        "symmetric": 8,         # swMateSYMMETRIC
+        "camfollower": 9,       # swMateCAMFOLLOWER
+        "gear": 10,             # swMateGEAR
+        "width": 11,            # swMateWIDTH
+        "locktosetch": 12,
+        "rackpinion": 13,       # swMateRACKPINION
+        "path": 15,             # swMatePATH
+        "lock": 16,             # swMateLOCK ← 真正的"锁定配合"
+        "screw": 17,            # swMateSCREW
+        "linearcoupler": 18,
+        "universaljoint": 19,
+        "coordinate": 20,
+        "slot": 21,
+        "hinge": 22,
+        "slider": 23,
+        "profilecenter": 24,
+    }
+    # 兼容旧的拼写（原 MATE_TYPES 里用过 antialigned / locktosetch 之类）
+    _MATE_TYPE_ALIASES = {
+        "antialigned": "concentric",
+        "anti-aligned": "concentric",
+        "locktosetch": "locktosetch",
+        "locksketch": "locktosetch",
+        "cam": "camfollower",
+        "rack": "rackpinion",
+    }
+
+    @classmethod
+    def _parse_mate_type(cls, mate_type):
+        """把配合类型（字符串或 SW 枚举 int）解析成 swMateType_e 整数。
+
+        来源：swconst.tlb 实测表见 _MATE_TYPE_E。
+        为什么不再用老的 MATE_TYPES 硬编码表：那张表把
+        'concentric' 写成 4（实为 TANGENT）、'lock' 写成 9（实为 CAMFOLLOWER），
+        传错枚举 SW 要么报"配合类型无效"、要么建出完全不相干的配合。
+        Returns: (int 枚举值, None) 或 (None, 错误说明)
+        """
+        if isinstance(mate_type, str):
+            _k = mate_type.strip().lower().replace(" ", "").replace("_", "")
+            _k = cls._MATE_TYPE_ALIASES.get(_k, _k)
+            if _k in cls._MATE_TYPE_E:
+                return cls._MATE_TYPE_E[_k], None
+            return None, ("未知配合类型 %r，可用: %s"
+                          % (mate_type, ", ".join(sorted(cls._MATE_TYPE_E))))
+        try:
+            return int(mate_type), None
+        except Exception:
+            return None, "配合类型无法解析: %r" % (mate_type,)
+
+    # ── BUG-12：组件 → 文档 / 实体访问（早期绑定优先，晚期自动回退）──────
+    def _component_doc(self, comp):
+        """取组件对应的模型文档（BUG-12 修复）。
+
+        BUG-12 现象：GetComponents 拿到的组件上调 GetModelDoc2() 恒为 None。
+        根因（报告 1.1 / 3.5）：SW2025 的 IComponent2.GetModelDoc2 在【晚期
+        绑定】下报"找不到成员"，pywin32 把异常吞成 None；必须先把组件包装成
+        早期接口 mod.IComponent2(comp._oleobj_) 再调。
+        本方法按 早期 IComponent2 → 晚期组件 → 组件.GetModelDoc（旧名）的顺序
+        尝试，全部失败返回 None（绝不抛异常）。
+        """
+        if comp is None:
+            return None
+        _cands = []
+        try:
+            _ce = early(comp, "IComponent2")
+            if _ce is not None:
+                _cands.append(("early(IComponent2)", _ce))
+        except Exception:
+            pass
+        _cands.append(("late(component)", comp))
+        for _name, _holder in _cands:
+            for _meth in ("GetModelDoc2", "GetModelDoc", "IGetModelDoc2"):
+                try:
+                    _fn = getattr(_holder, _meth, None)
+                    if _fn is None:
+                        continue
+                    _doc = _fn()
+                    if _doc is not None:
+                        return _doc
+                except Exception:
+                    continue
+        return None
+
+    def _component_bodies(self, comp, body_type=0):
+        """取组件里的实体列表（BUG-12 修复）。
+
+        BUG-12 现象：组件上的 GetBody2() 恒为 None（晚期绑定下该方法自身
+        也常报错）。报告 2.3 明确：IModelDoc2 / IComponent2 上【没有】GetBody，
+        只能 GetBodies() / GetBodies2() 再 list() 转数组 —— 它返回的是枚举器，
+        不能直接索引 len()。
+        Args:
+            body_type: swBodyType_e，0 = swSolidBody（默认只要实体）。
+        Returns: list[IBody2]（失败返回 []，绝不抛异常）
+        """
+        if comp is None:
+            return []
+        _holders = []
+        try:
+            _ce = early(comp, "IComponent2")
+            if _ce is not None:
+                _holders.append(_ce)
+        except Exception:
+            pass
+        _holders.append(comp)
+        for _h in _holders:
+            for _meth in ("GetBodies2", "GetBodies", "GetBody2", "GetBody"):
+                try:
+                    _fn = getattr(_h, _meth, None)
+                except Exception:
+                    _fn = None
+                if _fn is None:
+                    continue
+                _args = ()
+                # GetBodies/GetBodies2 需要 swBodyType_e；GetBody 无参
+                if _meth in ("GetBodies", "GetBodies2"):
+                    _args = (int(body_type),)
+                try:
+                    _res = _fn(*_args)
+                except Exception:
+                    continue
+                if _res is None:
+                    continue
+                _list = []
+                if isinstance(_res, (list, tuple)):
+                    _list = [b for b in _res if b is not None]
+                else:
+                    # 枚举器（IEnumBodies2）不可索引，必须 list() —— 报告 2.3
+                    try:
+                        _list = [b for b in list(_res) if b is not None]
+                    except Exception:
+                        _list = [_res]
+                if _list:
+                    return _list
+        return []
+
+    def _asm_early(self):
+        """取【早期绑定的 IAssemblyDoc】（失败回退晚期 model 本身）。
+
+        来源：报告 1.2 —— asm_ia = mod.IAssemblyDoc(model._oleobj_)。
+        为什么每次都重新包：包装很便宜（一次 QueryInterface），而缓存对象
+        在文档被关闭/重新打开后会失效，反而更难排错。
+        """
+        _m = getattr(self, "model", None)
+        if _m is None:
+            return None
+        try:
+            return early(_m, "IAssemblyDoc")
+        except Exception:
+            return _m
+
+    def _select_by_id_asm(self, name, sel_type, x, y, z, append, mark,
+                          sel_opt=0):
+        """装配配合链路上专用 SelectByID2（BUG-11 修复的一部分）。
+
+        为什么单独写一个而【不全局替换】：
+          报告 2.3 第 6/7 条 —— 早期绑定下 Callout 只能传 None，
+          传 VARIANT(pythoncom.VT_DISPATCH, None) 会报
+          "Python instance can not be converted to a COM object"，
+          传 pythoncom.Missing 报"非选择性的参数"；
+          但【晚期绑定】下恰恰相反：Callout 必须是 VARIANT，传 None 会报
+          "非选择性的参数"（本文件 3200 行附近的历史结论）。
+        所以本函数先试早期 IModelDoc2.Extension（Callout=None），
+        失败或不可用再走原来的晚期写法（Callout=self._empty）。
+        只覆盖装配配合链路，不动零件建模路径 —— 那部分晚期行为已经稳定。
+        Returns: bool（是否选中）
+        """
+        _m = getattr(self, "model", None)
+        if _m is None:
+            return False
+        # ── 路径 1：早期绑定 Extension.SelectByID2(..., None, ...) ─────────
+        try:
+            _me = early(_m, "IModelDoc2")
+            _ext_e = getattr(_me, "Extension", None) if _me is not None else None
+            if _ext_e is not None:
+                if _ext_e.SelectByID2(str(name), str(sel_type),
+                                      float(x), float(y), float(z),
+                                      bool(append), int(mark), None,
+                                      int(sel_opt)):
+                    return True
+        except Exception:
+            pass
+        # ── 路径 2：晚期绑定（原行为，Callout=VARIANT）────────────────────
+        try:
+            _ext = getattr(self, "ext", None)
+            if _ext is None:
+                _ext = _m.Extension
+            if _ext is not None and _ext.SelectByID2(
+                    str(name), str(sel_type), float(x), float(y), float(z),
+                    bool(append), int(mark), self._empty, int(sel_opt)):
+                return True
+        except Exception:
+            pass
+        return False
+
+    @classmethod
+    def _mate_value_args(cls, mate_type, distance_mm=None, angle_deg=None):
+        """按配合类型算出 AddMate5 的 5 个浮点 + 角度参数（报告 3.3）。
+
+        报告 2.3 第 9 条：AddMate5 的浮点参数【不能传 None】，
+        否则 pywin32 在参数编组前就抛
+        "float() argument must be a string or a real number, not 'NoneType'"
+        —— 这正是 BUG-11 里那句"类型不匹配"的来源之一。
+        所以这里永远给具体 float：
+          距离类  = distance_mm（mm→m）填 Distance，其它 0.0
+          角度类  = angle_deg（度→弧度）填 Angle，其它 0.0
+          上下限  = 0.0 表示"不设限"（SW 语义：0 = 无限制）
+        返回 (Distance, DistAbsUpper, DistAbsLower, GearRatioN,
+              GearRatioD, Angle, AngleAbsUpper, AngleAbsLower)
+        """
+        _mt = int(mate_type)
+        _d = 0.0
+        _a = 0.0
+        if distance_mm is not None:
+            try:
+                _d = float(distance_mm) * MM      # mm → m（swapi 内部单位）
+            except Exception:
+                _d = 0.0
+        if angle_deg is not None:
+            try:
+                _a = float(angle_deg) * math.pi / 180.0
+            except Exception:
+                _a = 0.0
+        # 距离配合类型（5）未给值时也必须给 0.0，绝不能是 None
+        if _mt == 5 and distance_mm is None:
+            _d = 0.0
+        # 齿条/齿轮/螺距类需要 GearRatio，给安全默认 1:1（报告 3.3 序列）
+        _n = 1.0
+        _den = 1.0
+        if _mt in (10, 13, 17):          # GEAR / RACKPINION / SCREW
+            try:
+                if distance_mm is not None:
+                    _n = float(distance_mm)
+            except Exception:
+                _n = 1.0
+        return (_d, 0.0, 0.0, _n, _den, _a, 0.0, 0.0)
+
+
+    # ── 组件选择（装配配合用；早期 IComponent2 只有 Select/SelectByMark）──
+    def _select_component(self, comp, append=False, mark=0):
+        """选中一个组件对象（配合参考为"整个组件"时用，如锁定配合）。
+
+        为什么不用 Select4：IComponent2 的早期接口里只有
+        Select(AppendFlag) / SelectByMark(AppendFlag, Mark)（见类型库），
+        没有 Select4；而晚期绑定下 Select4(Append, SelectData) 可用。
+        因此这里【先早期、再晚期】，两种写法都尝试，成功即返回 True。
+        """
+        if comp is None:
+            return False
+        _ce = None
+        try:
+            _ce = early(comp, "IComponent2")
+        except Exception:
+            _ce = comp
+        # 早期接口：SelectByMark / Select
+        for _holder in (_ce, comp):
+            if _holder is None:
+                continue
+            for _mn, _args in (("SelectByMark", (bool(append), int(mark))),
+                               ("Select2", (bool(append), int(mark))),
+                               ("Select", (bool(append),))):
+                try:
+                    _fn = getattr(_holder, _mn, None)
+                    if _fn is None:
+                        continue
+                    _fn(*_args)
+                    return True
+                except Exception:
+                    continue
+            # 晚期专属：Select4 需要 SelectData（_make_select_data 在建文档后可用）
+            try:
+                _sd = self._make_select_data(mark)
+                if _sd is not None:
+                    comp.Select4(bool(append), _sd)
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _best_planar_face(self, comp):
+        """在组件里挑一个【面积最大的平面】作为配合参考（BUG-12 连带修复）。
+
+        为什么必须走 _component_bodies：BUG-12 里组件 GetBody2 恒为 None，
+        主因是晚期绑定下这两条路都不通；报告 2.3 明确 GetBody 在
+        IModelDoc2 上根本不存在，只能 GetBodies()/GetBodies2() + list()。
+        Returns: (face, area_m2) 或 (None, 0.0)
+        """
+        _best = None
+        _best_area = -1.0
+        _diag = getattr(self, "_best_face_diag", None)
+        if _diag is None:
+            _diag = []
+            self._best_face_diag = _diag
+        for _b in self._component_bodies(comp):
+            try:
+                _faces = _b.GetFaces()
+            except Exception as _e_gf:
+                _diag.append("GetFaces: %r" % (_e_gf,))
+                continue
+            if _faces is None:
+                continue
+            try:
+                _fl = list(_faces)
+            except Exception:
+                _fl = [_faces]
+            for _f in _fl:
+                if _f is None:
+                    continue
+                # ── 面积：先晚期（实机可用），再 early(IFace2).GetArea ─────
+                # 实测（SW2025）：IBody2.GetFaces() 回来的面在晚期绑定下
+                # Normal / GetArea 都能用；但早期 IEntity 包装【没有】这两个
+                # 成员（它们定义在 IFace2 上），所以这里必须按接口分派，
+                # 不能一律当我们自己构造的早期对象使。
+                _area = None
+                try:
+                    _area = float(_f.GetArea())
+                except Exception:
+                    _fe = None
+                    try:
+                        _fe = early(_f, "IFace2")
+                    except Exception:
+                        _fe = None
+                    if _fe is not None:
+                        try:
+                            _area = float(_fe.GetArea())
+                        except Exception as _e_ga:
+                            _diag.append("GetArea: %r" % (_e_ga,))
+                if _area is None or _area <= 0.0:
+                    continue
+                # ── 只要平面（曲面法线不稳定；配合面基本都是平面）──────
+                # 判平面失败时【不直接丢弃】：SW 有些 face 的 Normal 取不到但
+                # 仍是平面；改为"接受但降权"，由面积决定优先级。
+                _is_plane = True
+                try:
+                    _n = _f.Normal
+                    _is_plane = _n is not None
+                except Exception:
+                    try:
+                        _fe2 = early(_f, "IFace2")
+                        _is_plane = getattr(_fe2, "IsPlane", True) is not False
+                    except Exception:
+                        _is_plane = True
+                _score = _area if _is_plane else _area * 0.5
+                if _score > _best_area:
+                    _best_area = _score
+                    _best = _f
+        return _best, max(_best_area, 0.0)
+
+    def _select_face(self, face, append=False, mark=0):
+        """选中一个面（IFace2）。
+
+        接口归属（本机类型库实测）：Select/Select2/Select3/Select4/SelectByMark
+        是在【IEntity】上，IFace2 自身【没有】这几个方法。
+        所以早期绑定必须先 early(face, 'IEntity') 再调；晚期绑定下 face 本身是
+        CDispatch，直接调也能通（保留这条退路，老版本行为不变）。
+        """
+        if face is None:
+            return False
+        _holders = []
+        try:
+            _ent = early(face, "IEntity")
+            if _ent is not None:
+                _holders.append(("early(IEntity)", _ent))
+        except Exception:
+            pass
+        _holders.append(("late(face)", face))
+        for _hname, _h in _holders:
+            _sd = None
+            for _mn in ("Select4", "Select3", "Select2", "Select"):
+                try:
+                    _fn = getattr(_h, _mn, None)
+                except Exception:
+                    _fn = None
+                if _fn is None:
+                    continue
+                try:
+                    if _mn == "Select4":
+                        _sd = _sd or self._make_select_data(mark)
+                        if _sd is None:
+                            continue
+                        _fn(bool(append), _sd)
+                    elif _mn == "Select3":
+                        _sd = _sd or self._make_select_data(mark)
+                        if _sd is None:
+                            continue
+                        _fn(bool(append), int(mark), _sd)
+                    elif _mn == "Select2":
+                        _fn(bool(append), int(mark))
+                    else:
+                        _fn(bool(append))
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    # ── 配合参考解析（create_mate 的 entities 元素 → 实际选中）─────────
+    def _asm_select_reference(self, spec, append=False, mark=1):
+        """把一个"配合参考规格"选中，返回 (ok, 标签)。
+
+        spec 支持四种写法（都来自现场脚本的真实用法）：
+          ① "Front Plane" / "上视基准面" → 按 PLANE 选（基准面配合）
+          ② "DSH_底座-1"                → 该组件面积最大的平面（最常用）
+          ③ {"component": "X", "face_index": n} → 指定组件的第 n 个平面
+          ④ {"type": "FACE", "at": [x,y,z]}     → 按坐标射线选面
+          ⑤ {"type": "PLANE", "name": "..."}     → 显式基准面
+        """
+        _PLANES = ("Front Plane", "前视基准面", "Top Plane", "上视基准面",
+                   "Right Plane", "右视基准面")
+        if spec is None:
+            return False, ""
+        # ②/③ 组件（按名或按对象）
+        _comp = None
+        _comp_name = None
+        _at = None
+        _stype = None
+        if isinstance(spec, dict):
+            _comp_name = spec.get("component") or spec.get("comp")
+            _at = spec.get("at") or spec.get("point")
+            _stype = spec.get("type")
+            if spec.get("name") and not _comp_name:
+                _stype = _stype or "PLANE"
+                if _stype == "PLANE":
+                    if self._select_by_id_asm(spec.get("name"), "PLANE",
+                                              0, 0, 0, append, mark):
+                        return True, "PLANE:%s" % spec.get("name")
+        elif isinstance(spec, str):
+            if spec.strip() in _PLANES:
+                if self._select_by_id_asm(spec, "PLANE", 0, 0, 0, append, mark):
+                    return True, "PLANE:%s" % spec
+            else:
+                _comp_name = spec
+        else:
+            # 直接给了组件对象或面对象
+            try:
+                if hasattr(spec, "Name2"):
+                    _comp_name = str(spec.Name2)
+            except Exception:
+                pass
+            if _comp_name is None:
+                if self._select_face(spec, append, mark):
+                    return True, "FACE(obj)"
+                return False, ""
+        # 按坐标选面（优先级最高：调用方明确给了点）
+        if _at:
+            try:
+                _x, _y, _z = [float(v) for v in _at]
+            except Exception:
+                _x = _y = _z = 0.0
+            if self._select_by_id_asm("", _stype or "FACE", _x, _y, _z,
+                                      append, mark):
+                return True, "FACE(at=%s)" % (_at,)
+        # 按组件名找组件 → 选它面积最大的平面（BUG-12 后这条路才真正通）
+        if _comp_name:
+            for _c in (self._assembly_components() or []):
+                try:
+                    if str(_c.Name2) != str(_comp_name):
+                        continue
+                    _f, _area = self._best_planar_face(_c)
+                    if _f is not None and self._select_face(_f, append, mark):
+                        # _best_planar_face 返回的面积单位是 m²（SW 内部单位），
+                        # 标签里换算成 mm² 才便于人工核对
+                        return True, ("FACE(comp=%s,%.1fmm2)"
+                                      % (_comp_name, float(_area) * 1e6))
+                    # 面取不到时退回"选中整个组件"（锁定/对称配合可能需要）
+                    if self._select_component(_c, append, mark):
+                        return True, "COMP:%s" % _comp_name
+                except Exception:
+                    continue
+            # 名字既不是基准面也不是组件 → 当作 FACE 名字直接试
+            if self._select_by_id_asm(str(_comp_name), _stype or "FACE",
+                                      0, 0, 0, append, mark):
+                return True, "FACE:%s" % _comp_name
+        return False, ""
+
+    def _assembly_components(self):
+        """取装配体组件列表（失败返回 []，绝不抛异常）。"""
+        try:
+            _c = self.model.GetComponents(False)
+        except Exception:
+            return []
+        if _c is None:
+            return []
+        if isinstance(_c, (list, tuple)):
+            return list(_c)
+        try:
+            return list(_c)
+        except Exception:
+            return [_c]
+
+    # ── 核心：早期绑定加配合（唯一收口点，add_mate / create_mate 都走这里）
+    def _add_mate_early(self, mate_type, align=0, flip=False,
+                        distance_mm=None, angle_deg=None, name=""):
+        """用【早期绑定 IAssemblyDoc】建立配合（BUG-11 根因修复）。
+
+        ══ 为什么晚期绑定必失败（报告 1.1 / 2.3 / 3.3）══════════════════
+        现场 BUG-11：add_mate 在 SW2025 SP5.0 上 AddMate5 一律报
+        com_error(-2147352571, 类型不匹配)。逐条核对报告后确认三个独立成因：
+          ① AddMate5 在晚期绑定下连方法都解析不出来（TypeInfo 不可用），
+             pywin32 退化成 IDispatch::Invoke，参数按 VARIANT 硬塞 →
+             "类型不匹配"；
+          ② 即使走早期绑定，报告 2.3 第 9 条：AddMate5 的浮点参数
+             【不能传 None】，否则编组阶段就抛
+             "float() argument must be ... not 'NoneType'"（本文件老代码
+             正好在 AddMate5(..., val, val, name) 里只传 8 个参数，
+             剩下 6 个浮点留空 → 必踩）；
+          ③ 传的枚举值本身错了（MATE_TYPES 把 concentric 写成 4 = TANGENT、
+             lock 写成 9 = CAMFOLLOWER），SW 要么拒绝要么建出别的配合。
+        三个都修掉，配合才建得起来。
+
+        ══ 调用顺序（按命中率从高到低）══════════════════════════════════
+          1) 专用 API（子任务 A 实测：签名最简单、命中率最高）
+             · 同心 → AddConcentricMateWithTolerance(Align, 0, False, 0.0)
+             · 距离 → AddDistanceMate(Align, Flip, Distance, 0, 0, 0, 0)
+          2) 通用 AddMate5（报告 3.3 的 14+1 参数全给具体值，浮点绝不传 None）
+          3) CreateMate(None)（报告 3.2：新版仅 1 参数，传 IMateData；
+             注意 IMateData 接口类【不在该 tlb 里导出】，不能去构造它，
+             只能传 None 或 CreateMateData() 的返回对象）
+          4) 晚期绑定旧写法（老机器 SW2018~2024 的既有行为，保持不让它退化）
+
+        Returns: (mate 对象或 None, 实际生效的方法名, 错误说明)
+        """
+        _mt = int(mate_type)
+        _holders = []
+        try:
+            _ia = self._asm_early()
+            if _ia is not None:
+                _holders.append(("early(IAssemblyDoc)", _ia))
+        except Exception:
+            pass
+        # 晚期兜底：老版本 SW 上这条是老代码唯一可用的路
+        try:
+            _holders.append(("late(model)", self.model))
+        except Exception:
+            pass
+
+        _d, _du, _dl, _gn, _gd, _a, _au, _al = self._mate_value_args(
+            _mt, distance_mm, angle_deg)
+        _n = str(name or "")
+        _errs = []
+
+        # ── ① 专用 API ────────────────────────────────────────────────
+        for _hname, _h in _holders:
+            if _mt == 1:      # swMateCONCENTRIC
+                for _argc in (4, 5):
+                    try:
+                        _fn = getattr(_h, "AddConcentricMateWithTolerance", None)
+                        if _fn is None:
+                            break
+                        _args = [int(align), 0, False, 0.0][:_argc]
+                        _m = _fn(*_args)
+                        if _m is not None:
+                            return (_m,
+                                    "%s/AddConcentricMateWithTolerance(%d)"
+                                    % (_hname, _argc), None)
+                    except Exception as _e1:
+                        _errs.append("%s/AddConcentricMateWithTolerance: %r"
+                                     % (_hname, _e1))
+                        break
+            elif _mt == 5:    # swMateDISTANCE
+                for _argc in (7, 8):
+                    try:
+                        _fn = getattr(_h, "AddDistanceMate", None)
+                        if _fn is None:
+                            break
+                        _args = [int(align), bool(flip), _d, _du, _dl, 0, 0][:_argc]
+                        _m = _fn(*_args)
+                        if _m is not None:
+                            return _m, "%s/AddDistanceMate(%d)" % (_hname, _argc), None
+                    except Exception as _e2:
+                        _errs.append("%s/AddDistanceMate: %r" % (_hname, _e2))
+                        break
+
+        # ── ② 通用 AddMate5（报告 3.3 参数顺序，浮点全给具体值）────────
+        #    (MateType, Align, Flip, Distance, DistAbsUpper, DistAbsLower,
+        #     GearRatioN, GearRatioD, Angle, AngleAbsUpper, AngleAbsLower,
+        #     ForPositioningOnly, LockRotation, WidthMateOption[, ErrorStatus])
+        _am5 = [_mt, int(align), bool(flip), _d, _du, _dl, _gn, _gd,
+                _a, _au, _al, False, False, 0]
+        for _hname, _h in _holders:
+            try:
+                _fn = getattr(_h, "AddMate5", None)
+            except Exception:
+                _fn = None
+            if _fn is None:
+                continue
+            # 先 14 参（ErrorStatus 走默认 Missing），再 15 参（显式 byref）
+            for _form in ("14", "15byref"):
+                try:
+                    if _form == "14":
+                        _m = _fn(*_am5)
+                    else:
+                        _es = win32com.client.VARIANT(
+                            pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                        _m = _fn(*(_am5 + [_es]))
+                    if _m is not None:
+                        return (_m, "%s/AddMate5(%s)" % (_hname, _form), None)
+                except Exception as _e3:
+                    _errs.append("%s/AddMate5(%s): %r" % (_hname, _form, _e3))
+                    continue
+        # 老版本才有的 AddMate3（11 参 + ForPositioningOnly）
+        for _hname, _h in _holders:
+            try:
+                _fn = getattr(_h, "AddMate3", None)
+            except Exception:
+                _fn = None
+            if _fn is None:
+                continue
+            try:
+                _m = _fn(_mt, int(align), bool(flip), _d, _du, _dl,
+                         _gn, _gd, _a, _au, _al, False)
+                if _m is not None:
+                    return _m, "%s/AddMate3" % (_hname,), None
+            except Exception as _e4:
+                _errs.append("%s/AddMate3: %r" % (_hname, _e4))
+
+        # ── ③ CreateMate（报告 3.2：新版仅 1 参数 IMateData）────────────
+        #    ⚠️ 只传 None：IMateData 接口类不在该 tlb 里导出，
+        #    不要试图 mod.IMateData(...) 构造（会 AttributeError）。
+        for _hname, _h in _holders:
+            try:
+                _fn = getattr(_h, "CreateMate", None)
+                if _fn is None:
+                    continue
+                for _arg in (None,):
+                    _m = _fn(_arg)
+                    if _m is not None:
+                        return _m, "%s/CreateMate(None)" % (_hname,), None
+            except Exception as _e5:
+                _errs.append("%s/CreateMate: %r" % (_hname, _e5))
+
+        return None, None, (" | ".join(_errs[-4:]) if _errs
+                            else "本版本没有任何可用的 AddMate/CreateMate API")
+
+    def create_mate(self, mate_type, entities, distance_mm=None,
+                    angle_deg=None):
+        """【BUG-14】新建配合的统一入口（文档承诺的 API，原代码里根本没有）。
+
+        BUG-14 现象：工具链文档写"add_mate 已废弃，请用 create_mate"，
+        但代码里既没有 create_mate 也没有 create_lock_mate —— 调用方按文档
+        写脚本必然 AttributeError。本方法就是补上这个承诺。
+
+        Args:
+            mate_type: 'coincident' / 'concentric' / 'distance' / 'angle' /
+                'parallel' / 'perpendicular' / 'tangent' / 'symmetric' / 'lock'
+                / 'screw' / 'gear' 等，或直接给 swMateType_e 整数。
+                （枚举表见 _MATE_TYPE_E，来源 swconst.tlb 实测）
+            entities: 恰好 2 个配合参考（顺序不限）。每个元素支持：
+                · 基准面名 "Front Plane" / "上视基准面"
+                · 组件名 "DSH_底座-1"（自动取其最大平面）
+                · {"component": "X"} / {"type":"FACE","at":[x,y,z]} /
+                  {"type":"PLANE","name":"Front Plane"}
+                · 面对象 / 组件对象本身
+            distance_mm: 距离配合的数值（mm）。
+            angle_deg:   角度配合的数值（度）。
+
+        Returns:
+            {ok, mate_type, mate_enum, used_api, mate_name?, selections?,
+             selected_count?, error?, hint?, fallback?}
+            —— 成功时 ok=True 且 used_api 标明真正生效的 API（可审计）。
+        """
+        out = {"ok": False, "mate_type": mate_type}
+        try:
+            _mt, _perr = self._parse_mate_type(mate_type)
+            if _mt is None:
+                out["error"] = _perr
+                return out
+            out["mate_enum"] = _mt
+            # entities 允许传 (a,) 单元素（锁定配合可只给一个组件数组）
+            if entities is None:
+                out["error"] = "entities 为空：配合至少需要 2 个参考对象"
+                return out
+            if not isinstance(entities, (list, tuple)):
+                entities = [entities]
+            _ents = list(entities)
+            if len(_ents) < 2 and _mt != 16:
+                out["error"] = ("entities 需要 2 个配合参考，当前 %d 个"
+                                % len(_ents))
+                out["hint"] = ("例：create_mate('distance', ('DSH_底座-1', "
+                               "'DSH_上盖-1'), distance_mm=10)")
+                return out
+            try:
+                self._activate_self()
+            except Exception:
+                pass
+            # 官方五步：① 清空选择 ② 选参考 1 ③ 选参考 2 ④ 建配合
+            try:
+                self.model.ClearSelection2(True)
+            except Exception:
+                pass
+            _notes = []
+            _ok_any = False
+            for _i, _spec in enumerate(_ents):
+                try:
+                    _ok, _lbl = self._asm_select_reference(
+                        _spec, append=(_i > 0), mark=1)
+                except Exception as _e_sel:
+                    _ok, _lbl = False, "ERR:%r" % (_e_sel,)
+                _notes.append(_lbl or "unselected:%r" % (_spec,))
+                if _ok:
+                    _ok_any = True
+            out["selections"] = _notes
+            # 选择集数量是"能不能建配合"的硬判据（老代码栽在这）
+            _sel_count = 0
+            try:
+                _sel_count = int(self.model.SelectionManager
+                                 .GetSelectedObjectCount2(-1))
+            except Exception:
+                _sel_count = sum(1 for n in _notes if not n.startswith("unselected")
+                                 and not n.startswith("ERR"))
+            out["selected_count"] = _sel_count
+            # 从 SelectionMgr 独立再读一次（不依赖我们自己数出来的结果）：
+            # 实机发现"面选上后再选第二个对象可能把第一个顶掉"，这个读数
+            # 就是判断"选择集真的还在不在"的唯一可信来源，必须留证。
+            try:
+                out["select_mgr_count"] = int(
+                    self.model.SelectionManager.GetSelectedObjectCount2(-1))
+            except Exception:
+                pass
+            if _sel_count < 2:
+                out["error"] = ("配合要求至少选中 2 个参考对象，当前仅 %d 个"
+                                % _sel_count)
+                out["hint"] = ("参考对象必须可被选中：基准面名要存在于本装配体，"
+                               "组件名要能被 GetComponents 找到；"
+                               "也可以直接把面对象传进来。")
+                return out
+
+            _mate, _api, _err = self._add_mate_early(
+                _mt, align=0, flip=False,
+                distance_mm=distance_mm, angle_deg=angle_deg)
+            if _mate is not None:
+                out["ok"] = True
+                out["used_api"] = _api
+                try:
+                    out["mate_name"] = _mate.Name
+                except Exception:
+                    pass
+                try:
+                    self.rebuild()
+                except Exception:
+                    pass
+                return out
+            # ── 晚期回退：老机器（SW2018~2024）上继续用旧签名 ───────────
+            _d2, _du2, _dl2, _gn2, _gd2, _a2, _au2, _al2 = self._mate_value_args(
+                _mt, distance_mm, angle_deg)
+            for _sig, _nargs in (("AddMate5", 8), ("AddMate3", 8)):
+                try:
+                    _fn = getattr(self.model, _sig, None)
+                    if _fn is None:
+                        continue
+                    _m = _fn(_mt, 0, False, False, False, _d2, _a2, "")
+                    if _m is not None:
+                        out["ok"] = True
+                        out["used_api"] = "late/%s(legacy)" % _sig
+                        out["fallback"] = True
+                        return out
+                except Exception:
+                    continue
+            out["error"] = "配合创建失败：%s" % (_err,)
+            out["hint"] = ("① 确认两个参考对象都被选中（看 selections/selected_count）；"
+                           "② 早期绑定不可用时本方法会自动回退，仍失败说明本版 "
+                           "SolidWorks 的配合 API 与预期不同，请附 used_api 报告。")
+            return out
+        except Exception as _e:
+            out["error"] = "create_mate 异常: %r" % (_e,)
+            return out
+
+    def create_lock_mate(self, entities):
+        """【BUG-14】锁定配合（swMateLOCK = 16，来源 swconst.tlb 实测）。
+
+        锁定配合把若干组件"锁"在当前位置（相对位姿固定），是总装里最省事、
+        最不容易出过约束的定位手段 —— 因此文档把它列为推荐 API。
+
+        ⚠️ 注意旧表把 'lock' 写成 9：9 在 SW 里是 swMateCAMFOLLOWER（凸轮推杆），
+        照旧值调用会得到一个完全不相干的配合（或直接失败）。
+
+        Args:
+            entities: 2 个及以上组件（名字 / 组件对象 / {"component": name}）。
+        Returns: 同 create_mate 的返回结构。
+        """
+        _ents = entities
+        if _ents is not None and not isinstance(_ents, (list, tuple)):
+            _ents = [_ents]
+        if not _ents:
+            return {"ok": False, "mate_type": "lock",
+                    "error": "create_lock_mate 需要至少 2 个组件"}
+        _out = self.create_mate("lock", tuple(_ents))
+        _out["mate_type"] = "lock"
+        _out["mate_enum"] = self._MATE_TYPE_E.get("lock", 16)
+        return _out
 
     def add_mate(self, mate_type, comp1=None, comp2=None,
                  align=0, flip=False, distance_mm=None, angle_deg=None,
@@ -8977,21 +10272,21 @@ class SWModel:
 
         Returns: dict {ok, error?, used_signature?, selection?}
         """
-        MATE_TYPES = {
-            'coincident': 0, 'parallel': 1, 'perpendicular': 2, 'tangent': 3,
-            'concentric': 4, 'distance': 5, 'angle': 6, 'antialigned': 7,
-            'symmetric': 8, 'lock': 9, 'screw': 12, 'gear': 13,
-        }
+        # ── 【BUG-14 连带修复】旧的 MATE_TYPES 表整体是错的 ──────────────
+        # 原表：'concentric': 4（4 实为 swMateTANGENT）、'lock': 9
+        #       （9 实为 swMateCAMFOLLOWER）、'screw': 12（12 实为 LOCKTOSKETCH）。
+        # 用错枚举即使配合 API 调通，也只会建出【别的配合】或直接被拒 ——
+        # 这是 BUG-11"所有配合类型都建不起来"的并列根因之一。
+        # 现统一走 _MATE_TYPE_E（来源：本机 swconst.tlb 实测，见装配增强块）。
+        # 保留 MATE_TYPES 这个名字做兼容（外部若引用到它不至于炸）。
+        MATE_TYPES = dict(self._MATE_TYPE_E)
         out = {"ok": False, "mate_type": mate_type}
         try:
-            if isinstance(mate_type, str):
-                mt = MATE_TYPES.get(mate_type.strip().lower())
-                if mt is None:
-                    out["error"] = ("未知配合类型 %r，可用: %s"
-                                     % (mate_type, ", ".join(sorted(MATE_TYPES))))
-                    return out
-            else:
-                mt = int(mate_type)
+            mt, _mt_err = self._parse_mate_type(mate_type)
+            if mt is None:
+                out["error"] = _mt_err
+                out["hint"] = ("可用: %s" % (", ".join(sorted(MATE_TYPES)),))
+                return out
             self._activate_self()
 
             # ── 【H 修复·第六轮】自动完成"选中参考对象"这一步 ────────────────
@@ -9045,20 +10340,17 @@ class SWModel:
                 Returns: (ok, label)
                 """
                 try:
-                    _comps_doc = None
-                    try:
-                        _comps_doc = _c.GetModelDoc2()
-                    except Exception:
-                        _comps_doc = None
-                    _bodies = None
-                    try:
-                        _bodies = _c.GetBody2()
-                    except Exception:
-                        _bodies = None
-                    _blist = []
-                    if _bodies is not None:
-                        _blist = (list(_bodies) if isinstance(_bodies, tuple)
-                                  else [_bodies])
+                    # ── 【BUG-12 修复】组件文档/实体必须走早期绑定 ───────────
+                    # 原实现 _c.GetModelDoc2() / _c.GetBody2() 在 SW2025 晚期
+                    # 绑定下分别报"找不到成员"和"参数数量错误"，被 except 吞成
+                    # None → _blist 恒空 → 永远选不到面 → 配合"0 个参考对象"。
+                    # 现在统一交给 _component_doc / _component_bodies：
+                    # 前者先 early(component,'IComponent2') 再调 GetModelDoc2；
+                    # 后者用 GetBodies()/GetBodies2() 再 list()（报告 2.3：
+                    # IModelDoc2/IComponent2 上【没有】GetBody）。
+                    # 注意 _comps_doc 只作诊断用，本函数不依赖它。
+                    _comps_doc = self._component_doc(_c)
+                    _blist = self._component_bodies(_c)
                     _best = None
                     _best_area = -1.0
                     for _b in _blist:
@@ -9097,7 +10389,9 @@ class SWModel:
                                 if _mn == "Select4" and _sd_f is None:
                                     continue
                                 _fn(*_args)
-                                return True, "FACE(comp)=%.1fmm2" % _best_area
+                                # GetArea() 返回 m²（SW 内部单位），标签换算成 mm²
+                                return True, ("FACE(comp)=%.1fmm2"
+                                              % (float(_best_area) * 1e6))
                             except Exception:
                                 continue
                 except Exception:
@@ -9108,12 +10402,14 @@ class SWModel:
                 # 选中一个配合参考：优先按面规格，其次组件，最后基准面
                 _append = not _first
                 if _spec and str(_spec) in _PLANE_ALIASES:
-                    try:
-                        if self.ext.SelectByID2(str(_spec), "PLANE", 0, 0, 0,
-                                                _append, _mark, self._empty, 0):
-                            return True, "PLANE:%s" % _spec
-                    except Exception:
-                        pass
+                    # ── 【BUG-11 刷选修复】装配链路改走 _select_by_id_asm ──
+                    # 早期绑定下 Callout 必须是 None（报告 2.3 第 6/7 条：
+                    # 传 VARIANT 报"无法转换成 COM 对象"，传 Missing 报
+                    # "非选择性的参数"）；晚期绑定下恰恰相反要传 VARIANT。
+                    # _select_by_id_asm 先试早期(None)、再回退晚期(_empty)。
+                    if self._select_by_id_asm(str(_spec), "PLANE", 0, 0, 0,
+                                              _append, _mark):
+                        return True, "PLANE:%s" % _spec
                 if _comp_name:
                     for _c in _comps:
                         try:
@@ -9126,6 +10422,8 @@ class SWModel:
                             _ok_face, _lbl_face = _select_face_of_component(
                                 _c, _mark, _append)
                             if _ok_face:
+                                # 标签里的面积单位统一成 mm²（旧实现漏了换算，
+                                # 打印出来一律 0.0mm²，排障时看不出选的是哪张面）
                                 return True, "%s@%s" % (_lbl_face, _comp_name)
                             # 面选不到时退回组件对象（至少保留旧行为）
                             _sd_c2 = self._make_select_data(_mark)
@@ -9137,12 +10435,9 @@ class SWModel:
                         except Exception:
                             continue
                 if _spec:
-                    try:
-                        if self.ext.SelectByID2(str(_spec), "FACE", 0, 0, 0,
-                                                _append, _mark, self._empty, 0):
-                            return True, "FACE:%s" % _spec
-                    except Exception:
-                        pass
+                    if self._select_by_id_asm(str(_spec), "FACE", 0, 0, 0,
+                                              _append, _mark):
+                        return True, "FACE:%s" % _spec
                 return False, ""
 
             # 步骤 2：第一个参考
@@ -9177,42 +10472,30 @@ class SWModel:
                                "若只给两个组件而未指定面，无法自动选中。")
                 return out
 
-            val = 0.0
-            if distance_mm is not None:
-                val = float(distance_mm) * MM   # mm -> m
-            elif angle_deg is not None:
-                val = float(angle_deg) * 3.141592653589793 / 180.0
-            _n = str(name or "")
-            _flip = bool(flip)
-            _al = int(align)
-            # 多版本签名兜底：AddMate5(7) / AddMate3(6)
-            last_err = None
-            for _sig in ("AddMate5", "AddMate3"):
+            # ── 【BUG-11 修复·核心】统一走早期绑定的 _add_mate_early ────────
+            # 原实现直接 self.model.AddMate5(mt, al, flip, False, False,
+            #                                val, val, name) 只有 8 个参数：
+            #   · 晚期绑定下方法解析不出来 → com_error(-2147352571, 类型不匹配)；
+            #    · 即便早期绑定，缺的参数位会让 pywin32 拿 None 去 float() →
+            #      "float() argument must be ... not 'NoneType'"（报告 2.3-9）。
+            # _add_mate_early 内部按 ①专用API ②AddMate5(14/15 参，浮点全给
+            #   具体值) ③CreateMate(None) ④晚期旧签名 的顺序试，并返回
+            #   真正生效的 API 名（used_api）供审计；失败时把最后 4 条原因带回。
+            m, _api_used, _api_err = self._add_mate_early(
+                mt, align=int(align), flip=bool(flip),
+                distance_mm=distance_mm, angle_deg=angle_deg, name=name)
+            if m is not None:
+                out["ok"] = True
+                out["used_signature"] = _api_used
+                out["used_api"] = _api_used
                 try:
-                    fn = getattr(self.model, _sig)
-                except Exception as e:
-                    last_err = e; continue
-                try:
-                    m = fn(mt, _al, _flip, False, False, val, val, _n)
-                except TypeError:
-                    try:
-                        m = fn(mt, _al, _flip, False, False, val,
-                               val if _sig == "AddMate3" else 0, _n)
-                    except Exception as e2:
-                        last_err = e2; continue
-                except Exception as e2:
-                    last_err = e2; continue
-                if m is not None:
-                    out["ok"] = True
-                    out["used_signature"] = _sig
-                    try:
-                        out["mate_name"] = m.Name
-                    except Exception:
-                        pass
-                    return out
-            out["error"] = ("AddMate 失败（%r）。注意：添加配合前必须先选中"
+                    out["mate_name"] = m.Name
+                except Exception:
+                    pass
+                return out
+            out["error"] = ("AddMate 失败（%s）。注意：添加配合前必须先选中"
                              "要配合的实体/面（SelectByID2），且两个组件都需已加载。"
-                             % (last_err,))
+                             % (_api_err,))
         except Exception as e:
             out["error"] = "add_mate 异常: %r" % (e,)
         return out

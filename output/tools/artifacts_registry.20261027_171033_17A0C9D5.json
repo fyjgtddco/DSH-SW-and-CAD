@@ -1,0 +1,78 @@
+{
+  "底盘": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_小车底板.SLDPRT",
+      "name": "DSH_小车底板",
+      "exists": true,
+      "mtime": 1793094239.835692,
+      "ts": 1793094846.1871245,
+      "at": "2026-10-27 17:54:06"
+    },
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_电池仓.SLDPRT",
+      "name": "DSH_电池仓",
+      "exists": true,
+      "mtime": 1793094271.884312,
+      "ts": 1793094846.2059152,
+      "at": "2026-10-27 17:54:06"
+    },
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_电子舱盖.SLDPRT",
+      "name": "DSH_电子舱盖",
+      "exists": true,
+      "mtime": 1793094301.5570793,
+      "ts": 1793094846.22139,
+      "at": "2026-10-27 17:54:06"
+    }
+  ],
+  "mate-test": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_小车底板.SLDPRT",
+      "name": "DSH_小车底板",
+      "exists": true,
+      "mtime": 1793096567.9289453,
+      "ts": 1793163954.566079,
+      "at": "2026-10-28 13:05:54"
+    }
+  ],
+  "结构件": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1793188084.4356074,
+      "at": "2026-10-28 19:48:04"
+    }
+  ],
+  "传动机构": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1793188084.7329416,
+      "at": "2026-10-28 19:48:04"
+    }
+  ],
+  "壳体机架": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1793188084.9857035,
+      "at": "2026-10-28 19:48:04"
+    }
+  ],
+  "支撑结构": [
+    {
+      "path": "C:\\Users\\j1877\\Desktop\\DSH-SW-and-CAD-main\\engineering\\output\\DSH_悬臂支架.SLDPRT",
+      "name": "DSH_悬臂支架",
+      "exists": true,
+      "mtime": 1788017590.9983473,
+      "ts": 1793188089.44603,
+      "at": "2026-10-28 19:48:09"
+    }
+  ]
+}

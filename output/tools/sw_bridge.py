@@ -1030,6 +1030,17 @@ def get_sw():
             setattr(sw, "_dsh_binding", _binding)
         except Exception:
             pass
+    # ── 【子任务 C】连接成功后顺手探测一次早期绑定（失败静默，绝不改返回值）──
+    # 与 swapi.get_sw() 同构（见 swapi.py 的 _attach_early_probe 调用）：只把
+    # 探测结论尽力挂到 sw 上，【不改变】返回的晚期 Dispatch 对象 —— SW 2018~2024
+    # 与既有代码都依赖晚期行为，换返回值会破坏兼容性（硬约束）。
+    try:
+        import swapi as _swapi_probe
+        _probe = getattr(_swapi_probe, "_attach_early_probe", None)
+        if callable(_probe):
+            _probe(sw)
+    except Exception:
+        pass
     try:
         import swapi
         swapi._disable_snapping(sw)
@@ -1094,6 +1105,487 @@ def cmd_status(sw):
         "doc_count": _fields.get("doc_count"),
         "docs": docs,
     }
+
+# ══ 【子任务 C · 早期绑定接入】CLI 侧诊断 + 签名兼容 ═══════════════════════
+# 现场依据：C:\Users\j1877\Desktop\test\SW2025_COM_API_完整摸底报告.md（下称"报告"）
+#   · 报告 1.1 / 1.2：SW2025 上 GetFeatureCount / OpenDoc6 等在【晚期绑定】下
+#     报"参数数量错误"，必须 gencache.EnsureModule(GUID, 0, 33, 0) 生成早期
+#     接口，再用 mod.ISldWorks(raw._oleobj_) 之类包一层才能正确编组；
+#   · 报告 3.7：OpenDoc6 的正确用法是 byref 参数直接传 None，且【返回 tuple】
+#     (model, errors, warnings) —— 原来传 VARIANT(VT_BYREF|VT_I4) 在早期接口上
+#     等于多传了实参，必然报参数数量错误；
+#   · 报告 4 / 2.3 #10：GetFeatureCount 在 SW2025 下【无参数】，旧版是 1 参数；
+#   · 报告 2.2 / 3.6：InterferenceDetectionManager.GetInterferenceCount 是
+#     【属性】（不能加括号），旧版才是方法。
+#
+# 本段只解决"CLI 侧怎么用"，早期绑定的基础设施（get_early_module / early /
+# early_status / early_diagnose / _attach_early_probe）由 swapi.py 提供。
+#
+# 三条硬约束（与 swapi 侧一致，不可违反）：
+#   ① 早期绑定只是【可选增强】：本段所有函数在任何异常下都必须静默回退，
+#      【绝不抛异常】，也【绝不改变】原有晚期绑定的行为 —— SW 2018~2024 与
+#      没装 SW 的机器必须照旧工作；
+#   ② swapi.py 的早期接口由另一个子任务（A）并行落地，可能【还没落盘】，
+#      因此一律 try/except + getattr 取用；缺失时如实返回 available=false，
+#      绝不 ImportError / AttributeError；
+#   ③ 保持 Python 3.6+ 语法（不用海象运算符 / 3.9+ 专有写法）。
+
+
+def _swapi_early():
+    """取 swapi 模块本身（仅用于 getattr 早期绑定入口）。失败返回 None。"""
+    try:
+        import swapi as _sw
+        return _sw
+    except Exception:
+        return None
+
+
+def _early_fn(name):
+    """取 swapi 上的早期绑定函数；不存在（子任务 A 未落盘）时返回 None。
+
+    为什么要容错而不是直接 import：本任务只改 sw_bridge.py，而 swapi.py 的
+    early_status()/is_early_available()/early_diagnose() 由另一个子任务并行
+    落地，版本可能对不上。缺失时 CLI 必须【如实报告】"不支持"，而不是
+    抛 ImportError 让整条诊断命令崩掉（诊断工具不能自己先崩）。
+    """
+    _sw = _swapi_early()
+    if _sw is None:
+        return None
+    _fn = getattr(_sw, name, None)
+    return _fn if callable(_fn) else None
+
+
+def _early_support_note():
+    """给"swapi 侧缺早期基础设施"一句可操作的说明（回退说明用）。"""
+    return ("swapi.py 未提供早期绑定接口（早期基础设施缺失或版本较旧）。"
+            "这不影响建模：桥接会自动按晚期绑定工作（SW 2018~2024 即如此）。"
+            "若需要早期绑定，请确认 engineering/tools/swapi.py 为含 "
+            "early()/early_status() 的版本。")
+
+
+def wrap_early(obj, iface_name):
+    """把晚期绑定的 COM 对象包装成早期接口；不可用/失败时【原样返回 obj】。
+
+    来源：报告 1.2 —— mod.ISldWorks(raw._oleobj_) / mod.IModelDoc2(...)。
+    与 swapi.early() 的语义一致：调用方拿到返回值后【可以无条件按晚期方式
+    继续用】—— 包装失败时返回的就是原对象，因此调用点只需要判
+    「返回值 is not 原对象」来决定要不要走早期分支。
+    """
+    if obj is None:
+        return None
+    _fn = _early_fn("early")
+    if _fn is None:
+        return obj
+    try:
+        _w = _fn(obj, iface_name)
+    except Exception:
+        return obj
+    # 包装失败时 swapi.early() 返回原对象；None 也按失败处理
+    return _w if _w is not None else obj
+
+
+def _unpack_open_result(v):
+    """把 OpenDoc6 的返回值统一成 (doc, errors, warnings)。
+
+    来源：报告 3.7 —— 早期接口返回 tuple (model, errors, warnings)；
+    晚期绑定只返回 model 本身。某些环境下 tuple 还会被包成 1 元序列，
+    这里一并剥掉。任何异常都退化成 (v, None, None)，绝不抛异常。
+    """
+    try:
+        if isinstance(v, (tuple, list)):
+            if len(v) >= 3:
+                return v[0], v[1], v[2]
+            if len(v) == 2:
+                return v[0], v[1], None
+            if len(v) == 1:
+                return v[0], None, None
+    except Exception:
+        pass
+    return v, None, None
+
+
+def early_status_snapshot(sw=None):
+    """汇总"这台机器能不能用早期绑定"（doctor 的 early_binding / early-status 用）。
+
+    来源：报告 1.1 —— SW2025 大量 API 必须早期绑定；确诊入口是 swapi 的
+    early_status()/early_diagnose()。
+
+    Args:
+        sw: 已连接的 Application 对象（可 None）。给定时优先读它的自述结论
+            （swapi.get_sw() 的 _attach_early_probe 会把 _dsh_early_available /
+            _dsh_early_major / _dsh_early_module 挂上去）。
+
+    Returns: dict（固定字段，见下）。【绝不抛异常】—— 本函数被 doctor 与
+        early-status 共用，是"排障入口"，它自己崩掉就失去了意义。
+        字段：
+          available       bool  早期绑定是否可用
+          major           int   已生效的类型库 major（0=未知；SW2025=33）
+          module_loaded   bool  gen_py 模块是否已在本进程内加载成功
+          connected       bool  调用时是否已有 SW 连接
+          binding         str   实际绑定方式 static / dynamic / None
+          revision        str   sw.RevisionNumber（如 "33.5.0"）
+          wrapped_count   int   成功包装成早期接口的次数（swapi 统计）
+          failed_count    int   回退到晚期的次数（swapi 统计）
+          swapi_early_api bool  swapi 是否提供早期绑定入口
+          source          str   结论来源 sw-object / swapi / none
+          error           str|None  不可用原因（可直接给人看）
+          summary         str   一句话结论
+          hint            str   下一步怎么做
+          signature_compat dict 本 CLI 已容错处理的签名差异（自文档化）
+    """
+    _out = {
+        "available": False,
+        "major": 0,
+        "module_loaded": False,
+        "connected": sw is not None,
+        "binding": None,
+        "revision": None,
+        "wrapped_count": 0,
+        "failed_count": 0,
+        "swapi_early_api": False,
+        "source": "none",
+        "error": None,
+        "summary": "",
+        "hint": "",
+        # 签名差异台账：让用户一眼看出"哪些 API 已经不需要手动改"
+        "signature_compat": {
+            "GetFeatureCount": "先无参（SW2025），失败再 (False)（旧版）—— 报告 4 / 2.3 #10",
+            "OpenDoc6": "先早期 (path,type,opt,'',None,None) 并解包 tuple，"
+                        "失败回退 VARIANT 写法 —— 报告 3.7",
+            "GetInterferenceCount": "先按属性取值，失败再按方法调用 —— 报告 2.2",
+        },
+    }
+    _from_obj = False
+    # ① 连接对象自述的结论（有 sw 时最准：major 直接来自 RevisionNumber）
+    if sw is not None:
+        try:
+            _v = getattr(sw, "_dsh_early_available", None)
+        except Exception:
+            _v = None
+        if _v is not None:
+            _out["available"] = bool(_v)
+            _from_obj = True
+            _out["source"] = "sw-object"
+        try:
+            _maj = getattr(sw, "_dsh_early_major", None)
+            if _maj is not None:
+                _out["major"] = int(_maj)
+        except Exception:
+            pass
+        try:
+            _out["binding"] = getattr(sw, "_dsh_binding", None)
+        except Exception:
+            _out["binding"] = None
+        try:
+            _rev = getattr(sw, "RevisionNumber", None)
+            _out["revision"] = str(_rev) if _rev is not None else None
+        except Exception:
+            _out["revision"] = None
+    # ② swapi 侧的权威状态（报告 1.2 的诊断入口；不依赖 SW 是否已连接）
+    _fn_avail = _early_fn("is_early_available")
+    _fn_status = _early_fn("early_status")
+    _fn_getmod = _early_fn("get_early_module")
+    _out["swapi_early_api"] = bool(_fn_avail or _fn_status or _fn_getmod)
+    _st = {}
+    if _fn_status is not None:
+        try:
+            _st = _fn_status()
+        except Exception as _e_st:
+            _st = {}
+            if not _out["error"]:
+                _out["error"] = "swapi.early_status() 异常: %r" % (_e_st,)
+    if not isinstance(_st, dict):
+        _st = {}
+    if _st:
+        if _st.get("available") is True:
+            # 任一来源说"可用"即可信：连上的 SW 能取到 major，比注册表更准
+            _out["available"] = True
+            if not _from_obj:
+                _out["source"] = "swapi"
+        elif _st.get("available") is False and not _from_obj:
+            _out["available"] = False
+            _out["source"] = "swapi"
+        try:
+            if _st.get("major"):
+                _out["major"] = int(_st.get("major"))
+        except Exception:
+            pass
+        try:
+            _out["wrapped_count"] = int(_st.get("wrapped_count") or 0)
+        except Exception:
+            pass
+        try:
+            _out["failed_count"] = int(_st.get("failed_count") or 0)
+        except Exception:
+            pass
+        if _st.get("error") and not _out["error"]:
+            _out["error"] = _st.get("error")
+    elif _fn_avail is not None:
+        # 只有旧版 is_early_available()：退而求其次，至少给出可用性
+        try:
+            _out["available"] = bool(_fn_avail())
+            _out["source"] = "swapi"
+        except Exception:
+            _out["available"] = False
+    # ③ gen_py 模块是否真的加载成功（有 get_early_module 时才能判断）
+    if _fn_getmod is not None:
+        try:
+            _mod = _fn_getmod(sw)
+            _out["module_loaded"] = _mod is not None
+            if _mod is not None:
+                _out["available"] = True
+        except Exception:
+            _out["module_loaded"] = False
+    # ④ 不可用且 swapi 完全没有早期接口 → 补一句"为什么"
+    if not _out["swapi_early_api"]:
+        if not _out["error"]:
+            _out["error"] = "swapi.py 未提供早期绑定接口（early_status/early_diagnose 缺失）"
+        _out["hint"] = _early_support_note()
+    # ⑤ 结论 / 下一步（可用与不可用都给可操作的话，避免"看了不知道干嘛"）
+    if _out["available"]:
+        _out["summary"] = ("早期绑定可用（类型库 major=%s）—— GetFeatureCount / "
+                           "OpenDoc6 会自动走早期签名" % (_out["major"] or "?"))
+        if not _out["hint"]:
+            _out["hint"] = ("无需处理。若要排查类型库路径，执行 "
+                            "python sw_bridge.py early-status 看 diagnose 段。")
+    else:
+        _out["summary"] = ("早期绑定不可用 → 已回退晚期绑定（%s）"
+                           % (_out["error"] or "原因未知"))
+        if not _out["hint"]:
+            _out["hint"] = ("无需处理：SW 2018~2024 与未装 SW 的机器本来就用晚期绑定。"
+                            "仅当在 SW2025 上遇到'参数数量错误'时，执行 "
+                            "python sw_bridge.py early-status 按 tlb_path / gen_py_dir 排查。")
+    return _out
+
+
+def cmd_early_status(sw=None):
+    """【子任务 C】early-status 子命令：打印早期绑定 JSON（只读、不连 SW）。
+
+    来源：报告 1.1 / 1.2 —— SW2025 上大量 API 必须早期绑定；本命令是
+    确诊"这台机器到底能不能用早期绑定 / 用的是哪个 major"的唯一入口。
+    sw 恒为 None（命令在 _LOCAL_CMDS 里，main() 不会为它连 SW）。
+    """
+    _out = {"ok": True, "command": "early-status",
+            "sw_connected": False,
+            "note": ("早期绑定为可选增强：不可用时桥接自动按晚期绑定工作"
+                     "（SW 2018~2024 与未装 SW 的机器即如此），不属于故障。")}
+    try:
+        _out["status"] = early_status_snapshot(None)
+    except Exception as _e1:
+        # 排障命令不能自己崩：异常也如实返回
+        _out["ok"] = False
+        _out["status"] = {"available": False, "major": 0,
+                          "error": "early_status_snapshot 异常: %r" % (_e1,)}
+    _fn = _early_fn("early_diagnose")
+    if _fn is None:
+        _out["diagnose"] = None
+        _out["diagnose_note"] = ("swapi.early_diagnose() 不可用（子任务 A 未落盘"
+                                 "或版本较旧）—— 已按 available=false 处理，不影响建模。")
+    else:
+        try:
+            _d = _fn()
+            _out["diagnose"] = _d if isinstance(_d, dict) else {"value": str(_d)}
+        except Exception as _e2:
+            _out["diagnose"] = {"error": "early_diagnose 异常: %r" % (_e2,)}
+    # 顶层冗余一份关键字段：调用方不用再深挖两层（报告 1.2 的 major=33）
+    try:
+        _st = _out.get("status") or {}
+        _out["available"] = bool(_st.get("available"))
+        _out["major"] = _st.get("major") or 0
+    except Exception:
+        _out["available"] = False
+        _out["major"] = 0
+    return _out
+
+
+def _feature_count(model, feature_manager=None):
+    """容错取特征总数：先无参（SW2025），失败再 (False)（旧版）。
+
+    来源：报告 4 —— "GetFeatureCount：SW2020 及以前 1 参数 (ToplevelOnly)，
+    SW2025 无参数"；报告 2.3 #10 记录了晚期绑定下 GetFeatureCount(False) 报
+    "takes 1 positional argument but 2 were given"，而早期接口下无参调用成功
+    （报告 3.4）。因此这里做成"两种签名都试 + 早期绑定兜底一次"。
+
+    Args:
+        model: IModelDoc2（零件/装配/工程图文档均可）。
+        feature_manager: 可选的已取到的 FeatureManager（减少一次 COM 往返）。
+
+    Returns:
+        (count, info)：count 为 int，全部尝试都失败时为 None；
+        info 为 dict（method / attempts / error），供 doctor/诊断回显。
+        本函数【绝不抛异常】—— 调用方原先是 try/except 包着用的。
+    """
+    _info = {"method": None, "attempts": [], "error": None,
+             "feature_manager": None}
+    _cands = []
+    if feature_manager is not None:
+        _cands.append(("passed-in", feature_manager))
+    if model is not None:
+        try:
+            _fm = getattr(model, "FeatureManager", None)
+        except Exception as _e_fm:
+            _fm = None
+            _info["error"] = "取 FeatureManager 失败: %r" % (_e_fm,)
+        # 属性式与无参方法式都兼容（动态/静态绑定行为不同）
+        if _fm is not None and callable(_fm):
+            try:
+                _fm = _fm()
+            except Exception as _e_fm2:
+                _info["error"] = "调用 FeatureManager() 失败: %r" % (_e_fm2,)
+                _fm = None
+        if _fm is not None:
+            _cands.append(("model.FeatureManager", _fm))
+    for _src, _fm in _cands:
+        try:
+            _m = getattr(_fm, "GetFeatureCount", None)
+        except Exception as _e_g:
+            _m = None
+            _info["attempts"].append("%s: getattr 失败 %r" % (_src, _e_g))
+        if _m is None:
+            _info["attempts"].append("%s: 无 GetFeatureCount 成员" % (_src,))
+            continue
+        _info["feature_manager"] = _src
+        # ① 新版签名（SW2025+）：无参数
+        try:
+            _c = _m()
+            _info["method"] = "%s.GetFeatureCount() [无参·新版]" % (_src,)
+            return int(_c), _info
+        except Exception as _e0:
+            _info["attempts"].append("%s.GetFeatureCount(): %r" % (_src, _e0))
+        # ② 旧版签名（SW2018~2024）：1 个 boolean 参数；False=连配合一起数
+        try:
+            _c = _m(False)
+            _info["method"] = "%s.GetFeatureCount(False) [1参·旧版]" % (_src,)
+            return int(_c), _info
+        except Exception as _e1:
+            _info["attempts"].append("%s.GetFeatureCount(False): %r" % (_src, _e1))
+    # ③ 兜底：包成早期接口（IModelDoc2）再按"无参"试一次
+    #    报告 3.4：早期接口能把无参签名正确编组，晚期则可能报参数数量错误
+    if model is not None:
+        _em = wrap_early(model, "IModelDoc2")
+        if _em is not None and _em is not model:
+            try:
+                _m2 = getattr(_em, "GetFeatureCount", None)
+            except Exception:
+                _m2 = None
+            if _m2 is not None:
+                try:
+                    _c = _m2()
+                    _info["method"] = "early(IModelDoc2).GetFeatureCount()"
+                    return int(_c), _info
+                except Exception as _e2:
+                    _info["attempts"].append("early.GetFeatureCount(): %r" % (_e2,))
+    if not _info["error"]:
+        _info["error"] = ("GetFeatureCount 在所有签名（无参 / False / 早期接口）下均失败：%s"
+                          % ("; ".join(_info["attempts"][-3:]) or "无可用 FeatureManager"))
+    return None, _info
+
+
+def _open_doc6(sw, path, doc_type, options=1):
+    """容错打开文档：先早期签名（byref 传 None + 解包 tuple），失败回退 VARIANT。
+
+    来源：报告 3.7 ——
+        ❌ errs/warns = VARIANT(VT_BYREF|VT_I4, 0); sw.OpenDoc6(p, 1, 1, "", errs, warns)
+        ✅ sw_early.OpenDoc6(p, 1, 1, "", None, None)  # 返回 (model, errors, warnings)
+    晚期绑定下必须继续用 VARIANT 写法（SW 2018~2024 都是这条路），因此本函数
+    的回退分支【逐字保留】原实现，保证"早期不可用 = 行为与改造前完全一致"。
+
+    Args:
+        sw: Application 对象（晚期即可；内部自行尝试 early(ISldWorks) 包装）。
+        path: 文档绝对路径。
+        doc_type: 1=零件 2=装配 3=工程图。
+        options: OpenDocOptions 位掩码（原调用点传 1=silent；工程图有传 0 的）。
+
+    Returns:
+        (doc, info)：doc 为打开后的 ModelDoc 或 None；info 为 dict
+        （ok / method / uses_early / errors / warnings / error）。
+        本函数不抛 COM 异常（原实现把异常收进 error 字段），行为向后兼容。
+    """
+    _info = {"ok": False, "method": None, "uses_early": False,
+             "errors": None, "warnings": None, "error": None, "attempts": []}
+    if sw is None or not path:
+        _info["error"] = "sw/path 为空"
+        return None, _info
+    try:
+        _dt = int(doc_type)
+        _opt = int(options)
+    except Exception:
+        _dt, _opt = doc_type, options
+    # ① 早期绑定（报告 3.7）：byref 参数传 None，返回 tuple
+    _early_sw = wrap_early(sw, "ISldWorks")
+    if _early_sw is not None and _early_sw is not sw:
+        try:
+            _ret = _early_sw.OpenDoc6(path, _dt, _opt, "", None, None)
+            _doc, _errs_v, _warns_v = _unpack_open_result(_ret)
+            _info["errors"], _info["warnings"] = _errs_v, _warns_v
+            if _doc is not None:
+                _info.update({"ok": True, "uses_early": True,
+                              "method": "early(ISldWorks).OpenDoc6(...,None,None)"})
+                return _doc, _info
+            _info["attempts"].append("early: 返回 None（errs=%r）" % (_errs_v,))
+        except Exception as e:
+            _info["attempts"].append("early: %r" % (e,))
+    # ② 回退：晚期绑定 + VARIANT byref（与改造前【逐字一致】）
+    try:
+        _errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+        _warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+        _doc = sw.OpenDoc6(path, _dt, _opt, "", _errs, _warns)
+    except Exception as e:
+        _info["attempts"].append("late: %r" % (e,))
+        _info["error"] = "OpenDoc6 异常: %r" % (e,)
+        _info["method"] = "late(VARIANT) 失败"
+        return None, _info
+    _info["method"] = "late(VARIANT)"
+    # 回退分支保持"逐字一致"：VARIANT 对象【在函数内取 .value】后只把 int 存进
+    # info，绝不把 VARIANT 裸露出去（否则调用方 json.dumps 会 TypeError）。
+    try:
+        _info["errors"] = _errs.value
+        _info["warnings"] = _warns.value
+    except Exception:
+        _info["errors"], _info["warnings"] = None, None
+    if _doc is None:
+        _info["error"] = ("OpenDoc6 返回 None（errs=%s）"
+                          % (_info["errors"],))
+        return None, _info
+    _info["ok"] = True
+    return _doc, _info
+
+
+def _interference_count(mgr):
+    """容错取干涉数：先按【属性】取值（SW2025），失败再按【方法】调用（旧版）。
+
+    来源：报告 2.2 / 3.6 —— "GetInterferenceCount 是属性不是方法（不能加括号）"，
+    晚期绑定下 mgr.GetInterferenceCount() 报 'int' object is not callable。
+
+    ⚠️ 现状说明（如实记录，勿误读）：本仓库当前【没有任何】调用点使用
+    InterferenceDetectionManager（grep GetInterferenceCount 为 0 命中），
+    本函数是预防性封装 —— 一旦后续写干涉检查，直接用它会同时兼容两种签名。
+    返回 (count, info)；取不到时 count=None。【绝不抛异常】。
+    """
+    _info = {"method": None, "attempts": [], "error": None}
+    if mgr is None:
+        _info["error"] = "mgr 为 None"
+        return None, _info
+    try:
+        _v = getattr(mgr, "GetInterferenceCount")
+    except Exception as e:
+        _info["error"] = "取 GetInterferenceCount 失败: %r" % (e,)
+        return None, _info
+    # ① 属性式（新版）：取到的就是 int
+    if not callable(_v):
+        _info["method"] = "属性访问（新版·无括号）"
+        return int(_v), _info
+    _info["attempts"].append("属性访问得到可调用对象，改按方法调用")
+    # ② 方法式（旧版）
+    try:
+        _c = _v()
+        _info["method"] = "方法调用（旧版·带括号）"
+        return int(_c), _info
+    except Exception as e:
+        _info["attempts"].append("方法调用失败: %r" % (e,))
+    _info["error"] = "GetInterferenceCount 属性/方法两种形态均失败"
+    return None, _info
+
 
 
 def cmd_doctor(sw):
@@ -1166,6 +1658,22 @@ def cmd_doctor(sw):
         result["install_drives_scanned"] = _swapi._all_drive_letters()
     except Exception as _e:
         result["sldworks_exe"] = "PROBE ERROR: %s" % _e
+
+    # ── 【子任务 C】early_binding：这台机器能不能用早期绑定、用的是哪个 major ──
+    # 来源：报告 1.1 / 1.2 —— SW2025 上 GetFeatureCount / OpenDoc6 等在晚期绑定下
+    #   会报"参数数量错误"，只有早期接口能正确编组。用户看 doctor 时应该【一眼】
+    #   看出这台机器处于哪种状态（可用 / 不可用已回退 / swapi 未提供入口）。
+    # ⚠️ 绝不参与 ok/problems 判定：早期绑定是可选增强，不可用【不是故障】
+    #   —— SW 2018~2024 与没装 SW 的机器本来就走晚期绑定，报失败反而误导。
+    try:
+        result["early_binding"] = early_status_snapshot(sw)
+    except Exception as _e_eb:
+        result["early_binding"] = {
+            "available": False,
+            "major": 0,
+            "error": "early_status_snapshot 异常: %r" % (_e_eb,),
+            "summary": "早期绑定状态探测异常（不影响建模，按晚期绑定工作）",
+        }
     # 结论
     problems = []
     if str(result.get("pywin32", "")).startswith("MISSING") or not result.get("pywin32"):
@@ -1242,17 +1750,18 @@ def open_document_fresh(sw, path, doc_type=None, force_close=True):
                 except Exception:
                     pass
     # 步骤2: 打开（silent=1，避免弹窗卡住自动化）
-    _errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-    _warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+    # ── 【子任务 C · 签名兼容】改用 _open_doc6（报告 3.7）─────────────────
+    # cmd_drawing 打开零件走的就是本函数（经 cmd_open），因此这里改造后
+    #   drawing 链路在 SW2025 上不再报"参数数量错误"。现在：先试早期
+    #   OpenDoc6(...,None,None) 并解包 tuple；失败【逐字回退】原 VARIANT
+    #   写法（SW 2018~2024 走的就是这条回退分支，行为完全一致）。
     doc = None
-    try:
-        doc = sw.OpenDoc6(_abs, int(doc_type), 1, "", _errs, _warns)
-    except Exception as e:
-        out["error"] = "OpenDoc6 异常: %r" % (e,)
-        return out
+    doc, _open_info = _open_doc6(sw, _abs, int(doc_type), 1)
+    out["open_method"] = _open_info.get("method")
+    out["open_uses_early"] = _open_info.get("uses_early")
     if doc is None:
-        out["error"] = ("OpenDoc6 返回 None（errs=%s）。"
-                        % (getattr(_errs, 'value', '?')))
+        out["error"] = _open_info.get("error") or "OpenDoc6 打开失败"
+        out["open_attempts"] = _open_info.get("attempts")
         return out
     out["ok"] = True
     out["doc"] = doc
@@ -2589,10 +3098,16 @@ def cmd_asm_verify(sw, asm_path):
         # 同时**如实回报 FirstFeature 的实测表现**，让后人一眼看出它坏了。
         try:
             _fc = None
-            try:
-                _fc = int(_doc.FeatureManager.GetFeatureCount(False))
-            except Exception:
-                _fc = None
+            # ── 【子任务 C · 签名兼容】改用 _feature_count（报告 4 / 3.4）────
+            # 原写法 GetFeatureCount(False) 在 SW2025 上【无参数】→
+            #   "takes 1 positional argument but 2 were given"，
+            #   于是 feature_tree_diag 恒为 None（诊断信息丢一半）。
+            # 现在：无参 → (False) → early(IModelDoc2) 三级容错，全部失败才 None。
+            _fc, _fc_info = _feature_count(_doc)
+            if _fc is None:
+                _fc_err = _fc_info.get("error")
+            else:
+                _fc_err = None
             # 实测 FirstFeature 顶层能走几个节点（预期：因失效而极少）
             _ff_nodes = []
             try:
@@ -2617,6 +3132,10 @@ def cmd_asm_verify(sw, asm_path):
                 _ff_nodes = [{"error": repr(_eff)}]
             out["feature_tree_diag"] = {
                 "feature_count_by_manager": _fc,
+                # 【子任务 C】回显实际生效的签名与失败原因（报告 4：新旧版
+                #   参数个数不同，写清楚才能判断"是 API 不可用还是用法不对"）
+                "feature_count_method": _fc_info.get("method"),
+                "feature_count_error": _fc_err,
                 "firstfeature_nodes": _ff_nodes,
                 "firstfeature_node_count": len(_ff_nodes),
                 "firstfeature_usable": len(_ff_nodes) > 3,
@@ -2914,6 +3433,13 @@ def cmd_drawing(sw, part_path, output_path=None):
 
         # 未打开，打开后读取
         try:
+            # ⚠️ 【子任务 C · 未改造调用点（有意保留）】本处仍用晚期 VARIANT 写法。
+            # 改造范围定为 cmd_drawing / cmd_dwg / annotate_drawing 的【主打开路径】
+            # （它们真正走的是 cmd_open → open_document_fresh，那里已改用
+            # _open_doc6）；本内嵌辅助只在"零件尚未打开、需要量包围盒"时用到，
+            # 失败本来就有默认值兜底（100×100），改与不改都不影响出图成败，
+            # 因此保持原样、缩小改动面。若 SW2025 在此报"参数数量错误"，
+            # 改用 _open_doc6(sw, path, 1, 1) 即可（报告 3.7）。
             errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
             warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
             d = sw.OpenDoc6(path, 1, 1, "", errs, warns)
@@ -3287,8 +3813,41 @@ def cmd_drawing(sw, part_path, output_path=None):
         _ann = _annotate_views_in_doc(final_doc, dim_types=None)
         result["annotation"] = _ann
         result["gbt_report"] = _ann.get("gbt_report")
+        # ── 【BUG-16 修复】delta=0 必须显式报警，不许"静默失败 + ok:true" ──
+        # 现场：InsertModelDimensions / InsertModelAnnotations3 调用后
+        #   rc=null、delta=0（一个标注都没加），drawing 仍返回 ok:true，
+        #   调用方完全看不出"自动标注其实没生效"。
+        # 处理（不阻断出图，但要说清楚）：
+        #   · 在返回值里加 annotation_warning（人类可读）；
+        #   · 加 annotation_effective=false（机器可判定）；
+        #   · 提示根因是"模型里没有可带出的尺寸"，并给出补救办法。
+        try:
+            _n_added = int((_ann or {}).get("total_annotations") or 0)
+        except Exception:
+            _n_added = 0
+        if _n_added <= 0:
+            result["annotation_effective"] = False
+            _tried = sorted({str(a.get("api")) for a in
+                             ((_ann or {}).get("attempts") or [])
+                             if a.get("called")})
+            result["annotation_warning"] = (
+                "工程图已生成，但【自动尺寸标注插入 0 个】："
+                "已按类型库签名尝试 [%s]，各视图标注计数均无变化。"
+                % (", ".join(_tried) or "无可调用 API"))
+            result["annotation_hint"] = (
+                "① InsertModelAnnotations* 只能带出【模型里已存在的尺寸】"
+                "（草图尺寸 / DimXpert），不会凭空生成；"
+                "② 建模脚本里请用 m.add_dimension(...) / add_key_dimensions(...) "
+                "给关键尺寸加约束后再出图；"
+                "③ 或在 SW 界面用「智能尺寸 / DimXpert」手工标注后，"
+                "再用 dwg 导出（dwg 默认复用已有工程图，不会覆盖你的标注）。")
+        else:
+            result["annotation_effective"] = True
     except Exception as _e_ann:
         result["annotation"] = {"ok": False, "error": repr(_e_ann)}
+        result["annotation_effective"] = False
+        result["annotation_warning"] = (
+            "自动标注过程抛异常：%r（工程图本身仍已生成）" % (_e_ann,))
         try:
             result["gbt_report"] = _gbt_annotation_report({})
         except Exception:
@@ -3572,11 +4131,16 @@ def annotate_drawing(sw, drawing_path, dim_types=None, tol_mm=0.05):
         return out
     doc = None
     try:
-        errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-        warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-        doc = sw.OpenDoc6(drawing_path, 3, 0, "", errs, warns)
+        # ── 【子任务 C · 签名兼容】改用 _open_doc6（报告 3.7）──────────────
+        # 原写法传 VARIANT byref，SW2025 早期接口下报"参数数量错误"。
+        # 现在先试早期 (path,3,0,"",None,None) 并解包 tuple；失败逐字回退
+        #   原 VARIANT 写法 —— 晚期绑定（SW2018~2024）行为与改造前一致。
+        doc, _open_info = _open_doc6(sw, drawing_path, 3, 0)
+        out["open_method"] = _open_info.get("method")
+        out["open_uses_early"] = _open_info.get("uses_early")
         if doc is None:
             out["error"] = "无法打开工程图"
+            out["open_attempts"] = _open_info.get("attempts")
             return out
         try:
             doc.ClearSelection2(True)
@@ -3792,6 +4356,10 @@ def set_title_block(sw, drawing_path, fields=None):
         return out
     doc = None
     try:
+        # ⚠️ 【子任务 C · 未改造调用点（有意保留）】本处仍用晚期 VARIANT 写法。
+        # 任务范围只要求优先改造 cmd_drawing / cmd_dwg / annotate_drawing 三处，
+        # title-block 链路保持原样（行为与改造前完全一致）。若 SW2025 在此处
+        # 报"参数数量错误"，改用 _open_doc6(sw, drawing_path, 3, 0) 即可（报告 3.7）。
         errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
         warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
         doc = sw.OpenDoc6(drawing_path, 3, 0, "", errs, warns)
@@ -3878,20 +4446,47 @@ def set_title_block(sw, drawing_path, fields=None):
             pass
 
 
-def cmd_dwg(sw, part_path, output_path=None):
+def cmd_dwg(sw, part_path, output_path=None, force_redraw=False):
     """从零件生成工程图并导出为 DWG 格式。
 
     【强制使用中文视图名】先调用 cmd_drawing（已包含中文视图名），再导出 DWG。
+
+    force_redraw: True = 即使 .slddrw 已存在也强制重建（会覆盖手工标注，慎用）；
+                  False（默认）= 已有工程图则直接复用导出（BUG-21）。
     """
-    # 1. 先生成工程图（强制中文视图名）
+    # 1. 先确定工程图路径
     drawing_path = None
     if output_path:
-        import re
         base = os.path.splitext(output_path)[0]
         drawing_path = base + ".slddrw"
-    dwg_result = cmd_drawing(sw, part_path, drawing_path)
-    if not dwg_result.get("ok"):
-        return dwg_result
+    else:
+        # 与 cmd_drawing 的默认落点保持一致（<任务根>\drawings\<名>.slddrw），
+        # 这样"先查后建"能命中上一轮已经出好的图，而不是另造一份。
+        try:
+            drawing_path = _default_drawing_path(part_path, ".slddrw")
+        except Exception:
+            drawing_path = None
+
+    # ── 【BUG-21 修复】工程图已存在时【直接复用】，绝不重新生成 ──────────────
+    # 现场：对已有 .slddrw 的零件执行 dwg，会先调 cmd_drawing 重建工程图，
+    #   把用户手工补上的公差/粗糙度/形位公差/标题栏【全部覆盖掉】。
+    #   用户原话：「dwg 命令应先检查 .slddrw 是否存在，存在则直接导出而非重建」。
+    # 处理：
+    #   · 默认（无 --redraw）：存在就直接用它，并在返回里如实说明 reused；
+    #   · 显式 --redraw：强制重建（保留旧能力，但要用户自己要求）。
+    _reuse = False
+    if drawing_path and os.path.exists(drawing_path) and not _force_redraw:
+        _reuse = True
+    if _reuse:
+        dwg_result = {"ok": True, "path": drawing_path, "reused": True,
+                      "note": ("【BUG-21】已存在工程图，直接导出 DWG，"
+                               "未重新生成（避免覆盖手工标注）。"
+                               "确需重建请加 --redraw。")}
+    else:
+        dwg_result = cmd_drawing(sw, part_path, drawing_path)
+        if not dwg_result.get("ok"):
+            return dwg_result
+        drawing_path = dwg_result.get("path") or drawing_path
 
     # 2. 确定输出路径
     if not output_path:
@@ -3907,12 +4502,18 @@ def cmd_dwg(sw, part_path, output_path=None):
 
     try:
         # 打开工程图
+        # ── 【子任务 C · 签名兼容】改用 _open_doc6（报告 3.7）──────────────
+        # 原写法 errs/warns=VARIANT(VT_BYREF|VT_I4,0) 在 SW2025 的早期接口上
+        #   等于多传实参 → "参数数量错误"；且早期接口返回的还是 tuple。
+        # 现在：先 early(ISldWorks).OpenDoc6(...,None,None) 并解包 tuple，
+        #   失败【逐字回退】原来的 VARIANT 写法 → SW 2018~2024 行为不变。
         doc_type = 3  # swDrawing
-        errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-        warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-        doc = sw.OpenDoc6(saving, doc_type, 1, "", errs, warns)
+        doc, _open_info = _open_doc6(sw, saving, doc_type, 1)
+        result["open_method"] = _open_info.get("method")
+        result["open_uses_early"] = _open_info.get("uses_early")
         if doc is None:
-            return {"ok": False, "error": "cannot open drawing for DWG export"}
+            return {"ok": False, "error": "cannot open drawing for DWG export",
+                    "open_attempts": _open_info.get("attempts")}
 
         # 导出 DWG（SaveAs3 直接另存为 .dwg）
         try:
@@ -4228,6 +4829,11 @@ def cmd_dxf(sw, part_path, output_path=None):
     result = {"dxf_path": output_path, "drawing_path": saving, "ok": False}
     doc = None
     try:
+        # ⚠️ 【子任务 C · 未改造调用点（有意保留）】本处仍用晚期 VARIANT 写法。
+        # 任务范围只要求优先改造 cmd_drawing / cmd_dwg / annotate_drawing 三处
+        # （外加它们必经的 open_document_fresh）；dxf 链路保持原样，以免在
+        # 未实机验证的情况下扩大改动面。SW2025 若在此处报"参数数量错误"，
+        # 直接改用 _open_doc6(sw, saving, 3, 1) 即可（报告 3.7）。
         doc_type = 3  # swDrawing
         errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
         warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
@@ -4906,21 +5512,68 @@ def _detect_gate_room(args):
                 pass
     return None
 def _room_candidates():
-    """【Bug5 修复】返回 (活动房间列表, SW锁持有房间)，供报错时给出可自救提示。
+    r"""返回 (【活着的】活动房间列表, SW锁持有房间)，供报错时给出可自救提示。
 
-    子代理最常见的卡点：报错说"必须指定 --room"，但它不知道自己该用哪个名字，
-    于是反复试错。把真实候选列出来，问题当场自解。
+    ── 【BUG-17 修复 · 僵尸房间被当成"活动"】────────────────────────────────
+    现场（2026-10-27 循迹小车任务，用户实测）：
+      任务早已结束 23 小时，mode_state.json 里仍留着两个 active=true 的房间
+      （物理深挖房 / 流程深挖房，心跳 age 81892s）。于是：
+        · 主对话想直接 sw_bridge.py drawing <零件> 导出工程图
+        · _room_candidates() 返回 2 个"活动房间" → len != 1 → 无法自动推断
+        · 报「并行模式下必须指定 --room <房间名>！」
+      而那两个房间根本没有代理在跑（房间早死了）。
+      用户原话：「即使当前没有运行中的 subagent」也被拦。
+
+    修复：不再只看 active 这个布尔值，而是调用 mode_gate 的**同一套**六态
+    判定（_room_status_of），只把"真的还活着"的房间算作候选：
+        · running / starting / running_unverified → 活着
+        · stale / no_heartbeat / 无时间戳      → 已死，剔除
+    于是：
+        · 没有活房间 → 返回 []，调用方据此【放行】（主对话直接出图）
+        · 只有一个活房间 → 自动采用
+        · 多个活房间 → 才要求显式 --room（那种情况确实无法唯一推断）
     """
     _act, _owner = [], None
     try:
         mg_path = _get_mode_gate_path()
         ms_path = os.path.join(os.path.dirname(mg_path), "mode_state.json")
-        if os.path.exists(ms_path):
-            with open(ms_path, "r", encoding="utf-8") as f:
-                ms = json.load(f)
-            rooms = ms.get("rooms", {})
-            _act = [k for k, v in rooms.items() if v.get("active")]
-            _owner = (ms.get("sw_lock", {}) or {}).get("owner")
+        if not os.path.exists(ms_path):
+            return [], None
+        with open(ms_path, "r", encoding="utf-8") as f:
+            ms = json.load(f)
+        rooms = ms.get("rooms", {}) or {}
+        _owner = (ms.get("sw_lock", {}) or {}).get("owner")
+        _raw_active = [k for k, v in rooms.items()
+                       if isinstance(v, dict) and v.get("active")]
+        if not _raw_active:
+            return [], _owner
+        # 用 mode_gate 的六态判定剔除僵尸房间（权威口径，不另立一套）
+        _status_of = None
+        try:
+            import importlib.util as _ilu
+            _spec = _ilu.spec_from_file_location("_mg_for_rooms", mg_path)
+            _m = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_m)
+            _status_of = getattr(_m, "_room_status_of", None)
+        except Exception:
+            _status_of = None
+        # 【2026-10-28】waiting_sw / idle 也是"活着"：
+        #   排队等 SolidWorks 锁时房间仍是活房间，不能因此少认一个房间。
+        _ALIVE = ("running", "starting", "running_unverified",
+                  "waiting_sw", "idle")
+        if callable(_status_of):
+            _subs = ms.get("subagents", {}) or {}
+            for _r in _raw_active:
+                try:
+                    _s = (_status_of(_r, rooms.get(_r) or {}, _subs) or {})
+                    if str(_s.get("status") or "") in _ALIVE:
+                        _act.append(_r)
+                except Exception:
+                    # 判定本身出错时保守保留（宁可多问一句，也不误删活房间）
+                    _act.append(_r)
+        else:
+            # mode_gate 不可用（老副本）→ 退化为旧行为，绝不更差
+            _act = list(_raw_active)
     except Exception:
         pass
     return _act, _owner
@@ -5220,6 +5873,9 @@ def main():
                 "self-path": "返回本脚本绝对路径（只读）",
                 "selftest": "【BUG-观察-17/1】离线自检：annotate API 归属+参数"
                             "个数+回退顺序、save 相对路径归位（只读，不连 SW）",
+                "early-status": "【子任务 C】早期绑定诊断：能否用早期绑定 / 类型库"
+                                " major / tlb 与 gen_py 路径 / 已容错的签名差异"
+                                "（只读，不连 SW、不取锁、不需 --room）",
                 "open/new/info/list/massprops/close/save": "文档基本操作",
                 "sketch-rect": "画矩形并拉伸（快速验证）",
                 "run <script.py>": "执行建模脚本（核心能力）",
@@ -5334,6 +5990,12 @@ def main():
                      # 不连 SW、不写业务产物、不抢独占权 → 既不取锁也不该被
                      # "并行模式必须带 --room"拦住（否则 SW 未运行时自检跑不起来）。
                      "selftest",
+                     # ── 【子任务 C】early-status 只读诊断早期绑定 ──────────────
+                     # 同 selftest / conn-probe 的登记方式：它只调 swapi 的
+                     #   early_status()/early_diagnose() 读本机状态（报告 1.1/1.2），
+                     #   不起 COM、不改模型、不写业务产物 → 不取 SW 锁，也不该被
+                     #   "并行模式必须带 --room"拦住（SW 没运行时正需要它来诊断）。
+                     "early-status",
                      # ── 【BUG-02 实机补强】physics-* 全部是【纯计算】命令 ──
                      # 它们只读载荷工况 JSON、用 numpy 算，完全不碰 SolidWorks，
                      # 不产生文件冲突，因此不需要 SW 独占权、也不该被
@@ -5400,7 +6062,12 @@ def main():
                    # ──【BUG-观察-17 / 观察-1 修复】纯 Python 离线自检 ──────
                    # 只用 mock 假对象 + 临时目录，【完全不碰 SolidWorks】，
                    # 因此必须在此列：SW 未运行时也要能跑，否则自检形同虚设。
-                   "selftest"}
+                   "selftest",
+                   # ── 【子任务 C】early-status 同样【完全不碰 SolidWorks】────
+                   # 它只读 swapi 的进程内状态 + 类型库/gen_py 路径。列入 _LOCAL_CMDS
+                   # 后 main() 会把 sw 置为 None（不 get_sw）—— 这正是关键：
+                   # "想看看能不能早期绑定"绝不能把 SolidWorks 拉起来。
+                   "early-status"}
     _NO_SW_CMDS = _PURE_COMPUTE_CMDS | _CAD_ONLY_CMDS | _LOCAL_CMDS
     # ── 【观察点 10 修复】只读诊断类：需要连 SW，但不该强制 --room ─────────
     # ⚠️ 必须与 _READONLY_CMDS【分开】—— 后者会被 `_NO_SW_CMDS = _READONLY_CMDS`
@@ -5458,6 +6125,25 @@ def main():
                 except Exception:
                     pass
 
+        # ══ 【BUG-17 修复】没有活房间时【放行】主对话 ═══════════
+        # 现场：任务早已结束，主对话想直接导出工程图，
+        #   却因为讯脚（已死的 active 房间）被拦"并行模式必须指定 --room"。
+        # 现在 _room_candidates() 已只返回【真正活着】的房间：
+        #   · 一个活房间也没有 → 说明当前没有子代理在建模 → 放行（不挂锁）
+        #   · 恰好一个 → 自动采用（已在上一段实现）
+        #   · 多个 → 才要求显式 --room
+        # 锁语义不变：放行时 _room_id 仍为 None，_lock 为空→
+        #   并不会抢占任何房间的 SW 独占权（下方 _gate_sw_lock(None)）。
+        if _room_id is None and _need_room:
+            _alive_rooms, _ = _room_candidates()
+            if not _alive_rooms:
+                _need_room = False
+                try:
+                    sys.stderr.write(
+                        "[sw_bridge] 当前没有活动中的房间（子代理均已结束），"
+                        "本次命令不需 --room。\n")
+                except Exception:
+                    pass
         if _room_id is None and _need_room:
             # ── 【Bug5 修复】报错必须"可自救"：列出真实候选房间 + 现成命令 ──
             # 原提示只说"必须指定 --room"，子代理不知道该填什么、反复重试失败。
@@ -5636,7 +6322,9 @@ def main():
         elif cmd == "drawing":
             result = cmd_drawing(sw, _args[1] if len(_args) > 1 else "", _args[2] if len(_args) > 2 else None)
         elif cmd == "dwg":
-            result = cmd_dwg(sw, _args[1] if len(_args) > 1 else "", _args[2] if len(_args) > 2 else None)
+            result = cmd_dwg(sw, _args[1] if len(_args) > 1 else "",
+                             _args[2] if len(_args) > 2 else None,
+                             force_redraw=("--redraw" in args))
         elif cmd == "dxf":
             # 【Bug8 修复】SW 直接导出 DXF —— 打通 cad-validate 几何验证链路
             # 【Bug-35 修复】_args[1] 也可直接是 .slddrw（不再强制先出图）
@@ -5677,6 +6365,14 @@ def main():
         elif cmd == "selftest":
             # 【BUG-观察-17 / BUG-观察-1 修复】离线自检（不连 SW，零副作用）
             result = cmd_selftest()
+        elif cmd == "early-status":
+            # ── 【子任务 C】早期绑定诊断（只读、不连 SW、不取锁、豁免 --room）──
+            # 来源：报告 1.1 —— SW2025 上大量 API 必须早期绑定才能调用；
+            #   报告 1.2 给出 EnsureModule 入口。本分支把 swapi 的
+            #   early_status()/early_diagnose() 原样打印成 JSON，即使
+            #   ① SW 没在运行 ② swapi 还没落盘早期接口，也必须 exit 0 并如实
+            #   回显 available=false（诊断命令不能自己先崩，也不能把 SW 拉起来）。
+            result = cmd_early_status()
         # ── 【连接区】SW/CAD 连接探测与流程判断（零副作用，不取 SW 锁）──
         elif cmd == "conn-probe":
             _ct = None

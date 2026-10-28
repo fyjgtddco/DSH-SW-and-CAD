@@ -34,6 +34,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WG = os.path.join(HERE, "workflow_gate.py")
 M2 = os.path.join(HERE, "mode2_flow.py")
 
+# 【2026-10-28 重构】编排/阶段命令要求 root 与总计子代理身份；子进程继承该身份
+os.environ["DSH_SESSION_ID"] = "test-analyst"
+
 P = F = 0
 def ck(label, cond, extra=""):
     global P, F
@@ -97,15 +100,24 @@ sec("缺陷 B-②：未登记编制时 select 必须拒绝（否则总计子代�
 # 注意：pc#3 已推进到 mechanics_done，select 需要的 choice/parallel 从 state 取。
 #   select 未登记编制时应直接拒绝。
 r4 = run(WG, "select", "B,D")
-ck("★ 未登记编制 → select 被拒绝", r4.get("ok") is False, r4.get("ok"))
+ck("★ 未绑定总计子代理 → select 被拒绝", r4.get("ok") is False, r4.get("ok"))
+ck("★ 第一道闸 = MODE2_ANALYST_REQUIRED（总计子代理必须先真实创建）",
+   r4.get("gate") == "MODE2_ANALYST_REQUIRED", r4.get("gate"))
+# 求解计划目录后先绑定总计子代理，再验证"未登记编制 → 拒绝"的第二道闸
+_wd0 = r4.get("plan_file")
+_wd0 = os.path.dirname(_wd0) if _wd0 else None
+run(M2, "analyst-bind", *(("--work-dir", _wd0) if _wd0 else ()))
+r4b = run(WG, "select", "B,D")
+ck("★ 未登记编制 → select 被拒绝", r4b.get("ok") is False, r4b.get("ok"))
 ck("★ gate = MODE2_SUBAGENT_PLAN_REQUIRED",
-   r4.get("gate") == "MODE2_SUBAGENT_PLAN_REQUIRED", r4.get("gate"))
-ck("★ 拒绝时给出可执行指引（how 非空）", bool(r4.get("how")), r4.get("how"))
-ck("★ 指引里点名『总计子代理』", "总计子代理" in str(r4.get("error")) + str(r4.get("why")))
+   r4b.get("gate") == "MODE2_SUBAGENT_PLAN_REQUIRED", r4b.get("gate"))
+ck("★ 拒绝时给出可执行指引（how 非空）", bool(r4b.get("how")), r4b.get("how"))
+ck("★ 指引里点名『总计子代理』",
+   "总计子代理" in str(r4b.get("error")) + str(r4b.get("why")))
 ck("★ 指引含 set-subagent-plan 命令",
-   any("set-subagent-plan" in str(x) for x in (r4.get("how") or [])))
+   any("set-subagent-plan" in str(x) for x in (r4b.get("how") or [])))
 ck("  拒绝时不生成旧房间表（rooms 为空）",
-   not ((r4.get("subagent_config") or {}).get("rooms") or []))
+   not ((r4b.get("subagent_config") or {}).get("rooms") or []))
 
 sec("缺陷 B-②（正路）：登记编制后 select 放行，房间表由编制决定 + 追加总理")
 # 从 select 的拒绝返回里取计划文件所在目录（= 本任务的交付目录）
@@ -127,6 +139,14 @@ rooms = [
 ]
 rj = os.path.join(tmp, "rooms.json")
 open(rj, "w", encoding="utf-8").write(json.dumps(rooms, ensure_ascii=False))
+# 编制的前置是"十阶段走完"（代码强制）—— 先用总计子代理身份补齐十阶段
+_STAGES = ["TaskUnderstanding", "FunctionalDecomposition", "PhysicsReasoning",
+           "PrincipleSynthesis", "MechanismSynthesis", "RecursivePartReasoning",
+           "PartSynthesis", "EngineeringValidation", "DesignIteration",
+           "ExplainableDesignOutput"]
+for _sid in _STAGES:
+    run(M2, "begin-stage", _sid, "--work-dir", wd)
+    run(M2, "mark-stage-done", _sid, "--artifact", "art-" + _sid, "--work-dir", wd)
 r5 = run(M2, "set-subagent-plan", "--rooms-json", "@" + rj,
          "--rationale", "回归测试：按功能分解", "--decided-by", "总计子代理",
          "--work-dir", wd)

@@ -1,0 +1,72 @@
+{
+  "kind": "physics",
+  "schema": "dsh-physics-attestation/1",
+  "at": "2026-10-27T09:50:46.010Z",
+  "ts": 1793094646011,
+  "room": "传感器支架",
+  "run_id": "opt_GATE_BC6C564D42D9_1793094640_iter_4",
+  "report_path": "C:\\Users\\j1877\\.dsh\\.agent-presets\\output\\physics_runs\\opt_GATE_BC6C564D42D9_1793094640\\iteration_4\\opt_GATE_BC6C564D42D9_1793094640_iter_4_report.json",
+  "report_sha256": "1e47e8520e318f189b63753dd08c2dab5fb9b83b8b419209bd8c8316aed0683c",
+  "run_dir": "C:\\Users\\j1877\\.dsh\\.agent-presets\\output\\physics_runs\\opt_GATE_BC6C564D42D9_1793094640\\iteration_4",
+  "overall": "FAIL",
+  "overall_status": "FAIL",
+  "safety_factor": 1.67,
+  "max_von_mises_mpa": 32.96,
+  "max_displacement_mm": 2.3411,
+  "passed_gates": [
+    "DESIGN_SPACE",
+    "CONNECTIVITY",
+    "MAX_DISPLACEMENT",
+    "MESH_QUALITY",
+    "FATIGUE_LIFE"
+  ],
+  "failed_gates": [
+    {
+      "id": "WALL_THICKNESS",
+      "status": "FAIL",
+      "estimated_mm": 1.4055,
+      "required_mm": 2,
+      "reason": "估计壁厚 1.405mm 明显低于要求 2.000mm（超出 15% 近似宽容度）"
+    },
+    {
+      "id": "SAFETY_FACTOR",
+      "status": "FAIL",
+      "actual": 1.67,
+      "required_min": 2.5,
+      "required_max": 5,
+      "over_design": false,
+      "note": "强度不足，必须加强"
+    },
+    {
+      "id": "FATIGUE_STRENGTH",
+      "status": "FAIL",
+      "actual_sf": 0.936,
+      "required_min": 1.5,
+      "endurance_limit_mpa": 20.76
+    }
+  ],
+  "not_evaluated": [],
+  "release_status": "NEEDS_REVISION",
+  "fatigue_verdict": "FAIL",
+  "fatigue_sf": 0.936,
+  "model": "equivalent_solid_cantilever_from_bbox",
+  "volume_inflation_x": 4.92,
+  "model_trustworthy": false,
+  "limitations": [
+    "2D plane stress assumption only",
+    "CST linear elements (6-8%% error vs analytical)",
+    "no stress concentrations captured",
+    "no 3D effects",
+    "【模型等效性】按真实零件【包围盒】的排序三边等效为【实心矩形棱柱】悬臂梁建模 —— 未使用真实截面形状与载荷路径",
+    "【适用边界】L 形 / 薄壁 / 镂空 / 变截面件的安全系数会被显著高估，不得仅凭本结论判定设计合格；此类零件需 3D FEA 复核",
+    "【本次失真程度】等效实心体积 12000 mm³ 是真实体积 2440 mm³ 的 4.92 倍 —— 安全系数存在同量级高估风险，务必人工复核",
+    "【Bug⑦·求解层级】已升级到 L1（numpy CST 2D 平面应力数值解）—— 仍不是 3D FEA；本机 3D 求解器不可用（Gmsh/CalculiX/Code_Aster/Elmer 均未安装），薄壁/镂空件的 3D 应力集中无法评估",
+    "【模型等效性·薄壁/镂空】该件属薄壁/镂空（薄壁（2V/A 估计壁厚 1.405mm < 判据 3.0mm）；镂空/等效实心体积失真 4.92 倍（>1.5 倍判据）），本次采用的 L1(numpy CST 2D 平面应力) 仍建立在【包围盒等效实心悬臂梁】之上 —— L0/L1 等效模型不适用，安全系数会被显著高估，【不得仅凭本结论判定设计合格】；需 3D FEA 复核。本机 3D 求解器（Gmsh/CalculiX/Code_Aster/Elmer）不可用 → 3D FEA 未执行（UNKNOWN），结论中不含任何 3D 有限元结果。",
+    "【载荷分担】本次校核使用 part_load_share=0.2500（来源 acceptance.part_load_share）—— 工况 magnitude_n 是整机级载荷，单件结论取决于该折减系数；若本零件实际承担更大份额，请在工况里显式覆盖（零件级 part_load_share）后重跑"
+  ],
+  "source": "physics_bridge",
+  "_sig": "oCV6zefLQS6qNzm8W+WOhi633UufCSrfBmMBC4eVwDo=",
+  "_kid": "eaedc7387e26fb27",
+  "_ts": 1793094646011,
+  "_nonce": "19433476726f7ebe7a0a58f813b6daa9"
+}

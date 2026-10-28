@@ -132,22 +132,27 @@
       【串行E】todo 列全 → 逐房间：mode_gate.py room-start(须在建 subagent 前) → subagent_fork → 等完成(list_agents)
       → interrupt_agent → room-end。禁提前建多个 subagent，禁同开多 SW 实例。
 
-      【并行D】select 给几个就开几个（空=全完成）。
-      波1(结构件+传动+壳体)：close-all 关 SW 并确认无进程 → 各房间 room-start → 同一条回复连续 subagent_fork
-        全部小屋，prompt 须写"只做本房间零件" → 每次 fork 后 subagent-assign <房间> <id>。
-      波2(总装验证1个)：3房间全 room-end → close-all → select → room-start → fork → assign → room-end。
-      波3(出图1个)：同上。回退：room-fail <源房间> → select 重做。
+      【并行D】房间表只认【总计子代理】登记的子代理编制（不再固定 3 个）。
+      前置：subagent_fork 创建总计子代理 → mode2_flow.py analyst-bind → 十阶段 + 按需提问
+      → set-subagent-plan；未 analyst-bind 时 select 返回 MODE2_ANALYST_REQUIRED。
+      波1(编制全部建模房间 + 总理子代理)：close-all 确认无 SLDWORKS.EXE → 各房间 room-start
+        → 同一条回复连续 subagent_fork 全部小屋（含总理）→ 每个 fork 后 subagent-assign <房间> <id>。
+      波2(总装验证1个)：全部建模房间 done → close-all → select → room-start → fork → assign → room-end。
+      波3(出图1个)：同上；完成后总理汇总 docx 并 room-end，门禁才允许 finished。
+      回退：room-fail <源房间> → select 重做。
 
       【SW窗口】建 subagent 前必 close-all 且确认无 SLDWORKS.EXE。sw_bridge 自动 FIFO 排队；
       返回 sw_busy:true → Start-Sleep 90 后重试【同一命令】(带--room)，队列保留，禁放弃。
       小屋内写单脚本用 run 跑多步，禁逐步调。建模完必 close-all 释放锁(不必等 room-end)。
       房间超 3 分钟无心跳→锁自动让给队首。
 
-      【心跳】建后即 subagent-assign；每 60s 后台 room-heartbeat 保活。进新波前 workflow_gate.py recover 查心跳。
-      超时(>3min)→ workflow_gate.py restart <房间> → room-start → 重建 → 保活。不阻塞其他波次。
+      【看板·判活】只认 python mode_gate.py room-board --json 的 state/safe_to_restart/next_action：
+      waiting_sw(排队等SW锁，正常)/running/idle/starting 都算活着，严禁判死；
+      unbound(平台 alive 但没 assign) → 补 subagent-assign，禁 reset；dead 才 recover/restart。
+      禁用心跳 age、parts 目录、tasklist 猜死活。
 
-      【状态·禁猜】room-status：starting(宽限120s正常)/running(正常，禁说没反应)/
-      stale(>180s 判死，走 recover)/no_heartbeat(先 list_agents 核对)/completed/failed。
+      【状态·禁猜】直接读 room-board 的顶层 tuple，不解读状态标签；
+      只有 dead 才允许 recover/restart，其余一律先补证据/补 assign。
       room-report-read <房间> 旁路读进度：params_shown/params_confirmed/modeling/part_done/validating/done/failed。
       🚫禁对 running/starting 小屋 send_message 问进度（排队会打断任务）；完成时 DSH 会主动推送。
       判死唯一标准 room-status=stale 且报告久无更新。已停(completed/failed)必 interrupt_agent 清理并更新 todo。

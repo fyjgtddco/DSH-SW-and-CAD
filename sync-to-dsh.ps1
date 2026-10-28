@@ -44,6 +44,11 @@ $RuntimeNames = @(
     'platform_status.json', 'artifacts_registry.json', 'TASK_FINISHED.json',
     'connection_state.json', 'design_params.json', 'defense_bypass.json',
     'violations.json', 'guard.json', 'runtime.json',
+    # 【2026-10-28】这三份也是【运行时/本机数据】，不是代码：
+    #   platform_agents.json  插件自动写的平台子代理注册表（每次会话都在变）
+    #   part_registry.json    零件台账（本任务数据，覆盖 = 丢数据）
+    #   custom_materials.json 用户自己登记的材料（覆盖 = 丢用户数据）
+    'platform_agents.json', 'part_registry.json', 'custom_materials.json',
     # -- [换机修复] 本机设置绝不跟着同步 ----------------------------------
     # settings.json 记的是【这台电脑】的交付目录 / SW-CAD-Python 路径，
     # 带着机器指纹。同步到别的电脑毫无意义（会被指纹判为外来而忽略），
@@ -219,6 +224,15 @@ if (-not (Test-Path $UiSrc)) {
         Say ("  profile: " + $prof) 'Gray'
         Copy-Tree $UiSrc $dst ('plugin@' + $prof)
     }
+}
+
+# ---- 3.5 docs/ -> <DSH_HOME>\.agent-presets\engineering\docs ------------
+# 设计/重构文档也要随代码走，否则安装副本上查不到本次改动的契约。
+$DocsSrc = Join-Path $Root 'engineering\docs'
+if (Test-Path $DocsSrc) {
+    Say ""
+    Say "---- 3.5 docs/ (design notes) ----" 'Yellow'
+    Copy-Tree $DocsSrc (Join-Path $DataDir 'docs') 'docs'
 }
 
 # ---- 4. preset-layer files at the engineering root -------------------------

@@ -1,0 +1,252 @@
+{
+  "schema": "dsh-engineering/part-registry@1",
+  "task_id": "20261027_171033_17A0C9D5",
+  "task_id_source": "C:\\Users\\j1877\\.dsh\\.agent-presets\\engineering\\tools\\workflow_state.json",
+  "created_at": "2026-10-27 17:51:01",
+  "updated_at": "2026-10-27 17:51:01",
+  "revisions": [
+    {
+      "rev": 1,
+      "action": "add",
+      "part": "DSH_小车底板",
+      "ts": 1793094661.470635,
+      "at": "2026-10-27 17:51:01",
+      "changes": {
+        "fields": [
+          "adjacent",
+          "credentials",
+          "dims",
+          "file",
+          "interfaces",
+          "material",
+          "material_consistency",
+          "name",
+          "origin",
+          "reported_at",
+          "reported_by",
+          "rev",
+          "room"
+        ]
+      },
+      "reason": "底盘房间建模产物",
+      "verification": {
+        "verified": false,
+        "evaluated": false,
+        "skipped": false,
+        "scope": [
+          "DSH_小车底板"
+        ],
+        "neighbors_checked": 0,
+        "digest": "ad729c882f167295890296883409649495ac30fb19d0966a6aa51324950184ff",
+        "part_digest": "ffd7d10b28d7fbea02257473fe04e4f0031bf06b3b1fd359d929f83e20688ba5",
+        "mismatch_count": 0,
+        "mismatches": [],
+        "reason": "零件 DSH_小车底板 没有任何邻接零件（adjacent 为空且无人引用它）—— 无相关数据可核实；若它确实与其他零件配合，请先 link_adjacent",
+        "summary": "未能核实：零件 DSH_小车底板 没有任何邻接零件（adjacent 为空且无人引用它）—— 无相关数据可核实；若它确实与其他零件配合，请先 link_adjacent"
+      }
+    },
+    {
+      "rev": 1,
+      "action": "add",
+      "part": "DSH_电池仓",
+      "ts": 1793094661.619773,
+      "at": "2026-10-27 17:51:01",
+      "changes": {
+        "fields": [
+          "adjacent",
+          "credentials",
+          "dims",
+          "file",
+          "interfaces",
+          "material",
+          "material_consistency",
+          "name",
+          "origin",
+          "reported_at",
+          "reported_by",
+          "rev",
+          "room"
+        ]
+      },
+      "reason": "底盘房间建模产物",
+      "verification": {
+        "verified": false,
+        "evaluated": false,
+        "skipped": false,
+        "scope": [
+          "DSH_电池仓"
+        ],
+        "neighbors_checked": 0,
+        "digest": "ee32bad9712839199c60c24ca70ca1f27ae3c298acbb5973889e5a0cb544a0b6",
+        "part_digest": "fca18e2830725bac34f76b71a892a8bdc8d75b0b19d17b80494d8c16facc3b97",
+        "mismatch_count": 0,
+        "mismatches": [],
+        "reason": "零件 DSH_电池仓 没有任何邻接零件（adjacent 为空且无人引用它）—— 无相关数据可核实；若它确实与其他零件配合，请先 link_adjacent",
+        "summary": "未能核实：零件 DSH_电池仓 没有任何邻接零件（adjacent 为空且无人引用它）—— 无相关数据可核实；若它确实与其他零件配合，请先 link_adjacent"
+      }
+    },
+    {
+      "rev": 1,
+      "action": "add",
+      "part": "DSH_电子舱盖",
+      "ts": 1793094661.8075442,
+      "at": "2026-10-27 17:51:01",
+      "changes": {
+        "fields": [
+          "adjacent",
+          "credentials",
+          "dims",
+          "file",
+          "interfaces",
+          "material",
+          "material_consistency",
+          "name",
+          "origin",
+          "reported_at",
+          "reported_by",
+          "rev",
+          "room"
+        ]
+      },
+      "reason": "底盘房间建模产物",
+      "verification": {
+        "verified": false,
+        "evaluated": false,
+        "skipped": false,
+        "scope": [
+          "DSH_电子舱盖"
+        ],
+        "neighbors_checked": 0,
+        "digest": "9902d439afdfa893053cc8bc62b6d5348ee522428461547534a3e94a5e5432c3",
+        "part_digest": "d15bf7988b332ace7e4af2bc8f2e4774742b17d8ee7ff7d7712cfb14affcbea0",
+        "mismatch_count": 0,
+        "mismatches": [],
+        "reason": "零件 DSH_电子舱盖 没有任何邻接零件（adjacent 为空且无人引用它）—— 无相关数据可核实；若它确实与其他零件配合，请先 link_adjacent",
+        "summary": "未能核实：零件 DSH_电子舱盖 没有任何邻接零件（adjacent 为空且无人引用它）—— 无相关数据可核实；若它确实与其他零件配合，请先 link_adjacent"
+      }
+    }
+  ],
+  "unresolved": [],
+  "parts": {
+    "DSH_小车底板": {
+      "name": "DSH_小车底板",
+      "room": "底盘",
+      "file": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_小车底板.sldprt",
+      "origin": {
+        "origin_mode": "center_bottom",
+        "origin_mode_cn": "底面中心（标准约定）",
+        "is_standard": true,
+        "assembly_note": "XY 原点=底面轮廓中心，Z=0 在底面，+Z 朝上",
+        "origin_mm": null,
+        "bbox_mm": [
+          -100.0,
+          100.0,
+          -80.0,
+          80.0,
+          0.0,
+          3.0
+        ],
+        "record_file": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_小车底板.sldprt.origin.json",
+        "standard_mode": "center_bottom"
+      },
+      "material_consistency": {
+        "requested_material": "PLA+",
+        "applied_material": "PLA+",
+        "requested_density_kg_m3": 1240.0,
+        "applied_density_kg_m3": 1240.0,
+        "density_deviation_pct": 0.0,
+        "name_matches": true,
+        "consistent": false,
+        "credential_file": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_小车底板.sldprt.material.json"
+      },
+      "adjacent": [],
+      "reported_by": "底盘",
+      "reported_at": "2026-10-27 17:51:01",
+      "credentials": {},
+      "interfaces": [],
+      "dims": {},
+      "material": "",
+      "rev": 1
+    },
+    "DSH_电池仓": {
+      "name": "DSH_电池仓",
+      "room": "底盘",
+      "file": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_电池仓.sldprt",
+      "origin": {
+        "origin_mode": "center_bottom",
+        "origin_mode_cn": "底面中心（标准约定）",
+        "is_standard": true,
+        "assembly_note": "XY 原点=底面轮廓中心，Z=0 在底面，+Z 朝上",
+        "origin_mm": null,
+        "bbox_mm": [
+          -37.0,
+          37.0,
+          -19.5,
+          19.5,
+          0.0,
+          22.0
+        ],
+        "record_file": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_电池仓.sldprt.origin.json",
+        "standard_mode": "center_bottom"
+      },
+      "material_consistency": {
+        "requested_material": "PLA+",
+        "applied_material": "PLA+",
+        "requested_density_kg_m3": 1240.0,
+        "applied_density_kg_m3": 1240.0,
+        "density_deviation_pct": 0.0,
+        "name_matches": true,
+        "consistent": false,
+        "credential_file": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_电池仓.sldprt.material.json"
+      },
+      "adjacent": [],
+      "reported_by": "底盘",
+      "reported_at": "2026-10-27 17:51:01",
+      "credentials": {},
+      "interfaces": [],
+      "dims": {},
+      "material": "",
+      "rev": 1
+    },
+    "DSH_电子舱盖": {
+      "name": "DSH_电子舱盖",
+      "room": "底盘",
+      "file": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_电子舱盖.sldprt",
+      "origin": {
+        "origin_mode": "center_bottom",
+        "origin_mode_cn": "底面中心（标准约定）",
+        "is_standard": true,
+        "assembly_note": "XY 原点=底面轮廓中心，Z=0 在底面，+Z 朝上",
+        "origin_mm": null,
+        "bbox_mm": [
+          -0.0,
+          60.0,
+          0.0,
+          5.0,
+          0.0,
+          30.0
+        ],
+        "record_file": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_电子舱盖.sldprt.origin.json",
+        "standard_mode": "center_bottom"
+      },
+      "material_consistency": {
+        "requested_material": "PLA+",
+        "applied_material": "PLA+",
+        "requested_density_kg_m3": 1240.0,
+        "applied_density_kg_m3": 1240.0,
+        "density_deviation_pct": 0.0,
+        "name_matches": true,
+        "consistent": false,
+        "credential_file": "C:\\Users\\j1877\\Desktop\\test\\20261027_171033_17A0C9D5\\parts\\DSH_电子舱盖.sldprt.material.json"
+      },
+      "adjacent": [],
+      "reported_by": "底盘",
+      "reported_at": "2026-10-27 17:51:01",
+      "credentials": {},
+      "interfaces": [],
+      "dims": {},
+      "material": "",
+      "rev": 1
+    }
+  }
+}

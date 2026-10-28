@@ -447,6 +447,9 @@ def _fresh_plan():
         "stage_question_deps": {},
         "stale_stages": [],
         "stale_history": [],
+        # ── 【2026-10-28 重构】总计子代理的真实身份（analyst-bind 写入）──
+        # 没有它 = 十阶段/编制都不合法（主对话不能再自己走完流程）。
+        "analyst": None,
         "subagent_plan": None, # 由【总计子代理】写入
         # ══ 【Bug③ 修复】rooms 快照（与门禁同一口径）══
         # 原缺陷：set-subagent-plan 只改 subagent_plan，不刷新 mode2_plan 的
@@ -559,12 +562,19 @@ def set_depth(depth, work_dir=None):
 # ═══════════════════════════════════════════════════════════════════════════
 # 五、十阶段按序推进
 # ═══════════════════════════════════════════════════════════════════════════
-def begin_stage(stage, work_dir=None, note=""):
+def begin_stage(stage, work_dir=None, note="", actor=None):
     """开始一个分析阶段。**必须按序**，跳阶段直接拒绝。
+
+    ── 【2026-10-28 重构】只能由【总计子代理】调用 ────────────────────
+    analyst-bind 之后，主对话（sessionId 不同）直接调会被
+    ANALYST_ACTOR_REQUIRED 拒绝。
 
     这条约束是"按需提问"的前提：只有真的推进到某个阶段，
     才允许登记挂在那个阶段上的问题（见 record_question）。
     """
+    _guard = _require_analyst_actor("begin-stage", actor, work_dir)
+    if _guard:
+        return _guard
     if stage not in STAGE_IDS:
         return {"ok": False,
                 "error": "未知阶段 %r；合法阶段：%s" % (stage, " → ".join(STAGE_IDS))}
@@ -606,8 +616,10 @@ def begin_stage(stage, work_dir=None, note=""):
             "progress": "%d/%d" % (idx + 1, len(STAGE_IDS))}
 
 
-def mark_stage_done(stage, artifact="", work_dir=None):
+def mark_stage_done(stage, artifact="", work_dir=None, actor=None):
     """把某阶段标记为完成，并登记它的产出物（artifact）。
+
+    【2026-10-28 重构】只能由【总计子代理】调用（见 begin_stage 注释）。
 
     为什么要登记 artifact：没有产出的"阶段完成"就是走过场。
     最终交付时会校验关键阶段是否真的留下了产出。
@@ -622,6 +634,9 @@ def mark_stage_done(stage, artifact="", work_dir=None):
     ④ 阶段产物若依赖【仍未作答】的题目，直接拒收 —— 这正是"产物写在用户
        答复之前"的根因，必须堵在写入侧。
     """
+    _guard = _require_analyst_actor("mark-stage-done", actor, work_dir)
+    if _guard:
+        return _guard
     if stage not in STAGE_IDS:
         return {"ok": False,
                 "error": "未知阶段 %r；合法阶段：%s" % (stage, " → ".join(STAGE_IDS))}
@@ -760,7 +775,7 @@ def stage_status(work_dir=None):
 # ═══════════════════════════════════════════════════════════════════════════
 # 六、★ 按需提问（取消"一股脑全问"）
 # ═══════════════════════════════════════════════════════════════════════════
-def record_question(topic, stage, reason, work_dir=None):
+def record_question(topic, stage, reason, work_dir=None, actor=None):
     """登记一道"按需提问"。**这是"AI 思考到那里才问"的机器判据。**
 
     强制点（任一不满足即拒绝）：
@@ -773,6 +788,9 @@ def record_question(topic, stage, reason, work_dir=None):
     第 3 条正是"取消一股脑全问"的落实：还没分析到那个阶段，
     就不允许问那个阶段才会产生的问题 —— 无法再"开头把 50 题全抛出去"。
     """
+    _guard = _require_analyst_actor("ask", actor, work_dir)
+    if _guard:
+        return _guard
     topic = str(topic or "").strip()
     reason = str(reason or "").strip()
     if not topic:
@@ -838,7 +856,7 @@ def record_question(topic, stage, reason, work_dir=None):
             "answered_map": _answered_map}
 
 
-def answer_question(seq, answer, work_dir=None):
+def answer_question(seq, answer, work_dir=None, actor=None):
     """记录某道已登记问题的【用户真实答复】。
 
     为什么必须有这一步：record_question 只登记"我要问什么"，
@@ -846,6 +864,9 @@ def answer_question(seq, answer, work_dir=None):
       调 provide_context）。这里强制把答复逐条落到对应题目上，
       未答的题在收尾校验时会让交付直接失败。
     """
+    _guard = _require_analyst_actor("answer-question", actor, work_dir)
+    if _guard:
+        return _guard
     ans = str(answer or "").strip()
     if not ans:
         return {"ok": False, "error": "答复内容为空 —— 空答复不算问过。"}
@@ -911,7 +932,7 @@ def answer_question(seq, answer, work_dir=None):
     return out
 
 
-def refresh_stage(stage, work_dir=None, reason="", artifact=""):
+def refresh_stage(stage, work_dir=None, reason="", artifact="", actor=None):
     """【Bug② 修复】显式重做某阶段：进入重做态，并要求交回【新产物】。
 
     为什么需要这个显式入口：
@@ -931,6 +952,9 @@ def refresh_stage(stage, work_dir=None, reason="", artifact=""):
 
     Returns: {"ok","stage","redone","stale_before","old_artifact","questions_to_apply",...}
     """
+    _guard = _require_analyst_actor("refresh-stage", actor, work_dir)
+    if _guard:
+        return _guard
     if stage not in STAGE_IDS:
         return {"ok": False,
                 "error": "未知阶段 %r；合法阶段：%s" % (stage, " → ".join(STAGE_IDS))}
@@ -1021,6 +1045,194 @@ SUBPLAN_AUTHORITY = "总计子代理"
 #: 每个子代理（房间）必须被总计子代理说明"为什么需要它"。
 MIN_SUBAGENTS = 1
 MAX_SUBAGENTS = 24
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 七·零、【2026-10-28 重构】总计子代理必须是一个【真实子代理】
+# ═══════════════════════════════════════════════════════════════════════════
+# 实测缺陷（会话 session-31c56a28）：
+#   主对话自己在主会话里把十阶段全跑完了，然后调 set-subagent-plan 时
+#   只写了 --decided-by "总计子代理" 这个【字符串】。门禁只校验字符串，
+#   于是"总计子代理"从头到尾没有被创建过 —— 用户原话：
+#     「总计子代理十阶段流水线不是要开总计子代理的吗？你在干嘛」
+#
+# 现在（代码强制，不靠提示词）：
+#   ① 总计子代理开工第一件事必须跑 analyst-bind：
+#        它从环境变量 DSH_SESSION_ID 取到【自己】的 sessionId 并落盘；
+#   ② 十阶段命令（begin-stage / mark-stage-done / ask / answer-question /
+#      refresh-stage / set-subagent-plan）一律要求【当前调用者】就是
+#      被绑定的那个 sessionId；主对话直接调 → ANALYST_ACTOR_REQUIRED；
+#   ③ 未绑定 analyst 时：set-subagent-plan 直接拒绝；
+#      workflow_gate.select 也会拦（见 workflow_gate 的 MODE2_ANALYST_REQUIRED）。
+ANALYST_ROOM_NAME = "总计子代理"
+ANALYST_ROOM_TYPE = "analyst"
+ANALYST_SESSION_ENV = "DSH_SESSION_ID"
+
+
+def _current_actor(actor=None):
+    """当前调用者身份：显式 --actor 优先，其次宿主注入的 DSH_SESSION_ID。"""
+    v = str(actor or "").strip()
+    if v:
+        return v
+    try:
+        return str(os.environ.get(ANALYST_SESSION_ENV) or "").strip() or None
+    except Exception:
+        return None
+
+
+def analyst_bind(session_id=None, work_dir=None, force=False):
+    """把【总计子代理】的 sessionId 绑定到当前任务（由它在自己会话内调用）。
+
+    只在总计子代理内部跑：它会从 DSH_SESSION_ID 读到自己的 id。
+    重复绑定同一 id → 幂等；绑定到另一个 id 而未 force → 拒绝（防止主对话
+    抢着绑一个假的）。
+    """
+    sid = str(session_id or "").strip() or _current_actor()
+    if not sid:
+        return {"ok": False,
+                "error": ("无法确定总计子代理的 sessionId：请在本子代理会话内运行，"
+                          "或显式传 --session-id。"),
+                "env_checked": ANALYST_SESSION_ENV}
+    # ── 【2026-10-28 重构】只允许【真实子代理】绑定自己 ──────────────────
+    # 否则主对话可以拿自己的 DSH_SESSION_ID 抢先 analyst-bind，
+    #   把"总计子代理"重新退回成一个身份字符串。
+    # 判定：插件注册表存在且非空时，本会话 id 必须是其中一条；
+    #   注册表不存在（测试/老宿主）则放行（不阻塞可测试性）。
+    # 插件登记有 300ms 节流，子代理刚创建时注册表可能还没写入 → 最多重试 6 次
+    # （共约 3 秒）。主对话永远等不到自己的 id 出现，最终仍会失败。
+    _agents = []
+    _registry_seen = False
+    for _attempt in range(6):
+        try:
+            _reg_p = os.path.join(_state_dir(), "platform_agents.json")
+            if os.path.exists(_reg_p):
+                with open(_reg_p, "r", encoding="utf-8-sig") as _rf:
+                    _reg = json.load(_rf) or {}
+                _agents = [a for a in (_reg.get("agents") or [])
+                           if isinstance(a, dict) and a.get("id")]
+                # 注册表过旧（>10 分钟没刷新）= 上一个会话的残留，不能当权威
+                _upd = _reg.get("updatedAt")
+                if isinstance(_upd, str):
+                    try:
+                        import datetime as _dt
+                        _upd = _dt.datetime.fromisoformat(
+                            _upd.replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        _upd = None
+                else:
+                    try:
+                        _upd = float(_upd) if isinstance(_upd, (int, float)) else None
+                    except Exception:
+                        _upd = None
+                if _upd and _upd > 1e11:
+                    _upd = _upd / 1000.0
+                if _upd and (time.time() - _upd) > 600:
+                    _agents = []
+                _registry_seen = bool(_agents)
+        except Exception:
+            _agents, _registry_seen = [], False
+        if not _registry_seen:
+            break                      # 无注册表（测试/老宿主）→ 放行
+        if any(str(a.get("id")) == sid for a in _agents):
+            break                      # 已在注册表里 → 放行
+        if _attempt < 5:
+            time.sleep(0.5)
+    if _registry_seen and not any(str(a.get("id")) == sid for a in _agents):
+        return {"ok": False,
+                "gate": "ANALYST_BIND_REQUIRES_SUBAGENT",
+                "session_id": sid,
+                "error": ("analyst-bind 只能在【子代理会话】里执行："
+                          "当前 sessionId 不在平台子代理注册表中。"
+                          "主对话不能把自己绑成总计子代理 —— "
+                          "请先用 subagent_fork 创建总计子代理，"
+                          "由它自己运行本命令。"),
+                "known_subagents": [{"id": a.get("id"), "label": a.get("label")}
+                                    for a in _agents]}
+    plan = load_plan(work_dir)
+    if plan.get("_load_error"):
+        return {"ok": False, "error": plan["_load_error"]}
+    old = plan.get("analyst") or {}
+    _old_sid = str(old.get("session_id") or "").strip()
+    if _old_sid and _old_sid != sid and not force:
+        return {"ok": False, "gate": "ANALYST_ALREADY_BOUND",
+                "session_id": _old_sid,
+                "error": ("本任务的总计子代理已绑定为 %s，拒绝改绑到 %s。"
+                          "确需改绑（例如上一个子代理确实挂了）请加 --force。"
+                          % (_old_sid, sid)),
+                "bound_at": old.get("bound_at")}
+    if not _old_sid or force:
+        plan["analyst"] = {
+            "session_id": sid,
+            "room_name": ANALYST_ROOM_NAME,
+            "type": ANALYST_ROOM_TYPE,
+            "bound_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ts": time.time(),
+            "bound_by": "analyst-bind",
+        }
+        save_plan(plan, work_dir)
+        try:
+            plan = load_plan(work_dir)
+        except Exception:
+            pass
+    return {"ok": True, "session_id": sid, "room_name": ANALYST_ROOM_NAME,
+            "task_id": plan.get("task_id"),
+            "note": ("总计子代理已绑定。现在【只有这个会话】能推进十阶段 / 登记编制；"
+                     "主对话直接调这些命令会被 ANALYST_ACTOR_REQUIRED 拒绝。"),
+            "next": "python mode2_flow.py begin-stage TaskUnderstanding"}
+
+
+def analyst_status(work_dir=None):
+    """查看总计子代理是否已真实绑定（只读）。"""
+    plan = load_plan(work_dir)
+    if plan.get("_load_error"):
+        return {"ok": False, "bound": False, "error": plan["_load_error"]}
+    rec = plan.get("analyst") or {}
+    sid = str(rec.get("session_id") or "").strip()
+    return {
+        "ok": True,
+        "bound": bool(sid),
+        "session_id": sid or None,
+        "room_name": ANALYST_ROOM_NAME,
+        "bound_at": rec.get("bound_at"),
+        "current_actor": _current_actor(),
+        "is_current_actor": bool(sid and _current_actor() == sid),
+        "authority": SUBPLAN_AUTHORITY,
+        "how_to_bind": ("在【总计子代理】里运行：python mode2_flow.py analyst-bind"
+                        "（自动取它自己的 DSH_SESSION_ID）"),
+        "note": (None if sid else
+                 "⚠️ 总计子代理尚未创建/绑定 —— 十阶段与子代理编制都不合法。"),
+    }
+
+
+def _require_analyst_actor(op, actor=None, work_dir=None):
+    """校验"当前调用者 == 已绑定的总计子代理"。未绑定时返回 None（由调用方决定）。
+
+    返回错误 dict 或 None。这条把"总计子代理"从字符串变成真实身份。
+    """
+    plan = load_plan(work_dir)
+    rec = plan.get("analyst") or {}
+    sid = str(rec.get("session_id") or "").strip()
+    if not sid:
+        return None
+    cur = _current_actor(actor)
+    if cur and cur == sid:
+        return None
+    return {
+        "ok": False,
+        "gate": "ANALYST_ACTOR_REQUIRED",
+        "op": op,
+        "bound_session_id": sid,
+        "current_actor": cur,
+        "error": ("【越权】%s 只能由【%s】执行（绑定会话 %s），"
+                  "当前调用者是 %s。十阶段分析必须发生在总计子代理内部，"
+                  "主对话直接调是违规的。"
+                  % (op, ANALYST_ROOM_NAME, sid, cur or "（未识别到会话）")),
+        "how": [
+            "1) 主对话用 subagent_fork 创建【总计子代理】；",
+            "2) 在该子代理里运行：python \"<根>\\tools\\mode2_flow.py\" analyst-bind",
+            "3) 之后所有十阶段 / 提问 / 编制命令都在该子代理里执行。",
+        ],
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1203,7 +1415,7 @@ def require_stages_complete(work_dir=None):
             "total": st.get("total")}
 
 
-def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
+def set_subagent_plan(rooms, rationale, decided_by, work_dir=None, actor=None):
     """由【总计子代理】登记"本轮该开几个子代理、分别做什么"。
 
     ★ 强制点：`decided_by` 必须是"总计子代理"。
@@ -1218,6 +1430,25 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
 
     Returns: {"ok":bool, ...}
     """
+    # ── 【2026-10-28 重构】编制必须来自【真实的总计子代理】，不是字符串 ──
+    # 实测缺陷：主对话自己调 set-subagent-plan 并手写 --decided-by "总计子代理"，
+    #   门禁只校验字符串 → 总计子代理从未被创建过。
+    _an = analyst_status(work_dir)
+    if not _an.get("bound"):
+        return {"ok": False,
+                "gate": "MODE2_ANALYST_REQUIRED",
+                "error": ("【模式二强制】总计子代理尚未创建/绑定（plan 里没有 analyst.session_id）。"
+                          "十阶段与子代理编制必须由【真实运行的总计子代理】完成，"
+                          "不接受主对话自己写 --decided-by \"总计子代理\"。") ,
+                "how": [
+                    "1) 主对话用 subagent_fork 创建【总计子代理】；",
+                    "2) 在它的会话里运行：python \"<根>\\tools\\mode2_flow.py\" analyst-bind",
+                    "3) 由它跑十阶段、提问、再执行本命令登记编制。",
+                ],
+                "analyst": _an}
+    _guard = _require_analyst_actor("set-subagent-plan", actor, work_dir)
+    if _guard:
+        return _guard
     if str(decided_by or "").strip() != SUBPLAN_AUTHORITY:
         return {"ok": False,
                 "error": ("【越权】子代理编制只能由【%s】决定，收到 decided_by=%r。"
@@ -1230,8 +1461,29 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
     _gate = require_stages_complete(work_dir)
     if not _gate.get("ok"):
         return _gate
+    # ── 【BUG-3 修复】兼容 {"rooms": [...]} 这层包装 ────────────────────
+    # 现场：用户照直觉写成 {"rooms":[...]} → 报"rooms 必须是非空数组"，
+    #   而改写成裸数组后又报缺 type —— 两步都踩坑，很难一次写对。
+    # 处理：识别到"对象里只有 rooms 键"时【自动解包】，并如实回显。
+    _unwrapped = False
+    if isinstance(rooms, dict):
+        for _k in ("rooms", "subagents", "plan"):
+            if isinstance(rooms.get(_k), list):
+                rooms = rooms[_k]
+                _unwrapped = True
+                break
     if not isinstance(rooms, list) or not rooms:
-        return {"ok": False, "error": "rooms 必须是非空数组（至少 1 个建模子代理）。"}
+        return {"ok": False,
+                "error": ("rooms 必须是非空【JSON 数组】（至少 1 个子代理）。"
+                          '注意：直接传数组，不要再包一层 {"rooms": [...]}；'
+                          "若确实包了，本命令会自动解包，但推荐按示例写。"),
+                "example": [{"name": "结构件", "type": "structural",
+                             "parts": ["DSH_车架底板"],
+                             "why": "承载整车与电池",
+                             "depends_on": []}],
+                "types": ["structural", "transmission", "housing", "support",
+                          "spring", "thermal", "corrosion", "assembly",
+                          "drafting", "prime"]}
     if not str(rationale or "").strip():
         return {"ok": False,
                 "error": ("必须给出 rationale（为什么是这个编制）—— "
@@ -1253,9 +1505,15 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
         seen.add(name)
         parts = r.get("parts") or []
         if not isinstance(parts, list) or not parts:
+            # ── 【BUG-6 修复】总装/出图等非建模房间也要写占位零件名 ────────
             return {"ok": False,
                     "error": ("子代理【%s】没有列出 parts（该屋负责哪些零件）。"
-                              "编制必须写明零件范围，否则无法做归属校验。" % name)}
+                              "编制必须写明零件范围，否则无法做归属校验。" % name),
+                    "hint": ("即使本屋【不建零件】（总装 / 出图 / 总理），"
+                             "也要写至少一个占位名：总装写 DSH_XX装配体，"
+                             "出图写 DSH_XX图纸，总理写 全任务零件台账。"
+                             "空数组 [] 会被拒绝。"),
+                    "example_parts": ["DSH_XX装配体"]}
         if not str(r.get("why") or "").strip():
             return {"ok": False,
                     "error": ("子代理【%s】缺少 why（为什么需要它）。"
@@ -1265,12 +1523,34 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None):
         #   会导致波1漏启动、require_physics=false（凭据被静默豁免）。
         _nz = normalize_room_type(r.get("type"))
         if not _nz.get("ok"):
-            return {"ok": False,
-                    "error": ("子代理【%s】的房间类型无法规范化：%s" % (name, _nz.get("error"))),
-                    "room": name, "raw_type": r.get("type"),
-                    "allowed": _nz.get("allowed"),
-                    "hint": ("drivetrain→transmission / sensor→housing / drawing→drafting "
-                             "等历史写法可被自动规范化；其余必须显式改成规范类型。")}
+            # ── 【BUG-4 修复】缺 type 是最常见的第一次踩坑，必须一次说清 ──
+            _raw_t = r.get("type")
+            _miss = (_raw_t is None or not str(_raw_t).strip())
+            _allowed = _nz.get("allowed") or [
+                "structural", "transmission", "housing", "support", "spring",
+                "thermal", "corrosion", "assembly", "drafting", "prime"]
+            _out = {
+                "ok": False,
+                "error": ("子代理【%s】%s：%s"
+                          % (name,
+                             "缺少 type 字段" if _miss else "的房间类型无法规范化",
+                             _nz.get("error"))),
+                "room": name, "raw_type": _raw_t,
+                "allowed": _allowed,
+                "example": {"name": name, "type": "structural",
+                            "parts": ["DSH_某零件"],
+                            "why": "该屋为什么存在",
+                            "depends_on": []},
+                "hint": ("每个房间必须显式写 type（白名单：%s）。"
+                         "常见映射：drivetrain→transmission、sensor→housing、"
+                         "drawing→drafting；总装用 assembly，出图用 drafting。"
+                         "非建模房间也要列 parts（可写装配体名/图纸名作占位）。"
+                         % " / ".join(_allowed)),
+            }
+            if _miss:
+                _out["hint"] = ("【最常见原因】忘写 type。请给每个房间补一个："
+                                + " / ".join(_allowed) + "。") + _out["hint"]
+            return _out
         _item = {
             "name": name,
             "type": _nz["type"],
@@ -1735,6 +2015,18 @@ def prime_room_definition(work_dir=None):
             "④ 发现不一致 → 标记 escalate_to_parent=true，交父代理做干涉处理",
             "⑤ 持久维护零件数据台账（part_registry），支持按零件反查关联",
             "⑥ 全部完成后汇总导出 docx，交主对话",
+            # ── 【2026-10-28 重构】用户要求："总理子代理要一直盯着其他子代理"──
+            "⑦ 【监工】建模期间每轮读 mode_gate.py room-board --json，盯住每个建模小屋的 state："
+            "running/waiting_sw/idle 都算活着（严禁判死）；unbound 让父代理补 subagent-assign；"
+            "dead 才上报父代理走 recover；done 则核对它的 prime-report 是否齐全。",
+            "⑧ 【收件缺口】用 mode2_flow.py prime-board 看还有哪些零件没上报，"
+            "缺口必须催办，不能等到 room-end 才发现。",
+        ],
+        "spawn_timing": ("与 wave1 全部建模小屋【同一条回复内同时 fork】（不得等建模完成后再开）；"
+                         "长生命周期，不阻塞波次推进；wave3 出图完成后 room-end。"),
+        "watch_commands": [
+            "python \"<根>\\tools\\mode_gate.py\" room-board --json",
+            "python \"<根>\\tools\\mode2_flow.py\" prime-board --json",
         ],
     }
 
@@ -1826,6 +2118,76 @@ def prime_reports(work_dir=None):
         return {"ok": False, "error": plan["_load_error"]}
     reps = plan.get("prime_reports", [])
     return {"ok": True, "count": len(reps), "reports": reps}
+
+def prime_board(work_dir=None):
+    """【2026-10-28 重构】总理子代理的监工看板（只读）。
+
+    用户要求："总理子代理要一直盯着第二的其他子代理，去干活"。
+    本命令把"该盯什么"变成一份可直接判断的清单：
+      · rooms：每个建模小屋的实时 state（来自 mode_gate.room-board，权威）
+      · report_gaps：编制里列了零件、但还没 prime-report 的零件
+      · consistency：最近一次相邻尺寸一致性结论
+      · actions：总理现在就该做的事（催报 / 等锁 / 报死 / 收尾）
+    """
+    plan = load_plan(work_dir)
+    if plan.get("_load_error"):
+        return {"ok": False, "error": plan["_load_error"]}
+    sp = plan.get("subagent_plan") or {}
+    rooms = sp.get("rooms") or []
+    reports = plan.get("prime_reports") or []
+    reported = {str(r.get("part_name") or "").strip() for r in reports}
+    expected = []
+    for r in rooms:
+        for p in (r.get("parts") or []):
+            p = str(p).strip()
+            if p and p not in expected:
+                expected.append(p)
+    gaps = [p for p in expected if p not in reported]
+
+    # 房间实时状态：委托 mode_gate 的权威看板（拿不到就显式降级，不猜）
+    live = None
+    live_error = None
+    try:
+        import mode_gate as _mg
+        if hasattr(_mg, "cmd_room_board"):
+            live = _mg.cmd_room_board(as_json=True)
+        else:
+            live_error = "mode_gate.cmd_room_board 不存在（版本不一致）"
+    except Exception as e:
+        live_error = repr(e)
+
+    actions = []
+    if live and isinstance(live, dict):
+        for room in (live.get("rooms") or []):
+            st = str(room.get("state") or "")
+            nm = room.get("room")
+            if st in ("waiting_sw", "running", "idle", "starting"):
+                continue
+            if st == "unbound":
+                actions.append({"room": nm, "action": "父代理补 subagent-assign",
+                                "why": "平台侧存活但未绑定，禁止 reset/restart"})
+            elif st == "dead":
+                actions.append({"room": nm, "action": "上报父代理走 recover/restart",
+                                "why": "平台确认已停止且无近期产物"})
+            elif st == "failed":
+                actions.append({"room": nm, "action": "待父代理重开该房间", "why": "房间已 fail"})
+    if gaps:
+        actions.append({"room": "*", "action": "催办未上报零件", "parts": gaps[:20],
+                        "why": "编制里有、总理台账没有"})
+    return {
+        "ok": True,
+        "prime_room": PRIME_ROOM_NAME,
+        "rooms": (live or {}).get("rooms") or [],
+        "live_error": live_error,
+        "expected_parts": expected,
+        "reported_parts": sorted(p for p in reported if p),
+        "report_gaps": gaps,
+        "consistency": plan.get("prime_consistency"),
+        "actions": actions,
+        "hint": ("state=waiting_sw/running/idle/starting 都是活着，严禁判死；"
+                 "只有 dead 才允许 recover/restart。"),
+    }
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2162,6 +2524,12 @@ def pre_delivery_check(work_dir=None, registry_work_dir=None, require_primes=Tru
     if not qr.get("ok"):
         blockers.append(qr.get("error") or "提问数量不达标")
 
+    # ── 【2026-10-28 重构】总计子代理必须是真实的（analyst-bind）──
+    _an = plan.get("analyst") or {}
+    if not str(_an.get("session_id") or "").strip():
+        blockers.append("总计子代理从未真实创建/绑定（analyst-bind 未执行）——\n"
+                        "十阶段与子代理编制必须由它完成，主对话自写 --decided-by 不算。")
+
     sp = plan.get("subagent_plan")
     if not sp:
         blockers.append("缺少子代理编制（必须由总计子代理决定，禁止固定房间表）")
@@ -2424,11 +2792,13 @@ def _main_body(argv):
     p = sub.add_parser("begin-stage", help="开始一个分析阶段（必须按序）")
     p.add_argument("stage", choices=STAGE_IDS)
     p.add_argument("--note", default="")
+    p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
     p.add_argument("--work-dir", default=None)
 
     p = sub.add_parser("mark-stage-done", help="标记阶段完成并登记产出")
     p.add_argument("stage", choices=STAGE_IDS)
     p.add_argument("--artifact", default="")
+    p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
     p.add_argument("--work-dir", default=None)
 
     p = sub.add_parser("stage-status", help="查看十阶段推进情况")
@@ -2438,11 +2808,13 @@ def _main_body(argv):
     p.add_argument("topic")
     p.add_argument("--stage", required=True, choices=STAGE_IDS)
     p.add_argument("--reason", required=True)
+    p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
     p.add_argument("--work-dir", default=None)
 
     p = sub.add_parser("answer-question", help="★记录某题的用户真实答复")
     p.add_argument("seq", type=int, help="题号（record_question 返回的 seq）")
     p.add_argument("answer", help="用户答复原文")
+    p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
     p.add_argument("--work-dir", default=None)
 
     p = sub.add_parser("questions", help="查看提问台账与题数校验")
@@ -2456,12 +2828,14 @@ def _main_body(argv):
     p.add_argument("--reason", default="", help="为什么重做（留痕；默认沿用 stale 原因）")
     p.add_argument("--artifact", default="",
                    help="可选：同时提交重算后的新产物（= refresh + mark-stage-done）")
+    p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
     p.add_argument("--work-dir", default=None)
     # 别名（用户口径里的 redo-stage 与 refresh-stage 等价）
     p = sub.add_parser("redo-stage", help="★refresh-stage 的别名")
     p.add_argument("stage", choices=STAGE_IDS)
     p.add_argument("--reason", default="")
     p.add_argument("--artifact", default="")
+    p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
     p.add_argument("--work-dir", default=None)
 
     # ── 【Bug③ 修复】三处 room_type 一致性自检（只读）──────────────────
@@ -2480,6 +2854,7 @@ def _main_body(argv):
     p.add_argument("--rooms-json", required=True, help="JSON 数组或 @文件路径")
     p.add_argument("--rationale", required=True)
     p.add_argument("--decided-by", default=SUBPLAN_AUTHORITY)
+    p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
     p.add_argument("--work-dir", default=None)
 
     p = sub.add_parser("subagent-plan", help="查看当前子代理编制")
@@ -2525,6 +2900,21 @@ def _main_body(argv):
     p = sub.add_parser("plan", help="打印完整计划文件")
     p.add_argument("--work-dir", default=None)
 
+    # ── 【2026-10-28 重构】总计子代理身份 + 总理监工看板 ──────────────
+    p = sub.add_parser("analyst-bind",
+                       help="★在【总计子代理】里运行：绑定它自己的 sessionId")
+    p.add_argument("--session-id", default=None,
+                   help="显式指定；默认读 DSH_SESSION_ID")
+    p.add_argument("--force", action="store_true", help="已有绑定也要改绑")
+    p.add_argument("--work-dir", default=None)
+
+    p = sub.add_parser("analyst-status", help="查看总计子代理是否已真实绑定")
+    p.add_argument("--work-dir", default=None)
+
+    p = sub.add_parser("prime-board", help="★总理子代理监工看板（房间状态+上报缺口+待办）")
+    p.add_argument("--json", action="store_true", help="强制 JSON 输出（默认即 JSON）")
+    p.add_argument("--work-dir", default=None)
+
     args = ap.parse_args(argv)
     if not args.cmd:
         ap.print_help()
@@ -2532,38 +2922,86 @@ def _main_body(argv):
 
     wd = getattr(args, "work_dir", None)
 
+    def _rooms_json_error(exc):
+        """--rooms-json 解析失败的【可操作】报错（BUG-2）。"""
+        return {
+            "ok": False,
+            "error": "rooms-json 解析失败: %r" % (exc,),
+            "hint": ("三种写法都支持，请在 PowerShell 里优先用 ②：",
+                     " ① 内联 JSON：--rooms-json '[{\"name\":\"结构件\","
+                     "\"type\":\"structural\",\"parts\":[\"DSH_x\"],"
+                     "\"why\":\"…\"}]'",
+                     " ② 文件路径（推荐）：--rooms-json C:\\path\\rooms.json"
+                     "（不带 @，避免 PowerShell 把 @ 当 splatting 吃掉）",
+                     " ③ 兼容写法：--rooms-json \"@C:\\path\\rooms.json\""
+                     "（bash / cmd / Python 下可用）"),
+            "note": "文件内容必须是【JSON 数组】，不要包一层 {\"rooms\": [...]}。",
+        }
+
     def _load_json_arg(v):
-        """支持 --rooms-json '[{...}]' 或 --rooms-json @file.json（便于长内容）。"""
+        r"""支持 --rooms-json '[{...}]' 或 --rooms-json @file.json（便于长内容）。
+
+        ── 【BUG-2 修复】PowerShell 的 @ 会被吃掉 ─────────────────────────
+        现场：在 PowerShell 里写 --rooms-json "@C:\pathooms.json"，
+          @ 被 PS 当成 splatting/数组符号解释，参数被拆散，命令直接失败。
+        处理（三重，任一即可用）：
+          ① 仍支持 @file.json（bash / cmd / Python 直接调用时最自然）；
+          ② 支持不带 @ 的 .json 文件路径（推荐 PS 用户这样写）；
+          ③ 支持把 JSON 直接内联传入。
+        另外把"解析失败"的报错换成可操作的：告诉用户三种写法都行。
+        """
         s = v
-        if isinstance(v, str) and v.startswith("@"):
-            with open(v[1:], "r", encoding="utf-8") as f:
-                s = f.read()
+        _is_path = False
+        if isinstance(v, str):
+            _raw = v.strip()
+            # ① @file.json
+            if _raw.startswith("@"):
+                _is_path = True
+                _raw = _raw[1:].strip().strip("'\"")
+            # ② 裸路径：以 .json 结尾且文件真的存在（PS 下 @ 被吃掉后就是这个形态）
+            elif _raw.lower().endswith(".json") and os.path.isfile(_raw):
+                _is_path = True
+            if _is_path:
+                if not os.path.isfile(_raw):
+                    raise IOError("文件不存在: %s" % _raw)
+                with open(_raw, "r", encoding="utf-8-sig") as f:
+                    s = f.read()
+        elif isinstance(v, (list, dict)):
+            return v
         return json.loads(s)
 
+    _actor = getattr(args, "actor", None)
     if args.cmd == "set-depth":
         r = set_depth(args.depth, wd)
+    elif args.cmd == "analyst-bind":
+        r = analyst_bind(getattr(args, "session_id", None), wd,
+                         force=bool(getattr(args, "force", False)))
+    elif args.cmd == "analyst-status":
+        r = analyst_status(wd)
+    elif args.cmd == "prime-board":
+        r = prime_board(wd)
     elif args.cmd == "begin-stage":
-        r = begin_stage(args.stage, wd, args.note)
+        r = begin_stage(args.stage, wd, args.note, actor=_actor)
     elif args.cmd == "mark-stage-done":
-        r = mark_stage_done(args.stage, args.artifact, wd)
+        r = mark_stage_done(args.stage, args.artifact, wd, actor=_actor)
     elif args.cmd == "stage-status":
         r = stage_status(wd)
     elif args.cmd == "ask":
-        r = record_question(args.topic, args.stage, args.reason, wd)
+        r = record_question(args.topic, args.stage, args.reason, wd, actor=_actor)
     elif args.cmd == "answer-question":
-        r = answer_question(args.seq, args.answer, wd)
+        r = answer_question(args.seq, args.answer, wd, actor=_actor)
     elif args.cmd == "questions":
         r = question_report(wd, final=args.final)
     elif args.cmd in ("refresh-stage", "redo-stage"):
         r = refresh_stage(args.stage, wd, getattr(args, "reason", ""),
-                          getattr(args, "artifact", ""))
+                          getattr(args, "artifact", ""), actor=_actor)
     elif args.cmd == "room-types":
         r = room_types_report(wd)
     elif args.cmd == "sync-rooms":
         try:
             _rooms = _load_json_arg(args.rooms_json)
         except Exception as e:
-            _print({"ok": False, "error": "rooms-json 解析失败: %r" % (e,)})
+            _print(_rooms_json_error(e))
             return 1
         r = sync_rooms_snapshot(_rooms, wd, source=args.source,
                                 task_id=getattr(args, "task_id", None))
@@ -2573,7 +3011,7 @@ def _main_body(argv):
         except Exception as e:
             _print({"ok": False, "error": "rooms-json 解析失败: %r" % (e,)})
             return 1
-        r = set_subagent_plan(rooms, args.rationale, args.decided_by, wd)
+        r = set_subagent_plan(rooms, args.rationale, args.decided_by, wd, actor=_actor)
     elif args.cmd == "subagent-plan":
         r = get_subagent_plan(wd)
     elif args.cmd == "prime-room":

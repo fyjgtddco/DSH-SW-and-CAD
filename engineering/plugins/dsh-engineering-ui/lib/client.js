@@ -227,8 +227,16 @@ window.__ModuleLoader__.load({
       // ── 目录（次级导航）：浅底、窄、安静，不与正文抢视觉 ──────────────
       '.eng-tree{background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.03));' +
         'border-right:1px solid var(--dsw-alias-border-l2,#e5e7eb);box-sizing:border-box;' +
-        'display:flex;flex:0 0 168px;flex-direction:column;height:100%;' +
-        'min-width:0;overflow:hidden}',
+        // ── 【自适应】频道列宽度不再写死 168px ──────────────────────────
+        //   现场：168px 里要塞「状态点 + 折叠箭头 + 层级徽标 + 标签 + 状态」，
+        //   连只有一级的「结构件房间：底盘/轮毂/…」都被截成「结构件房间：底..」，
+        //   二级/三级更是只剩「总装干涉...」。
+        //   改为：宽度 = clamp(190px, 面板宽 × 42%, 300px)，由 JS 写 --eng-tree-w；
+        //   变量缺失时回落到 clamp() 自身的响应式值（纯 CSS 也能自适应）。
+        'display:flex;flex:0 0 var(--eng-tree-w, clamp(190px, 42%, 300px));' +
+        'flex-direction:column;height:100%;min-width:0;overflow:hidden;' +
+        // ★ 容器查询的锚点：让内部 @container engtree (...) 按【本列宽度】生效
+        'container-type:inline-size;container-name:engtree}',
       '.eng-tree-cap{' +
         'align-items:center;border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
         'color:var(--dsw-alias-label-secondary,#475569);display:flex;flex:none;' +
@@ -251,12 +259,50 @@ window.__ModuleLoader__.load({
         'background:var(--dsw-alias-state-business-tertiary,#eef2ff);' +
         'border-color:var(--dsw-alias-state-business-primary,#2563eb);' +
         'color:var(--dsw-alias-label-primary-bluish,#3730a3)}',
+      // ── 【子代理层级】缩进 / 折叠三角 / 层级徽标 / 不可读分支 ─────────────
+      '.eng-node-wrap{display:flex;align-items:center;gap:2px;width:100%;min-width:0}',
+      // ── 【层级缩进自适应】每级 14px 太吃宽度（3 级就吃掉 42px）──────
+      //   通道列只有 190~300px，缩进必须克制：第 2 级 10px，之后每级 6px。
+      //   具体 padding 由 JS 按 depth 内联写（见 nodes 渲染），这里只兜底。
+      '.eng-node-wrap>.eng-node{flex:1;min-width:0}',
+      '.eng-node-wrap.lv{position:relative}',
+      '.eng-node-wrap.lv::before{' +
+        'content:"";position:absolute;left:6px;top:2px;bottom:2px;width:1px;' +
+        'background:var(--dsw-alias-border-l2,#e5e7eb)' +
+      '}',
+      '.eng-node-tw{background:transparent;border:none;color:var(--dsw-alias-label-tertiary,#8b95a3);' +
+        'cursor:pointer;flex:none;font-size:10px;line-height:1;padding:2px;width:14px;text-align:center}',
+      '.eng-node-tw:hover{color:var(--dsw-alias-label-primary,#0f172a)}',
+      '.eng-node-tw.ph{visibility:hidden}',
+      '.eng-lv{background:var(--dsw-alias-bg-layer-3,rgba(15,23,42,.08));border-radius:4px;' +
+        'flex:none;font-size:9px;font-weight:700;letter-spacing:.02em;padding:0 4px;opacity:.8}',
+      '.eng-dot.diag{background:#f59e0b}',
+      '.eng-node.diag{opacity:.75}',
       '.eng-dot{border-radius:50%;flex:none;height:8px;width:8px;background:#94a3b8}',
       '.eng-dot.run{background:#16a34a;animation:eng-pulse 1.3s ease-in-out infinite}',
       '.eng-dot.done{background:#0ea5e9}',
       '@keyframes eng-pulse{0%,100%{opacity:1}50%{opacity:.25}}',
       '.eng-node-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.eng-node-state{flex:none;font-size:10px;opacity:.75}',
+      // ── 【真·自适应：容器查询】按【频道列自身宽度】收敛，不依赖 JS 计算 ──
+      //   为什么用 @container 而不是 @media：
+      //     · @media 看的是【窗口】宽度，而频道列宽度取决于面板占比（40→46%），
+      //       窗口很宽但面板窄时它判断不出来；
+      //     · @container 直接量 .eng-tree 自己的内容盒，拖窗口、缩放、
+      //       换分辨率都自动重算，零 JS、零重排抖动。
+      //   三档收敛（按需隐藏最不重要的信息，标签永远优先）：
+      //     < 240px  → 隐藏「未运行/运行中」文字（圆点已表达同样语义）
+      //     < 210px  → 再隐藏层级徽标 L2/L3
+      //     < 180px  → 再压掉折叠箭头的占位宽度
+      '@container engtree (max-width:240px){' +
+        '.eng-node-state{display:none}' +
+      '}',
+      '@container engtree (max-width:210px){' +
+        '.eng-lv{display:none}' +
+      '}',
+      '@container engtree (max-width:180px){' +
+        '.eng-node-tw{width:10px;padding:0}' +
+      '}',
       '.eng-detail{background:#fff;box-sizing:border-box;display:flex;flex:1 1 0;flex-direction:column;' +
         'height:100%;min-width:0;overflow:hidden}',
       // ── 详情标题栏：两行结构（名称+状态 / 副标题摘要）───────────────
@@ -306,12 +352,19 @@ window.__ModuleLoader__.load({
       //   · 日志区加大留白与行高，长段落不再挤成一坨；
       //   · 全部改用 --dsw-alias-* 语义 token，自动跟随亮/暗主题。
       '.eng-log{' +
+        // ── 【自适应·居中】详情内容限宽并居中（用户要求「其他的偏中间一点」）──
+        //   面板变宽后，若正文仍从最左排到最右，长行会显得散。
+        //   用 max-width + margin auto 让日志列在自己的栏里居中；
+        //   窄屏时 max-width 不起作用，自动退回全宽。
+        '--eng-log-max:min(100%, 900px);' +
         'display:flex;flex:1;flex-direction:column;gap:10px;' +
         'font-size:12.5px;letter-spacing:.01em;line-height:1.72;' +
         'min-height:0;overflow-wrap:break-word;overflow-x:hidden;' +
         'overflow-y:auto;padding:14px 14px 22px;word-break:break-word' +
       '}' +
-      '.eng-log p,.eng-log div{overflow-wrap:break-word;word-break:break-word;max-width:100%}' +
+      '.eng-log p,.eng-log div{overflow-wrap:break-word;word-break:break-word;max-width:100%}',
+      // 详情正文居中：内容列限宽后左右留白，长行不会一路顶到面板边缘
+      '.eng-log>*{width:100%;max-width:var(--eng-log-max);margin-left:auto;margin-right:auto}' +
       '.eng-log *{box-sizing:border-box}' +
       '.eng-note{' +
         'color:var(--dsw-alias-label-tertiary,#94a3b8);font-size:12px;' +
@@ -898,6 +951,21 @@ window.__ModuleLoader__.load({
       // 有子代理在运行时切换为绿色，一眼可辨
       '.eng-fab.run{background:linear-gradient(180deg,#22c55e,#16a34a);border-color:#16a34a}' +
       '.eng-fab.run:hover{background:linear-gradient(180deg,#16a34a,#15803d);box-shadow:-3px 0 16px rgba(22,163,74,.34)}' +
+      // ── 【小标签吸附】贴左边时的视觉镜像（圆角/阴影/描边都要反过来）──────
+      //   同一颗按钮要能在左/右两侧都像"抽屉拉手"，否则贴左会变成"断口朝外"。
+      '.eng-fab.left{' +
+        'border:1px solid #2563eb;border-left:none;' +
+        'border-radius:0 10px 10px 0;' +
+        'box-shadow:2px 0 10px rgba(37,99,235,.22)' +
+      '}' +
+      '.eng-fab.left:hover{' +
+        'box-shadow:3px 0 16px rgba(37,99,235,.34);' +
+        'transform:translateX(2px)' +
+      '}' +
+      '.eng-fab.left.run{background:linear-gradient(180deg,#22c55e,#16a34a);border-color:#16a34a}' +
+      '.eng-fab.left.run:hover{background:linear-gradient(180deg,#16a34a,#15803d);box-shadow:3px 0 16px rgba(22,163,74,.34)}' +
+      // 拖动中：吸附动画必须关掉，否则会拖出橡皮筋延迟
+      '.eng-fab.dragging{transition:none!important}' +
       '.eng-fab-ico{font-size:12px;line-height:1;opacity:.85}' +
       '.eng-fab-txt{writing-mode:vertical-rl;text-orientation:mixed;line-height:1.15}' +
       '.eng-fab-badge{' +
@@ -1701,7 +1769,9 @@ window.__ModuleLoader__.load({
           sb = v;
         }
         var avail = vw - sb;
-        var pane = Math.round(avail * 0.40);
+        // 【自适应·往左扩】用户反馈：右侧内容被挤得太窄（频道列 + 详情都断字）。
+  //   40% → 46%，并保证主区仍有可读宽度（--eng-main-min 兜底）。
+  var pane = Math.round(avail * 0.46);
         var mainMin = parseFloat(getComputedStyle(document.documentElement)
                        .getPropertyValue("--eng-main-min")) || 600;
         if (avail - pane < mainMin) {
@@ -1710,6 +1780,24 @@ window.__ModuleLoader__.load({
         if (pane < 240) return 0;
         return pane;
       } catch (e) { return 420; }
+    }
+
+    // ── 【自适应】频道列宽度随面板宽度联动 ──────────────────────────────
+    //   频道列不再写死 168px：面板宽 380px 时 168px 够用；面板宽 640px 时
+    //   需要约 269px 才能装下「结构件房间：底盘/轮毂/方向机」这类标签。
+    //   这里按 --eng-pane 的像素值算频道列宽度并写 CSS 变量；
+    //   CSS 侧另有 clamp(190px,42%,300px) 兜底，本函数失效也能自适应。
+    function _syncTreeWidth(panePx) {
+      try {
+        var p = parseFloat(panePx);
+        if (!isFinite(p) || p <= 0) return;
+        var tw = Math.round(Math.max(190, Math.min(300, p * 0.42)));
+        document.documentElement.style.setProperty("--eng-tree-w", tw + "px");
+      } catch (e) { /* 写不进去就让 CSS clamp 兜底 */ }
+    }
+    /** 让位/收起时把频道列宽度变量摘掉，交回 CSS clamp() 兜底。 */
+    function _resetTreeWidth() {
+      try { document.documentElement.style.removeProperty("--eng-tree-w"); } catch (e) {}
     }
 
 
@@ -3208,21 +3296,75 @@ window.__ModuleLoader__.load({
         if (row && row.running === true) return true;
         return false;
       };
+      // ══ 【用户反馈 2】子代理的【子代理】（多级）必须能显示，且要区分层级 ══════
+      // 现场（图二）：面板只列出【当前会话的直接子代理】（depth=1），
+      //   "总装干涉检查"下面明明还挂着它自己的子代理，面板里完全看不到；
+      //   于是用户看到的是一堆平铺、层级不明的条目。
+      //
+      // 数据来源（已核实 DSH 0.2.1 源码，dsh-subagent/lib）：
+      //   ctx.subagents.listDescendants(rootSessionId)
+      //     → 返回【整棵子树】的扁平列表，每条带：
+      //         id / parentId / depth / kind('child'|'diagnostic') /
+      //         activity('running'|'inactive') / hasChildren / mode / label
+      //   也就是说宿主【本来就给了】完整层级，只是这里以前没去取。
+      //
+      // 为什么不用 projectionsBySession[parent].values.subagentCatalog：
+      //   那个投影只覆盖【单个会话的直接子代理】（源码 listChildren → 一条
+      //   observeSession(parentSessionId).subagentCatalog），拿不到孙辈。
+      //
+      // 策略（渐进增强，不破坏旧版）：
+      //   ① 先按旧逻辑构建直接子代理（保证首屏立刻有东西）；
+      //   ② 再异步请求 /agents?rootSessionId=<当前会话>，拿到整棵子树后
+      //      升级为带 depth / parentId 的完整列表；
+      //   ③ 接口不可用（旧版 DSH / 服务缺失）→ 保持 ①，零回归。
+      var treeSt = useState(null);      // null = 尚未拿到；[] = 拿到但是空
+      var tree = treeSt[0];
+      useEffect(function () {
+        if (typeof fetch !== 'function') return;
+        if (!currentId) { treeSt[1](null); return; }
+        var alive = true;
+        var tick = function () {
+          fetch('/dsh-engineering-ui/agents?rootSessionId=' + encodeURIComponent(currentId))
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              if (!alive) return;
+              if (j && j.ok === true && Array.isArray(j.agents)) treeSt[1](j.agents);
+            })
+            .catch(function () { /* 拿不到就保持旧数据，不打断面板 */ });
+        };
+        tick();
+        // 子代理会【在自己运行中新建孙代理】→ 必须持续刷新，否则新层不出现。
+        //   5s 足够快（用户能看到新建的子代理），又不会打爆宿主。
+        var timer = setInterval(tick, 5000);
+        return function () { alive = false; clearInterval(timer); };
+      }, [currentId]);
+
       var entries = [];
-      // ① 新形态（DSH 0.2.0）：projectionsBySession[parent].values.subagentCatalog
+      var entryKind = {};       // id -> 'child' | 'diagnostic'
+      var entryParent = {};     // id -> parentId
+      var entryDepth = {};      // id -> depth（1 = 直接子代理）
+      var entryHasKids = {};    // id -> 是否还有下一级
+      // ── ① 旧逻辑：当前会话的【直接】子代理（首屏兜底）──────────────────
       var _proj = projections && currentId ? projections[currentId] : undefined;
       var _cat = _proj && _proj.values ? _proj.values.subagentCatalog : undefined;
       if (Array.isArray(_cat)) {
         for (var pi = 0; pi < _cat.length; pi++) {
           var pe = _cat[pi];
           if (!pe || pe.id === undefined || pe.id === null) continue;
+          var _pid = String(pe.id);
           entries.push({
-            id: String(pe.id),
+            id: _pid,
             label: pe.label,
             mode: pe.mode,
             createdAt: pe.createdAt,
-            activity: isRunning(String(pe.id)) ? 'running' : 'inactive'
+            depth: 1,
+            parentId: currentId,
+            hasChildren: false,
+            activity: isRunning(_pid) ? 'running' : 'inactive'
           });
+          entryKind[_pid] = 'child';
+          entryParent[_pid] = currentId;
+          entryDepth[_pid] = 1;
         }
       }
       // ② 旧形态（DSH 0.1.x）：subagentsByParent[parent].entries，按 kind 过滤
@@ -3231,12 +3373,51 @@ window.__ModuleLoader__.load({
         if (catalog && catalog.entries) {
           for (var i = 0; i < catalog.entries.length; i++) {
             var en = catalog.entries[i];
-            // 旧条目用 kind==='child' 标注；新条目没有 kind，故此处仅在旧形态下过滤
             if (!en || (en.kind !== undefined && en.kind !== 'child')) continue;
-            entries.push(en);
+            entries.push({
+              id: String(en.id), label: en.label, mode: en.mode,
+              createdAt: en.createdAt, depth: 1, parentId: currentId,
+              hasChildren: false, activity: en.activity || 'inactive'
+            });
           }
         }
       }
+      // ── ③ 升级：整棵子树（含孙辈），按前序展开成扁平表 ─────────────────
+      //   宿主返回的顺序已是稳定前序（源码：stable pre-order），这里照抄即可，
+      //   只补 UI 需要的字段（running 用 byId 快照再确认一次）。
+      if (Array.isArray(tree) && tree.length > 0) {
+        var up = [];
+        for (var ti = 0; ti < tree.length; ti++) {
+          var te = tree[ti];
+          if (!te || te.id === undefined || te.id === null) continue;
+          var tid = String(te.id);
+          var kind = (te.kind === 'diagnostic') ? 'diagnostic' : 'child';
+          var run2 = isRunning(tid) || te.activity === 'running';
+          up.push({
+            id: tid,
+            label: te.label,
+            mode: te.mode,
+            createdAt: te.createdAt,
+            depth: (typeof te.depth === 'number' && te.depth > 0) ? te.depth : 1,
+            parentId: te.parentId || currentId,
+            hasChildren: te.hasChildren === true,
+            kind: kind,
+            diagnostic: (kind === 'diagnostic') ? String(te.reason || '') : null,
+            activity: run2 ? 'running' : 'inactive'
+          });
+          entryKind[tid] = kind;
+          entryParent[tid] = te.parentId || currentId;
+          entryDepth[tid] = up[up.length - 1].depth;
+          entryHasKids[tid] = te.hasChildren === true;
+        }
+        if (up.length > 0) entries = up;
+      } else {
+        for (var ui = 0; ui < entries.length; ui++) {
+          entryHasKids[entries[ui].id] = entries[ui].hasChildren === true;
+        }
+      }
+
+      // 子代理 id 串（用作 effect 依赖：ID 集合变了才重算，避免每帧重跑）
       var ids = entries.map(function (e) { return e.id; }).join(',');
       var selSt = useState(entries.length > 0 ? entries[0].id : null);
       var logSt = useState([]);
@@ -3273,9 +3454,22 @@ window.__ModuleLoader__.load({
       //   fabPos: {x, y} —— 左上角相对视口坐标；null = 用默认位置（右侧居中）
       var fabPosSt = useState(function () { return loadFabPosition(); });
       var fabDragSt = useState({ dragging: false });
+      // ── 【用户反馈 2】子代理树的逐分支折叠状态（id -> true 表示已收起）─────
+      //   ⚠️ 必须放在【hooks 区】、任何 return 之前 —— 放在渲染阶段（早退之后）
+      //      会让 hooks 数量随 entries 从 0 变非 0 而跳变，React 直接抛错 →
+      //      整个子代理面板（含右侧小标签）消失。
+      var collapsedSt = useState({});
       var fabMovedRef = useRef(false);          // 本次按下是否真的移动过
       var suppressClickRef = useRef(false);     // 拖动后的那次 click 要吞掉
       var fabSizeRef = useRef({ w: 0, h: 0 });  // 小标签实际尺寸（夹紧到视口用）
+      // ── 【拖动丢失修复】拖动中的实时坐标必须放 ref，不能放 state ──────────
+      //   现场：小标签只能左右动，上下完全拖不动。
+      //   根因：onUp 里读的是 `fabDragSt[0]` —— 那是【本次渲染时捕获的快照】，
+      //     React 的 setState 不会改写闭包里的那个旧元组，所以读到永远是
+      //     {dragging:false}（没有 live）→ 回退到起点 originX/originY →
+      //     松手瞬间又跳回原位，垂直位移 100% 丢失。
+      //   修法：live 坐标写 ref（跨渲染稳定），onUp 从 ref 读。
+      var fabLiveRef = useRef(null);
       var fabPos = fabPosSt[0];
       var fabDrag = fabDragSt[0];
       var askIdsSt = useState([]);     // 当前待答的 childId 列表（有序）
@@ -3596,20 +3790,24 @@ window.__ModuleLoader__.load({
             document.body.classList.add("eng-pane-open");
             var px = _calcPaneWidth();
             if (px > 0) {
+              _syncTreeWidth(px);
               document.documentElement.style.setProperty("--eng-pane", px + "px");
             }
           } else {
             // 让位给官方右列：两个类都摘掉 → 我方 grid 覆盖整条失效，
             //   宿主的【内联】grid-template-columns 自然生效。
+        try { _resetTreeWidth(); } catch (e) {}
             document.body.classList.remove("eng-pane-open");
             document.body.classList.remove(DOCK_CLASS);
           }
         } else {
           document.body.classList.remove(DOCK_CLASS);
+        try { _resetTreeWidth(); } catch (e) {}
           document.body.classList.remove("eng-pane-open");
         }
         return function () {
           document.body.classList.remove(DOCK_CLASS);
+        try { _resetTreeWidth(); } catch (e) {}
           document.body.classList.remove("eng-pane-open");
         };
       }, [active, paneOpen, embedded, engAllowed]);
@@ -3626,6 +3824,7 @@ window.__ModuleLoader__.load({
             if (!document.body.classList.contains('eng-pane-open')) return;
             var px = _calcPaneWidth();
             if (px > 0) {
+              _syncTreeWidth(px);
               document.documentElement.style.setProperty("--eng-pane", px + "px");
             }
           }, 140);
@@ -3698,42 +3897,95 @@ window.__ModuleLoader__.load({
       // 【让位时也不渲染】官方占着右列时，我方小标签同样不该出现
       //   （否则又变成用户看到的"多出来的蓝色小边"）。
       // ── 【本次改动·Bug4】拖动逻辑（在早退之后定义，不新增 hooks）──────
-      var fabStyle = undefined;
-      if (fabPos && typeof fabPos.x === 'number') {
-        fabStyle = {
-          left: fabPos.x + 'px',
-          top: fabPos.y + 'px',
-          right: 'auto',
-          transform: 'none',
-        };
-      }
+      // ══ 【小标签吸附 · 用户反馈 1】拖到中间必须自动吸回边上 ══════════════════
+      // 现场：小标签能拖动，但拖到屏幕中间就停在那儿"漂在空中"，很怪。
+      // 期望（用户原话）：「在拖到非俩边的时候应该是要自动吸附到右边的」。
+      //
+      // 设计：
+      //   · 拖动中 —— 完全跟随鼠标（自由位置），给足"我在拖它"的反馈；
+      //   · 松手   —— 吸附到【最近的边】（左/右），并记住 side；
+      //   · 竖向 —— 只在视口内夹紧，不吸附上下（贴顶部/底部更难看）。
+      //   · 记住 side 而不是绝对 x：窗口变宽/变窄后仍按边重贴，不会跑到屏幕外。
       var FAB_W_FALLBACK = 44, FAB_H_FALLBACK = 92;
+      /** 把 (x, y) 夹紧到视口内。 */
       var clampFab = function (x, y) {
         try {
           var vw = (typeof window !== 'undefined' ? window.innerWidth : 1200) || 1200;
           var vh = (typeof window !== 'undefined' ? window.innerHeight : 800) || 800;
           var w = fabSizeRef.current.w || FAB_W_FALLBACK;
           var h = fabSizeRef.current.h || FAB_H_FALLBACK;
-          var nx = Math.max(4, Math.min(vw - w - 4, x));
+          var nx = Math.max(0, Math.min(vw - w, x));
           var ny = Math.max(4, Math.min(vh - h - 4, y));
           return { x: nx, y: ny };
         } catch (e) { return { x: x, y: y }; }
       };
+      /** 吸附：返回 { x, y, side }，x 为贴边后的左坐标。 */
+      var snapFab = function (x, y) {
+        try {
+          var vw = (typeof window !== 'undefined' ? window.innerWidth : 1200) || 1200;
+          var w = fabSizeRef.current.w || FAB_W_FALLBACK;
+          var c = clampFab(x, y);
+          // 以"离哪边更近"决定吸附方向（用中心点比较，比用左边界更符合直觉）
+          var centerX = c.x + w / 2;
+          var side = (centerX <= vw / 2) ? 'left' : 'right';
+          var nx = (side === 'left') ? 0 : Math.max(0, vw - w);
+          return { x: nx, y: c.y, side: side };
+        } catch (e) { return { x: x, y: y, side: null }; }
+      };
+      /** 由已保存的 {x,y,side} 算出这次渲染的 left/top。 */
+      var fabStyle = undefined;
+      // ── 【小标签消失兜底】存下来的位置若已经完全在视口外（换显示器 / 缩放 /
+      //    分辨率变化），不能死认它 —— 那会让标签跑到屏幕外，用户以为它被删了。
+      //    这里判为「无效位置」并回落到右侧垂直居中的默认位。
+      if (fabPos && fabPos !== null) {
+        try {
+          var _vh0 = (typeof window !== 'undefined' ? window.innerHeight : 800) || 800;
+          var _vw0 = (typeof window !== 'undefined' ? window.innerWidth : 1200) || 1200;
+          var _badY = !(fabPos.y >= 0 && fabPos.y <= _vh0 - 8);
+          var _badX = (!fabPos.side && typeof fabPos.x === 'number' &&
+                       (fabPos.x < 0 || fabPos.x > _vw0 - 8));
+          if (_badY || _badX) fabPos = null;
+        } catch (e) { /* 判定失败就照旧用存下来的值 */ }
+      }
+      if (fabPos && fabPos !== null) {
+        try {
+          var _vw = (typeof window !== 'undefined' ? window.innerWidth : 1200) || 1200;
+          var _w = fabSizeRef.current.w || FAB_W_FALLBACK;
+          var _x = fabPos.x;
+          if (fabPos.side === 'left') _x = 0;
+          else if (fabPos.side === 'right') _x = Math.max(0, _vw - _w);
+          if (typeof _x === 'number' && isFinite(_x)) {
+            var _c0 = clampFab(_x, fabPos.y);
+            fabStyle = { left: _c0.x + 'px', top: _c0.y + 'px',
+                        // ⚠️ 必须清掉基础规则里的 translateY(-50%)，否则贴边后
+                        //    会被整体上移半个高度（看起来像"消失了"）。
+                        right: 'auto', bottom: 'auto', transform: 'none' };
+          }
+        } catch (e) { fabStyle = undefined; }
+      }
+      // 拖动进行中：用临时坐标（跟随鼠标），不受已保存位置影响
+      if (fabDrag && fabDrag.live && typeof fabDrag.live.x === 'number') {
+        fabStyle = {
+          left: fabDrag.live.x + 'px',
+          top: fabDrag.live.y + 'px',
+          right: 'auto', bottom: 'auto', transform: 'none'
+        };
+      }
       var fabOnMouseDown = function (ev) {
         try {
           if (!ev || (ev.button !== undefined && ev.button !== 0)) return;
           var el = ev.currentTarget;
           var rect = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
           if (!rect) return;
-          // 记住真实尺寸（用于夹紧到视口内）
+          // 记住真实尺寸（夹紧 / 吸附都要用）
           fabSizeRef.current = { w: rect.width || FAB_W_FALLBACK, h: rect.height || FAB_H_FALLBACK };
           var startX = ev.clientX, startY = ev.clientY;
           var originX = rect.left, originY = rect.top;
           var moved = false;
           fabMovedRef.current = false;
           suppressClickRef.current = false;
+            fabLiveRef.current = null;   // 每次按下重置实时坐标
           try { el.setPointerCapture && el.setPointerCapture(ev.pointerId); } catch (e0) {}
-          // 拖动期间禁止选中文字
           try { document.body.style.userSelect = 'none'; } catch (e0) {}
 
           var onMove = function (mv) {
@@ -3741,24 +3993,34 @@ window.__ModuleLoader__.load({
             if (!moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
               moved = true;
               fabMovedRef.current = true;
-              fabDragSt[1]({ dragging: true });
             }
             if (!moved) return;
             var next = clampFab(originX + dx, originY + dy);
-            fabPosSt[1](next);
+            // ★ 实时坐标【同时】写 ref（onUp 从 ref 读，闭包里的 state 是旧快照）
+            fabLiveRef.current = next;
+            // 拖动中自由跟随（live），松手才吸附
+            fabDragSt[1]({ dragging: true, live: next });
             if (mv.preventDefault) mv.preventDefault();
           };
           var onUp = function () {
             try { document.removeEventListener('mousemove', onMove, true); } catch (e1) {}
             try { document.removeEventListener('mouseup', onUp, true); } catch (e1) {}
             try { document.body.style.userSelect = ''; } catch (e1) {}
-            fabDragSt[1]({ dragging: false });
             if (moved) {
-              // 拖动结束 → 吞掉随后那次 click（否则会立刻展开面板）
+              // ★ 松手 → 吸附到最近的边（用户要求：非两边时回右边）
+              // ★ 必须从 ref 读：闭包里的 fabDragSt[0] 是旧快照（没有 live），
+              //   那样会让垂直位移全部丢失、松手后弹回原点。
+              var live = fabLiveRef.current || clampFab(originX, originY);
+              var snapped = snapFab(live.x, live.y);
+              fabPosSt[1](snapped);
+              fabDragSt[1]({ dragging: false });
+              // 吞掉随后那次 click（否则一拖就展开面板）
               suppressClickRef.current = true;
-              try { saveFabPosition(fabPosSt[0] || null); } catch (e2) {}
-              // 下一次 click 到来后再复位（防止没有 click 的场景卡住）
+              try { saveFabPosition(snapped); } catch (e2) {}
+              fabLiveRef.current = null;
               setTimeout(function () { fabMovedRef.current = false; }, 0);
+            } else {
+              fabDragSt[1]({ dragging: false });
             }
           };
           document.addEventListener('mousemove', onMove, true);
@@ -3768,22 +4030,29 @@ window.__ModuleLoader__.load({
       var fabResetPos = function (ev) {
         try { if (ev && ev.preventDefault) ev.preventDefault(); } catch (e0) {}
         try {
+          fabSizeRef.current = { w: 0, h: 0 };
           fabPosSt[1](null);
           saveFabPosition(null);
         } catch (e) {}
       };
-      // 视口变化（缩放窗口 / 换分辨率）后把落点重新夹紧，避免跑到屏幕外
+      // 视口变化（缩放窗口 / 换分辨率）：按【记住的边】重新贴，竖向夹紧。
       //   ⚠️ 只改这次渲染用的 style，不回写 state —— 渲染期禁止 setState。
-      if (fabPos) {
+      if (fabPos && !(fabDrag && fabDrag.live)) {
         try {
-          var _c = clampFab(fabPos.x, fabPos.y);
-          if (_c && (Math.abs(_c.x - fabPos.x) > 1 || Math.abs(_c.y - fabPos.y) > 1)) {
+          var _vw2 = (typeof window !== 'undefined' ? window.innerWidth : 1200) || 1200;
+          var _w2 = fabSizeRef.current.w || FAB_W_FALLBACK;
+          var _want = (fabPos.side === 'left') ? 0
+                    : (fabPos.side === 'right') ? Math.max(0, _vw2 - _w2)
+                    : fabPos.x;
+          var _c2 = clampFab(_want, fabPos.y);
+          if (_c2 && (Math.abs(_c2.x - _want) > 1 || Math.abs(_c2.y - fabPos.y) > 1)) {
             fabStyle = {
-              left: _c.x + 'px', top: _c.y + 'px', right: 'auto', transform: 'none'
+              left: _c2.x + 'px', top: _c2.y + 'px', right: 'auto', bottom: 'auto'
             };
           }
         } catch (e) {}
       }
+
 
       // ── 【本次改动·Bug4】收起态小标签支持【拖动】──────────────────────
       // 用户反馈：这个"子代理"小按钮拖不动。旧实现是固定的
@@ -3793,11 +4062,13 @@ window.__ModuleLoader__.load({
       //   · 没拖动（位移 < 4px）→ 视为点击，照常展开面板；
       //   · 位置存 localStorage，刷新/重启后仍在用户放的地方；
       //   · 双击 → 复位到右侧垂直居中。
+      var fabSide = (fabPos && fabPos.side) ? fabPos.side : 'right';
       var fab = (isCollapsed && !yieldToHost) ? h('button', {
-        className: 'eng-fab' + (anyRunning ? ' run' : '') + (fabDrag.dragging ? ' dragging' : ''),
+        className: 'eng-fab' + (fabSide === 'left' ? ' left' : '') +
+                   (anyRunning ? ' run' : '') + (fabDrag.dragging ? ' dragging' : ''),
         style: fabStyle,
         title: '展开子代理面板（' + entries.length + ' 个子代理' +
-               (anyRunning ? '，有运行中' : '') + '）；可拖动，双击复位',
+               (anyRunning ? '，有运行中' : '') + '）；可拖动（松手自动贴边），双击复位到右侧',
         onMouseDown: fabOnMouseDown,
         onDoubleClick: fabResetPos,
         onClick: function (ev) {
@@ -3815,7 +4086,7 @@ window.__ModuleLoader__.load({
       },
         h('span', { className: 'eng-fab-ico' }, '‹'),
         h('span', { className: 'eng-fab-txt' }, '子代理'),
-        h('span', { className: 'eng-fab-badge' }, String(entries.length)),
+        h('span', { className: 'eng-fab-badge' }, treeCountText),
         anyRunning ? h('span', { className: 'eng-fab-dot' }) : null) : null;
 
       var current = null;
@@ -3824,30 +4095,106 @@ window.__ModuleLoader__.load({
       var running = !!(current && (current.activity === 'running' || (sum && sum.running)));
       var done = !!(sum && sum.completed);
       var title = current ? String(current.label || (sum && sum.displayTitle) || current.id) : '子代理详情';
-      var nodes = entries.map(function (e2) {
+      // ── 【用户反馈 2】层级化渲染：缩进 + 折叠 + 层级徽标 ────────────────────
+      // 只把整棵子树拍平成一行行还不够 —— 用户要的是"分得出等级"。
+      // 这里做三件事：
+      //   ① 按 depth 缩进（每级 14px），并用竖线把父子连起来；
+      //   ② 有下级的条目给一个折叠三角（默认展开，收起后整条分支隐藏）；
+      //   ③ 徽标区分身份：直接子代理不显示，二级显示 L2，依次类推；
+      //      diagnostic（宿主报"读不到该分支"）单独标成灰色"不可读"。
+      //
+      // 折叠状态用 state 存（用户手动收起的分支在轮询刷新后仍然保持收起）。
+      var collapsed = collapsedSt[0];
+      // 计算"因祖先被收起而应隐藏"的 id 集合（扁平表 → 可见子集）
+      var visibleIds = {};
+      var depthOfId = {};
+      var parentOfId = {};
+      for (var vi = 0; vi < entries.length; vi++) {
+        var ve = entries[vi];
+        depthOfId[ve.id] = (typeof ve.depth === 'number' && ve.depth > 0) ? ve.depth : 1;
+        parentOfId[ve.id] = ve.parentId || null;
+      }
+      for (var wi = 0; wi < entries.length; wi++) {
+        var we = entries[wi];
+        // 向上找祖先链，只要有一个被收起就隐藏
+        var hidden = false;
+        var cursor = parentOfId[we.id];
+        var guard = 0;
+        while (cursor && guard < 32) {
+          if (collapsed[cursor] === true) { hidden = true; break; }
+          cursor = parentOfId[cursor];
+          guard++;
+        }
+        if (!hidden) visibleIds[we.id] = true;
+      }
+      var visibleEntries = [];
+      for (var wj = 0; wj < entries.length; wj++) {
+        if (visibleIds[entries[wj].id]) visibleEntries.push(entries[wj]);
+      }
+      var hasKidsInList = function (id) {
+        // 只有在【可见列表】里真有下级时才给折叠三角，否则是空三角
+        for (var hk = 0; hk < entries.length; hk++) {
+          if ((entries[hk].parentId || null) === id) return true;
+        }
+        return false;
+      };
+      var nodes = visibleEntries.map(function (e2) {
         var s2 = summaries ? summaries[e2.id] : null;
         var run = e2.activity === 'running' || !!(s2 && s2.running);
         var fin = !!(s2 && s2.completed);
-        var cls = run ? ' run' : (fin ? ' done' : '');
-        var state = run ? '运行中' : (fin ? '已完成' : '未运行');
+        var isDiag = e2.kind === 'diagnostic';
+        var cls = isDiag ? ' diag' : (run ? ' run' : (fin ? ' done' : ''));
+        var state = isDiag ? '不可读'
+                  : (run ? '运行中' : (fin ? '已完成' : '未运行'));
         var lb = String(e2.label || (s2 && s2.displayTitle) || e2.id);
-        return h('button', {
+        var dep = depthOfId[e2.id] || 1;
+        var kids = (!isDiag) && hasKidsInList(e2.id);
+        var isCollapsed = collapsed[e2.id] === true;
+        // 【自适应缩进】每级 14px 在 190~300px 的频道列里太奢侈（3 级吃掉 42px）。
+        var pad = (dep >= 2 ? 10 : 0) + (dep >= 3 ? 6 : 0) + (dep >= 4 ? 6 : 0);
+        return h('div', {
           key: e2.id,
-          className: 'eng-node' + (e2.id === selected ? ' on' : ''),
-          title: lb + ' — ' + state,
-          onClick: function () {
-            // 【问题3】用户主动选择 → 记录时间戳，自动顶替让路
-            try { manualPickRef.current = Date.now(); } catch (e) {}
-            // 【本次改动·Bug2】手动选择 = 钉住这个子代理，运行中的不再抢屏
-            try { pinnedRef.current = e2.id; } catch (e) {}
-            // 选中目标（原样保留：手动点选必须真正切换过去）
-            selSt[1](e2.id);
-          }
+          className: 'eng-node-wrap' + (dep > 1 ? ' lv' : '') + (isDiag ? ' diag' : ''),
+          style: pad > 0 ? { paddingLeft: pad + 'px' } : undefined
         },
-          h('span', { className: 'eng-dot' + cls }),
-          h('span', { className: 'eng-node-label' }, lb),
-          h('span', { className: 'eng-node-state' }, state));
+          // 折叠三角（只有真有下级才出现；无下级时占位保持对齐）
+          kids
+            ? h('button', {
+                className: 'eng-node-tw' + (isCollapsed ? ' off' : ''),
+                type: 'button',
+                title: isCollapsed ? '展开该子代理的下级' : '收起该子代理的下级',
+                onClick: function (ev) {
+                  try { ev.preventDefault(); ev.stopPropagation(); } catch (e0) {}
+                  var next = {};
+                  for (var k2 in collapsed) {
+                    if (Object.prototype.hasOwnProperty.call(collapsed, k2)) next[k2] = collapsed[k2];
+                  }
+                  next[e2.id] = !isCollapsed;
+                  collapsedSt[1](next);
+                }
+              }, isCollapsed ? '▸' : '▾')
+            : h('span', { className: 'eng-node-tw ph' }),
+          h('button', {
+            className: 'eng-node' + (e2.id === selected ? ' on' : '') + (isDiag ? ' diag' : ''),
+            type: 'button',
+            title: lb + ' — ' + state + (dep > 1 ? ('（第 ' + dep + ' 级）') : ''),
+            onClick: function () {
+              try { manualPickRef.current = Date.now(); } catch (e) {}
+              try { pinnedRef.current = e2.id; } catch (e) {}
+              selSt[1](e2.id);
+            }
+          },
+            h('span', { className: 'eng-dot' + cls }),
+            // 层级徽标：1 级不显示（避免整列都是 L1 的噪音）
+            dep > 1 ? h('span', { className: 'eng-lv' }, 'L' + dep) : null,
+            h('span', { className: 'eng-node-label' }, lb),
+            h('span', { className: 'eng-node-state' }, state)));
       });
+      // 目录条目数徽标用【可见数/总数】—— 收起后用户能看出"还有几个没展开"
+      var treeCountText = (visibleEntries.length === entries.length)
+        ? String(entries.length)
+        : (visibleEntries.length + '/' + entries.length);
+
       // ── 【本次改动·Bug2】info 必须【引用稳定】，否则 memo 永远失效 ──────
       //   旧实现每次渲染都新建对象 → EngEventRow 的浅比较必然不等 →
       //   整屏重建（这就是闪烁的另一半原因）。
@@ -3888,7 +4235,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'eng-tree' },
           h('div', { className: 'eng-tree-cap' },
             h('span', { className: 'eng-tree-cap-t' }, '子代理'),
-            h('span', { className: 'eng-tree-cap-n' }, String(entries.length)),
+            h('span', { className: 'eng-tree-cap-n' }, treeCountText),
             embedded ? null : h('button', {
               className: 'eng-collapse',
               title: '折叠子代理面板，让对话区占满全宽',
@@ -4599,6 +4946,12 @@ window.__ModuleLoader__.load({
         root: '',
         rootSaving: false,
         rootMsg: null,
+        // ── 【用户反馈 3】可放可收：默认收起，只在【有问题】时自动展开 ──────
+        // 用户原话：「一般来说，应该是没问题就默认收起来，有问题就弹出来的，
+        //   不然人家本来是正常的，然后你设置跳出来一大堆的」。
+        // 规则：首次检查完 status!=='ok' 才展开；用户手动点过之后一律以用户为准。
+        expanded: null,
+        userToggled: false,
       });
       var S = st[0];
       var mounted = useRef(true);
@@ -4619,7 +4972,11 @@ window.__ModuleLoader__.load({
             .then(function (j) {
               if (!mounted.current) return;
               if (j && j.items) {
+                // 【用户反馈 3】自动开合：只有「不 ok」才自动展开；
+                //   userToggled=true 表示用户亲手点过，之后以用户为准。
+                var _autoExpand = (j.status !== 'ok');
                 patch({ phase: 'done', data: j, err: null });
+                if (!S.userToggled) patch({ expanded: _autoExpand });
                 // 顺带把交付目录回填到输入框（只填一次，用户改过就不覆盖）
                 var dr = null;
                 for (var i = 0; i < j.items.length; i++) {
@@ -4722,8 +5079,16 @@ window.__ModuleLoader__.load({
           h('div', { className: 'eng-env-sum' },
             S.phase === 'busy' ? '正在检查本机环境…'
               : (S.err ? ('检查失败：' + S.err)
-                : (D ? (D.summary || chipText) : '点右侧按钮检查本机是否装了工程模式需要的东西'))),
+                : (D ? (D.summary || chipText)
+                     : '点右侧按钮检查本机是否装了工程模式需要的东西'))),
           h(EngStatusChip, { state: S.phase === 'busy' ? 'busy' : chipState, title: chipText }),
+          // 【用户反馈 3】可放可收：默认收起，只有"有问题"才自动展开
+          h('button', {
+            className: 'eng-conn-btn tiny',
+            type: 'button',
+            title: S.expanded ? '收起明细' : '展开明细',
+            onClick: function () { patch({ expanded: !S.expanded, userToggled: true }); }
+          }, S.expanded ? '收起' : '展开'),
           h('button', {
             className: 'eng-conn-btn',
             type: 'button',
@@ -4732,71 +5097,69 @@ window.__ModuleLoader__.load({
             onClick: runCheck
           }, S.phase === 'busy' ? '检查中' : '重新检查')),
 
-        // ── 交付目录（问题1 的根治点：不再写死 桌面\test）──────────────
-        h('div', { className: 'eng-env-note' },
-          '交付目录：以前固定落在桌面 test，换台电脑就会在那台桌面凭空建一个 test。'
-          + '现在可在这里指定；设置只在本机生效，换电脑自动忽略。'),
-        h('div', { className: 'eng-path-row' },
-          h('input', {
-            className: 'eng-path-in',
-            type: 'text',
-            value: S.root,
-            placeholder: 'C:\\Users\\你的用户名\\Documents\\dsh-out',
-            onChange: function (ev) { patch({ root: ev.target.value, rootMsg: null }); }
-          }),
-          h('button', {
-            className: 'eng-conn-btn tiny',
-            type: 'button',
-            disabled: S.rootSaving,
-            onClick: saveRoot
-          }, S.rootSaving ? '保存中' : '保存到本机')),
-        S.rootMsg ? h('div', { className: 'eng-env-note' }, S.rootMsg) : null,
-
-        rows.length ? h('div', { className: 'eng-env-list' }, rows) : null,
-
-        h('div', { className: 'eng-env-acts' },
-          h('button', {
-            className: 'eng-conn-btn',
-            type: 'button',
-            disabled: S.promptBusy,
-            title: '把本机实测结果写进一段提示词，交给一个新的工程模式对话去修',
-            onClick: makePrompt
-          }, S.promptBusy ? '生成中…' : '生成修复提示词')),
-        // ── 【弹窗修复】给「设置提醒弹窗」一条确定性手动入口 ──────────────
-        // 自动弹出要等会话列表订阅 + 保留 scope，时序不巧就静默失效；
-        // 这里让用户随时能把那条提醒调出来（内容与自动弹出完全一致）。
-        h('div', { className: 'eng-env-note' },
-          '子智能体上限提醒：默认在进入工程模式时自动弹出；若没看到，可点右边按钮立即调出。'),
-        h('div', { className: 'eng-env-acts' },
-          h('button', {
-            className: 'eng-conn-btn tiny',
-            type: 'button',
-            title: '把「把最大递进深度与子智能体并行上限设为 999」的提醒弹出来',
-            onClick: function () { showEngLimitReminder(); }
-          }, '立即查看提醒')),
-
-        S.prompt ? h('div', null,
-          h('div', { className: 'eng-conn-log-hd' },
-            h('span', {
-              className: 'eng-conn-log-tg',
-              onClick: function () { patch({ promptOpen: !S.promptOpen }); }
-            }, (S.promptOpen ? '▾ ' : '▸ ') + '修复提示词（可原样发给新对话）'),
+        (S.expanded === true) ? h('div', { className: 'eng-env-body' },
+          // ── 交付目录（不再写死 桌面\test）─────────────────────────────
+          h('div', { className: 'eng-env-note' },
+            '交付目录：以前固定落在桌面 test，换台电脑就会在那台桌面凭空建一个 test。'
+            + '现在可在这里指定；设置只在本机生效，换电脑自动忽略。'),
+          h('div', { className: 'eng-path-row' },
+            h('input', {
+              className: 'eng-path-in',
+              type: 'text',
+              value: S.root,
+              placeholder: 'C:\Users\你的用户名\Documents\dsh-out',
+              onChange: function (ev) { patch({ root: ev.target.value, rootMsg: null }); }
+            }),
             h('button', {
               className: 'eng-conn-btn tiny',
               type: 'button',
-              disabled: S.sent === 'sending',
-              title: '新建一个「工程模式」会话，把这段提示词作为首轮发出去',
-              onClick: sendPrompt
-            }, S.sent === 'sending' ? '发送中'
-               : (S.sent === 'drafted' ? '✓ 已填入新会话'
-                 : (S.sent === 'ok' ? '✓ 已发送' : '发给新对话')))
-          ),
-          S.sent && S.sent.indexOf('err:') === 0
-            ? h('div', { className: 'eng-conn-log-sent' }, '发送失败：' + S.sent.slice(4))
-            : null,
-          S.promptOpen ? h('pre', { className: 'eng-env-prompt' }, S.prompt) : null) : null
+              disabled: S.rootSaving,
+              onClick: saveRoot
+            }, S.rootSaving ? '保存中' : '保存到本机')),
+          S.rootMsg ? h('div', { className: 'eng-env-note' }, S.rootMsg) : null,
+
+          rows.length ? h('div', { className: 'eng-env-list' }, rows) : null,
+
+          h('div', { className: 'eng-env-acts' },
+            h('button', {
+              className: 'eng-conn-btn',
+              type: 'button',
+              disabled: S.promptBusy,
+              title: '把本机实测结果写进一段提示词，交给一个新的工程模式对话去修',
+              onClick: makePrompt
+            }, S.promptBusy ? '生成中…' : '生成修复提示词'),
+            // 【弹窗修复】给「设置提醒弹窗」一条确定性手动入口
+            h('button', {
+              className: 'eng-conn-btn tiny',
+              type: 'button',
+              title: '把「把最大递进深度与子智能体并行上限设为 999」的提醒弹出来',
+              onClick: function () { showEngLimitReminder(); }
+            }, '立即查看提醒')),
+
+          S.prompt ? h('div', null,
+            h('div', { className: 'eng-conn-log-hd' },
+              h('span', {
+                className: 'eng-conn-log-tg',
+                onClick: function () { patch({ promptOpen: !S.promptOpen }); }
+              }, (S.promptOpen ? '▾ ' : '▸ ') + '修复提示词（可原样发给新对话）'),
+              h('button', {
+                className: 'eng-conn-btn tiny',
+                type: 'button',
+                disabled: S.sent === 'sending',
+                title: '新建一个「工程模式」会话，把这段提示词作为首轮发出去',
+                onClick: sendPrompt
+              }, S.sent === 'sending' ? '发送中'
+                 : (S.sent === 'drafted' ? '✓ 已填入新会话'
+                   : (S.sent === 'ok' ? '✓ 已发送' : '发给新对话')))),
+            S.sent && S.sent.indexOf('err:') === 0
+              ? h('div', { className: 'eng-conn-log-sent' }, '发送失败：' + S.sent.slice(4))
+              : null,
+            S.promptOpen ? h('pre', { className: 'eng-env-prompt' }, S.prompt) : null) : null
+        ) : null
       );
+
     }
+
     /** 一个开关（自绘，不依赖官方组件库）。
      *
      * bare=true 时【只渲染开关本体】，标签由外层 .eng-row 提供 ——
@@ -4821,6 +5184,7 @@ window.__ModuleLoader__.load({
           props.hint ? h('div', { className: 'eng-sw-hint' }, props.hint) : null),
         toggle);
     }
+
 
     function EngineeringSettingsSection(props) {
       var close = props && props.close;
@@ -5040,15 +5404,21 @@ window.__ModuleLoader__.load({
     // ── 【本次改动·Bug4】收起态小标签的落点（可拖动）───────────────────────
     // 单独一个键，避免和设置对象混在一起；读写失败一律回落默认位置。
     var ENG_FAB_POS_KEY = 'dsh-engineering-ui/fab-position/v1';
+    // ── 【小标签吸附】位置记录 = { x, y, side } ──────────────────────────────
+    // 用户反馈（图一）：小标签能拖动，但拖到屏幕中间就【漂在空中】。
+    //   期望：松手时若不在左右边缘，自动吸附到【最近的边】（像悬浮球那样）。
+    // 存 side 是为了记住「贴哪一边」：窗口宽度变化后按边重新贴，
+    //   而不是死记一个绝对 x（那会随视口变化跑到中间或屏幕外）。
     function loadFabPosition() {
       try {
         if (typeof localStorage === 'undefined') return null;
         var raw = localStorage.getItem(ENG_FAB_POS_KEY);
         if (!raw) return null;
         var j = JSON.parse(raw);
-        if (j && typeof j.x === 'number' && typeof j.y === 'number' &&
-            isFinite(j.x) && isFinite(j.y)) {
-          return { x: j.x, y: j.y };
+        if (j && typeof j.y === 'number' && isFinite(j.y)) {
+          var okSide = (j.side === 'left' || j.side === 'right') ? j.side : null;
+          var okX = (typeof j.x === 'number' && isFinite(j.x)) ? j.x : null;
+          if (okSide || okX !== null) return { x: okX, y: j.y, side: okSide };
         }
       } catch (e) { /* 读取失败 → 用默认位置 */ }
       return null;
@@ -5057,7 +5427,11 @@ window.__ModuleLoader__.load({
       try {
         if (typeof localStorage === 'undefined') return;
         if (!pos) { localStorage.removeItem(ENG_FAB_POS_KEY); return; }
-        localStorage.setItem(ENG_FAB_POS_KEY, JSON.stringify({ x: pos.x, y: pos.y }));
+        localStorage.setItem(ENG_FAB_POS_KEY, JSON.stringify({
+          x: (typeof pos.x === 'number' ? pos.x : null),
+          y: pos.y,
+          side: pos.side || null
+        }));
       } catch (e) { /* 写入失败不影响本次会话 */ }
     }
     // ── 【独立聊天页】useStandaloneChat ────────────────────────────────────

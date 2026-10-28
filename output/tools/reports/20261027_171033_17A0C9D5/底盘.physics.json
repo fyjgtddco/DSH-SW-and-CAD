@@ -1,0 +1,71 @@
+{
+  "kind": "physics",
+  "schema": "dsh-physics-attestation/1",
+  "at": "2026-10-27T09:55:48.448Z",
+  "ts": 1793094948448,
+  "room": "底盘",
+  "run_id": "opt_GATE_BC6C564D42D9_1793094942_iter_3",
+  "report_path": "C:\\Users\\j1877\\.dsh\\.agent-presets\\output\\physics_runs\\opt_GATE_BC6C564D42D9_1793094942\\iteration_3\\opt_GATE_BC6C564D42D9_1793094942_iter_3_report.json",
+  "report_sha256": "2684c0137ad9286399368f34ade0eafac0909a78bf1e2c79a9bbb45b385d8c28",
+  "run_dir": "C:\\Users\\j1877\\.dsh\\.agent-presets\\output\\physics_runs\\opt_GATE_BC6C564D42D9_1793094942\\iteration_3",
+  "overall": "FAIL",
+  "overall_status": "FAIL",
+  "safety_factor": 0.87,
+  "max_von_mises_mpa": 63.26,
+  "max_displacement_mm": 110.8222,
+  "passed_gates": [
+    "DESIGN_SPACE",
+    "CONNECTIVITY",
+    "WALL_THICKNESS",
+    "MAX_DISPLACEMENT",
+    "MESH_QUALITY"
+  ],
+  "failed_gates": [
+    {
+      "id": "SAFETY_FACTOR",
+      "status": "FAIL",
+      "actual": 0.87,
+      "required_min": 2.5,
+      "required_max": 5,
+      "over_design": false,
+      "note": "强度不足，必须加强"
+    },
+    {
+      "id": "FATIGUE_STRENGTH",
+      "status": "FAIL",
+      "actual_sf": 0.488,
+      "required_min": 1.5,
+      "endurance_limit_mpa": 20.76
+    },
+    {
+      "id": "FATIGUE_LIFE",
+      "status": "FAIL",
+      "required_years": 30,
+      "allowable_life_years": 0.1,
+      "damage_at_required_life": 300.000009
+    }
+  ],
+  "not_evaluated": [],
+  "release_status": "NEEDS_REVISION",
+  "fatigue_verdict": "FAIL",
+  "fatigue_sf": 0.488,
+  "model": "equivalent_solid_cantilever_from_bbox",
+  "volume_inflation_x": 1,
+  "model_trustworthy": true,
+  "limitations": [
+    "2D plane stress assumption only",
+    "CST linear elements (6-8%% error vs analytical)",
+    "no stress concentrations captured",
+    "no 3D effects",
+    "【模型等效性】按真实零件【包围盒】的排序三边等效为【实心矩形棱柱】悬臂梁建模 —— 未使用真实截面形状与载荷路径",
+    "【适用边界】L 形 / 薄壁 / 镂空 / 变截面件的安全系数会被显著高估，不得仅凭本结论判定设计合格；此类零件需 3D FEA 复核",
+    "【Bug⑦·求解层级】已升级到 L1（numpy CST 2D 平面应力数值解）—— 仍不是 3D FEA；本机 3D 求解器不可用（Gmsh/CalculiX/Code_Aster/Elmer 均未安装），薄壁/镂空件的 3D 应力集中无法评估",
+    "【模型等效性·薄壁/镂空】该件属薄壁/镂空（薄壁（2V/A 估计壁厚 2.897mm < 判据 3.0mm）），本次采用的 L1(numpy CST 2D 平面应力) 仍建立在【包围盒等效实心悬臂梁】之上 —— L0/L1 等效模型不适用，安全系数会被显著高估，【不得仅凭本结论判定设计合格】；需 3D FEA 复核。本机 3D 求解器（Gmsh/CalculiX/Code_Aster/Elmer）不可用 → 3D FEA 未执行（UNKNOWN），结论中不含任何 3D 有限元结果。",
+    "【载荷分担】本次校核使用 part_load_share=0.2500（来源 acceptance.part_load_share）—— 工况 magnitude_n 是整机级载荷，单件结论取决于该折减系数；若本零件实际承担更大份额，请在工况里显式覆盖（零件级 part_load_share）后重跑"
+  ],
+  "source": "physics_bridge",
+  "_sig": "/hQEOGgc4T+bWC3P9WPKxIZFVbu8RJCDcNrmmTLJ1mU=",
+  "_kid": "eaedc7387e26fb27",
+  "_ts": 1793094948449,
+  "_nonce": "8f07065100ca1242bab5230ada129f49"
+}

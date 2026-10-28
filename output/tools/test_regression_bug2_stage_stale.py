@@ -63,8 +63,17 @@ def section(t):
     print("=" * 74)
 
 
+# 【2026-10-28 重构】先绑定总计子代理身份（测试固定身份）
+os.environ["DSH_SESSION_ID"] = "test-analyst"
+
+
 def fresh():
-    return tempfile.mkdtemp(prefix="m2bug2_")
+    d = tempfile.mkdtemp(prefix="m2bug2_")
+    try:
+        mf.analyst_bind("test-analyst", d)
+    except Exception:
+        pass
+    return d
 
 
 def walk_to_stage(d, stop_idx):
@@ -477,6 +486,7 @@ def main():
         _wd = _wf.get("work_dir")
         check("端到端：拿到本任务 work_dir", bool(_wd), _wd)
 
+        _run(_M2, "analyst-bind", "--work-dir", _wd)
         _run(_M2, "set-depth", "full", "--work-dir", _wd)
         for _sid in mf.STAGE_IDS:
             _run(_M2, "begin-stage", _sid, "--work-dir", _wd)

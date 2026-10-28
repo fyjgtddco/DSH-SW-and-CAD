@@ -10,9 +10,24 @@ provider: filesystem
 
 # Task Mode Selector with Code-Enforced Workflow Gate
 
+## ⛔ 先自查：你是不是被主对话派出来的子代理？
+
+运行 `echo $env:DSH_SESSION_ID`，或看自己的 system prompt：
+**如果本次对话是父会话用 `subagent_fork` 派出来的子代理（delegationDepth>0），
+不要执行本技能的门禁流程**，按主对话给你的房间任务直接干活：
+
+| 你的身份 | 允许做什么 | 禁止做什么 |
+|---|---|---|
+| **建模小屋 / 总理子代理** | 本房间建模、验证、`room-report`、`room-artifact`、`prime-report`（总理） | `init` / `provide_context` / `select` / `confirm-assembly` / `begin-stage` 等门禁命令 —— 门禁已在主对话完成 |
+| **总计子代理** | 只调 `mode2_flow.py` 的阶段/提问/编制命令 + `ask_user.py` | `init` / `provide_context` / `select`（那是主对话的活） |
+
+> 实测教训（会话 `session-31c56a28`）：三个建模小屋各自加载本技能后又跑了一遍
+> `init → provide_context → begin-stage → ask`，把主对话的十阶段状态覆盖成四份。
+> 现在代码侧已加 `ROOT_SESSION_REQUIRED`：子代理调这些编排命令会被直接拒绝并提示。
+
 ## Rules (Code-Enforced, Not Just Prompts)
 
-**Rule 0: Any design work MUST go through this gate first.**
+**Rule 0: Any design work MUST go through this gate first.**（仅限主对话）
 
 ## Step 1: Analyze Task Type
 
@@ -152,7 +167,71 @@ python "<工程模式根目录>\tools\workflow_gate.py" provide_context "<用户
     但必须落在上述区间内（见 3.5.1 / 3.5.2）。
 - ★ 返回内容会要求你**先启动总计子代理**按十阶段分析，**分析到缺信息时才提问**
   （不允许开头就把候选题目全部抛出）。命令返回里有完整的十阶段清单与调用示例。
-- **MUST 按返回指引执行：先 begin-stage，再按需 ask；不要一股脑问题！**
+- **MUST 按返回指引执行：立刻 spawn 总计子代理（见 §3.6），由它跑十阶段 + 按需提问。**
+  主对话自己 `begin-stage` / `ask` 会被 `ANALYST_ACTOR_REQUIRED` 拒绝 —— 别自己上手。
+
+### 第 3.6 步：★★ 在主对话里 spawn【总计子代理】（十阶段分析的唯一执行者）
+
+> 🔴 **【2026-10-28 修复 · 与旧文档直接矛盾处已删除】**
+> 旧版本文档末尾有两条**已废弃（deprecated）**的旧规则（原文已删除，这里只留一句指认，
+> 免得被再照抄）：①「门禁每一步都要在主对话里做完、不要进子代理」；
+> ②「子代理只用来建模、不负责提问」。—— 两条都与「第 3 步启动总计子代理」**直接矛盾**。
+> 实测后果：主对话据此自己把
+> 十阶段走完、`set-subagent-plan` 也自己调（只写了 `--decided-by "总计子代理"` 这个字符串），
+> **总计子代理从未被真实创建**。**本节取代那两句旧规则。**
+
+`provide_context` #2 返回后，主对话**立刻**用 `subagent_fork` 创建【总计子代理】
+（**真实子代理**，不是主对话自演）：
+
+```python
+subagent_fork(description="总计子代理（十阶段分析）", prompt="<按下面 5 条写>")
+```
+
+**总计子代理 prompt 必须原样包含这 5 条（缺一条就会退化成"主对话自演"）：**
+
+**① 第一步：绑定分析身份** —— 不绑定，后面每条阶段命令都会被 `ANALYST_ACTOR_REQUIRED` 拒绝：
+```powershell
+python "<根>\tools\mode2_flow.py" analyst-bind
+```
+   - 自动从环境变量 `DSH_SESSION_ID` 取**它自己**的 sessionId 落盘，**不用手写 id**。
+   - 自检：`python "<根>\tools\mode2_flow.py" analyst-status`（谁绑的、什么时候绑的）。
+
+**② 按序跑完十阶段**（`begin-stage` → `mark-stage-done`，禁止跳阶段）：
+```powershell
+python "<根>\tools\mode2_flow.py" begin-stage TaskUnderstanding
+python "<根>\tools\mode2_flow.py" mark-stage-done TaskUnderstanding --artifact "<本阶段产出>"
+```
+   - 十阶段清单见 §3.5.3；进度用 `python "<根>\tools\mode2_flow.py" stage-status` 查。
+   - 只有 `DesignIteration` 允许回退（`refresh-stage` / `redo-stage`）。
+   - 等价写法：`python "<根>\tools\workflow_gate.py" mode2 <子命令>`（透传同一个模块）。
+
+**③ 缺信息时提问 —— 走宿主代问桥 `ask_user.py`**
+（**子代理不能直接调 `ask_user_question`**：`userQuestions.ask` 校验 roots，
+子代理必抛 `DELEGATED_CALLER`，**只能用这个桥**）：
+```powershell
+python "<根>\tools\ask_user.py" --room "总计子代理" --child "<它自己的 sessionId>" `
+       --header "使用场合" --question "使用场合是什么？" --option "室内" --option "户外"
+```
+   - 阻塞等待；用户的答案以 **tool_result** 回到它当前调用栈，可继续原逻辑。
+   - **不许自己编答案**，也不许用正文代替提问。
+   - 问之前先登记：`python "<根>\tools\mode2_flow.py" ask "<问题>" --stage <当前阶段> --reason "<为什么现在问>"`；
+     用户答完再 `answer-question <seq> "<答复>"` 落账。
+   - 题数区间：强需求 10~50 / 弱需求 5~10（代码硬校验，见 §3.5.1）。
+
+**④ 分析完成后登记房间编制**（房间数 / 细分**由它决定**，禁止照抄固定表）：
+```powershell
+python "<根>\tools\mode2_flow.py" set-subagent-plan `
+       --rooms-json "<rooms.json 的绝对路径>" --rationale "<按功能分解的理由>" `
+       --decided-by "总计子代理"
+```
+   - `--decided-by` 必须写「总计子代理」；每房间必须写 `parts`（负责哪些零件）与 `why`；数量 1~24。
+   - 十阶段没走完就调会被拒 —— 先 `stage-status` 自查（`require_stages_complete` 强制前置）。
+
+**⑤ 结束回合**，返回值里带**编制摘要**：房间名 × 每房间零件 × 该房间属于第几波。
+
+**这整段时间，主对话只做一件事：等它结束**（`wait_agent` / `list_agents`）。
+主对话**不要**去跑 `begin-stage` / `mark-stage-done` / `ask` —— 代码会以 `ANALYST_ACTOR_REQUIRED` 拒绝；
+而且一旦主对话自己跑，`select` 之后的「编制由分析得出」就全是假的。
 
 ### 第 4 步：力学估算（`provide_context` #3）
 
@@ -161,6 +240,9 @@ python "<工程模式根目录>\tools\workflow_gate.py" provide_context "<全部
 ```
 - 执行力学估算，返回 A/B/C 搭建方式 + D/E 并行策略选项
 - **MUST wait for user to choose A/B/C and D/E!**
+- 🔴 **调用前必须确认：总计子代理已 `analyst-bind`、十阶段走完、已 `set-subagent-plan`、回合已结束。**
+  自查三连：`analyst-status` / `stage-status` / `subagent-plan`，再用 `list_agents` 确认它结束。
+  **它没跑完就调 #3，后面的 `select` 会直接报 `MODE2_ANALYST_REQUIRED`。**
 
 > 📌 状态流转（**新流程，2026-10-13 重排**）：
 > `mode_confirm_asked`（确认模式+D/E+A/B/C）
@@ -178,7 +260,7 @@ python "<工程模式根目录>\tools\workflow_gate.py" provide_context "<全部
 > **physics 校核必须用该文件**（额定载荷 = `magnitude_n`），
 > 严禁另起一套数值（那正是 BUG-07「门禁 1000N / physics 100N」的根因）。
 
-### 第 3 步：`select` 确认选择
+### 第 5 步：`select` 确认选择（前置：总计子代理已完成十阶段 + 编制）
 
 ```powershell
 python "<工程模式根目录>\tools\workflow_gate.py" select <A|B|C>,<D|E>
@@ -199,6 +281,13 @@ python "<工程模式根目录>\tools\workflow_gate.py" select <A|B|C>,<D|E>
 - **【BUG-04 修复】** 并行策略的权威来源已统一：
   `select` 当场写入 `workflow_state.json`，并自动与 `mode_state.json` **对齐**，
   不再出现两个命令读到相反结论的情况。
+- 🔴 **【2026-10-28】`select` 的硬前置：总计子代理已 `analyst-bind` 且十阶段走完。**
+  未 spawn / 未绑定 / 阶段缺项 → `select` 返回 **`MODE2_ANALYST_REQUIRED`**（绑定缺失的那次）
+  或子代理自己调阶段命令被 **`ANALYST_ACTOR_REQUIRED`** 拒。
+  **看到 `MODE2_ANALYST_REQUIRED` 就说明第 3.6 步没做**（八成是主对话自己把十阶段跑了）：
+    → spawn 总计子代理（§3.6）→ 让它 `analyst-bind` 并补齐缺的阶段 → 再 `select`。
+- 🔴 **`select` 返回的 `wave1` = 编制里的【全部建模房间】+【总理子代理】。**
+  房间数与细分**由总计子代理决定**，主对话**不得**改用固定表（旧固定 3 房间 / 5 房间已废弃）。
 
 ### 第 3.5 步：★ 模式二新流程（全部为【代码强制】，不是提示词约定）
 
@@ -253,6 +342,13 @@ python "<根>\tools\workflow_gate.py" mode2 set-subagent-plan `
 - `--decided-by` **必须是「总计子代理」**，否则报「越权」并拒绝。
 - 每个房间必须写 `parts`（负责哪些零件）与 `why`（为什么需要它）。
 - 依赖不得悬空。数量范围 1~24。
+- 🔴 **本条命令只能由【总计子代理本人】执行**：`mode2_flow.py` 会比对调用方的
+  `DSH_SESSION_ID` 与 `analyst-bind` 落盘的 analyst（也可显式 `--actor`），
+  **主对话直接调 → `ANALYST_ACTOR_REQUIRED`**；`select` 也会校验 analyst，缺失 → `MODE2_ANALYST_REQUIRED`。
+- 🔴 **编制 = 全系统房间表的唯一来源。** `select` 的 `wave1` 直接取编制里的全部建模房间
+  （+ 代码固定追加的「总理子代理」）。**旧的代码默认房间表已废弃，不得作为兜底**；
+  房间数量与细分由总计子代理按功能分解决定（可能是 2 个，也可能是 7 个）。
+- 「总理子代理」（`type=prime`，`fixed=True`）由代码自动追加，**不要写进编制 JSON**。
 
 #### 3.5.5 固定增设「总理子代理」（不可被编制顶掉）
 
@@ -358,18 +454,52 @@ python "<根>\tools\workflow_gate.py" pre-delivery
 任一不满足即**拒绝宣告完成**（拒绝归档）：十阶段未走完 / 题数不达标 /
 编制缺失或非总计子代理决定 / 有零件未上报总理 / 存在未处理的相邻尺寸不一致。
 
-### 第 4 步：创建子代理小屋（必须创建全部小屋！）
+### 第 6 步：创建子代理小屋（房间表由总计子代理决定！）
 
-**串行模式严格顺序（不可打乱）：**
+> 🔴 **【2026-10-28】** 房间表 = `select` 返回的 `wave1` = **编制里的全部建模房间 + 总理子代理**。
+> **数量与细分由总计子代理决定** —— 不要写死旧的固定五房间表
+> （结构件 / 传动机构 / 壳体机架 / 总装与验证 / 工程图输出），
+> 也不要写死「第1波 = 结构件 + 传动机构 + 壳体机架」这种固定三房间说法。
+
+**并行模式 D —— 三波式（总理与建模同波一起开）：**
+
+```
+wave1 = select.wave1 = 全部建模房间 + 总理子代理   ← 同时 fork
+wave2 = 总装与验证（等 wave1 全部 room-end）
+wave3 = 工程图输出（等 wave2 room-end）
+```
+
+**wave1 执行顺序（不可打乱）：**
+1. **先**对每个房间 `python "<根>\tools\mode_gate.py" room-start <房间名>`
+   （登记，**BEFORE** 创建 subagent；未 room-start 的房间 `subagent-assign` 会报 `ROOM_NOT_REGISTERED`）
+2. **再**在同一条回复里**一次性 `subagent_fork` 全部房间**（含总理子代理）——
+   ⚠️ 严禁只开一个、严禁分多条回复慢慢开：**波内房间必须同时启动**
+3. **每个 fork 之后立刻**用返回的 id 绑定（漏了就永远 `unbound`）：
+   ```powershell
+   python "<根>\tools\mode_gate.py" subagent-assign <房间名> <subagent_fork 返回的 id>
+   ```
+4. 建模小屋 prompt 必须写「只做本房间零件」，并带上 `select` 返回的 `part_ownership` keywords。
+
+**总理子代理（与 wave1 同时启动，长生命周期的监工）：**
+- 开工：`python "<根>\tools\mode2_flow.py" prime-board` 看全局，`prime-room` 看职责。
+- **循环**：每轮读 `python "<根>\tools\mode_gate.py" room-board --json`，**只看每个房间的 `state`**：
+  - `running` / `starting` / `idle` → 正常在干活，**不许催、不许判死**；
+  - `waiting_sw` → **在等 SW 锁，属正常等待**，只能等，**禁止判死、禁止 reset**；
+  - `unbound` → 平台 alive 但没 `subagent-assign`，**提示父代理补 assign**（不是死亡）；
+  - `dead` → **只有这个才允许报**，并建议父代理 `recover` / `restart`；
+  - `done` → 收报告。
+- 收件：建模小屋 `save()` 后 `prime-report`；总理做 `check-consistency` → `prime-verify`。
+- 结束：wave3 出图完成后 `python "<根>\tools\mode_gate.py" room-end 总理子代理`。
+- **prime 房间不计入 wave 完成判定**（长生命周期），但**收尾前必须 room-end**。
+
+**串行模式 E 严格顺序（不可打乱）：**
 1. **先**调 `mode_gate.py room-start <房间名>`（登记， BEFORE 创建 subagent）
-2. **再**用 subagent/subagent_fork 创建该小屋
-3. 等待该小屋完成（list_agents 检查）
-4. 调 interrupt_agent 停止
-5. 调 `mode_gate.py room-end <房间名>`（解锁，才能开下一个）
-6. 重复 1~5 处理下一个房间
+2. **再**用 subagent/subagent_fork 创建该小屋，**并立刻** `subagent-assign <房间> <id>`
+3. 等待该小屋完成（`room-board` 看 `state=done`，或 `list_agents` 检查）
+4. 调 `mode_gate.py room-end <房间名>`（解锁，才能开下一个）
+5. 重复 1~4 处理下一个房间
 
-**严禁一次性创建多个 subagent！** 串行锁会拒绝第二个 room-start。
-- 并行模式：可同时创建多个小屋，各自独立 room-start
+**严禁一次性创建多个 subagent（串行模式）！** 串行锁会拒绝第二个 room-start。
 - 🚫【铁律】所有小屋创建完毕前，主对话禁止调用 sw_bridge.py 做任何建模操作！
 
 ## ⚠️ 关键规则
@@ -384,39 +514,59 @@ python "<根>\tools\workflow_gate.py" pre-delivery
   ③ 传「全部按需提问」的答案（此时才出力学估算）。
   ⚠️ 顺序不能颠倒：模式确认在前、强度在后（2026-10-13 重排）。
 - **`select` 支持 `C,E` / `C E` / `"C, E"` / `--choice C --parallel E` 等写法**（BUG-03）
-- 所有门禁步骤必须在主对话完成，不要进子代理
+- 🔴 **谁调什么（2026-10-28 重排）**：
+  · `workflow_gate.py`（init / provide_context / select）与 `mode_gate.py`（room-start / room-end /
+    subagent-assign / room-board / recover）**由主对话调**；
+  · `mode2_flow.py` 的十阶段与编制命令（analyst-bind / begin-stage / mark-stage-done / ask /
+    answer-question / refresh-stage / set-subagent-plan）**只能由总计子代理调**。
+  · 旧规则「门禁每一步都在主对话完成、不进子代理」**已废除（deprecated）** —— 它与
+    "spawn 总计子代理"直接矛盾，实测导致主对话自演十阶段、总计子代理从未创建。
+- 🔴 **子代理死活只看 `python "<根>\tools\mode_gate.py" room-board --json` 的 `state`**：
+  · `waiting_sw`（在排 SW 锁）/ `running` / `starting` / `idle` = **正常，禁止判死**；
+  · `unbound` = 平台 alive 但没 `subagent-assign` → **补 assign**（不是僵尸）；
+  · `dead` = 才允许 `recover` / `restart`，且先看 `safe_to_restart`；
+  · **禁止对 `running` / `waiting_sw` / `idle` 的房间 `reset`**（会把还在干活的小屋清掉）。
 - 严禁跳过门禁直接开始设计
 
 ## Violation Handling
 
 - Skip workflow_gate = **CODE BLOCKED**
 - Mode 2 without subagent rooms = **CODE BLOCKED**
+- **主对话自己跑十阶段 / 自己调 `set-subagent-plan`** = **CODE BLOCKED**（`ANALYST_ACTOR_REQUIRED`）
+- **没 spawn 总计子代理就 `select`** = **CODE BLOCKED**（`MODE2_ANALYST_REQUIRED`）
+- **`fork` 后漏 `subagent-assign`** = 房间显示 `unbound`，上报与判定全部失真
 - Used subagent in Mode 1/3 = **FAIL**
 
 ## Example Flow
 
 User: "Design a planetary reducer"
 
-AI must (all in MAIN conversation, NOT in subagent):
+AI must（门禁命令在主对话；十阶段在**总计子代理**里）：
 1. Output: [MODE SELECTED] Mode 2
 2. 执行 `python "<工程模式根目录>\tools\workflow_gate.py" init "Design a planetary reducer"`
    → 返回**第 1 步：确认模式 + ① 并行策略 D/E + ② 是否 AI 自主 A/B/C**
    → **把这两问呈现给用户，必须等用户回答！**
 3. 用户回答后，执行
    `... workflow_gate.py provide_context "<并行策略+搭建方式的答案>"`
-   → 返回**第 2 步：参数需求强度（强需求 / 不强）**
-   → **把这一题呈现给用户，等用户作答！**
+   → 返回**第 2 步：参数需求强度（强需求 / 不强）** → 呈现给用户，等作答
 4. 用户答完参数强度后，**再次**执行
    `... workflow_gate.py provide_context "<参数强度的答案>"`
-   → 返回**第 3 步：启动总计子代理（十阶段流水线）+ 按需提问指引**
-   → 题数区间：强需求 10~50 / 弱需求 5~10（**不再一股脑全问**）
-   → 按指引先 `mode2_flow.py begin-stage <阶段>`，分析到缺信息时再 `ask`
-5. 提问完成后执行
-   `... workflow_gate.py provide_context "<全部提问的答案>"`
-   → 返回力学估算 + 落盘 `tools/load_cases/gate_load_case.json`
-6. 执行 `... workflow_gate.py select C,E`（choice=用户选择的 A/B/C，并行=D/E）
-7. 创建全部 5 个小屋（结构件→传动机构→壳体机架→总装与验证→工程图输出），串行模式逐个创建
-8. 每个小屋完成后用 interrupt_agent 清理，再创建下一个
-
-**IMPORTANT: All workflow_gate steps must be done in MAIN conversation first!**
-Subagents are ONLY for actual modeling work, NOT for asking questions.
+   → 返回**先启动总计子代理（十阶段）+ 按需提问指引**
+5. ★ **spawn 总计子代理**（`subagent_fork`，description="总计子代理（十阶段分析）"）：
+   - 它第一步 `python "<根>\tools\mode2_flow.py" analyst-bind`（绑自己 sessionId）
+   - 按序 `begin-stage` / `mark-stage-done` 走完十阶段（缺阶段会被拒）
+   - 缺信息时 `python "<根>\tools\ask_user.py" --room "总计子代理" --child <自己的 sessionId>
+     --header ... --question ...`（子代理不能直接 ask_user_question）
+   - 分析完 `python "<根>\tools\mode2_flow.py" set-subagent-plan --rooms-json <file>
+     --rationale "..." --decided-by "总计子代理"`
+   - 结束回合，返回编制摘要
+6. 主对话 `wait_agent` / `list_agents` 等它结束，再执行
+   `... provide_context "<全部提问的答案>"` → 力学估算 + 落盘 `tools/load_cases/gate_load_case.json`
+7. 问 A/B/C 与 D/E → 执行 `... workflow_gate.py select C,E`
+   → `wave1` = 编制里的**全部建模房间 + 总理子代理**（数量由总计子代理决定）
+   → 返回 **`MODE2_ANALYST_REQUIRED`** = 第 5 步没做（没 spawn 总计子代理）
+8. **wave1 一次性 fork 全部**（建模房间 + 总理子代理写在同一条回复里）；
+   每个 fork 后立刻 `python "<根>\tools\mode_gate.py" subagent-assign <房间> <id>`
+9. 总理子代理持续 `mode_gate.py room-board --json` 盯各房间 `state`
+   （`waiting_sw` 只是排队，不许判死）；wave2 = 总装、wave3 = 出图；
+   收尾前 `room-end 总理子代理`。

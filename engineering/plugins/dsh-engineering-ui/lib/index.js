@@ -3894,7 +3894,263 @@ export function apply(ctx) {
     } catch (e) {}
   }));
 
+  // ══ 【阶段 C · 状态可信化】平台子代理注册表（platform_agents.json）═══════
+  // 背景（用户会话实测）：主对话分不清子代理死活 —— 它手动跑 while(true)
+  //   platform-sync running 造假心跳，subagent-assign 从没调用，于是 recover 把
+  //   还在跑的房间当"僵尸残留"，紧接着 reset 把三个正在建模的子代理全杀了。
+  // 根因：存活状态靠主对话手写，而不是平台事实。
+  //
+  // 本登记器把【平台事实】自动落盘，供 mode_gate._platform_liveness() 读取：
+  //   agent/created       → 记一条 {id,label,parentId,createdAt,status:'running'}
+  //   agent/turn-stopping → 刷新 lastEventAt，status 仍为 'running'（回合结束≠死亡）
+  //   agent/disposed      → status='disposed'（平台确认释放，mode_gate 才允许判死）
+  //
+  // 硬约束（任何一条破了都可能误杀正在建模的小屋）：
+  //   · 只登记【子代理】（delegationDepth>0 或 有 parentId），绝不写主会话；
+  //   · 拿不到字段就跳过（不猜、不报错）；
+  //   · 原子写（tmp + rename）、读-改-写、节流 ≥300ms；
+  //   · 任何异常一律吞掉 —— 登记器坏了也绝不能影响会话。
+  const PLATFORM_AGENTS_NAME = 'platform_agents.json';
+  const PLATFORM_AGENTS_THROTTLE_MS = 300;
+  const PLATFORM_AGENTS_KEEP = 200;
+  let _paPending = new Map();     // id -> 待落盘记录
+  let _paTimer = null;
+  let _paLastWriteAt = 0;
+
+  /** 注册表路径（找不到 tools 目录返回 null → 静默跳过）。 */
+  function platformAgentsPath() {
+    try {
+      const dir = findToolsDir();
+      if (!dir) return null;
+      return path.join(dir, PLATFORM_AGENTS_NAME);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 只认字符串/数字标签；函数、对象一律不猜（返回 null）。 */
+  function paPickStr(v) {
+    try {
+      if (v === undefined || v === null) return null;
+      if (typeof v === 'string') return v.trim() || null;
+      if (typeof v === 'number') return String(v);
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 读现有注册表（读不到返回 null，由调用方决定跳过还是新建）。 */
+  function readPlatformAgentsFile() {
+    try {
+      const p = platformAgentsPath();
+      if (!p) return null;
+      const j = readJsonSafe(p);
+      if (!j || typeof j !== 'object') {
+        return { updatedAt: null, source: 'dsh-engineering-ui', agents: [] };
+      }
+      const agents = Array.isArray(j.agents)
+        ? j.agents.filter((a) => a && a.id) : [];
+      return {
+        updatedAt: j.updatedAt || null,
+        source: j.source || 'dsh-engineering-ui',
+        agents,
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 从 agent 对象抽取登记所需字段。
+   * 只返回【子代理】的元信息；主会话或拿不到字段 → null（跳过）。
+   * label 取值顺序：label / displayTitle / title / session.header.title / 兜底 id。
+   * parentId 取值顺序：parentId / parent.id / header.parentId / header.parentSessionId。
+   */
+  function platformAgentMeta(agent) {
+    try {
+      if (!agent || !agent.id) return null;
+      const header = (agent.session && agent.session.header) || {};
+      const depthRaw = (typeof agent.delegationDepth === 'number')
+        ? agent.delegationDepth
+        : ((typeof agent.depth === 'number') ? agent.depth
+          : ((typeof header.delegationDepth === 'number')
+            ? header.delegationDepth : null));
+      const parentId = agent.parentId
+        || (agent.parent && agent.parent.id)
+        || header.parentId
+        || header.parentSessionId
+        || agent.parentSessionId
+        || null;
+      const isSub = (depthRaw !== null && depthRaw > 0) || !!parentId;
+      if (!isSub) return null;   // 主会话不登记
+      const label = paPickStr(agent.label)
+        || paPickStr(agent.displayTitle)
+        || paPickStr(agent.title)
+        || paPickStr(header.title)
+        || paPickStr(agent.name)
+        || String(agent.id);
+      return {
+        id: String(agent.id),
+        label,
+        parentId: parentId ? String(parentId) : null,
+        createdAt: (agent.createdAt !== undefined && agent.createdAt !== null)
+          ? agent.createdAt : new Date().toISOString(),
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 该 id 是否已在注册表（文件或待写队列）里 —— 用于 disposed 时认领已知子代理。 */
+  function platformAgentKnown(id) {
+    try {
+      const key = String(id);
+      if (_paPending.has(key)) return true;
+      const cur = readPlatformAgentsFile();
+      if (!cur) return false;
+      return (cur.agents || []).some((a) => String(a && a.id) === key);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 读-改-写落盘（原子：先写 .tmp 再 rename；rename 失败退回直接写）。 */
+  function flushPlatformAgents() {
+    _paTimer = null;
+    try {
+      const p = platformAgentsPath();
+      if (!p) {
+        // 没有 tools 目录 → 静默跳过（丢弃待写队列，避免内存里无限堆积）
+        _paPending = new Map();
+        return;
+      }
+      const cur = readPlatformAgentsFile() || { agents: [] };
+      const map = new Map();
+      (cur.agents || []).forEach((a) => {
+        if (a && a.id) map.set(String(a.id), a);
+      });
+      const pending = _paPending;
+      _paPending = new Map();
+      pending.forEach((rec, id) => {
+        const old = map.get(String(id)) || {};
+        const merged = Object.assign({}, old, rec);
+        if (!merged.createdAt) merged.createdAt = new Date().toISOString();
+        if (!merged.label) merged.label = String(id);
+        if (!merged.status) merged.status = 'running';
+        map.set(String(id), merged);
+      });
+      const agents = Array.from(map.values()).slice(-PLATFORM_AGENTS_KEEP);
+      const payload = {
+        updatedAt: new Date().toISOString(),
+        source: 'dsh-engineering-ui',
+        agents,
+      };
+      const text = JSON.stringify(payload, null, 2);
+      const tmp = p + '.' + process.pid + '.tmp';
+      let wrote = false;
+      try {
+        fs.writeFileSync(tmp, text, 'utf8');
+        fs.renameSync(tmp, p);
+        wrote = true;
+      } catch (e) {
+        // Windows：目标被轮询/杀软占用时 rename 可能失败 → 退回直接写
+        try {
+          fs.writeFileSync(p, text, 'utf8');
+          wrote = true;
+        } catch (e2) {}
+        try { fs.unlinkSync(tmp); } catch (e3) {}
+      }
+      if (wrote) {
+        _paLastWriteAt = Date.now();
+      } else {
+        // 写失败 → 把这批记录放回队列，等下一次事件重试（不丢状态）
+        pending.forEach((rec, id) => {
+          if (!_paPending.has(id)) _paPending.set(id, rec);
+        });
+      }
+    } catch (e) {
+      // 登记器异常绝不能影响会话
+    }
+  }
+
+  /** 节流调度：≥300ms 内最多落盘一次，多次事件合并成一次写。 */
+  function schedulePlatformAgentsFlush() {
+    try {
+      if (_paTimer) return;
+      const elapsed = Date.now() - _paLastWriteAt;
+      const wait = elapsed >= PLATFORM_AGENTS_THROTTLE_MS
+        ? 0 : (PLATFORM_AGENTS_THROTTLE_MS - elapsed);
+      _paTimer = setTimeout(() => {
+        try { flushPlatformAgents(); } catch (e) {}
+      }, wait);
+    } catch (e) {}
+  }
+
+  /** 合并进待写队列并安排落盘（同 id 后续字段覆盖先前字段）。 */
+  function stagePlatformAgent(rec) {
+    try {
+      if (!rec || !rec.id) return;
+      const key = String(rec.id);
+      const prev = _paPending.get(key) || {};
+      _paPending.set(key, Object.assign({}, prev, rec));
+      schedulePlatformAgentsFlush();
+    } catch (e) {}
+  }
+
+  // ── 事件接线：本插件【只新增登记器】，不改任何既有路由/守卫行为 ──────────
+  disposers.push(ctx.on('agent/created', (payload) => {
+    try {
+      const meta = platformAgentMeta(payload && payload.agent);
+      if (!meta) return;                       // 主会话 / 字段缺失 → 跳过
+      stagePlatformAgent(Object.assign({}, meta, {
+        status: 'running',
+        lastEventAt: new Date().toISOString(),
+        lastEventAtMs: Date.now(),
+      }));
+    } catch (e) {}
+  }));
+
+  disposers.push(ctx.on('agent/turn-stopping', (payload) => {
+    try {
+      const agent = payload && payload.agent;
+      if (!agent || !agent.id) return;
+      const meta = platformAgentMeta(agent);
+      // 只有"已登记过的子代理"或"能证明是子代理"的才更新 —— 主会话不写
+      if (!meta && !platformAgentKnown(agent.id)) return;
+      const rec = {
+        id: String(agent.id),
+        // 【关键】回合结束 ≠ 死亡：子代理仍然活着，禁止让 mode_gate 判死
+        status: 'running',
+        lastEventAt: new Date().toISOString(),
+        lastEventAtMs: Date.now(),
+      };
+      if (meta) { rec.label = meta.label; rec.parentId = meta.parentId; }
+      stagePlatformAgent(rec);
+    } catch (e) {}
+  }));
+
+  disposers.push(ctx.on('agent/disposed', (payload) => {
+    try {
+      const agent = payload && payload.agent;
+      if (!agent || !agent.id) return;
+      const meta = platformAgentMeta(agent);
+      if (!meta && !platformAgentKnown(agent.id)) return;
+      const rec = {
+        id: String(agent.id),
+        // 平台已确认释放 → mode_gate 才允许把它判成 dead（唯一判死来源）
+        status: 'disposed',
+        lastEventAt: new Date().toISOString(),
+        lastEventAtMs: Date.now(),
+      };
+      if (meta) { rec.label = meta.label; rec.parentId = meta.parentId; }
+      stagePlatformAgent(rec);
+    } catch (e) {}
+  }));
+
   return () => {
+    // 卸载前把待写记录落盘（尽力而为；失败也绝不能抛）
+    try { if (_paPending && _paPending.size) flushPlatformAgents(); } catch (e) {}
     for (const dispose of disposers.reverse()) {
       try { dispose(); } catch {}
     }

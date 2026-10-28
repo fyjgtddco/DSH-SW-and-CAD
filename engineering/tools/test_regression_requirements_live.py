@@ -31,6 +31,9 @@ ITOOLS = os.path.join(INST, "tools")
 SKILL = os.path.join(DSH, "skills", "mode-selection", "SKILL.md")
 PLUGIN = os.path.join(DSH, "profiles", "desktop", "node_modules", "dsh-engineering-ui")
 
+# 【2026-10-28 重构】子进程继承固定身份；需求2 的脚本内会 analyst-bind
+os.environ["DSH_SESSION_ID"] = "test-analyst"
+
 P = F = 0
 def ck(label, cond, extra=""):
     global P, F
@@ -108,6 +111,11 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.getcwd())
 import mode2_flow as mf
 d = tempfile.mkdtemp()
+mf.analyst_bind("test-analyst", d)   # 先真实绑定总计子代理（代码强制）
+mf.set_depth("lite", d)
+for _sid in mf.STAGE_IDS:            # 编制前置：十阶段必须走完
+    mf.begin_stage(_sid, d)
+    mf.mark_stage_done(_sid, "art-" + _sid, d)
 rooms = [{"name":"A","type":"housing","parts":["p1"],"why":"承载","depends_on":[]},
          {"name":"B","type":"structural","parts":["p2"],"why":"支撑","depends_on":["A"]},
          {"name":"C","type":"structural","parts":["p3"],"why":"运动","depends_on":["B"]}]

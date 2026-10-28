@@ -54,6 +54,8 @@ def fresh():
 
 
 def main():
+    # ── 【2026-10-28 重构】总计子代理必须是真实绑定；直接函数调用用这个测试身份 ──
+    os.environ["DSH_SESSION_ID"] = "test-analyst"
     # ═══════════════════════════════════════════════════════════════
     section("1. 提问数量硬约束（用户口径：强 10~50 / 弱 5~10，下界可等于）")
     # ── 边界值：恰好取到上下界必须【合法】 ──
@@ -123,8 +125,11 @@ def main():
         qr = mf.question_report(d)
         check("★ 提问达到上界后被拦（asked=%d ≤ 50）" % qr.get("asked"),
               qr.get("asked") == 50, "实际 %s" % qr.get("asked"))
-        # 收尾校验：50 题 ≥ 下界 10 → 通过
-        check("50 题收尾校验 → 通过", mf.question_report(d, final=True)["ok"])
+        # 收尾校验：登记 ≠ 问过 —— 必须逐题落盘用户答复后才算通过
+        for _q in (mf.question_report(d).get("questions") or []):
+            mf.answer_question(_q["seq"], "测试答复", d)
+        check("50 题收尾校验 → 通过（全部已作答）",
+              mf.question_report(d, final=True)["ok"])
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -161,6 +166,12 @@ def main():
     section("4. 子代理编制：只能由【总计子代理】决定")
     d = fresh()
     try:
+        mf.analyst_bind("test-analyst", d)   # 先真实绑定总计子代理
+        # 编制的前置是"十阶段已走完"（代码强制）——这里先补齐
+        mf.set_depth("lite", d)
+        for _s in mf.STAGE_IDS:
+            mf.begin_stage(_s, d)
+            mf.mark_stage_done(_s, "art-" + _s, d)
         rooms = [{"name": "结构件", "type": "structural", "parts": ["大臂", "小臂"],
                   "why": "承载主载荷", "depends_on": []},
                  {"name": "传动机构", "type": "transmission", "parts": ["齿轮轴"],
@@ -326,9 +337,15 @@ def main():
     # 真正跑一条会写盘的 CLI（走 argparse default，能抓出 default 里的拼写错）
     _d9 = fresh()
     try:
+        mf.analyst_bind("test-analyst", _d9)
+        mf.set_depth("lite", _d9)
+        for _s in mf.STAGE_IDS:
+            mf.begin_stage(_s, _d9)
+            mf.mark_stage_done(_s, "art-" + _s, _d9)
         _code = mf.main(["set-subagent-plan",
                          "--rooms-json", json.dumps(
-                             [{"name": "A", "parts": ["p"], "why": "w"}]),
+                             [{"name": "A", "type": "structural",
+                               "parts": ["p"], "why": "w"}]),
                          "--rationale", "r",
                          "--work-dir", _d9])
         check("★ CLI set-subagent-plan 用默认 --decided-by 能成功", _code == 0,
