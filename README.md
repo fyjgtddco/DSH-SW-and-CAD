@@ -1,4 +1,5 @@
 # 🔧 DSH 工程模式 · Engineering Mode
+<img width="1710" height="1209" alt="image" src="https://github.com/user-attachments/assets/dd8b2c78-6098-438b-bf8c-3513306d52ac" />
 
 > **面向 CAD / SolidWorks 机械设计的 DeepSeek Harness Agent 预设。**
 > 以「完成工图」为唯一目标：需求访谈 → 三维建模 → 有限元校核 → 出图交付，
