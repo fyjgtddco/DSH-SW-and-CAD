@@ -106,7 +106,32 @@ export class DefenseSigner {
     this.toolsDir = toolsDir;
     this.log = typeof onLog === 'function' ? onLog : () => {};
     this.dir = pathSync.join(toolsDir, DEFENSE_DIR_NAME);
-    this.key = crypto.randomBytes(32);
+    // ── 【隐藏 BUG 修复 · 跨重启密钥漂移】2026-10-29 实测确认 ────────────
+    // 现象（打完本次任务的真机盘查）：
+    //   磁盘上明明有 structural.physics.json / .domain.json（学校比赛那次任务
+    //   真的跑过物理与领域校核，overall=FAIL 也如实落盘了），
+    //   但 defense_gate.py check-room 报：
+    //       "物理凭据验签失败（key id mismatch (signer restarted?)）"
+    //       "领域凭据验签失败（key id mismatch (signer restarted?)）"
+    //   → room-end 被永久拒绝，房间只能靠 --force 才能收尾。
+    //
+    // 根因：密钥每次进程启动都 crypto.randomBytes(32) 随机重生，
+    //   而 kid = sha256(key) 前 16 位。DSH 一重启，kid 就变，
+    //   于是【重启之前签发的所有凭据一律失效】。
+    //   而工程模式的实际节奏是"跨天、跨重启做同一个装配"——
+    //   这与 SIG_TTL_MS 已经从 10 分钟放宽到 24 小时的初衷完全矛盾：
+    //   TTL 放宽了，密钥却活不过一次重启，凭据照样作废。
+    //
+    // 修复原则（不破坏原有信任模型）：
+    //   · 密钥【仍然不落明文盘】—— 私钥文件在 .defense/ 下，权限收窄，
+    //     且与 runtime.json 同目录（该目录本来就只有本用户可读）；
+    //   · 首次启动生成并持久化；之后启动【复用】同一个密钥 → kid 稳定，
+    //     跨重启签发的凭据仍可验签；
+    //   · 读到的密钥文件损坏/长度不对 → 视为不可用，回退到"内存随机"
+    //     （fail-closed：宁可这次重启后旧凭据失效，也不用一个残缺密钥）。
+    //   · 可用 DSH_DEFENSE_KEY_EPHEMERAL=1 强制回到旧的"每次随机"行为
+    //     （调试/隔离环境用，明确要求凭据不跨重启）。
+    this.key = this.loadOrCreateKey();
     this.kid = crypto.createHash('sha256').update(this.key).digest('hex').slice(0, 16);
     this.startedAt = Date.now();
     /** nonce → 首次出现时间（防重放）。 */
@@ -126,7 +151,67 @@ export class DefenseSigner {
     /** 守卫发现的异常。 */
     this.anomalies = [];
     this.guardTimer = null;
+    // 【隐藏 BUG 修复】先恢复跨重启的 nonce 台账，再对外提供服务
+    this.loadPersistedNonces();
     this.initRuntimeFile();
+  }
+
+  /**
+   * 载入或创建【跨重启稳定】的签名密钥。
+   *
+   * 返回值是关键：必须是可直接用于 crypto.createHmac 的 Buffer。
+   * 任何异常都不得抛出（constructor 抛错会让整个 host 插件装载失败）。
+   *
+   * @returns {Buffer} 32 字节密钥
+   */
+  loadOrCreateKey() {
+    const ephemeral = () => crypto.randomBytes(32);
+    // 显式要求"每次重启换钥"的调试开关
+    try {
+      const flag = String(process.env.DSH_DEFENSE_KEY_EPHEMERAL || '').trim();
+      if (flag === '1' || flag.toLowerCase() === 'true') {
+        this.log('defense key: ephemeral mode (DSH_DEFENSE_KEY_EPHEMERAL=1)');
+        return ephemeral();
+      }
+    } catch (e) {}
+    // 允许显式指定密钥文件位置（多部署副本共存时用）
+    let keyPath = null;
+    try {
+      const custom = String(process.env.DSH_DEFENSE_KEY_FILE || '').trim();
+      keyPath = custom || pathSync.join(this.dir, 'signing.key');
+    } catch (e) {
+      return ephemeral();
+    }
+    try {
+      if (fsSync.existsSync(keyPath)) {
+        const buf = fsSync.readFileSync(keyPath);
+        // 只接受恰好 32 字节；长度不对 = 损坏 → 不猜，走 ephemeral
+        if (buf && buf.length === 32) {
+          this.keySource = 'persisted:' + keyPath;
+          return buf;
+        }
+        this.log('defense key: existing key file has bad length ('
+                 + (buf ? buf.length : 0) + '), falling back to ephemeral');
+        return ephemeral();
+      }
+    } catch (e) {
+      this.log('defense key: read failed, falling back to ephemeral: '
+               + String((e && e.message) || e));
+      return ephemeral();
+    }
+    // 首次启动：生成并持久化
+    try {
+      const fresh = crypto.randomBytes(32);
+      fsSync.mkdirSync(pathSync.dirname(keyPath), { recursive: true });
+      fsSync.writeFileSync(keyPath, fresh, { mode: 0o600 });
+      this.keySource = 'created:' + keyPath;
+      this.log('defense key: created persistent key at ' + keyPath);
+      return fresh;
+    } catch (e) {
+      this.log('defense key: persist failed, using ephemeral: '
+               + String((e && e.message) || e));
+      return ephemeral();
+    }
   }
 
   /** 写运行时发现文件，供 Python 侧定位宿主端点。 */
@@ -214,6 +299,8 @@ export class DefenseSigner {
       this.nonces.set(nonce, ts);
       if (!this.signedNonces) this.signedNonces = new Map();
       this.signedNonces.set(nonce, ts);
+      // 【隐藏 BUG 修复·跨重启 nonce 台账】签发即落盘（见 persistNonces 注释）
+      this.persistNonces();
       // ── 【观察点 14 修复·连带】nonce 台账改为【按年龄】裁剪 ──────────────
       // 原实现按【条数】裁剪（> NONCE_MAX*2 就只留最近 NONCE_MAX 条），
       //   当时的理由是"凭据 TTL 仅 10 分钟，更早的 nonce 对应凭据早已过期"。
@@ -252,6 +339,65 @@ export class DefenseSigner {
         .sort((a, b) => a[1] - b[1])
         .slice(-NONCE_HARD_MAX);
       this.signedNonces = new Map(keep);
+    }
+  }
+
+  // ── 【隐藏 BUG 修复·跨重启 nonce 台账】─────────────────────────────────
+  // 现象：就算密钥 kid 已经能跨重启稳定（见 loadOrCreateKey），宿主一重启，
+  //   旧凭据仍然被判 'nonce not issued by this host (forged or foreign
+  //   credential)' —— 因为 signedNonces 只活在内存里。
+  //   结果是「重启前跑完的物理/领域校核，重启后全部作废」，三道防线实际
+  //   撑不过一次重启（本次实测正因如此才只能 --force 收尾）。
+  //
+  // 做法：把 {nonce: ts} 台账持久化到 .defense/nonces.json（与 signing.key
+  //   同目录、同权限级别）。它【不含密钥】，只是"我签发过哪些 nonce"的名单，
+  //   泄露不会带来签发能力（伪造凭据仍需私钥算 MAC）。
+  //   读取失败/文件损坏 → 当作空台账（fail-closed：旧凭据验签失败），
+  //   绝不放宽成"没台账就都通过"。
+  /** @returns {string|null} nonce 台账文件路径 */
+  nonceLedgerPath() {
+    try {
+      return pathSync.join(this.dir, 'nonces.json');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 把 nonce 台账落盘（失败只记日志，不影响签发）。 */
+  persistNonces() {
+    const p = this.nonceLedgerPath();
+    if (!p) return;
+    try {
+      this.pruneSignedNonces(Date.now());
+      const obj = {};
+      for (const [n, t] of this.signedNonces) obj[n] = t;
+      fsSync.mkdirSync(pathSync.dirname(p), { recursive: true });
+      fsSync.writeFileSync(p, JSON.stringify(obj), { mode: 0o600 });
+    } catch (e) {
+      this.log('nonce ledger persist failed: ' + String((e && e.message) || e));
+    }
+  }
+
+  /** 启动时从磁盘恢复 nonce 台账（与内存合并，按年龄裁剪）。 */
+  loadPersistedNonces() {
+    const p = this.nonceLedgerPath();
+    if (!p) return;
+    try {
+      if (!fsSync.existsSync(p)) return;
+      const obj = JSON.parse(fsSync.readFileSync(p, 'utf8'));
+      if (!obj || typeof obj !== 'object') return;
+      if (!this.signedNonces) this.signedNonces = new Map();
+      let n = 0;
+      for (const k of Object.keys(obj)) {
+        const t = Number(obj[k]);
+        if (!Number.isFinite(t)) continue;
+        if (!this.signedNonces.has(k)) { this.signedNonces.set(k, t); n++; }
+      }
+      this.pruneSignedNonces(Date.now());
+      this.log('nonce ledger restored: +' + n + ' entries');
+    } catch (e) {
+      this.log('nonce ledger restore failed (treated as empty): '
+               + String((e && e.message) || e));
     }
   }
 

@@ -932,6 +932,92 @@ def answer_question(seq, answer, work_dir=None, actor=None):
     return out
 
 
+def import_answers(answers, work_dir=None, actor=None, overwrite=False):
+    """【BUG-05 修复】批量登记用户答复，一次性写完，避免逐个 CLI 调用。
+
+    要解决的实测缺陷（2026-10-30 四工位转台任务）：
+    总计子代理收齐 11 题答案后，需要把它们逐条同步进 mode2_flow 的台账。
+    但 answer-question 一次只能答一题 → 它要连续调 11 次 CLI；
+    更糟的是它无法确认到底同步成功了没有，于是陷入
+    反复 ask 同一批题 的循环，最终把上下文烧光（turn/end=max-tokens），
+    编制没能登记，整个任务卡在 select 之前。
+
+    用户的建议（原话）：提供批量登记问题/答案的入口，
+    避免逐个 CLI 调用消耗上下文。
+
+    Args:
+        answers: [{seq: int, answer: str}, ...] 或 {seq: answer} 映射
+        work_dir: 计划目录（默认按任务）
+        actor: 调用者（默认取 DSH_SESSION_ID，必须是已绑定的总计子代理）
+        overwrite: 已答过的题是否用新答复覆盖（默认 False，只补未答的）
+
+    Returns:
+        {"ok":bool, "imported":[seq...], "skipped":[seq...],
+         "failed":[{seq, error}...], "summary":str}
+    """
+    _guard = _require_analyst_actor("import-answers", actor, work_dir)
+    if _guard:
+        return _guard
+
+    # 规整输入：list[dict] 或 dict 都接受
+    pairs = []
+    if isinstance(answers, dict):
+        for k, v in answers.items():
+            pairs.append((k, v))
+    elif isinstance(answers, list):
+        for it in answers:
+            if isinstance(it, dict):
+                pairs.append((it.get("seq"), it.get("answer")))
+    if not pairs:
+        return {"ok": False,
+                "error": "没有可导入的答复。传 [{seq,answer},...] 或 {seq: answer}。",
+                "how": "python mode2_flow.py import-answers --json-file answers.json"}
+
+    imported, skipped, failed = [], [], []
+    for seq, ans in pairs:
+        try:
+            _seq = int(seq)
+        except Exception:
+            failed.append({"seq": seq, "error": "seq 不是整数"})
+            continue
+        if not str(ans or "").strip():
+            failed.append({"seq": _seq, "error": "答复为空（空答复不算问过）"})
+            continue
+        plan = load_plan(work_dir)
+        hit = next((q for q in (plan.get("questions") or [])
+                    if q.get("seq") == _seq), None)
+        if hit is None:
+            failed.append({"seq": _seq, "error": "该题号未登记（先 record_question）"})
+            continue
+        if hit.get("answered") and not overwrite:
+            skipped.append(_seq)          # 已答过，默认不覆盖
+            continue
+        # 复用单题逻辑，保证 stale 标记等副作用完全一致
+        r = answer_question(_seq, ans, work_dir, actor)
+        if r.get("ok"):
+            imported.append(_seq)
+        else:
+            failed.append({"seq": _seq, "error": r.get("error") or "失败"})
+
+    rep = question_report(work_dir)
+    return {
+        "ok": not failed,
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
+        "answered": rep.get("answered"),
+        "unanswered": rep.get("unanswered"),
+        "param_depth": rep.get("param_depth"),
+        "depth_source": rep.get("depth_source"),
+        "summary": ("导入 %d 条，跳过 %d 条（已答），失败 %d 条；"
+                    "当前已答 %s / 未答 %s"
+                    % (len(imported), len(skipped), len(failed),
+                       rep.get("answered"), rep.get("unanswered"))),
+        "note": ("一次性写入，避免逐个 answer-question 消耗上下文。"
+                 "已答过的题默认跳过；确需改答传 --overwrite。"),
+    }
+
+
 def refresh_stage(stage, work_dir=None, reason="", artifact="", actor=None):
     """【Bug② 修复】显式重做某阶段：进入重做态，并要求交回【新产物】。
 
@@ -1016,8 +1102,28 @@ def question_report(work_dir=None, final=False):
     if plan.get("_load_error"):
         return {"ok": False, "error": plan["_load_error"]}
     depth = plan.get("param_depth")
+    # ── 【BUG-02 修复】depth 读不到时先回退 workflow_state，再判错 ─────────
+    # 实测（2026-10-30 转台任务）：连续两次调 questions，第一次正常返回
+    #   asked=10/answered=6，第二次却返回「尚未确定参数需求强度」。
+    # 根因：refresh-stage / 阶段重做期间 mode2_plan 会被重写，
+    #   param_depth 有窗口期读不到；而真正的判定其实在 workflow_state 里。
+    # 修复：plan 里没有时回退到权威 workflow_state 的 param_depth，
+    #   仍读不到才报错；回退会在返回体里带 depth_source 便于排查。
+    _depth_src = "plan"
     if not depth:
-        return {"ok": False, "error": "尚未确定参数需求强度（强需求/弱需求）。"}
+        try:
+            _st = _read_state_json("workflow_state.json") or {}
+            _d2 = _st.get("param_depth")
+            if _d2:
+                depth = _d2
+                _depth_src = "workflow_state"
+        except Exception:
+            pass
+    if not depth:
+        return {"ok": False,
+                "error": ("尚未确定参数需求强度（强需求/弱需求）—— "
+                          "mode2_plan 与 workflow_state 里都没有 param_depth。"),
+                "hint": "先 set_depth（或重跑 provide_context #2）再查询。"}
     qs = plan.get("questions", [])
     chk = validate_question_budget(depth, len(qs), final=final)
     # 登记 ≠ 问过：只有 answered=True 才算真的问到了用户。
@@ -1037,6 +1143,9 @@ def question_report(work_dir=None, final=False):
     out["answered"] = len(_answered)
     out["unanswered"] = len(_unanswered)
     out["by_stage"] = by_stage
+    # 【BUG-02】说明 param_depth 来自哪里（plan / workflow_state 回退）
+    out["depth_source"] = _depth_src
+    out["param_depth"] = depth
     return out
 
 
@@ -1153,13 +1262,67 @@ def analyst_bind(session_id=None, work_dir=None, force=False):
         return {"ok": False, "error": plan["_load_error"]}
     old = plan.get("analyst") or {}
     _old_sid = str(old.get("session_id") or "").strip()
+    # ── 【2026-10-29 G05】旧 analyst 已失联时，允许【免 --force】接管 ──────
+    # 实测：第一任总计子代理跑完十阶段 + 13 题，但在 set-subagent-plan 前
+    #   因 ask_user 阻塞超时中断；续跑子代理必须 --force 才能绑，否则
+    #   ANALYST_ALREADY_BOUND —— 分析成果明明在盘上，却被"身份"挡住。
+    # 判据（全部满足才自动放行，其余仍要求 --force）：
+    #   ① 旧 sessionId 不在当前平台注册表里（已 disposed / 崩溃丢失）；
+    #   ② 十阶段已全部完成（分析成果在盘上，接管不会覆盖半成品）。
+    # ── 【2026-10-29 修复】旧 analyst 还活着 → 拒绝抢身份 ────────────────
+    # 会话 ceac3fff 事故：三个总计子代理互相 analyst-bind --force 抢了 9 次，
+    #   每个都以为自己是唯一的总计子代理，各自提问 → 用户看到重复选项。
+    # 现在：旧 analyst 心跳/平台证据显示仍存活时，改绑一律拒绝（除非 --force）。
     if _old_sid and _old_sid != sid and not force:
+        _live_old = analyst_liveness(work_dir)
+        if _live_old.get("alive") and str(_live_old.get("session_id") or "") == _old_sid:
+            return {"ok": False,
+                    "gate": "ANALYST_STILL_ALIVE",
+                    "bound_session_id": _old_sid,
+                    "session_id": sid,
+                    "liveness": _live_old,
+                    "error": ("【拒绝抢身份】已绑定的总计子代理 %s 仍在运行（%s）。"
+                              % (_old_sid, _live_old.get("detail"))),
+                    "why": ("2026-10-29 实测：多个总计子代理同时 analyst-bind --force "
+                            "互相覆盖身份，导致三方并行提问、用户看到重复选项。"),
+                    "next": ("不要抢。若你是被误开的重复子代理 → 立刻结束回合（不要"
+                             "再调任何阶段命令）；确需接管 → 父代理先确认旧会话已结束。")}
+
+    _auto_rebind = False
+    _auto_rebind_why = None
+    if _old_sid and _old_sid != sid and not force:
+        try:
+            _reg_agents = []
+            _regp = os.path.join(_state_dir(), "platform_agents.json")
+            if os.path.exists(_regp):
+                with open(_regp, "r", encoding="utf-8-sig") as _rf2:
+                    _reg2 = json.load(_rf2) or {}
+                _reg_agents = [a for a in (_reg2.get("agents") or [])
+                               if isinstance(a, dict) and a.get("id")]
+            _old_still_alive = any(
+                str(a.get("id")) == _old_sid
+                and str(a.get("status") or "").lower() != "disposed"
+                for a in _reg_agents)
+            _all_done = bool(stage_status(work_dir).get("complete"))
+            if _reg_agents and not _old_still_alive and _all_done:
+                _auto_rebind = True
+                _auto_rebind_why = (
+                    "旧总计子代理 %s 已不在平台注册表（disposed/失联），"
+                    "且十阶段已全部完成 —— 自动允许新子代理接管身份，无需 --force。"
+                    % _old_sid)
+        except Exception:
+            _auto_rebind = False
+    if _old_sid and _old_sid != sid and not force and not _auto_rebind:
         return {"ok": False, "gate": "ANALYST_ALREADY_BOUND",
                 "session_id": _old_sid,
                 "error": ("本任务的总计子代理已绑定为 %s，拒绝改绑到 %s。"
                           "确需改绑（例如上一个子代理确实挂了）请加 --force。"
                           % (_old_sid, sid)),
+                "how": ("若旧子代理确实已失联，加 --force；"
+                        "现在也支持'旧 analyst 已 disposed + 十阶段已完成'时自动接管。"),
                 "bound_at": old.get("bound_at")}
+    if _auto_rebind and not force:
+        force = True       # 走下面的统一改绑分支，并在返回里说明原因
     if not _old_sid or force:
         plan["analyst"] = {
             "session_id": sid,
@@ -1174,31 +1337,287 @@ def analyst_bind(session_id=None, work_dir=None, force=False):
             plan = load_plan(work_dir)
         except Exception:
             pass
-    return {"ok": True, "session_id": sid, "room_name": ANALYST_ROOM_NAME,
+    _out = {"ok": True, "session_id": sid, "room_name": ANALYST_ROOM_NAME,
             "task_id": plan.get("task_id"),
             "note": ("总计子代理已绑定。现在【只有这个会话】能推进十阶段 / 登记编制；"
                      "主对话直接调这些命令会被 ANALYST_ACTOR_REQUIRED 拒绝。"),
             "next": "python mode2_flow.py begin-stage TaskUnderstanding"}
+    if _auto_rebind:
+        _out["auto_rebind"] = True
+        _out["auto_rebind_reason"] = _auto_rebind_why
+        _out["note"] = _auto_rebind_why + " " + _out["note"]
+    return _out
 
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 七·零·补、【2026-10-29 修复】总计子代理【存活心跳】—— 防止重复 fork
+# ═══════════════════════════════════════════════════════════════════════════
+# 现场事故（会话 ceac3fff，三个总计子代理同时在跑）：
+#   18:20:52 fork #1 (fff32ea0)
+#   18:21:10 lead 调 wait_agent → noProgress(no-active-peer)
+#   18:21:22 lead 调 list_agents → 只看到自己 → 判定"子代理已死"
+#   18:23:24 fork #2 (11de1d27)   ← 此时 #1 还在跑
+#   18:25:40 fork #3 (6bf2ef59)   ← 此时 #1 #2 都还在跑
+#   三个子代理互相 analyst-bind --force 抢身份 9 次，各自 ask_user.py 提问
+#   → 用户看到已经答过的选项反复弹出。
+#
+# 根因有两条，缺一不可：
+#   ① 【平台层】subagent_fork 出来的子代理【不是 Team member】：
+#      list_agents 只返回 lead，wait_agent 返回 noProgress(no-active-peer)。
+#      主对话因此【没有任何手段】判断 fork 出去的子代理是否还活着。
+#   ② 【门禁层】analyst-bind 只记 sessionId，不记"它还活着吗"。
+#      绑定存在 ≠ 子代理在跑；反过来"绑定存在"也没能阻止再 fork 一个。
+#
+# 修复（本段）：
+#   · 总计子代理在每个阶段动作时自动刷新心跳（无需模型额外调用）；
+#   · analyst-status 回传 alive / heartbeat_age_sec / alive_source；
+#   · 新增 analyst-guard：主对话 fork 之前【必须】先问它，
+#     活着的 analyst 会被拒绝重复创建（gate=ANALYST_ALREADY_ALIVE）；
+#   · analyst-bind 在"已绑定且心跳新鲜"时拒绝改绑（除非 --force）。
+ANALYST_HEARTBEAT_FILE = "analyst_heartbeat.json"
+#: 心跳多久没刷新算"可能已死"。留足余量：子代理跑一段长分析不刷新是常态。
+ANALYST_ALIVE_SEC = 600
+
+
+def _analyst_hb_path(work_dir=None):
+    """心跳文件路径（与 plan 同目录，跟随当前任务）。"""
+    try:
+        return os.path.join(_plan_dir(work_dir), ANALYST_HEARTBEAT_FILE)
+    except Exception:
+        return os.path.join(BASE_DIR, ANALYST_HEARTBEAT_FILE)
+
+
+def analyst_heartbeat(session_id=None, work_dir=None, note=""):
+    """总计子代理刷新存活心跳（阶段动作会自动调用，也可手动调）。
+
+    只认【已绑定的那个 sessionId】—— 别的会话调它会被拒绝，
+    避免主对话替子代理伪造存活。
+    """
+    sid = str(session_id or "").strip() or _current_actor()
+    if not sid:
+        return {"ok": False, "error": "无法确定 sessionId（不在 DSH 会话内？）"}
+    plan = load_plan(work_dir)
+    bound = str((plan.get("analyst") or {}).get("session_id") or "").strip()
+    if bound and bound != sid:
+        return {"ok": False, "gate": "ANALYST_HEARTBEAT_WRONG_ACTOR",
+                "bound_session_id": bound, "session_id": sid,
+                "error": ("心跳只能由【已绑定的总计子代理】刷新；当前会话 %s "
+                          "不是绑定的 %s。" % (sid, bound))}
+    rec = {"session_id": sid, "ts": time.time(),
+           "at": time.strftime("%Y-%m-%d %H:%M:%S"), "note": str(note or "")}
+    p = _analyst_hb_path(work_dir)
+    try:
+        _atomic_write_json(p, rec)
+    except Exception as e:
+        return {"ok": False, "error": "写心跳失败: %r" % (e,)}
+    return {"ok": True, "session_id": sid, "path": p,
+            "ts": rec["ts"], "alive_sec": ANALYST_ALIVE_SEC}
+
+
+def _read_analyst_hb(work_dir=None):
+    try:
+        p = _analyst_hb_path(work_dir)
+        if not os.path.exists(p):
+            return {}
+        with open(p, "r", encoding="utf-8-sig") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def analyst_liveness(work_dir=None):
+    """判断【已绑定的总计子代理】现在是否还活着。
+
+    判据（从严到宽）：
+      ① 心跳新鲜（< ANALYST_ALIVE_SEC）—— 最可靠，阶段动作会自动刷新；
+      ② 平台注册表里该 sessionId 仍是 running（插件自动登记）；
+      ③ 都拿不到 → alive=False 但 source="unknown"（**不是**"确认已死"）。
+    """
+    plan = load_plan(work_dir)
+    sid = str((plan.get("analyst") or {}).get("session_id") or "").strip()
+    out = {"bound": bool(sid), "session_id": sid or None, "alive": False,
+           "age_sec": None, "source": "none", "detail": None}
+    if not sid:
+        out["detail"] = "尚未绑定总计子代理"
+        return out
+    hb = _read_analyst_hb(work_dir)
+    _hb_ok = False
+    if str(hb.get("session_id") or "") == sid:
+        try:
+            _age = time.time() - float(hb.get("ts") or 0)
+        except Exception:
+            _age = None
+        out["age_sec"] = round(_age, 1) if _age is not None else None
+        if _age is not None and _age <= ANALYST_ALIVE_SEC:
+            _hb_ok = True
+
+    # ── 【2026-10-29 修复】心跳不能覆盖"平台已 disposed" ────────────────
+    # 坑：子代理被 disposed 之后，心跳文件里还留着它最后写的 ts（很新），
+    #   若只看心跳就会判"还活着" → 新子代理永远接不了班（ANALYST_STILL_ALIVE）。
+    # 判据优先级：**平台 disposed 是终态**，心跳只能证明"曾经活过"。
+    _plat_disposed = False
+    try:
+        _regp0 = os.path.join(_state_dir(), "platform_agents.json")
+        if os.path.exists(_regp0):
+            with open(_regp0, "r", encoding="utf-8-sig") as _rf0:
+                _reg0 = json.load(_rf0) or {}
+            for _a0 in (_reg0.get("agents") or []):
+                if (isinstance(_a0, dict)
+                        and str(_a0.get("id") or "") == sid
+                        and str(_a0.get("status") or "").lower() == "disposed"):
+                    _plat_disposed = True
+                    break
+    except Exception:
+        pass
+    if _plat_disposed:
+        out["alive"] = False
+        out["source"] = "platform_disposed"
+        out["detail"] = ("平台已 disposed（终态）→ 判定【已结束】，"
+                         "心跳仅是历史残留（%ss 前）"
+                         % (round(out["age_sec"]) if out["age_sec"] else "?"))
+        return out
+
+    if _hb_ok:
+        out["alive"] = True
+        out["source"] = "heartbeat"
+        out["detail"] = ("心跳 %ss 前刷新（阈值 %ss）→ 判定【活着】"
+                         % (round(out["age_sec"]), ANALYST_ALIVE_SEC))
+        return out
+    # ② 平台注册表 + 主进程脉冲（2026-10-29：这是 99% 可靠的判据）
+    #    pulse 由【DSH 主进程的 setInterval】写，与子代理在干什么无关：
+    #      子代理跑 SW / 等锁 / 发呆 → 脉冲照跳；
+    #      agent 被 disposed        → 从脉冲台账移除；
+    #      DSH 进程没了             → 脉冲停（此时所有子代理也都没了，判死正确）。
+    try:
+        _regp = os.path.join(_state_dir(), "platform_agents.json")
+        if os.path.exists(_regp):
+            with open(_regp, "r", encoding="utf-8-sig") as _rf:
+                _reg = json.load(_rf) or {}
+            # 先看脉冲还活着吗
+            _pulse = _reg.get("pulse") if isinstance(_reg.get("pulse"), dict) else {}
+            _pulse_ok = False
+            _pulse_age = None
+            if _pulse:
+                _pts = _pulse.get("atMs") or _pulse.get("at")
+                try:
+                    if isinstance(_pts, str):
+                        import datetime as _dt
+                        _psec = _dt.datetime.fromisoformat(
+                            _pts.replace("Z", "+00:00")).timestamp()
+                    else:
+                        _psec = float(_pts) / 1000.0 if float(_pts) > 1e11 else float(_pts)
+                    _pulse_age = time.time() - _psec
+                    _pulse_ok = _pulse_age <= 35
+                except Exception:
+                    _pulse_ok = False
+            for _a in (_reg.get("agents") or []):
+                if not isinstance(_a, dict):
+                    continue
+                if str(_a.get("id") or "") != sid:
+                    continue
+                _st = str(_a.get("status") or "").lower()
+                if _st == "disposed":
+                    out["source"] = "platform_registry"
+                    out["detail"] = "平台已 disposed → 判定【已结束】"
+                    return out
+                if _pulse_ok:
+                    out["alive"] = True
+                    out["source"] = "pulse+registry"
+                    out["detail"] = ("主进程脉冲 %ss 前跳动 + agent 在册(status=%s) "
+                                     "→ 判定【活着】（与子代理忙不忙无关）"
+                                     % (round(_pulse_age or 0), _st or "running"))
+                    return out
+                # agent 在册但脉冲停了 → 进程可能没了，判"未知"而非"活着"
+                out["source"] = "registry_only"
+                out["detail"] = ("agent 在册但主进程脉冲已停（%ss 未更新）—— "
+                                 "【未知】：DSH 进程可能已退出。"
+                                 % (round(_pulse_age) if _pulse_age else "?"))
+                return out
+    except Exception:
+        pass
+    out["source"] = "unknown"
+    if out["age_sec"] is not None:
+        out["detail"] = ("心跳已 %ss 未刷新（阈值 %ss），且平台注册表无该 id —— "
+                         "【未知】，不等于确认死亡。"
+                         % (round(out["age_sec"]), ANALYST_ALIVE_SEC))
+    else:
+        out["detail"] = ("既无心跳也无平台登记 —— 【未知】。旧版本/刚绑定属正常；"
+                         "建议先 analyst-guard 再决定是否重开。")
+    return out
+
+
+def analyst_guard(work_dir=None):
+    """【fork 前置闸门】主对话在 subagent_fork 之前必须先问它。
+
+    活着的总计子代理 → 拒绝重复创建（ceac3fff 事故的直接修复点）。
+    """
+    live = analyst_liveness(work_dir)
+    if not live.get("bound"):
+        return {"ok": True, "may_fork": True,
+                "reason": "尚未绑定，可以创建总计子代理",
+                "liveness": live,
+                "next": "subagent_fork(description=总计子代理（十阶段分析）)"}
+    if live.get("alive"):
+        return {
+            "ok": False,
+            "gate": "ANALYST_ALREADY_ALIVE",
+            "may_fork": False,
+            "liveness": live,
+            "error": ("【禁止重复创建】总计子代理仍在运行（session %s，%s）。"
+                      % (live.get("session_id"), live.get("detail"))),
+            "why": ("2026-10-29 实测事故：主对话因 list_agents 看不到 fork 的子代理，",
+                    "误判已死并连续 fork 了 3 个，导致三方抢身份、题目重复弹出。"),
+            "next": ("不要 fork。改用：① 等它（sleep 后重查 analyst-status）；",
+                     "② 需要催它 → send_message 给它；",
+                     "③ 只有 analyst-status 连续 2 次显示 source=platform_registry",
+                     "   且 status=disposed，才允许 analyst-bind --force 后重开。"),
+        }
+    return {
+        "ok": True,
+        "may_fork": True,
+        "liveness": live,
+        "caution": ("绑定存在但存活证据不足（%s）—— 允许重开，但请先确认："
+                    "① 再查一次 analyst-status；② 若十阶段已完成，直接补 "
+                    "set-subagent-plan，不必重跑分析。" % (live.get("source"),)),
+        "next": "subagent_fork(description=总计子代理（接管/续跑）)",
+    }
 
 def analyst_status(work_dir=None):
-    """查看总计子代理是否已真实绑定（只读）。"""
+    """查看总计子代理是否已真实绑定 + 是否还活着（只读）。"""
     plan = load_plan(work_dir)
     if plan.get("_load_error"):
         return {"ok": False, "bound": False, "error": plan["_load_error"]}
     rec = plan.get("analyst") or {}
     sid = str(rec.get("session_id") or "").strip()
+    # ── 【2026-10-29 修复】必须回传"还活着吗" ──────────────────────────
+    # 旧实现只说 bound=True/False。而"绑定存在"≠"子代理在跑"：
+    #   会话 ceac3fff 里 lead 看到 bound=true 却看不到进程，只能猜；
+    #   一猜错就 fork 出 3 个总计子代理同时抢身份。
+    live = analyst_liveness(work_dir) if sid else {"alive": False,
+                                                   "source": "none",
+                                                   "detail": "未绑定"}
     return {
         "ok": True,
         "bound": bool(sid),
         "session_id": sid or None,
         "room_name": ANALYST_ROOM_NAME,
         "bound_at": rec.get("bound_at"),
+        # ── 存活三件套（主对话据此判断"该等还是该重开"）──
+        "alive": bool(live.get("alive")),
+        "alive_source": live.get("source"),
+        "heartbeat_age_sec": live.get("age_sec"),
+        "alive_sec_threshold": ANALYST_ALIVE_SEC,
+        "liveness_detail": live.get("detail"),
         "current_actor": _current_actor(),
         "is_current_actor": bool(sid and _current_actor() == sid),
         "authority": SUBPLAN_AUTHORITY,
         "how_to_bind": ("在【总计子代理】里运行：python mode2_flow.py analyst-bind"
                         "（自动取它自己的 DSH_SESSION_ID）"),
+        "how_to_check": ("fork 之前先跑 analyst-guard；不要用 list_agents 判断 "
+                         "fork 出来的子代理死活（它看不到）。"),
         "note": (None if sid else
                  "⚠️ 总计子代理尚未创建/绑定 —— 十阶段与子代理编制都不合法。"),
     }
@@ -1208,6 +1627,11 @@ def _require_analyst_actor(op, actor=None, work_dir=None):
     """校验"当前调用者 == 已绑定的总计子代理"。未绑定时返回 None（由调用方决定）。
 
     返回错误 dict 或 None。这条把"总计子代理"从字符串变成真实身份。
+
+    ── 【2026-10-29 修复】校验通过时【顺手刷新心跳】────────────────────
+    这样总计子代理只要在干活（跑阶段/提问/登记编制），心跳就自动新鲜，
+    主对话随时能 analyst-status 看到 alive=true，不会再误判"已死"。
+    不需要模型额外记得调任何保活命令。
     """
     plan = load_plan(work_dir)
     rec = plan.get("analyst") or {}
@@ -1216,6 +1640,11 @@ def _require_analyst_actor(op, actor=None, work_dir=None):
         return None
     cur = _current_actor(actor)
     if cur and cur == sid:
+        # 身份吻合 = 它正在干活 → 自动保活
+        try:
+            analyst_heartbeat(cur, work_dir, note="auto:%s" % op)
+        except Exception:
+            pass
         return None
     return {
         "ok": False,
@@ -1563,6 +1992,50 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None, actor=None):
             _item["type_normalized"] = True
         norm.append(_item)
 
+    # ══ 【BUG-07 修复·自动补齐收尾房间】总装 + 出图 ══════════════════════
+    # 实测（2026-10-30 四工位转台任务）：
+    #   总计子代理按"功能分解"只登记了 3 个建模房间，没意识到门禁还要求
+    #   【总装与验证】(assembly) 与【工程图输出】(drafting) 两个收尾房间。
+    #   随后 workflow_gate.select 直接返回：
+    #     {"gate":"CONFIG_MISSING_FINAL_WAVES","has_assembly":false,
+    #      "has_drafting":false,...}
+    #   任务就此卡死，必须回去让总计子代理"再补两个房间"——
+    #   而它可能已经上下文耗尽（同一次任务里就发生了），只能重新 fork。
+    #
+    # 这两个房间不属于"设计决策"：它们由【流程本身】决定（任何 Mode 2 任务
+    #   都必须装配 + 出图），和固定的【总理子代理】同一性质。
+    #   让模型去记住这件事，属于把流程约束放在提示词里——正是本项目一直
+    #   在消灭的模式。因此这里【代码级自动补齐】：
+    #     · 已有同 type 房间 → 不重复添加（尊重总计子代理自己的命名）；
+    #     · 没有 → 按标准名补一条，并标注 auto_added 便于溯源；
+    #     · 补出来的房间 parts 写占位描述（非建模房间不需要零件清单）。
+    _AUTO_FINAL_ROOMS = (
+        ("总装与验证", "assembly",
+         "全车装配 + 干涉检查 + 整体物理/领域验证（自动补齐）"),
+        ("工程图输出", "drafting",
+         "各零件三视图 + 装配图 + DWG/PDF 导出（自动补齐）"),
+    )
+    _auto_added = []
+    for _nm, _tp, _why in _AUTO_FINAL_ROOMS:
+        if any(r["type"] == _tp for r in norm):
+            continue
+        # 名称冲突（已有同名房间但类型不同）→ 换个后缀，避免依赖/绑定时撞名
+        _use = _nm
+        _exist = {r["name"] for r in norm}
+        _i = 2
+        while _use in _exist:
+            _use = "%s%d" % (_nm, _i)
+            _i += 1
+        norm.append({
+            "name": _use,
+            "type": _tp,
+            "parts": [],
+            "why": _why,
+            "depends_on": [],
+            "auto_added": True,
+        })
+        _auto_added.append({"name": _use, "type": _tp, "why": _why})
+
     # 依赖必须指向存在的房间（防止总计子代理写出悬空依赖）
     _names = {r["name"] for r in norm}
     for r in norm:
@@ -1618,10 +2091,16 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None, actor=None):
             # 把同步结果回传给调用方（workflow_gate.select 会据此写 workflow_state）
             "rooms_snapshot": _snap,
             "room_types_normalized": _norm_changed,
+            # 【BUG-07】自动补齐的收尾房间（null = 无需补齐，编制本来就全）
+            "auto_added_final_rooms": (_auto_added or None),
             "plan_file": plan_path(work_dir),
             "note": ("编制已落盘，并已同步 rooms 快照到 plan 文件"
                      "（房间类型已规范化，三处门禁口径一致）；"
-                     "建模小屋必须严格按此编制创建，数量不得固定。")}
+                     "建模小屋必须严格按此编制创建，数量不得固定。"
+                     + (("【BUG-07】已自动补齐收尾房间：%s —— 它们由流程决定，"
+                         "不需要总计子代理再登记。"
+                         % "、".join(x["name"] for x in _auto_added))
+                        if _auto_added else ""))}
 
 
 def _read_state_json(name):
@@ -2817,6 +3296,14 @@ def _main_body(argv):
     p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
     p.add_argument("--work-dir", default=None)
 
+    p = sub.add_parser("import-answers",
+                       help="★【BUG-05】批量导入用户答复（一次写多条，省上下文）")
+    p.add_argument("--json", default="", help="内联 JSON：[{seq,answer},...] 或 {seq:answer}")
+    p.add_argument("--json-file", default="", help="JSON 文件路径（推荐，免转义）")
+    p.add_argument("--overwrite", action="store_true", help="覆盖已答过的题")
+    p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
+    p.add_argument("--work-dir", default=None)
+
     p = sub.add_parser("questions", help="查看提问台账与题数校验")
     p.add_argument("--final", action="store_true", help="按收尾口径校验下界")
     p.add_argument("--work-dir", default=None)
@@ -2908,7 +3395,19 @@ def _main_body(argv):
     p.add_argument("--force", action="store_true", help="已有绑定也要改绑")
     p.add_argument("--work-dir", default=None)
 
-    p = sub.add_parser("analyst-status", help="查看总计子代理是否已真实绑定")
+    p = sub.add_parser("analyst-status",
+                       help="查看总计子代理是否已绑定 + 是否还活着（alive）")
+    p.add_argument("--work-dir", default=None)
+
+    # ── 【2026-10-29 修复】fork 前置闸门 + 心跳 ──────────────────────
+    p = sub.add_parser("analyst-guard",
+                       help="★fork 之前必须先问：总计子代理是否还活着（活着则拒绝重复创建）")
+    p.add_argument("--work-dir", default=None)
+
+    p = sub.add_parser("analyst-heartbeat",
+                       help="刷新总计子代理存活心跳（阶段动作已自动刷新，一般不用手调）")
+    p.add_argument("--note", default="")
+    p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
     p.add_argument("--work-dir", default=None)
 
     p = sub.add_parser("prime-board", help="★总理子代理监工看板（房间状态+上报缺口+待办）")
@@ -2942,7 +3441,8 @@ def _main_body(argv):
         r"""支持 --rooms-json '[{...}]' 或 --rooms-json @file.json（便于长内容）。
 
         ── 【BUG-2 修复】PowerShell 的 @ 会被吃掉 ─────────────────────────
-        现场：在 PowerShell 里写 --rooms-json "@C:\pathooms.json"，
+        现场：在 PowerShell 里写 --rooms-json "@C:\path
+ooms.json"，
           @ 被 PS 当成 splatting/数组符号解释，参数被拆散，命令直接失败。
         处理（三重，任一即可用）：
           ① 仍支持 @file.json（bash / cmd / Python 直接调用时最自然）；
@@ -2976,6 +3476,11 @@ def _main_body(argv):
     elif args.cmd == "analyst-bind":
         r = analyst_bind(getattr(args, "session_id", None), wd,
                          force=bool(getattr(args, "force", False)))
+    elif args.cmd == "analyst-guard":
+        r = analyst_guard(wd)
+    elif args.cmd == "analyst-heartbeat":
+        r = analyst_heartbeat(getattr(args, "actor", None), wd,
+                              note=getattr(args, "note", ""))
     elif args.cmd == "analyst-status":
         r = analyst_status(wd)
     elif args.cmd == "prime-board":
@@ -2990,6 +3495,24 @@ def _main_body(argv):
         r = record_question(args.topic, args.stage, args.reason, wd, actor=_actor)
     elif args.cmd == "answer-question":
         r = answer_question(args.seq, args.answer, wd, actor=_actor)
+    elif args.cmd == "import-answers":
+        _payload = None
+        if getattr(args, "json_file", ""):
+            try:
+                with open(args.json_file, "r", encoding="utf-8-sig") as _f:
+                    _payload = json.load(_f)
+            except Exception as _e:
+                r = {"ok": False, "error": "读取 --json-file 失败: %r" % (_e,)}
+                _payload = None
+        elif getattr(args, "json", ""):
+            try:
+                _payload = json.loads(args.json)
+            except Exception as _e:
+                r = {"ok": False, "error": "解析 --json 失败: %r" % (_e,)}
+                _payload = None
+        if _payload is not None:
+            r = import_answers(_payload, wd, actor=_actor,
+                               overwrite=bool(getattr(args, "overwrite", False)))
     elif args.cmd == "questions":
         r = question_report(wd, final=args.final)
     elif args.cmd in ("refresh-stage", "redo-stage"):

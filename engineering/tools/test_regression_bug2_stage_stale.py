@@ -39,6 +39,19 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ── 【测试隔离修复】必须隔离状态目录，否则会被【真实运行环境】干扰 ──────────
+# 实测（2026-10-29，DSH 正在运行时）：本测试会读到
+#   <state_dir>/platform_agents.json
+# 那是【宿主实时写入】的子代理注册表（几秒前刚刷新），里面全是真实子代理 id；
+# 而本测试用的是固定身份 "test-analyst"，于是 analyst_bind 判定
+#   "你不在子代理注册表里" → set_subagent_plan 返回 MODE2_ANALYST_REQUIRED
+#   → 一串断言连带失败。
+# 这不是代码缺陷，是【测试被污染】：同目录的
+#   test_regression_20261029_liveness.py 早就用 _isolate() 做了同样的事。
+# 这里补齐同款隔离：把 DSH_STATE_DIR 指向临时目录。
+_ISO_DIR = tempfile.mkdtemp(prefix="iso_")
+os.environ["DSH_STATE_DIR"] = _ISO_DIR
+
 import mode2_flow as mf  # noqa: E402
 
 PASS = 0

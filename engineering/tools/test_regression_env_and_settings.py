@@ -165,17 +165,55 @@ def main():
           '"hint"' in head and "3.11" in head)
 
     section("G. 设置页/宿主路由契约（静态）")
-    host = open(os.path.join(os.path.dirname(HERE),
-                             "plugins", "dsh-engineering-ui", "lib", "index.js"),
-                encoding="utf-8").read()
-    check("有 /env-check 路由", "PREFIX + '/env-check'" in host)
-    check("有 /env-prompt 路由", "PREFIX + '/env-prompt'" in host)
-    check("有 /settings 路由", "PREFIX + '/settings'" in host)
-    check("resolvePython 会校验最低版本",
-          "PYTHON_MIN_MINOR" in host and "3" in host)
-    check("resolvePython 会真的 import 探针 pywin32",
-          "import win32com.client" in host)
-    check("settings 写入口列入敏感路由", "PREFIX + '/settings'" in host)
+    # ── 【测试自身修复】安装副本里没有 plugins/ 目录 ──────────────────────
+    # 原实现硬编码 os.path.dirname(HERE)/plugins/...，这只在【工作区副本】
+    #   （<repo>/engineering/tools）成立；安装副本是
+    #   ~/.dsh/.agent-presets/engineering/tools —— plugins/ 根本不在那儿
+    #   （插件被装到 ~/.dsh/profiles/<profile>/node_modules/dsh-engineering-ui）。
+    #   于是本测试在安装副本上跑必然 FileNotFoundError，
+    #   表现为"回归失败"，其实是测试的路径假设错了。
+    # 修复：按优先级搜所有可能位置，全都找不到才跳过本节（不算失败）。
+    _cands = [
+        os.path.join(os.path.dirname(HERE), "plugins", "dsh-engineering-ui",
+                     "lib", "index.js"),
+        os.path.join(os.path.dirname(os.path.dirname(HERE)), "plugins",
+                     "dsh-engineering-ui", "lib", "index.js"),
+    ]
+    try:
+        _dsh_home = os.path.join(os.environ.get("USERPROFILE")
+                                 or os.environ.get("HOME") or "", ".dsh")
+        if os.path.isdir(_dsh_home):
+            for _p in sorted(os.listdir(os.path.join(_dsh_home, "profiles"))):
+                _cands.append(os.path.join(_dsh_home, "profiles", _p,
+                                           "node_modules", "dsh-engineering-ui",
+                                           "lib", "index.js"))
+    except Exception:
+        pass
+    host = None
+    _hit = None
+    for _c in _cands:
+        try:
+            if os.path.isfile(_c):
+                host = open(_c, encoding="utf-8").read()
+                _hit = _c
+                break
+        except Exception:
+            continue
+    if host is None:
+        print("  [SKIP] 找不到 dsh-engineering-ui/lib/index.js（安装副本无 plugins/），"
+              "跳过本节静态契约检查")
+        print("    已尝试：\n      " + "\n      ".join(_cands))
+    else:
+        print("  使用插件源码：" + _hit)
+    if host is not None:
+        check("有 /env-check 路由", "PREFIX + '/env-check'" in host)
+        check("有 /env-prompt 路由", "PREFIX + '/env-prompt'" in host)
+        check("有 /settings 路由", "PREFIX + '/settings'" in host)
+        check("resolvePython 会校验最低版本",
+              "PYTHON_MIN_MINOR" in host and "3" in host)
+        check("resolvePython 会真的 import 探针 pywin32",
+              "import win32com.client" in host)
+        check("settings 写入口列入敏感路由", "PREFIX + '/settings'" in host)
 
     print("\n" + "=" * 60)
     print("PASS %d / FAIL %d" % (PASSES[0], len(FAILS)))

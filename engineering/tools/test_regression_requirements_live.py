@@ -25,11 +25,46 @@ try:
 except Exception:
     pass
 
-DSH = os.path.expanduser(r"~\.dsh")
-INST = os.path.join(DSH, ".agent-presets", "engineering")
-ITOOLS = os.path.join(INST, "tools")
-SKILL = os.path.join(DSH, "skills", "mode-selection", "SKILL.md")
-PLUGIN = os.path.join(DSH, "profiles", "desktop", "node_modules", "dsh-engineering-ui")
+# -- 【测试健壮性修复】DSH 主目录解析必须可靠，否则 cwd 变成无效路径 --
+# 实测崩溃：某环境里 os.path.expanduser("~\.dsh") 原样返回 "~\.dsh"
+#   （USERPROFILE/HOME 未注入），随后 os.path.join 得到相对路径，
+#   subprocess.run(cwd=...) 直接抛 NotADirectoryError [WinError 267]，
+#   整个测试崩在第一次子进程调用 —— 看起来像"需求全挂"。
+# 修复：按 DSH_HOME → USERPROFILE/HOME → expanduser 顺序解析，并校验绝对路径。
+def _resolve_dsh_home():
+    _v = (os.environ.get("DSH_HOME") or "").strip()
+    if _v and os.path.isabs(_v):
+        return _v
+    for _k in ("USERPROFILE", "HOME"):
+        _v = (os.environ.get(_k) or "").strip()
+        if _v:
+            return os.path.join(_v, ".dsh")
+    _v = os.path.expanduser("~")
+    if _v and not _v.startswith("~"):
+        return os.path.join(_v, ".dsh")
+    return ""
+
+DSH = _resolve_dsh_home()
+INST = os.path.join(DSH, ".agent-presets", "engineering") if DSH else ""
+ITOOLS = os.path.join(INST, "tools") if INST else ""
+SKILL = os.path.join(DSH, "skills", "mode-selection", "SKILL.md") if DSH else ""
+# 插件可能装在任一 profile 下，优先探测实际存在的那个
+PLUGIN = ""
+if DSH:
+    _prof = os.path.join(DSH, "profiles")
+    for _name in ("desktop", "web", "bili-duty"):
+        _c = os.path.join(_prof, _name, "node_modules", "dsh-engineering-ui")
+        if os.path.isdir(_c):
+            PLUGIN = _c
+            break
+    if not PLUGIN:
+        PLUGIN = os.path.join(_prof, "desktop", "node_modules", "dsh-engineering-ui")
+
+if not DSH or not os.path.isdir(ITOOLS):
+    print("[SKIP] 找不到 DSH 安装副本（DSH 主目录=%r，ITOOLS=%r）" % (DSH, ITOOLS))
+    print("       本测试专门验证【安装副本】上的生效性，无法解析安装位置时跳过。")
+    print("       这不是回归缺陷 —— 请在装有 DSH 的机器上重跑。")
+    sys.exit(0)
 
 # 【2026-10-28 重构】子进程继承固定身份；需求2 的脚本内会 analyst-bind
 os.environ["DSH_SESSION_ID"] = "test-analyst"
@@ -45,10 +80,23 @@ def sec(t):
     print("\n" + "=" * 74); print(t); print("=" * 74)
 
 
+# ── 【测试隔离修复】状态目录必须隔离，否则被"正在运行的 DSH"污染 ──────────
+# 实测（2026-10-29 DSH 运行时跑本测试）：子进程会读到
+#   <真实 state_dir>/platform_agents.json（宿主几秒前刚写的真实子代理注册表），
+#   于是 mf.analyst_bind("test-analyst") 被判"你不在子代理注册表里" → 失败
+#   → set_subagent_plan 返回 MODE2_ANALYST_REQUIRED
+#   → RIGHT_COUNT=None → 断"数量由编制决定"必失败。
+# 这不是需求没生效，是测试用了真实身份却配了真实注册表。
+# 修复：给所有子进程指定一个空的临时 DSH_STATE_DIR（无注册表 → 放行测试身份），
+#   与 test_regression_20261029_liveness.py 的 _isolate() 同一做法。
+_ISO_ROOT = tempfile.mkdtemp(prefix="req_live_iso_")
+
+
 def py(code, cwd=ITOOLS, args=()):
     """在安装副本里执行 python 片段，返回 (rc, stdout)。"""
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
+    env["DSH_STATE_DIR"] = _ISO_ROOT
     p = subprocess.run([sys.executable, "-c", code, *args],
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", cwd=cwd, env=env)
@@ -147,7 +195,11 @@ for line in out.splitlines():
         "REQUIRED_FIELDS","REJECTED_MISSING","FAKE_DOCX_REJECTED","FAKE_2_ALSO_REJECTED"):
         print("  " + line)
 ck("★ 非『总计子代理』决定编制 → 拒绝", "WRONG_DECIDER=True" in out)
-ck("★ 数量由编制决定（示例 3 个，非固定）", "RIGHT_COUNT=3" in out)
+# 【2026-10-30 更新·BUG-07】set-subagent-plan 现在自动补齐两个收尾房间
+#   （总装与验证 assembly + 工程图输出 drafting），所以：
+#   传入 3 个建模房间 → 落盘 3 + 2 = 5 个。数量仍由编制决定（不是写死）。
+ck("★ 数量由编制决定（3 个建模 + 2 个自动补齐收尾 = 5）",
+   "RIGHT_COUNT=5" in out, [l for l in out.splitlines() if "RIGHT_COUNT" in l])
 ck("总理子代理固定存在（fixed=True）", "PRIME_FIXED=True" in out)
 ck("完整上报 → 通过", "REPORT_OK=True" in out)
 ck("★ 6 个必填字段缺任一 → 拒绝", "REJECTED_MISSING=6" in out, out[:200])

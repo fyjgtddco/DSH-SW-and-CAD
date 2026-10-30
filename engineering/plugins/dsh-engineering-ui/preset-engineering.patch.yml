@@ -169,6 +169,8 @@
                   十阶段 begin-stage/mark-stage-done 与 set-subagent-plan **只能由它跑**；它结束回合后才 provide_context #3/select。
                   缺信息提问只能用 python "<根>\tools\ask_user.py" --room "总计子代理" --child <自己的 sessionId> --header .. --question ..
                   （子代理直调 ask_user_question 必抛 DELEGATED_CALLER）；禁自编答案。
+                  该桥已自动取 DSH_WEB_URL 选端口；若仍报 gate=ASK_BRIDGE_UNREACHABLE（3~6s 内快速失败），
+                  立即改用降级路径：把题列发父代理 → 父代理 ask_user_question 代问 → 回传后 answer-question 落账，禁干等。
                   主对话直接调 mode2 阶段命令 → ANALYST_ACTOR_REQUIRED 拒绝；没 spawn 就 select → MODE2_ANALYST_REQUIRED。
 
                 【串行E】todo 列全 → 逐房间：mode_gate.py room-start(须在建 subagent 前) → subagent_fork → 等完成(list_agents)
@@ -189,16 +191,36 @@
                 小屋内写单脚本用 run 跑多步，禁逐步调。建模完必 close-all 释放锁(不必等 room-end)。
                 单房间最长持锁 4 小时(SW_MAX_HOLD，兜底防死锁)，超时锁自动让给队首（与心跳无关）。
 
-                【看板·assign】每个 fork 后立刻 subagent-assign（漏了该房间永远 unbound）。判活只看 room-board，不再靠心跳：
+                【判活·铁律】fork 出来的子代理【不是 Team member】—— list_agents 看不到、wait_agent 返回
+                noProgress(no-active-peer)。🚫绝不能用这两个判断 fork 的子代理死活（2026-10-29 实测：主对话因此
+                误判"已死"，3 分钟内连开 3 个总计子代理，三个同时存活、互相抢 analyst 身份、题目重复弹出）。
+                ⚠️【2026-10-30 补充】**send_message 同样找不到 fork 子代理**（按 Team member 注册表寻址，
+                  必返回 active teammate "..." not found）→ 主对话【无法主动指挥】fork 子代理：
+                  不能回复它的消息、不能催它、不能给它补指令。通信是【单向】的（它→你）。
+                  要它多做/改做，只能 room-fail + room-start + 重新 fork（prompt 里写全新要求）；
+                  要观察它，用 room-board / room-report-read 读磁盘状态。别浪费回合一试再试 send_message。
+                ✅ 唯一权威：主进程脉冲 pulse（插件每 10s 由 DSH 主进程 setInterval 写，与子代理忙不忙无关）：
+                  python "<根>\tools\mode2_flow.py" analyst-guard   ← fork 之前【必须先跑】；活着会返回
+                                                                       gate=ANALYST_ALREADY_ALIVE 并拒绝
+                  python "<根>\tools\mode2_flow.py" analyst-status  ← 看 alive / alive_source / heartbeat_age_sec
+                  python "<根>\tools\mode_gate.py" room-board --json ← 顶层 pulse.alive 表示判据本身可不可信
+                判死规则：只有 pulse.alive=true 且 agent status=disposed 才算【确认已死】；
+                pulse.alive=false 只说明 DSH 进程停了（那时子代理也全没了，判死正确，但别据此说"某个子代理死了"）。
+
+                【看板·assign】每个 fork 后立刻 subagent-assign（漏了该房间永远 unbound）。判活只看 room-board + pulse：
                   python "<根>\tools\mode_gate.py" room-board --json（单间加 --room <房间>）→ 每间给 state/detail/subagent_id/
                   platform/report_stage/sw_queue_pos/safe_to_restart/next_action。只认这些字段，别拿心跳 age/mtime/startedAt 推算。
                   starting/running/idle=正常；**waiting_sw=在等SW锁，属正常，禁判死禁 reset**；
                   unbound=平台alive但没 assign→补 assign（不是僵尸，禁 reset）；done=收报告；
+                  **detached=房间绑的子代理已不在平台注册表（DSH 崩溃/重启后失联）→
+                   send_message 唤不醒它，但也不要 reset 整局；按 next_action 先 room-fail 再 room-start+fork；
+                  （2026-10-29 实测：崩溃重启后 6 个建模房间全部 detached，父代理误当 idle 干等）**；
                   dead 才允许 recover/restart，且先看 safe_to_restart 与 next_action。
 
-                【状态·禁猜】只认 room-board 的 tuple（state/safe_to_restart/next_action，来自 mode_gate.py room-board）：
+                【状态·禁猜】只认 room-board 的 tuple（state/safe_to_restart/next_action + pulse.alive）：
                   starting|running|idle=正常（running 禁说没反应）；waiting_sw=在等SW锁，属正常；
-                  unbound=平台alive但没 assign，补 assign，禁 reset；done=完；failed/dead 才处理（dead 才可 recover/restart）。
+                  unbound=平台alive但没 assign，补 assign，禁 reset；done=完；failed/dead/detached 才处理
+                  （detached→room-fail+room-start+fork；dead 才可 recover/restart）。
                   🚫禁自行用心跳 age / 文件 mtime / list_agents.startedAt 推算死活；🚫禁对 running/waiting_sw/idle 的 room reset。
                 room-report-read <房间> 旁路读进度：params_shown/params_confirmed/modeling/part_done/validating/done/failed。
                 🚫禁对 running/starting 小屋 send_message 问进度（排队会打断任务）；完成时 DSH 会主动推送。

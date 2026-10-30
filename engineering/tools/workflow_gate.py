@@ -453,6 +453,85 @@ def _extract_load_n(text):
     return best[0], best[1]
 
 
+def _extract_mass_kg(text):
+    """【BUG-09 新增】从用户输入中提取【被设计对象自身】的质量（kg）。
+
+    为什么需要它：载荷估算在用户没写载荷时只能靠关键词分档（默认 500N），
+    对小尺度对象严重失真 —— 650g 的小车被估成 500N（≈76 倍自重），
+    于是零件被强行加厚，越做越重，与"要跑得快"直接冲突。
+
+    有了"自重"这一手信息，额定载荷就可以按自重推导（再乘动载系数），
+    比固定基准值贴近现实得多；但仍会标注为估算值、要求 confirm-load 复核。
+
+    支持写法：650g / 650 g / 0.65kg / 650克 / 1.2公斤 / 约650g / 650g左右
+    Returns:
+        float | None —— 识别不到返回 None（绝不瞎猜）
+    """
+    import re as _re
+    s = str(text or "")
+    # 先找 kg（含"公斤/千克"），再找 g；kg 优先避免 "0.65kg" 被 g 模式截成 "65"
+    _PATTERNS = (
+        (r"(\d+(?:\.\d+)?)\s*(?:kg|公斤|千克|KG|Kg)(?![a-z])", 1.0),
+        (r"(\d+(?:\.\d+)?)\s*(?:g|克|G)(?![a-z])", 0.001),
+    )
+    for pat, k in _PATTERNS:
+        m = _re.search(pat, s)
+        if not m:
+            continue
+        try:
+            v = float(m.group(1)) * k
+        except Exception:
+            continue
+        # 合理性闸门：0.001kg(1g) ~ 100t。超出范围说明误读了别的数字
+        # （例如把"300mm"里的 300 当克、"150N"的 150 当克）。
+        if 0.001 <= v <= 100000.0:
+            return v
+    return None
+
+
+#: 加工工艺 → 相对【工件重力】的典型载荷放大系数（工程经验量级）。
+#: 用途：任务只写「工件 5kg、钻孔加工」时，门禁不应停在 5kg×g≈49N，
+#:   而要反映"钻削轴向力远大于重力"这一事实（实测 5kg 钢件钻削可达 1~2kN）。
+#: 取值刻意保守（宁可略低，也要让 confirm-load 去修正）：
+#:   钻孔/铣削 30、车削 15、冲压 40、夹紧 20、起重/搬运 3。
+_PROCESS_LOAD_FACTORS = (
+    (("钻孔", "钻削", "drill", "镗孔", "铰孔"), 30.0),
+    (("铣削", "milling"), 25.0),          # 不用单字"铣"：会误命中"铣床型号"等无关串无妨，但"铣削"更准
+    (("车削", "车床", "turning"), 15.0),  # ⚠️ 不能用单字"车"：实测"轨迹小车/小车"会被判成车削工艺，
+                                          #    把 650g 小车的载荷从 6.4N 抬到 95.6N（15 倍虚高）。
+    (("冲压", "冲裁", "stamp"), 40.0),
+    (("磨削", "grinding"), 10.0),
+    (("夹紧", "clamp", "装夹"), 20.0),
+    (("起重", "吊装", "搬运", "lifting"), 3.0),
+    (("压装", "压入", "press-fit"), 20.0),
+)
+_PROCESS_LABELS = {
+    30.0: "钻孔/钻削", 25.0: "铣削", 15.0: "车削", 40.0: "冲压",
+    10.0: "磨削", 20.0: "夹紧/压装", 3.0: "起重/搬运",
+}
+
+
+def _extract_process_load_factor(text):
+    """从任务描述里识别加工工艺，返回相对工件重力的载荷放大系数。
+
+    【BUG-06/08 修复】为什么需要它：
+      门禁旧逻辑只在用户【显式写出载荷】时才采信，否则一律用固定基准值
+      500N。但真实工程任务常以"工件 5kg + 钻孔"这种【间接但确定】的方式
+      给出依据。若仍按 500N 校核，而实际钻削轴向力约 1500N，强度结论会
+      系统性偏乐观 —— 这正是转台任务里发生的事。
+
+    Returns:
+        float | None —— 未识别到工艺返回 None（不臆造）
+    """
+    t = str(text or "")
+    t = t.lower()
+    for kws, k in _PROCESS_LOAD_FACTORS:
+        for kw in kws:
+            if kw.lower() in t:
+                return k
+    return None
+
+
 def _extract_life_years(text):
     """【BUG-02 修复】从用户输入中提取设计寿命（年）。找不到返回 None。"""
     import re as _re
@@ -1113,17 +1192,67 @@ def estimate_mechanics(task, context=None):
 
     # ── 1) 额定载荷：用户数值优先 ──────────────────────────────────────
     user_load, matched = _extract_load_n(raw)
-    if user_load is not None:
+    # ── 【BUG-06 修复】"5kg 工件 + 钻孔"被误当成"用户已给出载荷" ───────────
+    # 缺陷（2026-10-30 转台任务实测）：任务写的是「每工位额定工件 5kg、钻孔加工」。
+    #   _extract_load_n 把 "5kg" 解析成 49N 并标记为 "用户输入"，
+    #   于是既不追问、也不叠加加工力 —— 而钻削轴向力实测约 1500N。
+    #   结果：门禁按 49N 校核，比真实值低 30 倍，强度结论完全失真。
+    # 修复：若命中的数值【带质量单位】且任务里同时出现加工工艺关键词，
+    #   判定这是"工件质量"而非"工作载荷"，改用 质量×g×工艺系数 推导，
+    #   并在 load_source 里如实写明口径（仍需 confirm-load 复核）。
+    _proc_k_user = _extract_process_load_factor(t)
+    _is_mass_hit = bool(matched) and any(
+        u in matched for u in ("kg", "公斤", "千克", "t", "吨", "g", "克"))
+    if user_load is not None and _is_mass_hit and _proc_k_user:
+        _grav_u = float(user_load)          # _extract_load_n 已把质量换成 N
+        nominal_load = _grav_u * _proc_k_user
+        load_source = ("按「工件质量 %s（%.1f N 重力）× %s工艺系数 %.0f」推导"
+                       "（%.1f N）—— 质量不是工作载荷，加工力远大于重力；"
+                       "请用 confirm-load 复核"
+                       % (matched, _grav_u, _PROCESS_LABELS.get(_proc_k_user, "加工"),
+                          _proc_k_user, nominal_load))
+    elif user_load is not None:
         nominal_load = float(user_load)
         load_source = "用户输入: %s" % (matched or "")
     else:
-        # 无明确数值 → 关键词粗估（明确标注为估算值，供用户复核）
-        if any(k in t for k in ["大型", "重型", "large"]):
+        # ── 【BUG-09 修复】小尺度对象不再被固定 500N 严重高估 ───────────────
+        # 缺陷（2026-10-29 竞速小车实测）：650g 的小车被估成 500N
+        #   （≈76 倍自重），动载系数又默认 1.0，寿命默认 30 年 / 20 万次/年。
+        #   用户不复核就会按 500N 做强度校核 → 零件被强行加厚加筋，
+        #   车又重又慢 —— 与"比赛要快"的目标直接冲突。
+        # 修复：在没有用户数值时，优先用【能识别出的自重】推导载荷
+        #   （额定载荷取自重的 1 倍，设计载荷再乘动载系数），
+        #   并明确标注这是"按自重推导"，仍要求用户复核。
+        #   识别不出自重时才退回原来的关键词分档。
+        # ── 【BUG-06/08 修复】加工工艺力优先于自重 ───────────────────────
+        # 实测（2026-10-30 四工位转台）：任务写明「每工位额定工件 5kg、
+        #   钻孔加工」，门禁却取默认 500N；而总计子代理在物理推理阶段算出
+        #   钻孔轴向力约 1500N、夹紧力 2000N/侧 —— 门禁值比真实值低 3 倍，
+        #   按 500N 校核等于严重低估，强度结论不可信。
+        # 根因：旧逻辑只认「显式写的载荷数值」，对「工件质量 + 工艺」这类
+        #   间接但确定的依据视而不见，一律退回固定基准值。
+        # 修复：先看工艺关键字，按【工件质量 × 工艺系数】推导一个量级正确的
+        #   额定载荷，并把口径如实写进 load_source（仍然要求复核）。
+        _mass_kg = _extract_mass_kg(raw)
+        _proc_k = _extract_process_load_factor(t)
+        _proc_label = _PROCESS_LABELS.get(_proc_k)
+        if _mass_kg and _mass_kg > 0 and _proc_k:
+            _grav = _mass_kg * 9.80665
+            nominal_load = _grav * _proc_k
+            load_source = ("按「工件 %.3g kg × %s工艺系数 %.0f」推导（%.1f N）；"
+                           "比纯自重大，因为加工力远高于重力 —— 请用 confirm-load 复核"
+                           % (_mass_kg, _proc_label, _proc_k, nominal_load))
+        elif _mass_kg and _mass_kg > 0:
+            nominal_load = _mass_kg * 9.80665
+            load_source = ("按识别到的自重 %.3g kg 推导（%.1f N）；"
+                           "请用 confirm-load 复核" % (_mass_kg, nominal_load))
+        elif any(k in t for k in ["大型", "重型", "large"]):
             nominal_load = 2000.0
             load_source = "关键词粗估（大型/重型）"
-        elif any(k in t for k in ["小型", "轻型", "small"]):
-            nominal_load = 300.0
-            load_source = "关键词粗估（小型/轻型）"
+        elif any(k in t for k in ["小型", "轻型", "微小", "桌面", "small"]):
+            # 小尺度（桌面级/模型级）真实载荷常在个位数牛顿量级
+            nominal_load = 50.0
+            load_source = "关键词粗估（小型/桌面级，50N；请务必复核）"
         else:
             nominal_load = 500.0
             load_source = "默认基准值（用户未给出载荷，请务必复核）"
@@ -2701,6 +2830,9 @@ def cmd_init(task_desc):
     #     并在返回里明确告知是哪个房间在跑，避免误伤正在干活的任务。
     _residue = None
     _residue_cleaned = False
+    # 【2026-10-29 G01】本行必须早于下面所有清理路径初始化 ——
+    #   否则"先被 residue 清掉"时 zombies_cleaned 会引用未定义变量。
+    _auto_cleaned_zombies = []
     _alive_live = []          # 【残留检测】当前确实活着的子对话（任何情况下都不得无视）
     _force_now = ("--force" in sys.argv)
     try:
@@ -2711,8 +2843,22 @@ def cmd_init(task_desc):
             _pre.get("gate_residue"))
         # 只在"无活房间"时自动清 —— 有活房间说明真在进行中，不能动
         if _needs_clean and not _alive_pre and not _force_now:
+            # 【2026-10-29 G01 补强】把"这次清掉了哪些房间"记下来，
+            #   否则这条更早的清理路径会把 G01 的僵尸分支抢先走完，
+            #   返回里 zombies_cleaned 恒为空 → 调用方不知道发生过清理。
+            try:
+                _pre_rooms = sorted(
+                    (json.load(open(os.path.join(STATE_DIR, "mode_state.json"),
+                                    encoding="utf-8")) or {}).get("rooms", {}).keys())
+            except Exception:
+                _pre_rooms = []
             _residue = _residue_check(auto_clean=True)
             _residue_cleaned = True
+            if _pre_rooms:
+                try:
+                    _auto_cleaned_zombies = _pre_rooms
+                except Exception:
+                    pass
             # 清理后重新载入门禁状态，避免用过期的内存副本继续判定
             state = load_state()
             _step_now = str(state.get("step") or "")
@@ -2870,9 +3016,39 @@ def cmd_init(task_desc):
                    and not _zombie
     _force = _force_now
 
+    # ── 【2026-10-29 G01 修复】僵尸房间自动清理，不再拒绝 init ──────────
+    # 实测：新任务第一次 init 就返回 gate=ZOMBIE_DETECTED（active_rooms=[结构件]，
+    #   无任何子代理登记），用户/模型必须自己发现并先跑 reset 才能继续。
+    #   这等于把"清残留"的活推给调用方 —— 而僵尸房间本来就【零产出、不可能在干活】，
+    #   留着只会有害（挡住新任务、让看板显示幽灵房间）。
+    # 现在：僵尸一律【自动清理后继续 init】，并把清理结果回传（zombies_cleaned
+    #   + auto_cleaned=true），让调用方知道发生了什么。
+    if _zombie and not _force:
+        _auto_cleaned_zombies = sorted(_active_rooms)
+        try:
+            _rc = _residue_check(auto_clean=True) or {}
+        except Exception:
+            _rc = {}
+        try:
+            _reset_mode_rooms()
+        except Exception:
+            pass
+        # 清理后重新载入判断依据（房间/子代理/推进态都已变）
+        try:
+            state = load_state()
+        except Exception:
+            pass
+        _ms_rooms, _ms_subs, _active_rooms = {}, {}, []
+        _zombie = False
+        _step_now = str(state.get("step") or "")
+        _has_choice = bool(state.get("user_choice"))
+        _has_asm = bool(state.get("assembly_confirmed"))
+        _step_advanced = _step_now in _ADVANCED
+        _in_progress = False
+
     if (_in_progress or _zombie) and not _force:
         if _zombie:
-            # 僵尸态：明确告知可安全重开，并给出清理指引
+            # 走到这里说明上面自动清理没生效（例如 _residue_check 抛异常）
             return {
                 "ok": False,
                 "gate": "ZOMBIE_DETECTED",
@@ -2991,6 +3167,34 @@ def cmd_init(task_desc):
     state["finished_at"] = None
     state["param_depth"] = None
     save_state(state)
+    # ── 【未记录 BUG 修复】新任务开始时，把 task_id 同步进 mode_state ───────
+    # 目的：让 mode_state 里的房间能按"归属任务"被识别。
+    #   否则上一轮遗留的 active 房间（实测有 3 个）无法判定归属，
+    #   会被守卫当成"本轮仍在进行"，导致任何新会话都结束不了。
+    #   同时【归档】上一轮遗留的 active 房间：它们既不是本轮任务，
+    #   也不该继续占用 active 标志。
+    try:
+        import mode_gate as _mg_init
+        _ms = _mg_init.load_state()
+        _tid_new = state.get("task_id") or ""
+        _archived = []
+        for _n, _v in list((_ms.get("rooms") or {}).items()):
+            if not isinstance(_v, dict):
+                continue
+            _rt = _v.get("task_id")
+            if _v.get("active") and _tid_new and _rt and str(_rt) != str(_tid_new):
+                _v["active"] = False
+                _v["failed_at"] = _v.get("failed_at") or time.time()
+                _v["archived_reason"] = "属于上一轮任务 %s，新任务开始自动归档" % _rt
+                _archived.append(_n)
+        if _tid_new:
+            _ms["task_id"] = _tid_new
+        _mg_init.save_state(_ms)
+        if _archived:
+            state["mode_state_stale_rooms_archived"] = _archived
+            save_state(state)
+    except Exception:
+        pass
     # 【Bug3】新任务开始 → 清除"任务已完成"标记，
     # 否则上一任务的完成标记会让守卫在本任务中错误放行。
     try:
@@ -3015,7 +3219,15 @@ def cmd_init(task_desc):
             # ── 【残留检测】把"开始前清掉了什么"透明地报给用户 ──────────
             # ★ 新任务开始前【强制清空】旧凭证的结果（用户要求：每局凭证必须干净）
             "legacy_state_purged": state.get("legacy_state_purged"),
-            "residue_cleaned": bool(_residue_cleaned or _need_reset),
+            # ── 【2026-10-29 G01 修复】僵尸房间已自动清理（不再拒绝 init）────
+            "auto_cleaned": bool(_auto_cleaned_zombies),
+            "zombies_cleaned": list(_auto_cleaned_zombies),
+            "auto_clean_note": (
+                ("【G01 修复】上一轮僵尸房间已自动清理（%s）——房间标记 active 但从未"
+                 "拉起子代理、零产出。直接继续即可，无需手动 reset。"
+                 % "、".join(_auto_cleaned_zombies))
+                if _auto_cleaned_zombies else None),
+            "residue_cleaned": bool(_residue_cleaned or _need_reset or _auto_cleaned_zombies),
             "residue_actions": ((_residue or {}).get("actions") or []) if _residue_cleaned else (
                 (["【BUG-12】init 清理上一轮 mode_state 残留"] if _need_reset else [])),
             # 【BUG-12】把清理前快照回传，做到"清可审计、没清也可确认"
@@ -4434,6 +4646,27 @@ def cmd_select(choice, parallel=None, unknown=None):
     #   模型嘴上说"复核"，实际照旧按 500N 往下走，零件被强行加厚。
     #   代码级做法：没有 confirm-load 记录就不放行。
     if state.get("load_is_estimate") and not state.get("load_confirmed_at"):
+        # 算出"建议命令"里的数值：优先用载荷工况文件里的真实额定值，
+        # 取不到就退回门禁记忆里的 nominal_load_n（两者应当一致）。
+        _suggest_load = None
+        try:
+            _mres = state.get("mechanics_result") or {}
+            _suggest_load = _mres.get("nominal_load_n")
+            if _suggest_load is None:
+                # 载荷工况文件在工作目录的 load_cases/ 下（见 write_load_case_file）
+                _wd = state.get(WORKDIR_STATE_KEY) or os.path.join(BASE_DIR, "load_cases")
+                _lc_path = os.path.join(_wd, "gate_load_case.json")
+                if os.path.exists(_lc_path):
+                    with open(_lc_path, "r", encoding="utf-8") as _lcf:
+                        _lc = json.load(_lcf) or {}
+                    for _ld in (_lc.get("loads") or []):
+                        if isinstance(_ld, dict) and _ld.get("id") == "load_rated":
+                            _suggest_load = _ld.get("magnitude_n")
+                            break
+            if _suggest_load is not None:
+                _suggest_load = ("%g" % float(_suggest_load))
+        except Exception:
+            _suggest_load = None
         return {
             "ok": False,
             "gate": "LOAD_REVIEW_REQUIRED",
@@ -4442,12 +4675,28 @@ def cmd_select(choice, parallel=None, unknown=None):
             "error": ("【载荷未经复核】当前额定载荷 %s N 是门禁按关键词估算的，"
                       "不是用户确认值 —— 拒绝开工。"
                       % (state.get("mechanics_result") or {}).get("nominal_load_n")),
+            # ── 【BUG-08 修复】直接把建议值与命令给出来 ────────────────────
+            # 实测：模型改 gate_load_case.json 为 25N 后仍被本闸拦住
+            #   （因为门禁状态里记的还是 500N），必须专门调 confirm-load 才过。
+            #   多绕一步不说，还容易让人以为"改 JSON 就能生效"。
+            #   这里把"该改成多少"和"具体命令"直接算好给出，减少一次试错。
             "how": [
                 "1) 用 ask_user_question 把载荷问给用户，拿到明确数值（带单位）；",
                 "2) 把用户答复写回门禁：",
                 "     python workflow_gate.py confirm-load \"<用户原话>\"",
                 "3) 再调 select。",
             ],
+            "suggested_value": (
+                "请把【用户确认的实际载荷】告诉 confirm-load；"
+                "当前估算值 %s N 仅供参考。" % (
+                    (state.get("mechanics_result") or {}).get("nominal_load_n"))),
+            "suggested_command": (
+                'python workflow_gate.py confirm-load "%sN"'
+                % (_suggest_load or "")).strip(),
+            "why_json_edit_does_not_work": (
+                "直接改 tools/load_cases/gate_load_case.json【不会】解除本闸："
+                "本闸校验的是门禁状态文件里的 load_is_estimate / load_confirmed_at，"
+                "这两个字段只有 confirm-load 命令会写。"),
         }
     # ── 【Bug② 修复 · 补充拦截】已登记编制但阶段产物过期 → 同样拒绝开工 ──
     # set-subagent-plan 的前置会拦"登记那一刻"的 stale；但用户之后仍可能改答，
@@ -4528,6 +4777,20 @@ def cmd_select(choice, parallel=None, unknown=None):
                              "select %s,%s" % (choice, parallel)),
         }
 
+    # ── 【BUG-07 修复】pending_rooms 语义歧义 ───────────────────────────────
+    # 实测：select A,D 返回的 pending_rooms 只有 3 项（本波房间），
+    #   而 subagent_config.rooms 有 5 项（全局编制）。主对话据此以为
+    #   "这波只有 3 个房间"，后续波次调度容易漏房间。
+    # 修复：保留 pending_rooms（向后兼容 = 本波房间），
+    #   另加两个语义明确的字段：
+    #     wave_rooms         —— 本波要开的房间（与 pending_rooms 相同）
+    #     all_pending_rooms  —— 全局尚未完成的房间（含后续波次）
+    _all_rooms = [r for r in (state.get("subagent_config") or {}).get("rooms", [])]
+    _done_rooms = set(_get_done_rooms())
+    _all_pending = [{"name": str(r[0]), "type": str(r[1]) if len(r) > 1 else None}
+                    for r in _all_rooms
+                    if isinstance(r, (list, tuple)) and len(r) >= 1
+                    and str(r[0]) not in _done_rooms]
     return {
         "ok": True, "step": "user_selected", "choice": choice,
         "choice_label": config["label"], "parallel_mode": parallel,
@@ -4536,6 +4799,13 @@ def cmd_select(choice, parallel=None, unknown=None):
         "subagent_config": state["subagent_config"],
         "assembly_confirmed": bool(state.get("assembly_confirmed")),
         "pending_rooms": pending_rooms,
+        # 【BUG-07】明确的波次/全局语义（新调用方请用这两个）
+        "wave_rooms": pending_rooms,
+        "all_pending_rooms": _all_pending,
+        "all_pending_count": len(_all_pending),
+        "pending_rooms_note": ("pending_rooms / wave_rooms = 本波要开的房间；"
+                               "all_pending_rooms = 全局尚未完成的房间。"
+                               "只看 pending_rooms 会漏掉后续波次。"),
         "completed_count": len(_get_done_rooms()),
         # ── 【C3 修复】一致性自检：把"门禁认为的完成数"与
         #    "mode_state 实际 ended 数"并排给出，一眼可辨是否不同步。
@@ -5157,7 +5427,8 @@ def cmd_recover():
         #   而是"登记了却没拉起"，应当走 reset/清理，而非 restart。
         if not _has_sub and info.get("active") and not info.get("ended_at"):
             # 先问平台：若平台侧仍存活 → unbound（补 assign），严禁 reset
-            _plat = _mg_call("_plugin_liveness", None, room, None)
+            # 【2026-10-29】改用脉冲判据（_plugin_liveness 已删除）
+            _plat = _mg_call("_platform_liveness", None, room, None)
             _alive = bool(_plat and _plat[0] == "running")
             if _alive:
                 no_hb.append({

@@ -98,6 +98,95 @@ const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const ROOM_RE = /^[\u4e00-\u9fa5A-Za-z0-9_.: -]{1,64}$/;
 // 【Bug2】守卫只对这一个预设的会话生效。原先无差别 steer 所有对话 → 到处都不给结束。
 const GUARD_PRESET = 'engineering';
+// ══════════════════════════════════════════════════════════════════════
+//  【模型自动接替】额度/限流耗尽时自动切换下一个候选模型
+// ══════════════════════════════════════════════════════════════════════
+// 用户需求（原文）：「在工程模式的时候，可以指定模型进行选择，类似于第一个
+//   模型额度不够嘎了，第二个就立马接上，不至于出现模型会直接死掉的情况，
+//   可以直接指定10个模型」。
+//
+// ── 为什么由本插件做，而不是等宿主 ──────────────────────────────────
+// 实测日志（2026-10-30 四工位转台任务）：商汤 sn-sensenova-6-8-flash 账号
+//   全部限流时，宿主直接 turn/end error 终止本轮：
+//     {"code":"QUOTA_EXCEEDED","message":"...可用账号均在限流中，
+//       最近一个将于 ... 解禁"}
+//   六个建模子代理 + 主对话全部因此停摆，一个零件都没产出。
+//   DSH 自带的 dsh-llm-retry 只做「同 provider 重试」，不换模型；
+//   dsh-agent-loop 暴露了两个 waterfall，正好够用：
+//     · ctx.on('agent/request')       → 每轮请求前决定用哪个 provider/model
+//     · ctx.on('agent/request-error') → 失败后返回 {kind:'retry'} 可让本轮重试
+//
+// ── 关键约束（踩过的坑，别改回去）────────────────────────────────────
+// 1. 【最重要】绝不无条件覆盖模型选择 —— v2 曾把请求每轮改成"链首候选"，
+//    结果用户选 DeepSeek 却回 Hy3（插件劫持了选型权）。详见下方
+//    agent/request 处的长注释。现在的语义是：默认不介入，只在"本轮已接替"
+//    时才覆盖，且一旦发现手动改选立即交还控制权。
+// 2. 状态必须【按 agent】保存：不同会话/子代理各有自己的接替进度。
+// 3. 只对 engineering 预设生效（复用 isGuardSession 的口径）。
+// 4. 任何异常都必须静默降级（next() 原样返回），绝不能因为接替逻辑
+//    让本该成功的请求失败。
+// 5. 失败后从【当前实际在用的模型】往后找候选，而不是从链首重来；
+//    tried 集合按 turn 重置。
+const MODEL_CHAIN_FILE = 'model_chain.json';
+/** 被认为"该换模型"的错误码（宿主 dsh-llm 的 provider-neutral 码）。 */
+const MODEL_CHAIN_SWITCH_CODES = new Set([
+  'QUOTA', 'ACCOUNT_QUOTA', 'QUOTA_EXCEEDED', 'RATE_LIMIT',
+  'CONTEXT_WINDOW_EXCEEDED',
+]);
+
+/**
+ * 规整一条链配置。纯函数，供 host 与测试共用。
+ * @param raw 任意输入
+ * @returns {{ok:boolean, enabled:boolean, entries:Array<{provider:string,model:string,reasoningEffort?:string}>, error?:string}}
+ */
+function normalizeModelChain(raw) {
+  const out = { ok: true, enabled: false, entries: [] };
+  try {
+    if (!raw || typeof raw !== 'object') return out;
+    out.enabled = raw.enabled === true;
+    const list = Array.isArray(raw.models) ? raw.models : [];
+    const seen = new Set();
+    for (const m of list) {
+      if (!m || typeof m !== 'object') continue;
+      const provider = String(m.provider || '').trim();
+      const model = String(m.model || '').trim();
+      if (!provider || !model) continue;              // 空槽位直接跳过
+      const key = provider + '\u0000' + model;
+      if (seen.has(key)) continue;                    // 去重
+      seen.add(key);
+      const entry = { provider, model };
+      const eff = String(m.reasoningEffort || '').trim();
+      if (eff) entry.reasoningEffort = eff;
+      out.entries.push(entry);
+      if (out.entries.length >= 10) break;            // 上限 10 个（用户要求）
+    }
+    return out;
+  } catch (e) {
+    out.ok = false;
+    out.error = String((e && e.message) || e);
+    return out;
+  }
+}
+
+/**
+ * 从链里挑出下一个候选（排除本次 turn 已尝试过的）。
+ * @param entries 规整后的链
+ * @param tried   本 turn 已尝试的 key 集合（provider\0model）
+ * @returns 候选或 null
+ */
+function nextModelCandidate(entries, tried) {
+  for (const e of (entries || [])) {
+    const key = e.provider + '\u0000' + e.model;
+    if (tried && tried.has(key)) continue;
+    return e;
+  }
+  return null;
+}
+
+function modelKey(provider, model) {
+  return String(provider) + '\u0000' + String(model);
+}
+
 // 高频低值事件：不入前端流（流式 chunk 每token一条，会挤满窗口）
 const RAW_DROP = new Set(['assistant/chunk', 'step/start', 'step/end', 'request/header']);
 
@@ -297,6 +386,27 @@ const GUARD_TEXT = [
   '  room-report 上报等），而不是仅用文字描述进展。',
   '',
   '若用户已明确要求停止（"停 / 够了 / 不用了 / 就这样"），直接结束即可。'
+].join('\n');
+
+// ── 【2026-10-29 修复】子代理专用守卫文案 ────────────────────────────────
+// 主对话那份文案说的是"用 workflow_gate / room-end 让状态进入终态"，
+// 但这些都是【编排命令】，子代理本来就被禁止调用（反夺舍规则）。
+// 拿主对话的文案去 steer 子代理，等于让它去做一件它无权做的事 ——
+// 实测它只能在"I'm still working"和空转之间反复，最后房间判 dead。
+// 子代理唯一该做的是：继续推进【本房间的建模/验证】，然后如实停下等父代理收尾。
+const GUARD_TEXT_SUBAGENT = [
+  '【系统提示 · 工程模式守卫 · 子代理】',
+  '你正准备结束本轮。你是【建模/专项子代理】，不需要让门禁进入终态 ——',
+  '收尾（room-end）由父代理负责，你没有权限、也不应该调用编排命令。',
+  '',
+  '请检查你自己这一轮：',
+  '  · 如果本房间的零件/验证还没做完 → 直接调用工具继续做',
+  '    （sw_bridge.py run / visual_check.py gate / room-report / room-artifact），',
+  '    不要只写"我接下来要做X"却没有工具调用。',
+  '  · 如果你确实已经做完本轮该做的 → 直接结束即可，无需任何标记，',
+  '    父代理会通过 room-board / room-report-read 看到你的进度。',
+  '',
+  '⚠️ 只输出文字而不调用工具，等于没有推进。',
 ].join('\n');
 
 function send(res, status, body) {
@@ -800,7 +910,35 @@ export function apply(ctx) {
         //   守卫会漏放正在进行的任务。
         const _msEarly = readJsonSafe(path.join(toolsDir, 'mode_state.json'));
         const _roomsEarly = (_msEarly && _msEarly.rooms) || {};
-        const _namesEarly = Object.keys(_roomsEarly);
+        // ── 【未记录 BUG 修复·跨任务残留房间卡死守卫】────────────────────
+        // 实测（2026-10-29 盘查真实安装副本）：
+        //   mode_state.json 里躺着 3 个 active 房间（底盘与车架总成 / 驱动轮组 /
+        //   总理子代理），task_epoch 还是 10 月中旬的上一轮任务，而且
+        //   mode_state 里【没有 task_id 字段】，无法判断它们属不属于本轮。
+        //   后果：detectTaskFinished() 永远走"仍有 active 房间 → done=false"
+        //   分支，守卫对【所有新会话】每轮 steer、永不放行 —— 用户看到的就是
+        //   "模型一直在重复同一句话、停不下来"。
+        // 修复：判断 active 时只看【属于本轮 workflow task_id】的房间；
+        //   · 房间记录没有 task_id（升级前的老数据）→ 按【属本轮】处理
+        //     （宁可不放行，也不能把正在跑的房间当残留误放）；
+        //   · 只有明确记着别的 task_id 才排除，并在日志里留痕。
+        const _wfTidEarly = (wf && wf.task_id) ? String(wf.task_id) : '';
+        const _namesAllEarly = Object.keys(_roomsEarly);
+        let _staleRoomCount = 0;
+        const _namesEarly = _namesAllEarly.filter((n) => {
+          const _rec = _roomsEarly[n] || {};
+          const _rt = _rec.task_id;
+          if (!_rt || !_wfTidEarly) return true;      // 无从判断 → 保守按本轮
+          if (String(_rt) === _wfTidEarly) return true;
+          _staleRoomCount += 1;
+          return false;
+        });
+        if (_staleRoomCount > 0) {
+          try {
+            console.warn('[dsh-engineering-ui] 守卫忽略上一轮任务的 '
+                         + _staleRoomCount + ' 个残留房间（task 不匹配）');
+          } catch (e) {}
+        }
         const _anyActiveEarly = _namesEarly.some((n) => (_roomsEarly[n] || {}).active);
         if (_anyActiveEarly) {
           return { done: false, reason: '仍有 active 房间，任务在进行中' };
@@ -812,7 +950,12 @@ export function apply(ctx) {
         const ms = readJsonSafe(path.join(toolsDir, 'mode_state.json'));
         if (ms) {
           const rooms = ms.rooms || {};
-          const names = Object.keys(rooms);
+          // 【未记录 BUG 修复】这里同样只认【本轮任务】的房间（理由见上）。
+          const names = Object.keys(rooms).filter((n) => {
+            const _rt = (rooms[n] || {}).task_id;
+            if (!_rt || !_wfTidEarly) return true;
+            return String(_rt) === _wfTidEarly;
+          });
           // ── 【守卫修复·误拦】空房间表 = 没有进行中的房间 ────────────────
           // 原条件要求 names.length > 0 才判定，导致 rooms-reset 清空后
           //   （rooms = {}）直接跳过，判定为"未完成"→ 永久拦截。
@@ -928,9 +1071,333 @@ export function apply(ctx) {
     return false;
   }
 
-  const guardState = new Map(); // agentId -> { count, firstAt }
+  // ── 【模型自动接替】运行时状态（每 agent 一份）────────────────────────
+  // 结构：agentId -> { key: 当前钉住的候选 key, tried: Set(本 turn 已试),
+  //                    turn: 该 tried 属于哪个 turn }
+  // 放在 apply() 作用域内，与 guardState 同级：随插件卸载自然释放。
+  const modelChainState = new Map();
+  /** 配置缓存（读盘有开销，按 mtime 失效）。 */
+  let modelChainCache = null;
+  let modelChainCacheAt = 0;
+
+  /** 读模型链接配置（找不到/读坏都返回"未启用"）。 */
+  function readModelChainConfig() {
+    const now = Date.now();
+    if (modelChainCache && (now - modelChainCacheAt) < 5000) return modelChainCache;
+    let cfg = { ok: true, enabled: false, entries: [] };
+    try {
+      const dir = findToolsDir();
+      if (dir) {
+        const p = path.join(dir, MODEL_CHAIN_FILE);
+        const j = readJsonSafe(p);
+        if (j) cfg = normalizeModelChain(j);
+      }
+    } catch (e) {
+      cfg = { ok: false, enabled: false, entries: [], error: String((e && e.message) || e) };
+    }
+    modelChainCache = cfg;
+    modelChainCacheAt = now;
+    return cfg;
+  }
+
+  /**
+   * 该 agent 是否适用模型接替（工程模式 + 配置启用 + 有候选）。
+   *
+   * ── 作用域（用户要求：最好只运用在工程模式）──────────────────────────
+   * 三条证据任一成立即认为是工程模式会话：
+   *   ① isGuardSession(agent)        —— 与收尾守卫完全同一口径（最权威）
+   *   ② 会话 header 的 agentPreset === 'engineering'
+   *   ③ 子代理：父会话是工程模式（fork 子代理继承父级 preset，但它自己的
+   *      header 未必带 agentPreset，所以要顺着 parentSession 查一次）
+   * 非工程模式会话【完全不介入】—— 不换模型、不改请求配置。
+   */
+  function modelChainApplies(agent) {
+    try {
+      const cfg = readModelChainConfig();
+      if (!cfg.enabled || !cfg.entries.length) return false;
+      // ① 与守卫同口径
+      if (isGuardSession(agent)) return true;
+      // ② header 直接标明
+      try {
+        const h = agent && agent.session && agent.session.header;
+        if (h && String(h.agentPreset || '') === GUARD_PRESET) return true;
+        if (agent && String(agent.agentPreset || '') === GUARD_PRESET) return true;
+      } catch (e) {}
+      // ③ 子代理继承父级 preset 判断
+      try {
+        const pst = parentChainStateOf(agent);
+        // 父级必须是【当前】判定为工程模式（isEng 已改非粘性，每轮重算）
+        if (pst && pst.isEng === true) return true;
+        const pid = agent && (agent.parentSession
+          || (agent.session && agent.session.header && agent.session.header.parentSession));
+        if (pid) {
+          const cached = presetCache.get(String(pid));
+          if (cached === GUARD_PRESET) return true;
+          if (cached === undefined) readPreset(String(pid)).catch(() => {});
+        }
+      } catch (e) {}
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 取/建某 agent 的接替状态，并按 turn 重置已试集合。 */
+  function modelChainStateOf(agent, turn) {
+    let st = modelChainState.get(agent.id);
+    if (!st) {
+      st = { key: null, tried: new Set(), turn: null, isEng: false, switched: false };
+      modelChainState.set(agent.id, st);
+    }
+    if (st.turn !== turn) {
+      st.turn = turn;
+      st.tried = new Set();
+      // 新的一轮：接替状态复位（否则上一轮切换会一直粘住，
+      // 表现为"用户重新选了模型却还被按在旧候选上"）
+      st.switched = false;
+    }
+    // 记录"这个 agent 是否工程模式"，供子代理顺着父级判断作用域。
+    // ⚠️ 必须是【非粘性】判定：每轮重算、允许从 true 变回 false。
+    //    旧实现只在为 true 时赋值，一旦某轮误判成工程模式就永久生效，
+    //    导致普通会话也被接替逻辑接管（用户反馈"不是工程模式也被接管"）。
+    try {
+      let _eng = false;
+      if (isGuardSession(agent)) _eng = true;
+      else {
+        const h = agent && agent.session && agent.session.header;
+        if (h && String(h.agentPreset || '') === GUARD_PRESET) _eng = true;
+      }
+      st.isEng = _eng;
+    } catch (e) { st.isEng = false; }
+    return st;
+  }
+
+  /**
+   * 找出该 agent 的【父会话】的接替状态。
+   *
+   * ── 为什么子代理必须跟随父级（用户要求：子代理继承模型）─────────────
+   * DSH 的 fork 子代理本来就继承父级模型：
+   *   ForkInProcessProvider 的 agentOptions 是 merged over the parent route，
+   *   且工具描述明确写 "Omit provider, model ... to inherit compatible
+   *   missing values from the parent Agent"。
+   * 所以如果子代理【各自独立】从链首重新试，会出现：
+   *   主对话已经切到候选 2，子代理却又从候选 1（已耗尽的）开始撞墙，
+   *   白白失败一轮才切走 —— 既浪费额度，也违背"继承"语义。
+   * 正确做法：子代理直接沿用父级当前钉住的候选；只有当父级也没定
+   * （比如父级不是工程模式会话）时才自己从头挑。
+   */
+  function parentChainStateOf(agent) {
+    try {
+      const pid = agent && (agent.parentSession || agent.parentId
+        || (agent.session && agent.session.header && agent.session.header.parentSession));
+      if (!pid) return null;
+      const st = modelChainState.get(String(pid));
+      return st || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // ── ① 每轮请求前：只有【本轮已经接替过】才覆盖请求配置 ────────────────
+  //
+  // ══ 【2026-10-30 重大修正】绝不能再无条件覆盖用户的选择 ══════════════
+  // 原实现（v2）每轮都把请求强制改成"链首候选"，导致两个严重问题：
+  //   ① 用户在设置页选了 workbuddy/deepseek-v4.1-flash，
+  //      实际请求却被改成 chain[0] = buddy/... —— 用户看到的是
+  //      "我选 DeepSeek，回的却是 Hy3"。这等于插件劫持了模型选择权。
+  //   ② 本插件监听器挂在【root 上下文】，而官方的 installModelSelection
+  //      挂在【agent 作用域】。cordis 的 waterfall 是 outermost-first，
+  //      所以我们的覆盖永远赢过官方的选择 —— 手动选择彻底失效。
+  //
+  // 正确语义（把"接替"还原成"兜底"）：
+  //   · 默认【完全不介入】—— 用户/宿主选什么就用什么；
+  //   · 只有当 agent/request-error 判定当前模型失效、并把 st.key 指向
+  //     链里【下一个候选】之后，本监听器才在下一轮把请求改成那个候选；
+  //   · 用户一旦重新手动选模型（请求头里出现与 st.key 不同的选择），
+  //     立即清除接替状态，把控制权交还给用户。
+  disposers.push(ctx.on('agent/request', async (payload, next) => {
+    let resolved;
+    try { resolved = await next(); } catch (e) { throw e; }
+    try {
+      const agent = payload && payload.agent;
+      if (!agent || !agent.id) return resolved;
+      if (!modelChainApplies(agent)) return resolved;
+
+      const st = modelChainStateOf(agent, payload.turn);
+      // 本轮没有发生接替 → 什么都不做（这是最常见路径）
+      if (!st.switched || !st.key) return resolved;
+
+      // ── 【最终保险】链里没有的模型 → 一律不碰 ──────────────────────────
+      // 用户手动选的模型常常不在"自动接替链"里（比如临时换了个别的家）。
+      // 那种情况下接替毫无意义，直接放行，绝不改用户的选型。
+      const cfg = readModelChainConfig();
+      const cur = cfg.entries.find((e) => modelKey(e.provider, e.model) === st.key) || null;
+      if (!cur) return resolved;
+
+      // 用户此刻选的路由与我们要切的不同 → 视为用户重新手动接管，交还控制权
+      const wantP = String((resolved && resolved.provider) || '');
+      const wantM = String((resolved && resolved.model) || '');
+      if (wantP && wantM && modelKey(wantP, wantM) !== st.key) {
+        st.switched = false;
+        st.key = null;
+        try {
+          console.warn('[dsh-engineering-ui] 检测到手动选型变更（'
+            + wantP + '/' + wantM + '），已放弃接替、交还用户选择');
+        } catch (e) {}
+        return resolved;
+      }
+
+      try {
+        console.warn('[dsh-engineering-ui] 接替生效：本轮改用 '
+          + cur.provider + '/' + cur.model);
+      } catch (e) {}
+      // 只改 provider/model，并清掉继承来的 reasoningEffort
+      const { reasoningEffort: _inherited, ...rest } = resolved || {};
+      return {
+        ...rest,
+        provider: cur.provider,
+        model: cur.model,
+        ...cur.reasoningEffort === undefined ? {} : { reasoningEffort: cur.reasoningEffort },
+      };
+    } catch (e) {
+      return resolved;      // 接替逻辑任何异常都不得影响主流程
+    }
+  }));
+
+  // ── ② 请求失败后：额度/限流类错误 → 换下一个候选并让本轮重试 ────────
+  disposers.push(ctx.on('agent/request-error', async (payload, next) => {
+    try {
+      const agent = payload && payload.agent;
+      const failure = payload && payload.failure;
+      const code = String((failure && failure.code) || '');
+      if (!agent || !agent.id) return next();
+      if (!MODEL_CHAIN_SWITCH_CODES.has(code)) return next();   // 其它错误交给默认链路
+      if (!modelChainApplies(agent)) return next();
+      const cfg = readModelChainConfig();
+      const st = modelChainStateOf(agent, payload.turn);
+      // 把"刚失败的模型"记为已试，避免又切回它
+      st.tried.add(modelKey(payload.provider, (failure && failure.model) || ''));
+      st.tried.add(modelKey(payload.provider, ''));
+      // 同 provider 的候选全部标掉 —— 额度是按账号算的，同家大概率一起挂
+      for (const e of cfg.entries) {
+        if (e.provider === payload.provider) st.tried.add(modelKey(e.provider, e.model));
+      }
+      // ── 【2026-10-30 修正】从【当前实际在用的模型】往后找候选 ──────────
+      // 原实现用 nextModelCandidate(entries, tried) 从头扫，于是：
+      //   · 用户手动选了链里第 5 个，失败后又回到链首第 1 个；
+      //   · 甚至把用户自己选的模型也跳过了。
+      // 现在：先定位当前模型在链中的下标，之后只往后找（找不到再回到链首
+      //       找没过期的，保持"兜底"语义但不打乱用户偏好）。
+      const _curKey = modelKey(payload.provider, (failure && failure.model) || '');
+      let _start = cfg.entries.findIndex((e) => modelKey(e.provider, e.model) === _curKey);
+      if (_start < 0) _start = -1;          // 当前模型不在链里：从链首开始找
+      let nxt = null;
+      for (let _i = _start + 1; _i < cfg.entries.length; _i++) {
+        const e = cfg.entries[_i];
+        if (st.tried.has(modelKey(e.provider, e.model))) continue;
+        nxt = e; break;
+      }
+      if (!nxt) {
+        // 后面没有了 → 回到链首找还没试过的（真正的兜底）
+        nxt = nextModelCandidate(cfg.entries, st.tried);
+      }
+      if (!nxt) return next();        // 链已试完 → 交回默认（明确失败）
+      st.key = modelKey(nxt.provider, nxt.model);
+      st.switched = true;             // ← 关键：只有这个标记置位，下一轮才会覆盖请求
+      try {
+        console.warn('[dsh-engineering-ui] 模型接替：' + payload.provider
+          + ' 错误 ' + code + ' → 切到 ' + nxt.provider + '/' + nxt.model);
+      } catch (e) {}
+      // 冷却一小会儿再重试，避免立刻撞同一个限流窗口
+      const delay = 800;
+      await new Promise((r) => setTimeout(r, delay));
+      return { kind: 'retry' };
+    } catch (e) {
+      return next();
+    }
+  }));
+
+  // ── ③ 会话结束/agent 销毁时清理状态，避免 Map 无界增长 ──────────────
+  disposers.push(ctx.on('agent/disposed', (payload) => {
+    try {
+      const id = payload && payload.agent && payload.agent.id;
+      if (id) modelChainState.delete(id);
+    } catch (e) {}
+  }));
+
+  const guardState = new Map(); // agentId -> { count, firstAt, probe }
   const MAX_GUARD = 12;         // 【Bug3】从 40 降到 12：过高的上限本身就会造成"死缠烂打"
   const GUARD_WINDOW = 30 * 60 * 1000; // 30 分钟内计数，超过则重置
+
+  // ══════════════════════════════════════════════════════════════════════
+  //  【2026-10-29 修复 · 子代理死循环】把"无进展"变成可判定的结构信号
+  // ══════════════════════════════════════════════════════════════════════
+  // 实测（竞速小车任务，日志 _logs_666）：
+  //   建模小屋 66c7982f 连续 5 步【只输出文本、不调用任何工具】，
+  //   每次都写"I'm still working. Let me run the sensor bracket script:"，
+  //   最后到 65 步也没有真正发起调用，房间被判 dead，两件零件没建。
+  //   与此同时 turn-stopping 守卫每一轮都把它拉回来 —— 共 steer 12 次，
+  //   正好撞上 MAX_GUARD 上限才停。也就是说：
+  //     · 模型侧确实有"光说不做"的退化（用户判断正确）；
+  //     · 但守卫【无条件】把每一次"想停"都当成"你想偷懒"打回去，
+  //       连【子代理】也一视同仁，于是把退化放大成了死循环。
+  //
+  // 本修复不基于"文本重复度"（Bug-47 已证明会误伤），而是看结构事实：
+  //   ① 子代理【不设】收尾守卫 —— 它的收尾由父代理的 room-end 决定，
+  //      它自己本来就没有"结束任务"的权限，反复 steer 只会让它空转；
+  //   ② 主对话连续 N 次"想结束且没产生任何工具调用"→ 判定无进展，
+  //      停止 steer 并放行（把控制权交回用户，而不是无限拉回）。
+  // 这两个信号都是"回合数/是否存在工具调用"，不依赖措辞。
+  const MAX_NO_PROGRESS = 4;    // 连续这么多轮"无工具调用却想结束"就放手
+  const GUARD_MAX_STEER_SUBAGENT = 2; // 子代理最多 steer 2 次（原本 12）
+
+  /** 该 agent 是否是被 fork 出来的子代理（delegationDepth > 0）。 */
+  function isDelegatedAgent(agent) {
+    try {
+      const d = agent && (agent.delegationDepth ?? agent.session?.delegationDepth
+                          ?? agent.session?.header?.delegationDepth);
+      if (typeof d === 'number') return d > 0;
+      if (d !== undefined && d !== null) return Number(d) > 0;
+      // 兜底：会话 header 带 parentSession 也说明是子代理
+      const parent = agent && (agent.parentSession || agent.session?.header?.parentSession);
+      return !!parent;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * 最近若干步里，模型是否【连续只说话、没调用任何工具】。
+   * 这是"卡住"的结构证据：正常的推进一定会伴随工具调用或状态文件变化。
+   */
+  function countConsecutiveNoToolSteps(agent, limit = MAX_NO_PROGRESS + 2) {
+    try {
+      const evs = sessionEvents(agent && agent.session) || [];
+      if (!evs.length) return 0;
+      let n = 0;
+      for (let i = evs.length - 1; i >= 0 && n < limit; i--) {
+        const ev = evs[i];
+        if (!ev) continue;
+        // 只看"一轮模型产出"这个粒度：assistant/message
+        const t = String(ev.type || '');
+        if (t !== 'assistant/message' && t !== 'assistant') continue;
+        const content = ev.data?.message?.content
+          || (Array.isArray(ev.data?.content) ? ev.data.content : []);
+        let hasTool = false;
+        if (Array.isArray(content)) {
+          for (const b of content) {
+            if (!b || typeof b !== 'object') continue;
+            if (b.type === 'tool-call' || b.type === 'tool_use') { hasTool = true; break; }
+          }
+        }
+        if (hasTool) break;        // 一遇到有工具调用的步就停止计数
+        n += 1;
+      }
+      return n;
+    } catch (e) {
+      return 0;
+    }
+  }
 
   disposers.push(ctx.on('agent/turn-stopping', (payload) => {
     try {
@@ -954,9 +1421,54 @@ export function apply(ctx) {
         return;
       }
 
-      const st = guardState.get(agent.id) || { count: 0, firstAt: Date.now() };
+      // ── 【2026-10-29 修复】子代理不设收尾守卫 ──────────────────────────
+      // 理由见 MAX_NO_PROGRESS 上方长注释：子代理没有"结束任务"的权限
+      //   （收尾由父代理 room-end 决定），把它拉回来只会让它空转。
+      //   实测 66c7982f 被 steer 12 次后仍然什么都没多做，最后房间判 dead。
+      if (isDelegatedAgent(agent)) {
+        const sd = guardState.get(agent.id) || { count: 0, firstAt: Date.now(), probe: 0 };
+        if (Date.now() - sd.firstAt > GUARD_WINDOW) {
+          sd.count = 0; sd.firstAt = Date.now();
+        }
+        // 子代理只在【最长 GUARD_MAX_STEER_SUBAGENT 次】内被提醒，
+        // 且仅当它其实还在干活（有工具调用）时 —— 否则直接放手。
+        const _noToolSub = countConsecutiveNoToolSteps(agent);
+        if (sd.count >= GUARD_MAX_STEER_SUBAGENT || _noToolSub >= MAX_NO_PROGRESS) {
+          return;                    // 放手：交回父代理/用户处理，不再拉回
+        }
+        sd.count += 1;
+        guardState.set(agent.id, sd);
+        const subMsg = createUserMessage({
+          content: [{ type: 'text', text: GUARD_TEXT_SUBAGENT }],
+          source: { kind: 'plugin:dsh-engineering-ui' }
+        });
+        agent.steer(subMsg);
+        return;
+      }
+
+      const st = guardState.get(agent.id) || { count: 0, firstAt: Date.now(), probe: 0 };
       if (Date.now() - st.firstAt > GUARD_WINDOW) { st.count = 0; st.firstAt = Date.now(); }
-      if (st.count >= MAX_GUARD) return;
+      // ── 【2026-10-29 修复】无进展就放手，别把"光说不做"放大成死循环 ──
+      // 主对话连续 MAX_NO_PROGRESS 轮"想结束且没有工具调用"→ 判无进展。
+      // 此时再 steer 也不会带来新动作（实测 4 轮全部只输出一句话），
+      // 继续拉回只会烧额度、并让用户看到"模型一直在重复同一句话"。
+      const _noTool = countConsecutiveNoToolSteps(agent);
+      if (_noTool >= MAX_NO_PROGRESS) {
+        try {
+          console.warn('[dsh-engineering-ui] guard 放手：连续 ' + _noTool
+                       + ' 轮无工具调用，判定无进展（session=' + agent.id + '）');
+        } catch (e) {}
+        guardState.delete(agent.id);
+        return;
+      }
+      if (st.count >= MAX_GUARD) {
+        // 撞上限也放手（原有行为），但留一条日志便于事后定位
+        try {
+          console.warn('[dsh-engineering-ui] guard 撞上限放手：已 steer '
+                       + st.count + ' 次（session=' + agent.id + '）');
+        } catch (e) {}
+        return;
+      }
       st.count += 1;
       guardState.set(agent.id, st);
       // 必须带 source：DSH 宿主多处按 message.source.kind 判别消息来源
@@ -1983,7 +2495,8 @@ export function apply(ctx) {
       if (childSessionId && !ID_RE.test(childSessionId)) {
         return send(res, 400, { ok: false, error: 'bad childSessionId' });
       }
-      if (rootSessionId && !ID_RE.test(rootSessionId)) {
+      // 允许 "*" = 全局查询（跨子代理会话去重用，见下方 byAll）
+      if (rootSessionId && rootSessionId !== "*" && !ID_RE.test(rootSessionId)) {
         return send(res, 400, { ok: false, error: 'bad rootSessionId' });
       }
       if (!childSessionId && !rootSessionId) {
@@ -1994,7 +2507,13 @@ export function apply(ctx) {
         if (e.settled) continue;
         const byChild = childSessionId && e.childSessionId === childSessionId;
         const byRoot = rootSessionId && e.rootSessionId === rootSessionId;
-        if (byChild || byRoot) {
+        // ── 【2026-10-29 修复】rootSessionId=* 时返回【全部】未结提问 ──────
+        // 现场事故（会话 ceac3fff）：三个总计子代理同时存活，各自用不同的
+        //   childSessionId 提问同一道题；而旧去重只按 childSessionId 匹配，
+        //   于是同一题被判成"三张新卡"，用户看到已答过的选项反复弹出。
+        // 现在允许按 root 全局查，让 ask_user.py 能做【跨会话】去重。
+        const byAll = rootSessionId === "*";
+        if (byChild || byRoot || byAll) {
           out.push({
             pendingId: pid,
             questions: e.questions,
@@ -3792,6 +4311,257 @@ export function apply(ctx) {
     return (j && typeof j.text === 'string') ? j.text : '';
   }
 
+  // ══ 【模型自动接替】列出宿主当前可用的模型（GET /model-catalog）══════
+  // 为什么需要它（用户反馈 2026-10-30）：
+  //   "这我也看不到是啥模型啊，而且你起码给我一个可以有模型表的模型让我选择吧"
+  //   —— 原版只能手打 provider / model 字符串：用户既不知道有哪些可用，
+  //      也看不清自己填了什么（还撞上深色主题下输入框黑底黑字的问题）。
+  // 数据来源（全部取自宿主内存里的真实注册信息，不猜）：
+  //   ① ctx.llm.listProviders()                  → 已注册的 provider 路由
+  //   ② 每个 provider 的 adapter.listModels(pr)  → 该路由能广告的模型
+  //   ③ ctx.llm.listConfigurableProviders()      → 配置目录（含未激活）
+  //   ④ 并入【当前链里已保存的模型】—— 即便 catalog 没广告，也不能让
+  //      用户已保存的选择从列表里消失（否则一保存就被覆盖成空）。
+  // 任一来源失败都不抛错：宁可列表少几项，也要保证设置页能打开。
+  /**
+   * 列出宿主当前真实可路由的模型目录 —— 与官方 GUI 用【完全同一套 API】。
+   *
+   * ── 为什么第一版只列出 2 家、模型不全（用户反馈 2026-10-30）───────────
+   *  v1 走的是 `llm.adapters.get(pid).adapter.listModels(provider)`：
+   *    · 那个 adapters Map 只含"当前进程注册过"的少数路由；
+   *    · adapter.listModels 的入参是"provider 路由对象"而非 id，签名对不上；
+   *    · 更要命的是它【不走 resolveModelInfo】，拿不到官方展示用的 name。
+   *  结果：provider 只有 buddy / raccoon 两家，模型也缺。
+   *
+   * ── 现在对齐官方（dsh-api-session-controller: buildModelCatalog）────
+   *  · ctx.llm.listProviders()            → 全部 provider（含 {id, name}）
+   *  · ctx.llm.listModels(provider.id)    → 该 provider 的模型（{id, name, ...}）
+   *  · ctx.llm.resolveModelInfo(p, id)    → 模型元信息（含 reasoning 档位）
+   *  这样设置页列出来的东西与聊天框底部那个模型选择器【完全一致】。
+   *
+   * ── 额外保留的兜底 ──────────────────────────────────────────────────
+   *  · 某个 provider 抛错 → 只记 failure，其余照常（与官方一致）；
+   *  · 当前 chain 里已保存但目录里没有的 → 补进来并标 fromChain，
+   *    避免用户一保存就被"清空"；
+   *  · llm 服务整体不可用 → 返回空目录 + errors，绝不抛错。
+   *
+   * @returns {Promise<{ok:boolean, providers:Array, groups:Array,
+   *                    models:Array, failures:Array, sources:Array, errors:Array}>}
+   */
+  async function collectModelCatalog() {
+    const out = {
+      ok: true, providers: [], groups: [], models: [],
+      failures: [], sources: [], errors: [],
+    };
+    const seen = new Set();
+    const pushModel = (provider, model, extra) => {
+      const p = String(provider || '').trim();
+      const m = String(model || '').trim();
+      if (!p || !m) return;
+      const key = p + '\u0000' + m;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.models.push(Object.assign({ provider: p, model: m }, extra || {}));
+    };
+
+    let llm = null;
+    try {
+      llm = (typeof ctx.get === 'function' ? ctx.get('llm') : null) || ctx.llm || null;
+    } catch (e) { llm = null; }
+
+    if (!llm || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+      out.ok = true;   // 目录失败不影响设置页打开
+      out.errors.push('llm 服务不可用（listProviders / listModels 缺失）');
+    } else {
+      let providers = [];
+      try {
+        providers = llm.listProviders() || [];
+      } catch (e) {
+        out.errors.push('listProviders: ' + String((e && e.message) || e));
+      }
+      out.sources.push('listProviders=' + providers.length);
+
+      // 与官方 buildModelCatalog 同构：每个 provider 独立 try/catch
+      for (const pr of providers) {
+        const pid = String((pr && (pr.id || pr.provider)) || '').trim();
+        if (!pid) continue;
+        const pname = String((pr && (pr.name || pr.label)) || pid);
+        let models = [];
+        try {
+          models = await Promise.resolve(llm.listModels(pid) || []);
+        } catch (e) {
+          out.failures.push({ id: pid, name: pname,
+            message: String((e && e.message) || e) });
+          continue;
+        }
+        const entries = [];
+        for (const m of models) {
+          const mid = String((m && (m.id || m.model)) || '').trim();
+          if (!mid) continue;
+          let label = String((m && (m.name || m.label)) || mid);
+          let desc = (m && m.description) || undefined;
+          let reasoning = m && m.reasoning;
+          // 与官方一致：再问一次元信息（拿 name / reasoning 档位）
+          try {
+            if (typeof llm.resolveModelInfo === 'function') {
+              const info = await Promise.resolve(llm.resolveModelInfo(pid, mid));
+              if (info) {
+                if (info.name) label = String(info.name);
+                if (info.description) desc = info.description;
+                if (info.reasoning) reasoning = info.reasoning;
+              }
+            }
+          } catch (e) { /* 元信息拿不到就用基础信息，不影响可选 */ }
+          const entry = { id: mid, name: label };
+          if (desc) entry.description = desc;
+          if (reasoning) {
+            entry.reasoning = {
+              efforts: Array.isArray(reasoning.efforts) ? reasoning.efforts.map((x) => ({
+                id: x.id, name: x.name || x.id,
+                ...x.description === undefined ? {} : { description: x.description },
+              })) : [],
+              ...reasoning.defaultEffort === undefined ? {} : { defaultEffort: reasoning.defaultEffort },
+            };
+          }
+          entries.push(entry);
+          pushModel(pid, mid, { label, ...desc === undefined ? {} : { description: desc } });
+        }
+        if (entries.length) {
+          out.groups.push({ id: pid, label: pname, models: entries });
+        }
+      }
+    }
+
+    // 兜底：当前链里已保存的模型一定列出（否则一保存就从 UI 消失）
+    try {
+      const cur = readModelChainConfig();
+      for (const e of (cur.entries || [])) {
+        const pid = String(e.provider || '').trim();
+        const mid = String(e.model || '').trim();
+        if (!pid || !mid) continue;
+        pushModel(pid, mid, { fromChain: true });
+        if (!out.groups.some((g) => g.id === pid)) {
+          out.groups.push({ id: pid, label: pid + '（链外）',
+            models: [{ id: mid, name: mid }] });
+        }
+      }
+    } catch (e) {}
+
+    out.groups.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    out.providers = out.groups.map((g) => ({ id: g.id, label: g.label }));
+    if (!out.groups.length && !out.failures.length) {
+      out.errors.push('宿主没有返回任何可用 provider（模型目录为空）');
+    }
+    return out;
+  }
+
+
+  // ══ 【模型自动接替】配置读写（GET/POST /model-chain）════════════════
+  // 存 tools/model_chain.json：{ enabled: bool, models: [{provider,model,reasoningEffort?}] }
+  //   · 与 persona.json 同一处（findToolsDir 解析的 tools 目录），
+  //     保证 UI 与宿主读的是同一份真相；
+  //   · 不参与签名/防线，属于用户配置，不是凭据。
+  function modelChainPath() {
+    const dir = findToolsDir();
+    if (!dir) return null;
+    return path.join(dir, MODEL_CHAIN_FILE);
+  }
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/model-catalog',
+    handler: async (req, res) => {
+      if (req.method !== 'GET') return send(res, 405, { ok: false, error: 'GET only' });
+      try {
+        const cat = await collectModelCatalog();
+        // collectModelCatalog 已按官方 buildModelCatalog 的结构给出 groups
+        // （每个 model 带 name / description / reasoning），这里直接透传，
+        // 只补一个给 UI 用的 total。
+        return send(res, 200, {
+          ok: true,
+          total: cat.models.length,
+          provider_count: cat.groups.length,
+          groups: cat.groups,
+          providers: cat.providers,
+          models: cat.models,
+          failures: cat.failures,
+          sources: cat.sources,
+          errors: cat.errors,
+        });
+      } catch (e) {
+        return send(res, 200, {
+          ok: false,
+          error: String((e && e.message) || e),
+          groups: [], providers: [],
+        });
+      }
+    }
+  })));
+
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/model-chain',
+    handler: async (req, res) => {
+      if (req.method === 'GET') {
+        const p = modelChainPath();
+        const raw = p ? readJsonSafe(p) : null;
+        const cfg = normalizeModelChain(raw);
+        // ── 【2026-10-30】同时回传宿主当前默认模型 ────────────────────────
+        // 用户反馈"模型显示没跟上"：链里第一条是 buddy/...，但设置页
+        // 默认选的是 workbuddy/...，UI 摘要只显示链、不显示"实际在用哪个"，
+        // 于是看起来像是"我选的没用上"。
+        // 这里把宿主真实默认选择一并给出，UI 就能并排显示并提示不一致。
+        let hostDefault = null;
+        try {
+          const adm = (typeof ctx.get === 'function' ? ctx.get('agentDefaultModel') : null)
+            || ctx.agentDefaultModel;
+          if (adm && typeof adm.currentSelection === 'function') {
+            hostDefault = adm.currentSelection();
+          }
+        } catch (e) { hostDefault = null; }
+        // 链首是否与宿主默认一致（不一致时前端给出提示）
+        const head = cfg.entries[0] || null;
+        const headMatchesDefault = !!(head && hostDefault
+          && String(head.provider) === String(hostDefault.provider)
+          && String(head.model) === String(hostDefault.model));
+        return send(res, 200, {
+          ok: true,
+          enabled: cfg.enabled,
+          models: cfg.entries,
+          file: p,
+          limit: 10,
+          host_default: hostDefault,
+          head_matches_default: headMatchesDefault,
+          switch_codes: [...MODEL_CHAIN_SWITCH_CODES],
+          note: ('接替只在前一个模型真的报额度/限流错误后才生效，'
+                 + '正常情况下【不会】改掉你在设置页选的模型；'
+                 + '本轮内不重复试同一个模型。'),
+        });
+      }
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'GET or POST only' });
+      let payload;
+      try { payload = JSON.parse(await readBody(req)); } catch {
+        return send(res, 400, { ok: false, error: 'bad json' });
+      }
+      const cfg = normalizeModelChain(payload);
+      const p = modelChainPath();
+      if (!p) {
+        return send(res, 200, { ok: false, error: '无法定位工程模式 tools 目录，模型链未保存' });
+      }
+      try {
+        fs.writeFileSync(p, JSON.stringify({
+          enabled: cfg.enabled,
+          models: cfg.entries,
+          updated_at: new Date().toISOString(),
+        }, null, 2), 'utf8');
+        modelChainCache = null;          // 立刻失效，下一轮请求就用新配置
+        modelChainState.clear();         // 链变了，旧进度作废
+        return send(res, 200, { ok: true, enabled: cfg.enabled, models: cfg.entries, file: p });
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  })));
+
   disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/persona',
@@ -3911,6 +4681,15 @@ export function apply(ctx) {
   //   · 原子写（tmp + rename）、读-改-写、节流 ≥300ms；
   //   · 任何异常一律吞掉 —— 登记器坏了也绝不能影响会话。
   const PLATFORM_AGENTS_NAME = 'platform_agents.json';
+  // 本次 DSH 进程运行标识（崩溃/重启后必然变化 → 可据此判"整批失联"）
+  const PLATFORM_RUN_ID = (() => {
+    try {
+      return 'run-' + process.pid + '-' + Date.now().toString(36);
+    } catch (e) {
+      return 'run-unknown';
+    }
+  })();
+  const PLATFORM_RUN_STARTED_AT = new Date().toISOString();
   const PLATFORM_AGENTS_THROTTLE_MS = 300;
   const PLATFORM_AGENTS_KEEP = 200;
   let _paPending = new Map();     // id -> 待落盘记录
@@ -3954,6 +4733,9 @@ export function apply(ctx) {
       return {
         updatedAt: j.updatedAt || null,
         source: j.source || 'dsh-engineering-ui',
+        // runId / runStartedAt 供 mode_gate 判"整批失联"（G04）
+        runId: j.runId || null,
+        runStartedAt: j.runStartedAt || null,
         agents,
       };
     } catch (e) {
@@ -4044,6 +4826,11 @@ export function apply(ctx) {
       const payload = {
         updatedAt: new Date().toISOString(),
         source: 'dsh-engineering-ui',
+        // ── 【2026-10-29 G04】本进程（= 本次 DSH 运行）的标识 ────────────
+        // 用途：DSH 崩溃重启后，mode_gate 看到 registry.runId 与上次记录的不同，
+        //   就能判定"上一轮 fork 的子代理全部失联"，而不是逐房间靠 id 去猜。
+        runId: PLATFORM_RUN_ID,
+        runStartedAt: PLATFORM_RUN_STARTED_AT,
         agents,
       };
       const text = JSON.stringify(payload, null, 2);
@@ -4098,11 +4885,134 @@ export function apply(ctx) {
     } catch (e) {}
   }
 
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 【2026-10-29 · 99% 可靠的存活判据】主进程级定时脉冲
+  // ══════════════════════════════════════════════════════════════════════
+  // 为什么之前的判活全都不可靠：
+  //   · list_agents / wait_agent → fork 出来的子代理【不是 Team member】，
+  //     永远看不到（会话 ceac3fff 就是因此误判死亡，连开 3 个）；
+  //   · 子代理自己写心跳     → 它一忙（跑 SW、等锁、长命令）就停写；
+  //   · 只靠 agent/created|disposed 事件 → 事件不来时无法区分"没事件"与"已死"。
+  //
+  // 本方案（核心思路）：心跳由【DSH 主进程的 setInterval】写，
+  //   与子代理在干什么【完全无关】：
+  //     - 子代理跑 SolidWorks、卡死、等锁、发呆 → 定时器照跳；
+  //     - 只有 agent 被 disposed（真结束）→ 从表里移除；
+  //     - 只有 DSH 整个进程没了 → 定时器停 → pulse 停止前进。
+  //   而"DSH 进程没了"时【所有】子代理也都没了，此时判死是【正确】的，
+  //   不会造成"误杀活子代理"。
+  //
+  // 两个信号缺一不可，组合起来才 99%：
+  //   ① pulse.seq  单调递增 —— 证明"写它的那个进程还活着且在跳"；
+  //   ② agents[] 里仍有该 id 且 status!=disposed —— 证明"该 agent 对象还在"。
+  //   ① 且 ② → 子代理活着。任一不成立 → 才允许判死。
+  const PULSE_INTERVAL_MS = 10000;      // 每 10 秒一跳
+  const PULSE_STALE_MS = 35000;         // 超过 3.5 跳没更新 → 视为进程已停
+  let _pulseSeq = 0;
+  let _pulseTimer = null;
+  /** 主进程内存里的 agent 台账：id -> 记录。只在 disposed 时移除。 */
+  const _liveAgents = new Map();
+
+  /** 把一个 agent 记进内存台账（created 时调用）。 */
+  function pulseTrack(agent, meta) {
+    try {
+      if (!agent || !agent.id) return;
+      const key = String(agent.id);
+      const prev = _liveAgents.get(key) || {};
+      _liveAgents.set(key, Object.assign({}, prev, meta || {}, {
+        id: key,
+        status: "running",
+        trackedAt: prev.trackedAt || new Date().toISOString(),
+      }));
+    } catch (e) {}
+  }
+
+  /** 从内存台账移除（disposed 时调用）。 */
+  function pulseUntrack(agentId) {
+    try {
+      if (agentId) _liveAgents.delete(String(agentId));
+    } catch (e) {}
+  }
+
+  /** 打一拍：把 pulse + 全部存活 agent 落盘（原子写）。 */
+  function pulseTick() {
+    try {
+      const p = platformAgentsPath();
+      if (!p) return;
+      _pulseSeq += 1;
+      const nowIso = new Date().toISOString();
+      const nowMs = Date.now();
+      // 先读现有文件，保留历史里"已 disposed"的记录（审计用）
+      const cur = readPlatformAgentsFile() || { agents: [] };
+      const map = new Map();
+      (cur.agents || []).forEach((a) => {
+        if (a && a.id) map.set(String(a.id), a);
+      });
+      // 合并内存台账（这是权威：只有 disposed 才会被移除）
+      _liveAgents.forEach((rec, id) => {
+        const old = map.get(id) || {};
+        map.set(id, Object.assign({}, old, rec, {
+          status: "running",
+          lastPulseAt: nowIso,
+          lastPulseAtMs: nowMs,
+        }));
+      });
+      const agents = Array.from(map.values()).slice(-PLATFORM_AGENTS_KEEP);
+      const payload = {
+        updatedAt: nowIso,
+        source: "dsh-engineering-ui",
+        runId: PLATFORM_RUN_ID,
+        runStartedAt: PLATFORM_RUN_STARTED_AT,
+        // ── 心跳脉冲：证明"写这份文件的进程还活着且在跳" ──
+        pulse: {
+          seq: _pulseSeq,
+          at: nowIso,
+          atMs: nowMs,
+          intervalMs: PULSE_INTERVAL_MS,
+          staleMs: PULSE_STALE_MS,
+        },
+        agents,
+      };
+      const text = JSON.stringify(payload, null, 2);
+      const tmp = p + "." + process.pid + ".tmp";
+      try {
+        fs.writeFileSync(tmp, text, "utf8");
+        fs.renameSync(tmp, p);
+      } catch (e) {
+        try { fs.writeFileSync(p, text, "utf8"); } catch (e2) {}
+        try { fs.unlinkSync(tmp); } catch (e3) {}
+      }
+    } catch (e) {
+      // 脉冲失败绝不能影响会话
+    }
+  }
+
+  /** 启动脉冲定时器（幂等）。 */
+  function pulseStart() {
+    try {
+      if (_pulseTimer) return;
+      pulseTick();                       // 立刻打第一拍
+      _pulseTimer = setInterval(pulseTick, PULSE_INTERVAL_MS);
+      // Node 里定时器会阻止进程退出；unref 让它不拖住退出
+      try { if (_pulseTimer.unref) _pulseTimer.unref(); } catch (e) {}
+    } catch (e) {}
+  }
+
+  pulseStart();
+  disposers.push(() => {
+    try { if (_pulseTimer) clearInterval(_pulseTimer); } catch (e) {}
+    _pulseTimer = null;
+  });
+
   // ── 事件接线：本插件【只新增登记器】，不改任何既有路由/守卫行为 ──────────
   disposers.push(ctx.on('agent/created', (payload) => {
     try {
-      const meta = platformAgentMeta(payload && payload.agent);
+      const agent = payload && payload.agent;
+      const meta = platformAgentMeta(agent);
       if (!meta) return;                       // 主会话 / 字段缺失 → 跳过
+      // 记进主进程内存台账 → 之后由脉冲定时器持续续期（与子代理忙不忙无关）
+      pulseTrack(agent, meta);
       stagePlatformAgent(Object.assign({}, meta, {
         status: 'running',
         lastEventAt: new Date().toISOString(),
@@ -4136,6 +5046,8 @@ export function apply(ctx) {
       if (!agent || !agent.id) return;
       const meta = platformAgentMeta(agent);
       if (!meta && !platformAgentKnown(agent.id)) return;
+      // 【关键】从内存台账移除 —— 脉冲不再为它续期，这是【唯一】判死来源
+      pulseUntrack(agent.id);
       const rec = {
         id: String(agent.id),
         // 平台已确认释放 → mode_gate 才允许把它判成 dead（唯一判死来源）

@@ -694,6 +694,36 @@ window.__ModuleLoader__.load({
       '.eng-row-hint{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;line-height:1.65;margin-top:3px}',
       // 右箭头：灰色、不换行、不参与拉伸
       '.eng-row-chev{color:#c0c4cc;flex:none;font-size:16px;line-height:1;transform:translateY(-1px)}',
+      // ── 【模型自动接替】10 槽位表格（默认收起，展开后显示）────────────
+      // 目标：紧凑。10 行必须能在一屏内看完，所以行高与字号都压到最小可用值。
+      '.eng-mc-table{border-top:1px solid var(--dsw-alias-border-l1,#e5e7eb);margin-top:6px;padding-top:6px}',
+      '.eng-mc-head,.eng-mc-row{align-items:center;display:flex;gap:6px;padding:3px 0}',
+      '.eng-mc-head{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:10.5px;padding-bottom:2px}',
+      '.eng-mc-head .eng-mc-cell{font-weight:600;letter-spacing:.02em}',
+      '.eng-mc-idx{color:var(--dsw-alias-label-tertiary,#8b95a3);flex:none;font-size:11px;text-align:center;width:16px}',
+      '.eng-mc-cell{flex:1 1 0;min-width:0}',
+      // ⚠️ 颜色必须【显式】写死，绝不能用 color:inherit ——
+      //    实测（2026-10-30 用户截图）输入框变成黑底黑字、完全看不见内容，
+      //    根因就是 inherit 把容器的深色前景继承了下来。
+      '.eng-mc-in{background:#fff;border:1px solid #d8dde5;border-radius:6px;color:#1f2328;flex:1 1 0;font-family:inherit;font-size:11.5px;min-width:0;padding:3px 7px}',
+      '.eng-mc-in::placeholder{color:#a8b0bb}',
+      '.eng-mc-in:focus{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.15);outline:none}',
+      // 下拉：原生 select（点开是系统列表，可按首字母跳转，最稳）
+      '.eng-mc-sel{appearance:none;-webkit-appearance:none;background:#fff;border:1px solid #d8dde5;border-radius:6px;color:#1f2328;cursor:pointer;flex:1 1 0;font-family:inherit;font-size:11.5px;min-width:0;padding:3px 20px 3px 7px;text-overflow:ellipsis}',
+      '.eng-mc-sel:focus{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.15);outline:none}',
+      '.eng-mc-selwrap{display:flex;flex:1 1 0;min-width:0;position:relative}',
+      // 档位列窄一些（provider / model 才是主要信息）
+      '.eng-mc-effort{flex:0 0 68px}',
+      '.eng-mc-head .eng-mc-effort{flex:0 0 68px}',
+      '.eng-mc-selwrap::after{color:#8b95a3;content:"\u25be";font-size:9px;pointer-events:none;position:absolute;right:6px;top:50%;transform:translateY(-50%)}',
+      '.eng-mc-ops{display:flex;flex:none;gap:3px;width:auto}',
+      '.eng-mc-ops .eng-conn-btn.tiny{font-size:10.5px;padding:1px 6px}',
+      '.eng-mc-ft{align-items:center;display:flex;gap:8px;padding-top:6px}',
+      '.eng-mc-ok{color:#15803d;font-size:11px}',
+      '.eng-mc-err{color:#b91c1c;font-size:11px;overflow-wrap:anywhere}',
+      '.eng-mc-empty{background:rgba(37,99,235,.06);border:1px dashed #b9cdf3;border-radius:6px;color:#3b5bdb;font-size:11px;line-height:1.55;margin-top:6px;padding:6px 9px}',
+      // 行内"手动填写"切回链接
+      '.eng-mc-manual{background:none;border:0;color:#2563eb;cursor:pointer;font-size:10.5px;padding:0 0 0 4px;text-decoration:underline}',
       // ── 【连接区】状态徽标 + 连接按钮（当前仅 UI，真实连接后续接入）──────
       '.eng-chip{align-items:center;border-radius:999px;display:inline-flex;flex:none;font-size:11px;font-weight:600;gap:5px;padding:2px 9px;white-space:nowrap}',
       '.eng-chip-dot{border-radius:50%;flex:none;height:6px;width:6px}',
@@ -1431,6 +1461,10 @@ window.__ModuleLoader__.load({
         '.eng-row-label{color:#e5e7eb}' +
         '.eng-row-hint{color:#8b95a3}' +
         '.eng-row-chev{color:#5b6270}' +
+        // 模型接替表格（深色）
+        '.eng-mc-in{background:#15181d;border-color:#33383f;color:#e5e7eb}' +
+        '.eng-mc-table{border-top-color:#2f333c}' +
+        '.eng-mc-head{color:#8b95a3}' +
         // 连接区徽标（深色）
         '.eng-chip.on{background:rgba(22,163,74,.22);color:#4ade80}' +
         '.eng-chip.off{background:rgba(148,163,184,.18);color:#94a3b8}' +
@@ -5186,6 +5220,347 @@ window.__ModuleLoader__.load({
     }
 
 
+    /* ══════════════════════════════════════════════════════════════════
+     * 【模型自动接替】设置面板
+     * ══════════════════════════════════════════════════════════════════
+     * 用户需求：
+     *   「第一个模型额度不够嘎了，第二个就立马接上，可以直接指定10个模型，
+     *     但是一般是收起来那个表」
+     *   「这我也看不到是啥模型啊，而且你起码给我一个可以有模型表的模型让我选择吧」
+     *
+     * 因此版式与交互：
+     *   · 默认【收起】—— 一行摘要「A → B → C」+ 开关；
+     *   · 点摘要行展开 10 行表格；
+     *   · 每行 provider / model 都是【下拉选择】，选项来自宿主真实模型目录
+     *     （/model-catalog → ctx.llm.listProviders + adapter.listModels），
+     *     不再需要手打字符串；
+     *   · 目录里没有的模型仍可切「手填」兜底；
+     *   · 下拉的值是真实 provider/model，显示的是友好名。
+     */
+    function EngModelChainPanel() {
+      var useState = React.useState;
+      var st = useState({
+        loaded: false, enabled: false, models: [], open: false, saved: '', error: '',
+        cat: null, catLoading: true, catError: '',
+        manual: {},
+        hostDefault: null, headMatches: true
+      });
+      var S = st[0], setS = st[1];
+      function patch(part) {
+        setS(function (prev) {
+          var n = {};
+          for (var k in prev) n[k] = prev[k];
+          for (var k2 in part) n[k2] = part[k2];
+          return n;
+        });
+      }
+      function withTen(ms) {
+        var a = Array.isArray(ms) ? ms.slice(0, 10) : [];
+        while (a.length < 10) a.push({ provider: '', model: '' });
+        return a;
+      }
+      function load() {
+        fetch('/dsh-engineering-ui/model-chain')
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok) {
+              patch({
+                loaded: true, enabled: !!j.enabled, models: withTen(j.models), error: '',
+                // 【2026-10-30】记录宿主当前真实默认模型，用于"实际在用"提示
+                hostDefault: j.host_default || null,
+                headMatches: j.head_matches_default !== false,
+              });
+            } else {
+              patch({ loaded: true, models: withTen([]), error: (j && j.error) || '读取失败' });
+            }
+          })
+          .catch(function (e) {
+            patch({ loaded: true, models: withTen([]), error: String((e && e.message) || e) });
+          });
+      }
+      function loadCatalog() {
+        fetch('/dsh-engineering-ui/model-catalog')
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok) patch({ cat: j, catLoading: false, catError: '' });
+            else patch({ catLoading: false, catError: (j && j.error) || '模型目录为空', cat: j || null });
+          })
+          .catch(function (e) {
+            patch({ catLoading: false, catError: String((e && e.message) || e) });
+          });
+      }
+      React.useEffect(function () { load(); loadCatalog(); }, []);
+      function save(next) {
+        fetch('/dsh-engineering-ui/model-chain', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ enabled: next.enabled, models: next.models })
+        }).then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok) patch({ saved: '已保存', error: '' });
+            else patch({ saved: '', error: (j && j.error) || '保存失败' });
+          })
+          .catch(function (e) { patch({ saved: '', error: String((e && e.message) || e) }); });
+      }
+      function setSlot(i, field, val) {
+        var ms = S.models.slice();
+        var cur = {};
+        for (var k in (ms[i] || {})) cur[k] = ms[i][k];
+        cur[field] = val;
+        // 换 provider 后清空 model，避免出现"provider 与 model 不匹配"的脏组合
+        if (field === 'provider') cur.model = '';
+        ms[i] = cur;
+        patch({ models: ms, saved: '' });
+      }
+      function move(i, dir) {
+        var j = i + dir;
+        if (j < 0 || j >= S.models.length) return;
+        var ms = S.models.slice();
+        var t = ms[i]; ms[i] = ms[j]; ms[j] = t;
+        patch({ models: ms, saved: '' });
+      }
+      function toggleManual(i) {
+        var m = {};
+        for (var k in S.manual) m[k] = S.manual[k];
+        m[i] = !m[i];
+        patch({ manual: m });
+      }
+
+      var groups = (S.cat && S.cat.groups) || [];
+      var totalModels = (S.cat && S.cat.total) || 0;
+      function modelsOf(pid) {
+        for (var i = 0; i < groups.length; i++) {
+          if (groups[i].id === pid) return groups[i].models || [];
+        }
+        return [];
+      }
+      /** 找某个 provider/model 在目录里的元信息（名字 / reasoning 档位）。 */
+      function infoOf(pid, mid) {
+        var ms = modelsOf(pid);
+        for (var i = 0; i < ms.length; i++) {
+          if (ms[i].id === mid) return ms[i];
+        }
+        return null;
+      }
+      /**
+       * 显示名：与官方选择器口径一致 —— 优先用模型 name（如
+       * "DeepSeek-V4.1-Flash"），拿不到才退回 id。
+       * 用户反馈就是"看不到是啥模型"，所以这里绝不直接甩 id。
+       */
+      function displayName(pid, mid) {
+        var it = infoOf(pid, mid);
+        if (it && it.name) return String(it.name);
+        // 目录里没有（链外/手填）→ 把 id 做轻度美化：连字符转驼峰首字母
+        var s = String(mid || '');
+        return s || '（未填）';
+      }
+      /** 思考档位显示名（×低/×中/×高 这类，取决于 provider 的 efforts）。 */
+      function effortName(pid, mid, effortId) {
+        if (!effortId) return '';
+        var it = infoOf(pid, mid);
+        var rs = it && it.reasoning;
+        if (rs && Array.isArray(rs.efforts)) {
+          for (var i = 0; i < rs.efforts.length; i++) {
+            if (rs.efforts[i].id === effortId) return rs.efforts[i].name || effortId;
+          }
+        }
+        return String(effortId);
+      }
+      function shortName(s, max) {
+        var v = String(s || '');
+        var n = max || 18;
+        if (v.length > n) v = v.slice(0, n - 1) + '\u2026';
+        return v;
+      }
+      var filled = S.models.filter(function (m) { return m && m.provider && m.model; });
+      // 摘要：显示友好名（+ 档位），与图二那种"模型名 · 档位"一致
+      var summary = filled.length
+        ? filled.map(function (m) {
+            var nm = shortName(displayName(m.provider, m.model), 20);
+            var ef = effortName(m.provider, m.model, m.reasoningEffort);
+            return ef ? (nm + ' \u00b7 ' + shortName(ef, 6)) : nm;
+          }).join('  \u2192  ')
+        : '未配置（展开后从下拉里选，最多 10 个）';
+
+      var rows = S.models.map(function (m, i) {
+        var isManual = !!S.manual[i];
+        var pid = m.provider || '';
+        var mids = modelsOf(pid);
+        var knownPids = groups.map(function (g) { return g.id; });
+
+        var provOpts = [];
+        provOpts.push(h('option', { value: '', key: 'p' + i + '-empty' }, '— 选择 provider —'));
+        if (pid && knownPids.indexOf(pid) < 0) {
+          provOpts.push(h('option', { value: pid, key: 'p' + i + '-cur' }, pid + '（目录外）'));
+        }
+        groups.forEach(function (g) {
+          // 显示 "CodeBuddy (腾讯) · 12" —— 让用户一眼看出是哪家、有几个模型
+          var cnt = (g.models || []).length;
+          var txt = (g.label || g.id) + (cnt ? (' \u00b7 ' + cnt) : '');
+          provOpts.push(h('option', { value: g.id, key: 'p' + i + '-' + g.id }, txt));
+        });
+
+        var knownMids = mids.map(function (x) { return x.id; });
+        var modelOpts = [];
+        var noModelHint = !pid
+          ? '— 先选 provider —'
+          : (mids.length ? '— 选择模型 —' : '— 该 provider 无广告模型，请「手填」—');
+        modelOpts.push(h('option', { value: '', key: 'm' + i + '-empty' }, noModelHint));
+        if (m.model && knownMids.indexOf(m.model) < 0) {
+          modelOpts.push(h('option', { value: m.model, key: 'm' + i + '-cur' }, m.model + '（目录外）'));
+        }
+        mids.forEach(function (mm) {
+          // 与官方选择器一致：显示 model.name（没有 name 才退回 id）
+          modelOpts.push(h('option', {
+            value: mm.id, key: 'm' + i + '-' + mm.id, title: mm.id
+          }, mm.name || mm.label || mm.id));
+        });
+
+        var provCell = isManual
+          ? h('input', {
+              className: 'eng-mc-in', value: pid,
+              placeholder: i === 0 ? '如 raccoon' : '',
+              onChange: function (e) { setSlot(i, 'provider', e.target.value); }
+            })
+          : h('select', {
+              className: 'eng-mc-sel', value: pid,
+              title: pid || '选择 provider',
+              onChange: function (e) { setSlot(i, 'provider', e.target.value); }
+            }, provOpts);
+
+        var modelCell = isManual
+          ? h('input', {
+              className: 'eng-mc-in', value: m.model || '',
+              placeholder: i === 0 ? '如 sn-sensenova-6-8-flash' : '',
+              onChange: function (e) { setSlot(i, 'model', e.target.value); }
+            })
+          : h('select', {
+              className: 'eng-mc-sel', value: m.model || '',
+              disabled: !pid,
+              title: m.model || '选择模型',
+              onChange: function (e) { setSlot(i, 'model', e.target.value); }
+            }, modelOpts);
+
+        // ── 思考档位（对应官方选择器里的 "· Hi / · x0.11" 那一段）──────
+        // 只有当该模型真的广告了 reasoning.efforts 才显示，否则留空。
+        var minfo = infoOf(pid, m.model);
+        var efforts = (minfo && minfo.reasoning && Array.isArray(minfo.reasoning.efforts))
+          ? minfo.reasoning.efforts : [];
+        var effortCell = null;
+        if (!isManual && efforts.length) {
+          var eOpts = [h('option', { value: '', key: 'e' + i + '-auto' },
+            '默认' + (minfo.reasoning.defaultEffort ? ('(' + effortName(pid, m.model, minfo.reasoning.defaultEffort) + ')') : ''))];
+          efforts.forEach(function (ef) {
+            eOpts.push(h('option', { value: ef.id, key: 'e' + i + '-' + ef.id },
+              ef.name || ef.id));
+          });
+          effortCell = h('span', { className: 'eng-mc-selwrap eng-mc-effort' },
+            h('select', {
+              className: 'eng-mc-sel', value: m.reasoningEffort || '',
+              title: '思考档位（留空=模型默认）',
+              onChange: function (e) { setSlot(i, 'reasoningEffort', e.target.value); }
+            }, eOpts));
+        }
+
+        return h('div', { className: 'eng-mc-row', key: 'mc' + i },
+          h('span', { className: 'eng-mc-idx' }, String(i + 1)),
+          h('span', { className: 'eng-mc-selwrap' }, provCell),
+          h('span', { className: 'eng-mc-selwrap' }, modelCell),
+          effortCell,
+          h('span', { className: 'eng-mc-ops' },
+            h('button', {
+              className: 'eng-conn-btn tiny', type: 'button', disabled: i === 0,
+              title: '上移', onClick: function () { move(i, -1); }
+            }, '\u2191'),
+            h('button', {
+              className: 'eng-conn-btn tiny', type: 'button',
+              disabled: i === S.models.length - 1,
+              title: '下移', onClick: function () { move(i, 1); }
+            }, '\u2193'),
+            h('button', {
+              className: 'eng-mc-manual', type: 'button',
+              title: isManual ? '改回下拉选择' : '目录里没有？手动填写',
+              onClick: function () { toggleManual(i); }
+            }, isManual ? '下拉' : '手填')));
+      });
+
+      return h(EngGroup, { title: '模型自动接替' },
+        h('div', { className: 'eng-row sw' },
+          h('div', { className: 'eng-row-txt' },
+            h('div', { className: 'eng-row-label' }, '额度不足自动换模型'),
+            h('div', { className: 'eng-row-hint' },
+              S.enabled
+                ? '仅当当前模型报额度/限流错误时才切下一个；平时不影响你在设置里选的模型。'
+                : '已关闭：额度耗尽时本轮直接失败。')),
+          h(EngSwitch, {
+            bare: true,
+            checked: S.enabled,
+            label: '额度不足自动换模型',
+            onChange: function (next) {
+              patch({ enabled: next, saved: '' });
+              save({ enabled: next, models: S.models });
+            }
+          })),
+
+        h('div', {
+          className: 'eng-row clickable',
+          role: 'button',
+          tabIndex: 0,
+          title: '展开/收起模型列表',
+          onClick: function () { patch({ open: !S.open }); }
+        },
+          h('div', { className: 'eng-row-txt' },
+            h('div', { className: 'eng-row-label' },
+              (S.open ? '\u25be ' : '\u25b8 ') + '模型列表（最多 10 个，按顺序优先）'),
+            h('div', { className: 'eng-row-hint' }, summary)),
+          h('span', { className: 'eng-row-chev' },
+            filled.length ? String(filled.length) : '\u203a')),
+
+        // ── 【2026-10-30】"实际在用哪个模型"提示 ─────────────────────────
+        // 用户反馈"模型显示没跟上"：UI 只显示链，不显示宿主当前真实使用
+        // 的模型，于是"我选的 DeepSeek 到底有没有生效"完全看不出来。
+        // 这里把宿主默认选择显式列出来；若与链首不一致，额外提示一句。
+        S.hostDefault
+          ? h('div', { className: 'eng-mc-empty' },
+              '宿主当前默认：' + (S.hostDefault.provider || '?') + ' / '
+              + (S.hostDefault.model || '?')
+              + (S.hostDefault.reasoningEffort ? (' · ' + S.hostDefault.reasoningEffort) : '')
+              + (S.headMatches
+                  ? '\u3000✓ 与链首一致'
+                  : '\u3000⚠ 与链首不一致；接替只在该模型失败后才会改用下一个，'
+                    + '平时仍用这个默认值。'))
+          : null,
+
+        (S.open && S.catError)
+          ? h('div', { className: 'eng-mc-empty' },
+              '模型目录读取失败：' + S.catError + '\u3000（可切「手填」直接输入 provider / model）')
+          : null,
+
+        S.open ? h('div', { className: 'eng-mc-table' },
+          h('div', { className: 'eng-mc-head' },
+            h('span', { className: 'eng-mc-idx' }, '#'),
+            h('span', { className: 'eng-mc-cell' }, 'provider'),
+            h('span', { className: 'eng-mc-cell' }, 'model'),
+            h('span', { className: 'eng-mc-cell eng-mc-effort' }, '档位'),
+            h('span', { className: 'eng-mc-ops' }, '')),
+          rows,
+          h('div', { className: 'eng-mc-ft' },
+            h('button', {
+              className: 'eng-conn-btn tiny', type: 'button',
+              onClick: function () { save({ enabled: S.enabled, models: S.models }); }
+            }, '保存'),
+            h('button', {
+              className: 'eng-conn-btn tiny', type: 'button',
+              title: '重新读取宿主可用模型',
+              onClick: function () { patch({ catLoading: true }); loadCatalog(); }
+            }, S.catLoading ? '读取中…' : '刷新目录'),
+            h('span', { className: 'eng-row-hint' },
+              S.catLoading
+                ? '正在读取模型目录…'
+                : ('目录共 ' + totalModels + ' 个模型 / ' + groups.length + ' 个 provider')),
+            S.saved ? h('span', { className: 'eng-mc-ok' }, '\u2713 ' + S.saved) : null,
+            S.error ? h('span', { className: 'eng-mc-err' }, S.error) : null)) : null);
+    }
     function EngineeringSettingsSection(props) {
       var close = props && props.close;
       var settings = useEngSettings();
@@ -5240,9 +5615,8 @@ window.__ModuleLoader__.load({
               h('div', { className: 'eng-row-txt' },
                 h('div', { className: 'eng-row-label' }, '右键引用调出AI解释'),
                 h('div', { className: 'eng-row-hint' }, explainOn
-                  ? '已开启：在对话里选中文字（或右键）会浮现「问问AI」，' +
-                    '点开即在右下角开一个小面板，就这段内容展开分析，结果可回填到输入框。'
-                  : '已关闭：选中文字不再出现「问问AI」入口。')),
+                  ? '选中文字或右键 → 浮现「问问AI」，可就该段内容展开分析并回填输入框。'
+                  : '已关闭：不再出现「问问AI」入口。')),
               h(EngSwitch, {
                 bare: true,
                 checked: explainOn,
@@ -5258,9 +5632,8 @@ window.__ModuleLoader__.load({
               h('div', { className: 'eng-row-txt' },
                 h('div', { className: 'eng-row-label' }, '是否启用选项倒计时'),
                 h('div', { className: 'eng-row-hint' }, countdownOn
-                  ? '已开启：选项卡片显示 120 秒倒计时，超时自动选择带「推荐」的选项。' +
-                    '点选后立即停表；「并行策略」「搭建方式」「参数需求强度」三题不受影响，始终由你选。'
-                  : '已关闭：不显示倒计时，所有题目都由你自己选择。')),
+                  ? '选项卡片 120 秒倒计时，超时选「推荐」；三个关键题不受影响。'
+                  : '已关闭：所有题目都由你自己选择。')),
               h(EngSwitch, {
                 bare: true,
                 checked: countdownOn,
@@ -5271,6 +5644,11 @@ window.__ModuleLoader__.load({
               })),
             h(EngRow, { label: '子栏目选项设置3' })),
 
+          // ── 主栏目 2.5：模型自动接替（用户需求 2026-10-30）──────────────
+          // 「第一个模型额度不够嘎了，第二个立马接上，可以直接指定10个模型，
+          //   一般是收起来那个表」。默认收起，点摘要行展开 10 行槽位。
+          h(EngModelChainPanel, {}),
+
           // ── 主栏目3：美化工程模式（第 1 行 = 子代理显示页开关）────────
           h(EngGroup, { title: '美化工程模式' },
             h('div', { className: 'eng-row sw' },
@@ -5278,9 +5656,8 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'eng-row-label' },
                   '使用工程模式自带的子代理显示页'),
                 h('div', { className: 'eng-row-hint' }, useOwn
-                  ? '已开启：右侧子代理面板由工程模式接管（三栏布局）。' +
-                    '官方子代理入口在工程模式下也指向本面板。'
-                  : '已关闭：隐藏工程模式自带的子代理面板，右侧交回 DSH 官方显示。')),
+                  ? '右侧由工程模式接管（三栏布局），官方入口也指向本面板。'
+                  : '已关闭：右侧交回 DSH 官方显示。')),
               h(EngSwitch, {
                 bare: true,
                 checked: useOwn,
@@ -5294,9 +5671,8 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'eng-row-label' },
                   '是否开启单独的聊天而非 Agent'),
                 h('div', { className: 'eng-row-hint' }, standalone
-                  ? '已开启：工程模式下顶部多一个「聊天」视图，只做纯对话，不显示工具调用与工作过程；' +
-                    '「工作」视图仍是原来的三栏工作区。'
-                  : '已关闭：不提供独立聊天视图，工程模式只保留 DSH 官方界面。')),
+                  ? '顶部多一个「聊天」视图（只对话，不显示工具调用）。'
+                  : '已关闭：不提供独立聊天视图。')),
               h(EngSwitch, {
                 bare: true,
                 checked: standalone,

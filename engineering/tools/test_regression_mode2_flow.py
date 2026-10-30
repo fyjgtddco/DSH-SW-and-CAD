@@ -20,8 +20,33 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def _isolate_state():
+    """★ 必须在 import mode2_flow 之前跑：给它一个独立状态目录。
+
+    为什么：analyst-bind 会校验"调用者是不是真实子代理"，判据是
+    <state_dir>/platform_agents.json。不隔离就会读到【真实宿主】的注册表
+    （里面没有 test-analyst），于是绑定被拒 → 后面全部假失败。
+    """
+    d = tempfile.mkdtemp(prefix="m2test_state_")
+    os.environ["DSH_STATE_DIR"] = d
+    # 伪造一条"测试身份在该注册表里"的记录（模拟插件已登记该子代理）
+    with open(os.path.join(d, "platform_agents.json"), "w", encoding="utf-8") as f:
+        json.dump({"updatedAt": int(time.time() * 1000),
+                   "source": "test",
+                   "agents": [{"id": "test-analyst",
+                               "label": "总计子代理（十阶段分析）",
+                               "status": "running",
+                               "createdAt": int(time.time() * 1000)}]},
+                  f, ensure_ascii=False)
+    return d
+
+
+_STATE_DIR_TEST = _isolate_state()
 
 import mode2_flow as mf  # noqa: E402
 
@@ -48,8 +73,18 @@ def section(t):
 
 
 def fresh():
-    """每个用例独立工作目录，避免互相污染。"""
+    """每个用例独立工作目录，避免互相污染。
+
+    同时把【状态目录】也指回隔离目录，并清空缓存 —— 否则
+    workflow_state / platform_agents 又会读回真实宿主那份。
+    """
     d = tempfile.mkdtemp(prefix="mode2test_")
+    os.environ["DSH_STATE_DIR"] = _STATE_DIR_TEST
+    try:
+        import _store
+        _store.reset_cache()
+    except Exception:
+        pass
     return d
 
 
@@ -181,7 +216,20 @@ def main():
         check("★ 非总计子代理决定编制 → 拒绝", not r["ok"], r.get("error"))
         r = mf.set_subagent_plan(rooms, "按功能分解", "总计子代理", d)
         check("★ 总计子代理决定编制 → 通过", r["ok"], r.get("error"))
-        check("编制数量不再固定为 3（此处 2 也合法）", r["count"] == 2, r.get("count"))
+        # ── 【2026-10-30 更新】数量断言必须计入"自动补齐的收尾房间" ─────
+        # 背景（BUG-07 修复）：set-subagent-plan 现在会自动补齐
+        #   「总装与验证」(assembly) 与「工程图输出」(drafting) 两个收尾房间
+        #   —— 它们由流程决定，不该要求总计子代理记得写。
+        # 因此这里传入 2 个建模房间 → 落盘应为 2 + 2 = 4 个。
+        # 断言同时校验"补齐的确实是那两个类型"，而不只是数字对上。
+        _auto = r.get("auto_added_final_rooms") or []
+        check("编制数量 = 建模房间(2) + 自动补齐收尾房间(2)",
+              r["count"] == 4, {"count": r.get("count"), "auto": _auto})
+        check("自动补齐的是 assembly + drafting",
+              sorted(x["type"] for x in _auto) == ["assembly", "drafting"], _auto)
+        check("补齐房间标记 auto_added 便于溯源",
+              all(x.get("auto_added") for x in r.get("rooms", [])
+                  if x.get("type") in ("assembly", "drafting")), r.get("rooms"))
         # 无理由 → 拒
         check("缺 rationale → 拒绝",
               not mf.set_subagent_plan(rooms, "", "总计子代理", d)["ok"])
@@ -208,7 +256,13 @@ def main():
                   "r", "总计子代理", d)["ok"])
         # 读取
         gp = mf.get_subagent_plan(d)
-        check("get_subagent_plan 读回编制", gp["ok"] and gp["count"] == 2, gp)
+        # 【2026-10-30 更新·BUG-07】读回的编制含自动补齐的两个收尾房间，
+        #   所以数量是 2(建模) + 2(assembly/drafting) = 4；同时校验两者都在。
+        _gp_types = sorted(x.get("type") for x in (gp.get("rooms") or []))
+        check("get_subagent_plan 读回编制（含自动补齐的收尾房间）",
+              gp["ok"] and gp["count"] == 4
+              and "assembly" in _gp_types and "drafting" in _gp_types,
+              {"count": gp.get("count"), "types": _gp_types})
         # 总理子代理定义固定存在
         pr = mf.prime_room_definition(d)
         check("总理子代理固定存在且 fixed=True",

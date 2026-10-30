@@ -28,6 +28,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.stdout.reconfigure(encoding="utf-8")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +37,28 @@ M2 = os.path.join(HERE, "mode2_flow.py")
 
 # 【2026-10-28 重构】编排/阶段命令要求 root 与总计子代理身份；子进程继承该身份
 os.environ["DSH_SESSION_ID"] = "test-analyst"
+
+
+def _isolate_state():
+    """隔离状态目录 + 伪造平台注册表（否则 analyst-bind 会被真实宿主拒绝）。
+
+    2026-10-29 实测：本测试原先直接跑在【真实状态目录】上，
+    analyst-bind 校验"调用者是否在 platform_agents.json 里"——
+    真实注册表里没有 test-analyst → 绑定失败 → select 永远 MODE2_ANALYST_REQUIRED。
+    """
+    d = tempfile.mkdtemp(prefix="flowlive_state_")
+    os.environ["DSH_STATE_DIR"] = d
+    with open(os.path.join(d, "platform_agents.json"), "w", encoding="utf-8") as f:
+        json.dump({"updatedAt": int(time.time() * 1000), "source": "test",
+                   "agents": [{"id": "test-analyst",
+                               "label": "总计子代理（十阶段分析）",
+                               "status": "running",
+                               "createdAt": int(time.time() * 1000)}]},
+                  f, ensure_ascii=False)
+    return d
+
+
+_STATE_DIR_TEST = _isolate_state()
 
 P = F = 0
 def ck(label, cond, extra=""):
@@ -48,9 +71,20 @@ def sec(t):
     print("\n" + "=" * 74); print(t); print("=" * 74)
 
 
-def run(script, *args):
+#: 主对话（root）身份：**故意不放进 platform_agents.json**，
+#: 这样 ROOT_SESSION_REQUIRED 闸门才能正常放行编排命令。
+ROOT_SID = "test-root"
+
+
+def run(script, *args, session=None):
+    """跑一个 CLI。session 决定身份：
+
+      · 默认 ROOT_SID（主对话）—— 编排命令 init/provide_context/select 必须用它；
+      · 传 "test-analyst" —— 十阶段 / 编制命令必须用它（它在平台注册表里）。
+    """
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
+    env["DSH_SESSION_ID"] = session or ROOT_SID
     p = subprocess.run([sys.executable, script, *args],
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", cwd=HERE, env=env)
@@ -106,7 +140,8 @@ ck("★ 第一道闸 = MODE2_ANALYST_REQUIRED（总计子代理必须先真实�
 # 求解计划目录后先绑定总计子代理，再验证"未登记编制 → 拒绝"的第二道闸
 _wd0 = r4.get("plan_file")
 _wd0 = os.path.dirname(_wd0) if _wd0 else None
-run(M2, "analyst-bind", *(("--work-dir", _wd0) if _wd0 else ()))
+run(M2, "analyst-bind", *(("--work-dir", _wd0) if _wd0 else ()),
+    session="test-analyst")
 r4b = run(WG, "select", "B,D")
 ck("★ 未登记编制 → select 被拒绝", r4b.get("ok") is False, r4b.get("ok"))
 ck("★ gate = MODE2_SUBAGENT_PLAN_REQUIRED",
@@ -145,11 +180,12 @@ _STAGES = ["TaskUnderstanding", "FunctionalDecomposition", "PhysicsReasoning",
            "PartSynthesis", "EngineeringValidation", "DesignIteration",
            "ExplainableDesignOutput"]
 for _sid in _STAGES:
-    run(M2, "begin-stage", _sid, "--work-dir", wd)
-    run(M2, "mark-stage-done", _sid, "--artifact", "art-" + _sid, "--work-dir", wd)
+    run(M2, "begin-stage", _sid, "--work-dir", wd, session="test-analyst")
+    run(M2, "mark-stage-done", _sid, "--artifact", "art-" + _sid,
+        "--work-dir", wd, session="test-analyst")
 r5 = run(M2, "set-subagent-plan", "--rooms-json", "@" + rj,
          "--rationale", "回归测试：按功能分解", "--decided-by", "总计子代理",
-         "--work-dir", wd)
+         "--work-dir", wd, session="test-analyst")
 ck("总计子代理登记编制成功", r5.get("ok") is True, r5)
 ck("  登记数量 = 编制数量", r5.get("count") == 4, r5.get("count"))
 

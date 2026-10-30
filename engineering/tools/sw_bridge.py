@@ -5104,6 +5104,396 @@ def _push_room_validating(room=None, what=""):
                 "reason": repr(e)}
 
 
+# ══ 【BUG-S02/S03 修复】文档清场循环 + SW 进程强杀确认 ══════════════════
+# 现场缺陷（2026-10-29 循迹小车任务 20261029_082936_4159A331）：
+#   S02：sw_bridge.py close-all 返回 ok=false、docs_after=15
+#        （15 个文档仍开着）。旧实现只调【一次】CloseAllDocuments(0) 就读
+#        GetDocumentCount —— 有后台任务/模态对话框时一次关不干净，
+#        于是"清场"事实上没清，下一波并行房间继续堆文档，SW 变慢/不稳。
+#   S03：Stop-Process -Force 杀掉 SLDWORKS 后 5 秒又冒出新 PID
+#        （13240→24256→25548），杀不干净。旧实现只发一次 taskkill 信号，
+#        既不 /T（不带子进程树），也不轮询确认"真的没了"。
+# 修法（本段）：
+#   · close-all：最多 3 轮 CloseAllDocuments(0)，每轮读 GetDocumentCount，
+#     docs_after==0 才算成功；关不掉就如实报 failing_docs + hint。
+#   · sw-kill：每轮 taskkill /F /T /IM SLDWORKS.exe → 等 wait 秒 → 再查进程，
+#     最多 rounds 轮；只有"最后真的没有进程"才 finally_exited=True / ok=True。
+#
+# ⚠️ 【可测试性设计】上面两段逻辑都抽成【纯函数】，把"读文档数/关文档"
+#    与"杀进程/查进程/sleep"全部做成可注入的参数：
+#      测试脚本注入 mock 就能 100% 覆盖，不需要真的装 SW、真的杀进程。
+
+# ── SW 文档管理器适配层（把 COM 的三种调用约定收敛成三个方法）───────────
+class _SwDocManager(object):
+    """把 SldWorks.Application 适配成文档管理器（只做读/关，不退出进程）。
+
+    抽这一层的理由：循环关闭的【判定逻辑】不该和 COM 的绑定细节纠缠
+    （late-binding 下 GetDocumentCount 是无参属性、早期绑定下是方法；
+    关闭接口名也可能不存在）。适配层把差异吃掉，纯函数只管循环与判定。
+    """
+
+    def __init__(self, sw):
+        self.sw = sw
+
+    def count(self):
+        """当前文档数（取不到返回 None）。"""
+        for _get in (lambda: getattr(self.sw, "GetDocumentCount", None),
+                     lambda: self.sw.GetDocumentCount()):
+            try:
+                _v = _get()
+                if _v is not None:
+                    return int(_v)
+            except Exception:
+                continue
+        return None
+
+    def close_all(self):
+        """调一次 CloseAllDocuments(0)（0 = 不弹保存提示）。返回 (ok, err)。"""
+        try:
+            self.sw.CloseAllDocuments(0)
+            return True, None
+        except AttributeError as e:
+            return False, "当前 SW 版本没有 CloseAllDocuments: %r" % (e,)
+        except Exception as e:
+            return False, "CloseAllDocuments 调用异常: %r" % (e,)
+
+    def doc_titles(self, limit=20):
+        """尽力枚举仍打开文档的标题（拿不到就返回空列表，绝不抛异常）。"""
+        titles = []
+        try:
+            _docs = None
+            for _get in (lambda: self.sw.GetDocuments,
+                         lambda: self.sw.GetDocuments()):
+                try:
+                    _docs = _get()
+                    if _docs:
+                        break
+                except Exception:
+                    continue
+            for _d in (_docs or []):
+                if len(titles) >= limit:
+                    break
+                try:
+                    _t = getattr(_d, "GetTitle", None)
+                    if _t is not None:
+                        _t = _t() if callable(_t) else _t
+                    if _t:
+                        titles.append(str(_t))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return titles
+
+    def visible(self):
+        """当前 Visible 设置（取不到返回 None）。"""
+        try:
+            return bool(self.sw.Visible)
+        except Exception:
+            return None
+
+    def set_visible(self, v):
+        """恢复/保持 Visible（保活语义：绝不把 SW 藏起来导致弹框看不见）。"""
+        try:
+            self.sw.Visible = bool(v)
+            return True
+        except Exception:
+            return False
+
+
+def close_documents_until_zero(doc_mgr, max_rounds=3, close_fn=None):
+    """【BUG-S02 修复】循环关闭文档，直到 docs_after==0（最多 max_rounds 轮）。
+
+    ── 为什么必须循环 ────────────────────────────────────────────────────
+    实测：CloseAllDocuments(0) 返回后仍有 15 个文档开着。改文档保存状态、
+    后台重建、模态对话框都会让【单次】关闭失效。所以：
+      · 每轮都重新读 GetDocumentCount（客观证据，不看返回值）；
+      · 只有 docs_after == 0 才算 ok=True；
+      · 关不掉就如实报 failing_docs（最多 20 个标题）+ 最后一轮的 before/after。
+
+    ── 为什么绝对不在这里杀进程 ──────────────────────────────────────────
+    本函数是【保活】路径：并行房间共用一台 SW，杀进程会让其它房间的 RPC
+    立刻失效（Bug⑧）。杀进程只在 --quit / sw-kill 分支，由调用方显式选择。
+
+    Args:
+        doc_mgr: 文档管理器（需有 count() / close_all() / doc_titles()）；
+                 传真实 SW 时用 _SwDocManager(sw)；测试注入 mock。
+        max_rounds: 最多关闭轮数（默认 3）。
+        close_fn: 可选的"执行一次关闭"函数 → (ok, err)；默认用
+                 doc_mgr.close_all()。传 swapi 版可复用既有单次实现。
+    Returns:
+        {"ok", "method": "close_all_documents_loop", "keepalive": True,
+         "quit": False, "sw_exited": False, "docs_before", "docs_after",
+         "rounds_used", "max_rounds", "failing_docs", "hint"?, "error"?}
+    """
+    try:
+        _rounds = int(max_rounds)
+    except Exception:
+        _rounds = 3
+    _rounds = max(1, _rounds)
+    out = {"ok": False, "method": "close_all_documents_loop",
+           "keepalive": True, "quit": False, "sw_exited": False,
+           "docs_before": None, "docs_after": None,
+           "rounds_used": 0, "max_rounds": _rounds,
+           "failing_docs": []}
+    if doc_mgr is None:
+        out["error"] = "文档管理器为空（sw=None）—— 无法执行文档级关闭。"
+        out["hint"] = ("请先确认 SolidWorks 已连接；若只是僵尸进程，"
+                       "用 python sw_bridge.py sw-kill 或 close-all --quit。")
+        return out
+
+    # 一次关闭尝试的完整轨迹（每轮 before/after 都留证，便于 UI/AI 定位）
+    trace = []
+    try:
+        _before = doc_mgr.count()
+    except Exception as e:
+        _before = None
+        trace.append({"phase": "count_before", "error": repr(e)})
+    out["docs_before"] = _before
+    if _before == 0:
+        # 本来就没文档：无需调用关闭接口，直接算已清场
+        out["ok"] = True
+        out["rounds_used"] = 0
+        out["note"] = "执行前就没有打开的文档，无需关闭。"
+        return out
+
+    _last_after = _before
+    _close_err = None
+    for _i in range(_rounds):
+        _r = {"round": _i + 1, "before": _last_after}
+        try:
+            if close_fn is not None:
+                _cp = close_fn()
+                _cok, _cerr = (_cp if isinstance(_cp, tuple)
+                               else (bool(_cp), None))
+            else:
+                _cok, _cerr = doc_mgr.close_all()
+        except Exception as e:
+            _cok, _cerr = False, "close_all 抛异常: %r" % (e,)
+        _r["close_ok"] = bool(_cok)
+        if _cerr:
+            _r["close_error"] = _cerr
+            _close_err = _cerr
+        try:
+            _after = doc_mgr.count()
+        except Exception as e:
+            _after = None
+            _r["count_error"] = repr(e)
+        _r["after"] = _after
+        trace.append(_r)
+        out["rounds_used"] = _i + 1
+        _last_after = _after
+        if _after == 0:
+            break
+
+    out["docs_after"] = _last_after
+    out["rounds_trace"] = trace
+
+    if _last_after == 0:
+        out["ok"] = True
+        out["note"] = ("已关闭全部文档（%s 轮，docs %s → 0）；SW 进程保持运行"
+                       "（保活）—— 并行房间下次调用可直接复用该实例。"
+                       % (out["rounds_used"], _before))
+        return out
+
+    # ── 关不干净：如实报出残存文档，并给出【可操作】的下一步 ────────────
+    out["ok"] = False
+    _titles = []
+    try:
+        _titles = doc_mgr.doc_titles(limit=20) or []
+    except Exception:
+        _titles = []
+    out["failing_docs"] = _titles[:20]
+    if _last_after is None:
+        out["error"] = ("无法读取文档数（GetDocumentCount 取不到），"
+                        "不能确认文档是否已全部关闭。")
+    else:
+        out["error"] = ("已关闭 %s 轮，仍有 %d 个文档未关闭（docs %s → %s）。"
+                        % (out["rounds_used"], _last_after, _before, _last_after))
+        if _titles:
+            out["error"] += " 残存文档: " + "; ".join(_titles[:20])
+    out["hint"] = ("为避免误杀并行房间共用的 SW 进程，本路径【不】强杀进程。"
+                   "若仍有文档关不掉：① SolidWorks 有【未保存文档时会弹保存框】，"
+                   "该模态框会阻塞 CloseAllDocuments —— 请到 SW 窗口里处理掉；"
+                   "② 也可能是后台重建/仿真任务占着文档，等它结束再重试；"
+                   "③ 确认要连进程一起清场时用 python sw_bridge.py close-all --quit"
+                   "（会走 sw-kill 强杀并确认退出）。")
+    if _close_err:
+        out["close_error"] = _close_err
+    return out
+
+
+def kill_solidworks_confirmed(rounds=3, wait=5,
+                              kill_fn=None, process_list_fn=None, sleep_fn=None):
+    """【BUG-S03 修复】循环强杀 SLDWORKS.exe，并【轮询确认真的退出】。
+
+    ── 现场缺陷 ──────────────────────────────────────────────────────────
+    Stop-Process -Force 杀完 5 秒内又冒出新的 PID（13240→24256→25548），
+    反复 3 轮仍存在。原因有两层：
+      ① 只发【一次】taskkill 信号，且不带 /T —— 拉起的子进程/COM 宿主没被带走；
+      ② taskkill 是【异步信号】：返回码 0 只说明"信号发出去了"，
+         不代表进程已经没了。旧实现拿返回码当成功，于是"杀完还在"。
+
+    ── 为什么杀完还会重生 ────────────────────────────────────────────────
+    SolidWorks 有自己的【后台下载器/文档恢复】守护进程（SolidWorks 后台
+    下载服务、文档恢复、许可服务等）。强杀主进程后，它们会在几秒内把
+    SLDWORKS.exe 重新拉起（这正是现场 13240→24256→25548 的成因）。
+    因此本函数【每轮都重新查进程】，并用 pid_history 全程留证；
+    即使 rounds 轮后仍有进程，也把 pid 变化历史一并返回，供 AI 判断
+    "是被重生还是根本没杀掉"。仍不成功时 note 会明确写出重生成因。
+
+    Args:
+        rounds: 最多尝试轮数（默认 3）
+        wait:   每轮杀完等待【秒】数（默认 5）
+        kill_fn: 可注入的"执行一次强杀"函数 → (killed:bool, detail:str)
+                 默认 taskkill /F /T /IM SLDWORKS.exe
+        process_list_fn: 可注入的"枚举进程"函数 → [pid ...] 或 [{"pid":...}]
+                 默认 _sw_processes；返回 None 表示探测失败（≠ 没有进程）
+        sleep_fn: 可注入的 sleep（测试注入空函数，避免真等待）
+    Returns:
+        {"ok", "finally_exited", "rounds_used", "pid_history":[...],
+         "rounds_trace":[...], "note", "error"?}
+    """
+    if kill_fn is None:
+        def kill_fn():
+            try:
+                _r = subprocess.run(
+                    ["taskkill", "/F", "/T", "/IM", "SLDWORKS.exe"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=30)
+                return (_r.returncode == 0,
+                        ((_r.stdout or "") + (_r.stderr or "")).strip()[:300])
+            except Exception as e:
+                return False, "taskkill 执行失败: %r" % (e,)
+    if process_list_fn is None:
+        def process_list_fn():
+            procs, err = _sw_processes()
+            if err:
+                return None   # 探测失败 ≠ 没有进程
+            return [(p or {}).get("pid") for p in (procs or [])]
+    if sleep_fn is None:
+        sleep_fn = time.sleep
+
+    try:
+        _rounds = max(1, int(rounds))
+    except Exception:
+        _rounds = 3
+    try:
+        _wait = max(0.0, float(wait))
+    except Exception:
+        _wait = 5.0
+
+    def _pids(raw):
+        if raw is None:
+            return None
+        res = []
+        for p in raw:
+            try:
+                if isinstance(p, dict):
+                    p = p.get("pid")
+                if p is None:
+                    continue
+                res.append(int(p))
+            except Exception:
+                continue
+        return res
+
+    out = {"ok": False, "finally_exited": False, "rounds_used": 0,
+           "pid_history": [], "rounds_trace": [], "wait_sec": _wait,
+           "max_rounds": _rounds,
+           "method": "taskkill /F /T /IM SLDWORKS.exe + 轮询确认"}
+    # 初始快照：杀之前到底有哪些 PID
+    _init = _pids(process_list_fn())
+    if _init is not None:
+        for _p in _init:
+            if _p not in out["pid_history"]:
+                out["pid_history"].append(_p)
+    if _init == []:
+        out["ok"] = True
+        out["finally_exited"] = True
+        out["rounds_used"] = 0
+        out["note"] = "执行前就没有 SLDWORKS.exe 进程，无需强杀。"
+        return out
+    if _init is None:
+        out["note"] = ("进程探测手段失败，无法确认初始状态；仍按计划尝试强杀，"
+                       "最后以【能否读到进程列表】为准判定。")
+
+    _probe_failed = False
+    _after = _init
+    for _i in range(_rounds):
+        _kill_ok, _kill_detail = kill_fn()
+        _tr = {"round": _i + 1, "kill_ok": bool(_kill_ok),
+               "kill_detail": _kill_detail}
+        try:
+            sleep_fn(_wait)
+        except Exception:
+            pass
+        _raw = _pids(process_list_fn())
+        _tr["after_wait"] = _raw
+        out["rounds_trace"].append(_tr)
+        out["rounds_used"] = _i + 1
+        if _raw is None:
+            _probe_failed = True
+            continue
+        for _p in _raw:
+            if _p not in out["pid_history"]:
+                out["pid_history"].append(_p)
+        _after = _raw
+        if not _raw:
+            out["ok"] = True
+            out["finally_exited"] = True
+            out["note"] = ("已确认 SLDWORKS.exe 完全退出（%s 轮，等待 %.1f 秒/轮）。"
+                           "PID 变化: %s。"
+                           % (out["rounds_used"], _wait,
+                              " → ".join(str(x) for x in out["pid_history"]) or "无"))
+            return out
+
+    # ── rounds 轮仍未退出：如实报失败 + pid 历史 + 重生成因 ───────────────
+    out["ok"] = False
+    out["finally_exited"] = False
+    _remain = _after if _after is not None else []
+    out["remaining_pids"] = _remain
+    if _probe_failed and _after is None:
+        out["error"] = ("已尝试 %s 轮强杀，但【进程探测手段失败】，"
+                        "无法确认 SLDWORKS.exe 是否已退出。" % out["rounds_used"])
+    else:
+        out["error"] = ("已尝试 %s 轮 taskkill（每轮等 %.0f 秒），仍有 SLDWORKS.exe "
+                        "在运行（PID: %s）。"
+                        % (out["rounds_used"], _wait,
+                           ", ".join(str(x) for x in _remain) or "?"))
+    _grew = [p for p in (_remain or []) if p not in (_init or [])]
+    out["note"] = (
+        "PID 变化历史: %s。"
+        "若每轮杀完都出现【新 PID】，说明 SolidWorks 被【后台下载器/文档恢复/"
+        "许可服务】等守护进程重新拉起 —— 这是 Windows 上强杀 SW 的常见现象，"
+        "不是 taskkill 没生效：先结束这些守护进程（或等它们下一轮调度结束），"
+        "再杀 SLDWORKS.exe 才能真正退出。%s"
+        % (" → ".join(str(x) for x in out["pid_history"]) or "无",
+           ("本轮出现了新 PID（%s），符合『被杀后重生』的特征。"
+            % ", ".join(str(x) for x in _grew)) if _grew else ""))
+    return out
+
+
+def cmd_sw_kill(rounds=3, wait=5):
+    """【BUG-S03】命令：循环强杀 SLDWORKS.exe 并确认退出（zero-COM）。
+
+    用法：
+      python sw_bridge.py sw-kill               # 默认 3 轮 × 5 秒
+      python sw_bridge.py sw-kill --rounds 5 --wait 3
+
+    与 close-all 的分工：
+      · close-all          → 只关文档、SW 进程【保活】（并行房间共用时默认）；
+      · close-all --quit   → 关文档 + Quit + sw-kill（真正退出进程）；
+      · sw-kill            → 【只】处理进程：不碰文档、不连 COM。
+    因此它也是【SW 卡死/连不上】时唯一可用的清场手段（不需要 COM 会话）。
+    finally_exited=True 才 ok=True —— 绝不用"信号已发出"冒充"进程已退出"。
+    """
+    r = kill_solidworks_confirmed(rounds=rounds, wait=wait)
+    r["command"] = "sw-kill"
+    r["exe"] = "SLDWORKS.exe"
+    return r
+
+
 # ── Bug-25: 安全退出 SolidWorks / 【Bug⑧】close-all 保活 ─────────────
 def cmd_close_all(sw, quit=False):
     """关闭 SolidWorks 文档并释放使用权（【Bug⑧】默认保活，--quit 才退出）。
@@ -5119,10 +5509,13 @@ def cmd_close_all(sw, quit=False):
       （本会话 9 个零件总耗时约 70 分钟）。
 
     现在分两级（与 Bug 记录里的建议修复方向一致）：
-      · 默认     → 只调 SldWorks.CloseAllDocuments(0)，【不退出 SW 进程】。
-                   下一个房间/下一个零件复用同一实例，无需冷启动；
-      · --quit  → 走原有 close_all_and_exit（CloseAllDocuments + Quit +
-                   taskkill + 轮询确认进程真的退出）。
+      · 默认     → 循环调 CloseAllDocuments(0)（最多 3 轮），【docs_after==0
+                   才算成功】，且【不退出 SW 进程】；下一个房间/下一个零件
+                   复用同一实例，无需冷启动。
+                   （【BUG-S02】旧实现只调一次，实测 docs_after=15 一个没关掉）
+      · --quit  → 循环关文档 + 原有 close_all_and_exit（Quit + taskkill），
+                   再用 sw-kill 的确认逻辑复核进程是否【真的】退出，
+                   返回体带 sw_exited / finally_exited 的真实值（【BUG-S03】）。
 
     SW 使用权（mode_gate 的 SW 锁）在两种语义下【都】释放：
       它是"排队使用权"，与 SW 进程生死无关 —— 不放会让队列死锁。
@@ -5133,6 +5526,28 @@ def cmd_close_all(sw, quit=False):
     """
     import swapi as _swapi
     if sw is None:
+        # ── 【BUG-S03】sw=None + --quit：这正是"SW 卡死/COM 连不上、想清场"
+        #   的现场。没有 COM 会话 ≠ 没法杀进程，所以无论如何，--quit 必须
+        #   走【进程层】的 sw-kill 真正试一试，而不是直接返回"做不到"。
+        if quit:
+            _kill = kill_solidworks_confirmed(rounds=3, wait=5)
+            return {
+                "ok": bool(_kill.get("finally_exited")),
+                "keepalive": False,
+                "quit": True,
+                "method": "sw-kill(no-com)",
+                "docs_closed": None,
+                "sw_exited": bool(_kill.get("finally_exited")),
+                "finally_exited": bool(_kill.get("finally_exited")),
+                "sw_kill": _kill,
+                "error": (None if _kill.get("finally_exited")
+                          else (_kill.get("error") or "SW 进程未能确认退出。")),
+                "note": _kill.get("note"),
+                "hint": ("SW 未连接（COM 不可用），因此【未能】关闭文档，"
+                         "只做了进程层强杀与确认。若 SW 仍在运行，"
+                         "请处理 SW 里的保存对话框后重试，或再执行一次 "
+                         "python sw_bridge.py sw-kill 查看 pid_history。"),
+            }
         # SW 未连接：无法发 CloseAllDocuments，但锁仍然要释放（由调用方处理）。
         # 明确回报 resumed=False，避免调用方误以为"文档已清干净"。
         return {"ok": False, "keepalive": (not quit), "quit": bool(quit),
@@ -5141,16 +5556,102 @@ def cmd_close_all(sw, quit=False):
                 "hint": ("SW 进程可能根本没启动。若只是想释放使用权，"
                          "用 python mode_gate.py sw-release <房间名>；"
                          "若确认有僵尸进程，用 python sw_bridge.py close-all --quit。")}
+    # ── 【BUG-S02 修复】默认路径改为【循环关闭直到 docs_after==0】──────────
+    # 现场缺陷：旧实现只调一次 swapi.close_all_documents()（单次
+    #   CloseAllDocuments），实测返回 ok=false / docs_after=15 —— 15 个文档
+    #   一个都没真正关掉。改为最多 3 轮、每轮重读 GetDocumentCount 验证。
+    #
+    # ⚠️ 保留 sw.Visible：SW 有未保存文档时会弹【保存对话框】，
+    #    该模态框会阻塞 CloseAllDocuments。把 SW 藏起来只会让用户看不见、
+    #    更处理不了那个框 —— 所以这里显式保持/恢复 Visible，并在 hint 里
+    #    写清"有未保存文档时 SW 会弹框"。
+    _mgr = _SwDocManager(sw)
+
+    def _swapi_close_once():
+        """复用 swapi.close_all_documents 的一次关闭（单一事实来源）+ 读回计数。
+
+        ⚠️ 不直接用它当"循环体判定"：它内部只调【一次】CloseAllDocuments
+          并自带 ok=false 判定（实测就是 docs_after=15 那次）。循环与
+          "关到 0 才算成功"的判定由本函数负责，这里只取它的一次关闭动作。
+        """
+        try:
+            _r = _swapi.close_all_documents(sw)
+        except Exception as e:
+            return False, "swapi.close_all_documents 异常: %r" % (e,)
+        if isinstance(_r, dict):
+            return bool(_r.get("ok", True)), _r.get("error")
+        return True, None
+
+    _vis_before = _mgr.visible()
     if quit:
+        # --quit 路径 = 先循环关文档，再走原有 Quit + taskkill，
+        # 最后用 sw-kill 的判定函数【再确认一次】进程是否真的退出。
+        _doc_res = close_documents_until_zero(_mgr, max_rounds=3,
+                                              close_fn=_swapi_close_once)
         result = _swapi.close_all_and_exit(sw, quit=True)
         if isinstance(result, dict):
             result.setdefault("keepalive", False)
             result["quit"] = True
+            # 把"关闭文档循环"的证据一并带回（谁关的、几轮、剩几个）
+            result["documents"] = {
+                "ok": _doc_res.get("ok"),
+                "docs_before": _doc_res.get("docs_before"),
+                "docs_after": _doc_res.get("docs_after"),
+                "rounds_used": _doc_res.get("rounds_used"),
+                "failing_docs": _doc_res.get("failing_docs") or [],
+            }
+            # ── 【BUG-S03 修复】quit 分支必须给出【真实】的退出结论 ──────
+            # close_all_and_exit 内部的 taskkill 只发一次 /IM（不带 /T、
+            # 也可能被"后台下载器/文档恢复"重新拉起）。这里再跑一次
+            # 带轮询确认的 sw-kill，并用它的 finally_exited 覆盖 ok ——
+            # 绝不用"信号已发出"冒充"进程已退出"。
+            _kill = kill_solidworks_confirmed(rounds=3, wait=5)
+            result["sw_kill"] = {
+                "ok": _kill.get("ok"),
+                "finally_exited": _kill.get("finally_exited"),
+                "rounds_used": _kill.get("rounds_used"),
+                "pid_history": _kill.get("pid_history") or [],
+                "note": _kill.get("note"),
+                "error": _kill.get("error"),
+            }
+            result["sw_exited"] = bool(_kill.get("finally_exited"))
+            result["finally_exited"] = bool(_kill.get("finally_exited"))
+            if _kill.get("finally_exited") is not True:
+                result["ok"] = False
+                result["error"] = (_kill.get("error") or
+                                   "SW 进程未能确认退出（taskkill 是异步信号，"
+                                   "且可能被后台守护进程重新拉起）。")
+                result["hint"] = (
+                    "请再执行一次 python sw_bridge.py sw-kill 查看 pid_history；"
+                    "若每轮都出现新 PID，说明 SW 被【SolidWorks 后台下载器/"
+                    "文档恢复】守护进程重新拉起 —— 需先结束这些守护进程。")
+            else:
+                result.setdefault("note", "")
+                if _kill.get("note"):
+                    result["note"] = (_kill["note"] + " "
+                                      + str(result.get("note") or "")).strip()
+            if not _doc_res.get("ok"):
+                result.setdefault("documents_warning",
+                                  _doc_res.get("error"))
         return result
-    result = _swapi.close_all_documents(sw)
-    if isinstance(result, dict):
-        result["keepalive"] = True
-        result["quit"] = False
+    result = close_documents_until_zero(_mgr, max_rounds=3,
+                                          close_fn=_swapi_close_once)
+    result["keepalive"] = True
+    result["quit"] = False
+    result["sw_exited"] = False
+    result["finally_exited"] = False
+    # Visible 保持/恢复（弹框必须看得见，否则用户无从处理）
+    if _vis_before is not None:
+        result["sw_visible"] = bool(_vis_before)
+        if not _mgr.set_visible(_vis_before):
+            result["sw_visible_restore_failed"] = True
+    if not result.get("ok"):
+        _h = result.get("hint") or ""
+        if "未保存文档时会弹保存框" not in _h:
+            _h = (_h + " " if _h else "") + (
+                "注意：SolidWorks 有未保存文档时会弹【保存对话框】，"
+                "该模态框会阻塞 CloseAllDocuments —— 请到 SW 窗口处理后再重试。")
+        result["hint"] = _h
     return result
 
 
@@ -5906,16 +6407,24 @@ def main():
                 "physics-fatigue <case.json>": "疲劳 / 设计寿命（默认30年）校核",
                 "physics-report <run_id>": "查看仿真报告",
                 "physics-recommend <run_id>": "生成修正建议",
-                "close-all": "【Bug⑧】只关闭 SolidWorks 文档 + 释放使用权，"
+                "close-all": "【Bug⑧】【BUG-S02】循环关闭 SolidWorks 文档"
+                             "（最多 3 轮，docs_after==0 才算成功）+ 释放使用权；"
                              "SW 进程【保活】（并行房间共用一台 SW 时不会互相"
-                             "切断 RPC）",
-                "close-all --quit": "【Bug⑧】完整退出：关文档 + Quit + "
-                                    "taskkill，确认 SLDWORKS.exe 真正退出",
+                             "切断 RPC）；关不掉时返回 failing_docs + hint",
+                "close-all --quit": "【Bug⑧】【BUG-S03】完整退出：循环关文档 + "
+                                    "Quit + taskkill + sw-kill 复核，返回 "
+                                    "sw_exited / finally_exited 真实值",
+                "sw-kill [--rounds 3] [--wait 5]": "【BUG-S03】循环强杀 "
+                                    "SLDWORKS.exe（taskkill /F /T）并轮询确认"
+                                    "进程真的退出；返回 finally_exited 与 "
+                                    "pid_history（只读进程层，不连 COM）",
             },
             "close_all_note": ("【Bug⑧】并行模式下 close-all 默认【不】退出 SW "
-                               "进程：只调 SldWorks.CloseAllDocuments，让其它"
+                               "进程：循环调 SldWorks.CloseAllDocuments 直到 "
+                               "docs_after==0（【BUG-S02】最多 3 轮），让其它"
                                "房间的连接继续可用、下一个零件免冷启动。"
-                               "确需释放进程请显式加 --quit。"),
+                               "确需释放进程请显式加 --quit（会再跑 sw-kill "
+                               "确认进程【真的】退出）。"),
             "room_note": ("并行模式(D)下 run/drawing/dwg/dxf/cad-validate "
                           "必须带 --room <房间名>；--room 可放任意位置。"),
         }, ensure_ascii=False, indent=2))
@@ -6021,6 +6530,10 @@ def main():
                      #   而 active_rooms 为空 → 提示里的 <房间名> 无解，
                      #   CAD 连接确认入口实际不可用。
                      "ac-status", "ac-export", "cad-validate-live",
+                     # ── 【BUG-S03】sw-kill 只做进程层清场（taskkill + 轮询），
+                     #   不连 COM、不写业务产物，且【SW 卡死时最需要它能用】——
+                     #   必须豁免 SW 独占锁与 --room（否则清场入口自己先被拦住）。
+                     "sw-kill",
                      # ── 【连接区】连接探测/状态/判断同样是零副作用只读 ──
                      # conn-probe 只做进程与 COM 连接探测，不改模型、不写业务产物。
                      # conn-launch 会拉起进程，但这正是它的语义（用户主动点击），
@@ -6059,6 +6572,9 @@ def main():
                    "conn-probe", "conn-status", "conn-gate",
                    "conn-launch", "conn-log",
                    "conn-probe-process-only",
+                   # 【BUG-S03】sw-kill 是纯进程层动作：不连 SW（sw=None），
+                   #   正因如此它才能在 "SW 卡死 / COM 连不上" 时完成清场。
+                   "sw-kill",
                    # ──【BUG-观察-17 / 观察-1 修复】纯 Python 离线自检 ──────
                    # 只用 mock 假对象 + 临时目录，【完全不碰 SolidWorks】，
                    # 因此必须在此列：SW 未运行时也要能跑，否则自检形同虚设。
@@ -6086,7 +6602,7 @@ def main():
     #   若还要求先指定房间才能释放，会出现"锁被上一家占着 → 想释放却因没带 room
     #   被拒"的死结；串行模式下更是完全没有房间概念。
     #   因此 close-all / sw-release / rooms-reset 豁免 --room 与取锁流程。
-    _NO_ROOM_CMDS = {"close-all", "sw-release", "rooms-reset"}
+    _NO_ROOM_CMDS = {"close-all", "sw-release", "rooms-reset", "sw-kill"}
     # ── 【Bug5 修复】进入业务解析前先剥离 --room，避免它污染位置参数 ────────
     # 原缺陷：run/drawing/dwg/cad-validate 用 args[1] 当路径，
     #   写成 `run --room 结构件 script.py` 时 args[1]="--room" →
@@ -6225,7 +6741,7 @@ def main():
         #        "连不上 → 想关掉它 → 因连不上被拒"）；
         #   · cleanup / check-part —— 纯文件操作，函数体根本不碰 sw。
         _SW_TOLERANT_CMDS = {"status", "doctor", "close-all",
-                             "cleanup", "check-part"}
+                             "cleanup", "check-part", "sw-kill"}
         if sw is None and cmd not in _NO_SW_CMDS \
                 and cmd not in _SW_TOLERANT_CMDS:
             result = _sw_not_connected_result(cmd)
@@ -6268,6 +6784,38 @@ def main():
                         result["sw_lock_released"] = True
             except Exception:
                 pass
+        # ── 【BUG-S03 修复】sw-kill：循环强杀 SLDWORKS.exe 并确认退出 ──────
+        # 现场缺陷：Stop-Process -Force 后 5 秒又冒出新的 PID
+        #   （13240→24256→25548），反复 3 轮仍存在。taskkill 是【异步信号】，
+        #   返回码 0 只说明信号发出去了；且不带 /T 时子进程/COM 宿主还在。
+        # 本命令：每轮 taskkill /F /T /IM → 等 wait 秒 → 再查进程，最多 rounds 轮，
+        #   只有"最后真的没有进程"才 finally_exited=True / ok=True。
+        # 用法：python sw_bridge.py sw-kill [--rounds 3] [--wait 5]
+        elif cmd == "sw-kill":
+            _rounds = 3
+            _wait = 5
+            for _i in range(1, len(_args)):
+                if _args[_i] == "--rounds" and _i + 1 < len(_args):
+                    try:
+                        _rounds = int(_args[_i + 1])
+                    except ValueError:
+                        pass
+                elif _args[_i].startswith("--rounds="):
+                    try:
+                        _rounds = int(_args[_i].split("=", 1)[1])
+                    except ValueError:
+                        pass
+                elif _args[_i] == "--wait" and _i + 1 < len(_args):
+                    try:
+                        _wait = float(_args[_i + 1])
+                    except ValueError:
+                        pass
+                elif _args[_i].startswith("--wait="):
+                    try:
+                        _wait = float(_args[_i].split("=", 1)[1])
+                    except ValueError:
+                        pass
+            result = cmd_sw_kill(rounds=_rounds, wait=_wait)
         elif cmd == "save":
             # ── 【Bug-38 建议②】保存前校验零件归属，越界则拒绝并记录违规 ─────
             # 台账："小屋保存零件前，校验文件名是否落在本房间归属清单内，

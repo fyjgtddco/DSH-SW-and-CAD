@@ -102,11 +102,45 @@ def main():
     io.open(p, "w", encoding="utf-8").write(json.dumps(rooms, ensure_ascii=False))
     helper = getattr(mf, "_load_json_arg", None) or None
     # CLI 内部函数不在模块级 → 直接测 CLI
+    # ── 【2026-10-29】set-subagent-plan 现在要求"真实绑定的总计子代理"身份；
+    #    这里先 analyst-bind 并伪造平台注册表，否则拿到的只会是
+    #    ANALYST_ACTOR_REQUIRED / MODE2_ANALYST_REQUIRED（不是本用例要测的东西）。
     import subprocess
+    import time as _t
+    _env = dict(os.environ)
+    _env["DSH_STATE_DIR"] = d
+    _env["DSH_SESSION_ID"] = "test-analyst"
+    _env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        io.open(os.path.join(d, "platform_agents.json"), "w", encoding="utf-8").write(
+            json.dumps({"updatedAt": int(_t.time() * 1000), "source": "test",
+                        "agents": [{"id": "test-analyst", "label": "总计子代理",
+                                    "status": "running",
+                                    "createdAt": int(_t.time() * 1000)}]},
+                       ensure_ascii=False))
+    except Exception:
+        pass
+    subprocess.run([sys.executable, os.path.join(HERE, "mode2_flow.py"),
+                    "analyst-bind", "--work-dir", d],
+                   capture_output=True, text=True, encoding="utf-8", env=_env)
+    # 编制前置：十阶段必须走完
+    for _sid in mf.STAGE_IDS:
+        subprocess.run([sys.executable, os.path.join(HERE, "mode2_flow.py"),
+                        "begin-stage", _sid, "--work-dir", d],
+                       capture_output=True, text=True, encoding="utf-8", env=_env)
+        subprocess.run([sys.executable, os.path.join(HERE, "mode2_flow.py"),
+                        "mark-stage-done", _sid, "--artifact", "art-" + _sid,
+                        "--work-dir", d],
+                       capture_output=True, text=True, encoding="utf-8", env=_env)
+    # 还需 set-depth（record 题数校验用；这里只走阶段，故直接设 lite）
+    subprocess.run([sys.executable, os.path.join(HERE, "mode2_flow.py"),
+                    "set-depth", "lite", "--work-dir", d],
+                   capture_output=True, text=True, encoding="utf-8", env=_env)
     r = subprocess.run([sys.executable, os.path.join(HERE, "mode2_flow.py"),
                         "set-subagent-plan", "--rooms-json", p,
-                        "--rationale", "t", "--decided-by", "总计子代理"],
-                       capture_output=True, text=True, encoding="utf-8")
+                        "--rationale", "t", "--decided-by", "总计子代理",
+                        "--work-dir", d],
+                       capture_output=True, text=True, encoding="utf-8", env=_env)
     check("裸 .json 路径可解析（不需要 @）",
           "count" in (r.stdout or "") or '"ok": true' in (r.stdout or ""),
           (r.stdout or "")[:200])

@@ -116,11 +116,30 @@ def main():
     print("反证：接线审计必须能抓出问题（否则它只是摆设）")
     print("=" * 72)
 
+    # ── 【测试路径修复】安装副本上 ROOT 下没有 plugins/ ────────────────────
+    # 本测试需要一个【可复制的仓库树】做变异反证。安装副本里插件在
+    #   profiles/<p>/node_modules 下，与 tools/ 不同根 →
+    #   _copy_tree_for_mutation 复制出来的树里没有 plugins/，
+    #   于是"找不到仓库 client.js"直接 return 1（假失败）。
+    # 处理：先按工作区布局找；找不到就明确 skip（这不是回归缺陷）。
     repo_client = os.path.join(ROOT, "plugins", "dsh-engineering-ui",
                                "lib", "client.js")
     if not os.path.exists(repo_client):
-        print("找不到仓库 client.js：%s" % repo_client)
-        return 1
+        try:
+            import _plugin_paths as _pp
+            _pc = _pp.plugin_file("client.js")
+        except Exception:
+            _pc = None
+        if _pc and os.path.dirname(os.path.dirname(os.path.dirname(_pc))) and \
+                os.path.normcase(os.path.dirname(os.path.dirname(
+                    os.path.dirname(_pc)))) == os.path.normcase(ROOT):
+            repo_client = _pc
+    if not os.path.exists(repo_client):
+        print("[SKIP] 当前布局下 ROOT 内没有 plugins/dsh-engineering-ui/lib/client.js")
+        print("     （安装副本把插件装在 profiles/<profile>/node_modules 下，")
+        print("       与 tools/ 不同根，无法做整树变异反证）")
+        print("     这【不是】回归缺陷 —— 本测试请在工作区副本运行。")
+        return 0
     with io.open(repo_client, "rb") as f:
         repo_hash_before = hashlib.sha256(f.read()).hexdigest()
     repo_size_before = os.path.getsize(repo_client)

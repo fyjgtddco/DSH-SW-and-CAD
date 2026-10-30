@@ -328,6 +328,57 @@ def _plugin_agents():
         return []
 
 
+def _plugin_run_id():
+    """本次 DSH 运行的标识（插件写进注册表；读不到返回 None）。
+
+    【2026-10-29 G04】DSH 崩溃重启后 runId 必然变化。mode_gate 把这值记进
+    platform_status.json 的 _meta.run_id；下次读到不同的 runId 就知道
+    "上一轮 fork 的所有子代理都已失联"，可以整批判 detached，
+    而不是逐个房间靠 id 去注册表里碰运气。
+    """
+    try:
+        return str((_load_plugin_registry() or {}).get("runId") or "").strip() or None
+    except Exception:
+        return None
+
+
+def _remember_run_id():
+    """把当前 runId 记进 platform_status.json（只读命令也可安全调用）。"""
+    try:
+        _rid = _plugin_run_id()
+        if not _rid:
+            return None
+        _d = _load_platform_status()
+        _meta = _d.get("_meta") if isinstance(_d.get("_meta"), dict) else {}
+        if _meta.get("run_id") != _rid:
+            _meta["run_id"] = _rid
+            _meta["run_id_seen_at"] = time.time()
+            _d["_meta"] = _meta
+            _save_platform_status(_d)
+        return _rid
+    except Exception:
+        return None
+
+
+def _run_id_changed():
+    """本次 runId 与上次记录的是否不同（= DSH 重启过）。
+
+    返回 (changed: bool, prev_run_id, current_run_id)
+    """
+    try:
+        _cur = _plugin_run_id()
+        if not _cur:
+            return False, None, None
+        _meta = (_load_platform_status() or {}).get("_meta") or {}
+        _prev = _meta.get("run_id") if isinstance(_meta, dict) else None
+        if not _prev:
+            _remember_run_id()
+            return False, None, _cur
+        return (str(_prev) != str(_cur)), _prev, _cur
+    except Exception:
+        return False, None, None
+
+
 def _plugin_agent_for_room(room, sub_rec=None):
     """把房间匹配到插件注册表里的子代理记录（不猜：多条匹配返回 None）。
 
@@ -367,29 +418,67 @@ def _plugin_agent_for_room(room, sub_rec=None):
     return None
 
 
-def _plugin_liveness(room, sub_rec=None):
-    """插件注册表给出的存活结论 (status, age_sec, agent)。
+# ══ 【2026-10-29 · 重写】平台存活判据：主进程脉冲（唯一权威）═════════════
+#
+# 为什么推倒重来（会话 ceac3fff 实测事故）：
+#   lead 用 list_agents 看不到 fork 出来的子代理（它们不是 Team member），
+#   于是误判"已死"，在 3 分钟内连开 3 个总计子代理；三个同时存活、
+#   互相 analyst-bind --force 抢身份、各自提问 → 用户看到重复选项。
+#
+# 旧实现的三层判据全都【可以被绕过或误读】：
+#   ① lastEventAt（子代理写）—— 子代理一忙就停写，看着像死了；
+#   ② 平台 status 字段 —— 事件不来时无法区分"没事件"与"已死"；
+#   ③ 手动 platform-sync —— 靠主对话自觉，还容易被写成假心跳。
+#
+# 新判据（组合起来接近 100%，且不依赖任何外部环境）：
+#   ① pulse.seq 单调递增且新鲜 —— 由【DSH 主进程的 setInterval】写，
+#      与子代理在干什么无关。子代理跑 SW/等锁/发呆，脉冲照跳。
+#      脉冲停 = DSH 进程没了 = 所有子代理也都没了 → 判死是正确的。
+#   ② agents[] 里仍有该 id 且 status != disposed —— agent 对象还在。
+#   两条同时成立 → 活着。任一不成立 → 才允许判死。
+#
+# platform_status.json 保留为【人工覆盖】（排障时强制标记），不作主判据。
+PULSE_STALE_SEC = 35          # 与插件 PULSE_STALE_MS 对齐（3.5 拍 x 10s）
 
-    语义（关键，别改错）：
-      · 命中且 status != disposed → ("running", age)：
-        子代理对象【仍然存在】。agent/turn-stopping 只是"本回合结束"，
-        子代理还活着 → 绝不能当成死亡（这正是用户被误杀的根因）。
-      · status == disposed → ("inactive", age)：平台已确认释放；
-      · 未命中 → (None, None)：不猜，退回证据链。
+
+def _pulse_state():
+    """读主进程脉冲。返回 {alive, seq, age_sec, reason}。
+
+    alive=True 表示"写这份注册表的 DSH 进程还活着且在跳"。
     """
-    a = _plugin_agent_for_room(room, sub_rec)
-    if not a:
-        return None, None, None
-    _st = str(a.get("status") or "").strip().lower()
-    _ts = _parse_ts_any(a.get("lastEventAtMs"))
-    if _ts is None:
-        _ts = _parse_ts_any(a.get("lastEventAt"))
-    if _ts is None:
-        _ts = _parse_ts_any(a.get("createdAt"))
-    _age = (time.time() - _ts) if _ts else None
-    if _st == "disposed":
-        return "inactive", _age, a
-    return "running", _age, a
+    out = {"alive": False, "seq": None, "age_sec": None, "reason": "no_registry"}
+    reg = _load_plugin_registry()
+    if not reg:
+        return out
+    pulse = reg.get("pulse") if isinstance(reg.get("pulse"), dict) else {}
+    if not pulse:
+        out["reason"] = "no_pulse_field"
+        _ts = _parse_ts_any(reg.get("updatedAt"))
+        if _ts:
+            _age = time.time() - _ts
+            out["age_sec"] = round(_age, 1)
+            if _age <= PULSE_STALE_SEC:
+                out["alive"] = True
+                out["reason"] = "legacy_updatedAt"
+        return out
+    _ts = _parse_ts_any(pulse.get("atMs")) or _parse_ts_any(pulse.get("at"))
+    try:
+        out["seq"] = int(pulse.get("seq"))
+    except Exception:
+        out["seq"] = None
+    if not _ts:
+        out["reason"] = "pulse_no_ts"
+        return out
+    _age = time.time() - _ts
+    out["age_sec"] = round(_age, 1)
+    if _age <= PULSE_STALE_SEC:
+        out["alive"] = True
+        out["reason"] = "pulse_fresh"
+    else:
+        out["reason"] = ("pulse_stale(%.0fs > %ds) —— DSH 进程可能已停，"
+                         "此时所有子代理同样已消失"
+                         % (_age, PULSE_STALE_SEC))
+    return out
 
 
 def _platform_liveness(room, sub_rec=None):
@@ -398,31 +487,57 @@ def _platform_liveness(room, sub_rec=None):
     Returns:
       "running"  -> 平台确认仍在跑（权威：禁止判死/禁止重启）
       "inactive" -> 平台确认已停止/已释放（才允许判死）
-      "missing"  -> 平台侧无此子代理（登记丢失，Bug-32 场景）
+      "missing"  -> 平台侧无此子代理（登记丢失）
       None       -> 无平台事实（证据不足，退回证据链，绝不当成"死亡"）
 
-    读取顺序（【阶段 C】契约，顺序不可颠倒）：
-      ① 手动 platform_status.json（PLATFORM_FRESH_SEC 内）—— 人工覆盖优先；
-      ② 插件自动注册表 platform_agents.json（按绑定 id 或 label 唯一匹配）；
-      ③ (None, None) —— 无平台事实。
+    判定顺序：
+      ① 人工覆盖 platform_status.json（PLATFORM_FRESH_SEC 内）—— 排障用；
+      ② 脉冲活着 + agent 在册且非 disposed -> "running"；
+      ③ 脉冲活着 + agent 在册但 disposed  -> "inactive"；
+      ④ 脉冲活着 + 注册表里确实没有该 agent -> "missing"；
+      ⑤ 脉冲已停（DSH 进程没了）-> "inactive"（此时子代理确实也没了）。
     """
-    _stale_manual_age = None
     rec = _load_platform_status().get(room)
     if isinstance(rec, dict):
         try:
             _ts = float(rec.get("ts") or 0)
         except Exception:
             _ts = 0.0
-        if _ts:
-            _age = time.time() - _ts
-            if _age <= PLATFORM_FRESH_SEC:
-                return str(rec.get("status") or "").lower() or None, _age
-            # 手动记录已过期 → 不再作权威结论；保留年龄仅用于展示
-            _stale_manual_age = _age
-    _pst, _page, _pa = _plugin_liveness(room, sub_rec)
-    if _pst:
-        return _pst, _page
-    return None, _stale_manual_age
+        if _ts and (time.time() - _ts) <= PLATFORM_FRESH_SEC:
+            return str(rec.get("status") or "").lower() or None, time.time() - _ts
+
+    pulse = _pulse_state()
+    if not pulse.get("alive"):
+        # ── 【关键区分】"没有 pulse 字段" != "pulse 过期" ──────────────────
+        #   · no_registry / no_pulse_field / pulse_no_ts：
+        #       插件没装、或还没重启到带 pulse 的版本 —— 这是【判据缺失】，
+        #       不是"子代理死了"。此时绝不能返回 inactive（那会把所有活房间
+        #       判死）。退回"agent 在册即 running"的弱判据。
+        #   · pulse_stale：pulse 确实存在但停了 = DSH 进程没了，
+        #       此时所有子代理也都没了 → 返回 inactive 是【正确】的。
+        # 注意：reason 是带参数的完整句子（"pulse_stale(999s > 35s) ..."），
+        # 必须用 startswith 判断，不能用 ==（踩过一次，导致该判死的没判死）。
+        if str(pulse.get("reason") or "").startswith("pulse_stale"):
+            return "inactive", pulse.get("age_sec")
+        # 判据缺失 → 弱判据（agent 在册且未 disposed 就算活着）
+        a_weak = _plugin_agent_for_room(room, sub_rec)
+        if a_weak is not None:
+            _st_w = str(a_weak.get("status") or "").strip().lower()
+            if _st_w == "disposed":
+                return "inactive", pulse.get("age_sec")
+            return "running", pulse.get("age_sec")
+        return None, pulse.get("age_sec")
+
+    a = _plugin_agent_for_room(room, sub_rec)
+    if a is None:
+        _agents = _plugin_agents()
+        if not _agents:
+            return None, pulse.get("age_sec")
+        return "missing", pulse.get("age_sec")
+    _st = str(a.get("status") or "").strip().lower()
+    if _st == "disposed":
+        return "inactive", pulse.get("age_sec")
+    return "running", pulse.get("age_sec")
 
 
 def cmd_platform_sync(room, status, by="main"):
@@ -1492,6 +1607,77 @@ def cmd_room_artifact(room, file_path, part_name=None):
                      "room-status 的 artifact 判定将以登记表为准（Bug-16/17）。")}
 
 
+def _archive_room_artifacts(room):
+    """【BUG-05 修复】把该房间上一波登记的产物移到归档目录。
+
+    缺陷（2026-10-29 竞速小车实测）：
+      room-fail 后重开房间，返回 fresh_reason=auto_fresh_after_fail，
+      但 parts/ 里旧的 .SLDPRT 仍然在。新小屋重做时会覆盖，
+      判断失误就漏建/重复建，而且事后分不清"这批件属于哪一波"。
+
+    做法：
+      · 只归档【本房间已登记归属】的文件（artifacts_registry 里 room 匹配的那些），
+        绝不按文件名前缀猜 —— 猜错会搬走别的房间的件；
+      · 连同同名伴生文件一起搬（.material.json / .origin.json /
+        .sw_internal.json / _preview.png / _iso.png），否则凭据与模型会脱节；
+      · 目标：<工作目录>/parts/_archive/<房间>_<时间戳>/；
+      · 任何失败都只返回警告，绝不让 room-start 失败
+        （归档是整理，不是正确性前提）。
+
+    Returns: {"ok": bool, "moved": [...], "target": str, "note"|"warning": str}
+    """
+    out = {"ok": True, "moved": [], "target": None}
+    try:
+        _items = _registered_artifacts(room)
+        _files = [it["path"] for it in _items
+                  if it.get("path") and it.get("exists")]
+        if not _files:
+            out["note"] = "该房间没有已登记的产物，无需归档"
+            return out
+        _work = _default_work_dir()
+        _stamp = time.strftime("%Y%m%d-%H%M%S")
+        _dst = os.path.join(str(_work), "parts", "_archive",
+                            "%s_%s" % (_safe_room_name(room), _stamp))
+        os.makedirs(_dst, exist_ok=True)
+        out["target"] = _dst
+        _suffixes = (".material.json", ".origin.json", "", "_preview.png", "_iso.png")
+        for _p in _files:
+            _dir = os.path.dirname(_p)
+            _base = os.path.basename(_p)
+            _stem = _base
+            for _ext in (".SLDPRT", ".sldprt", ".SLDASM", ".sldasm"):
+                if _stem.lower().endswith(_ext.lower()):
+                    _stem = _stem[:-len(_ext)]
+                    break
+            _cands = [_base, _stem + ".SLDPRT.material.json",
+                      _stem + ".sldprt.material.json",
+                      _stem + ".SLDPRT.origin.json",
+                      _stem + ".sldprt.origin.json",
+                      _stem + ".sldprt.material.json.sw_internal.json",
+                      _stem + "_preview.png", _stem + "_iso.png",
+                      _stem + ".SLDPRT.material.json.sw_internal.json"]
+            for _c in _cands:
+                _src = os.path.join(_dir, _c)
+                if not os.path.exists(_src):
+                    continue
+                _tgt = os.path.join(_dst, _c)
+                try:
+                    if os.path.exists(_tgt):
+                        os.remove(_tgt)
+                    import shutil as _shutil
+                    _shutil.move(_src, _tgt)
+                    out["moved"].append(_c)
+                except Exception:
+                    continue
+        out["note"] = ("已把该房间上一波的 %d 个文件移到 %s"
+                       "（新一波从干净目录开始，避免新旧混淆）"
+                       % (len(out["moved"]), _dst))
+    except Exception as _e:
+        out["ok"] = False
+        out["warning"] = "归档旧产物失败（不影响 room-start）：%r" % (_e,)
+    return out
+
+
 def _registered_artifacts(room):
     """取本房间【显式登记】的产物列表（含存在性复核）。"""
     rec = _load_artifact_registry().get(str(room))
@@ -1982,6 +2168,113 @@ def _confirm_granted(room, detail):
     return _miss()
 
 
+def cmd_wait_rooms(targets, timeout=900.0, interval=10.0, all_active=False):
+    """【BUG-03 修复】阻塞等待若干房间离开 active，或等待超时。
+
+    设计目标：把"父代理反复轮询 room-board / parts 目录"换成【一次命令行阻塞】。
+    轮询发生在 Python 进程里、只读状态文件，几乎不耗 token；
+    到点（或状态变化）后一次性返回结构化结论。
+
+    终止条件（任一即返回）：
+      ① 目标房间全部离开 active（ended_at / failed_at / 判定 dead）；
+      ② 期间任一房间状态发生变化（便于父代理及时处理异常）；
+      ③ 到达 timeout；
+      ④ all_active=True 时，只要 mode_state 里已经没有 active 房间就返回。
+
+    Returns: {"ok":bool, "returned_because":str, "elapsed_sec":float,
+              "rooms":[{room, state, active, ended, failed}], "board":[...]}
+    """
+    _t0 = time.time()
+    _last_sig = None
+    _first = True
+    _board = []
+    while True:
+        st = load_state()
+        rooms = st.get("rooms") or {}
+        if all_active and not targets:
+            targets = [n for n, v in rooms.items()
+                       if isinstance(v, dict) and v.get("active")]
+        rows = []
+        _sig_bits = []
+        for n in targets:
+            info = rooms.get(n) or {}
+            ended = bool(info.get("ended_at"))
+            failed = bool(info.get("failed_at"))
+            active = bool(info.get("active"))
+            try:
+                _bd = _board_entry(n, info, (st.get("subagents") or {}), state=st)
+                _state = _bd.get("state")
+            except Exception:
+                _bd = {}
+                _state = "unknown"
+            rows.append({"room": n, "state": _state, "active": active,
+                         "ended": ended, "failed": failed})
+            _sig_bits.append("%s:%s:%s%s%s" % (n, _state, active, ended, failed))
+        if targets:
+            _board = rows
+        else:
+            _board = []
+        _sig = "|".join(_sig_bits)
+        # 条件①／②：全部结束 或 状态发生变化
+        _all_done = bool(targets) and all(not r["active"] for r in rows)
+        if _all_done:
+            return {"ok": True, "returned_because": "all_rooms_inactive",
+                    "elapsed_sec": round(time.time() - _t0, 1),
+                    "rooms": rows, "note": "全部目标房间已离开 active 状态"}
+        if all_active and not targets:
+            return {"ok": True, "returned_because": "no_active_rooms",
+                    "elapsed_sec": round(time.time() - _t0, 1), "rooms": [],
+                    "note": "mode_state 里已无 active 房间"}
+        if (not _first) and _sig != _last_sig:
+            return {"ok": True, "returned_because": "state_changed",
+                    "elapsed_sec": round(time.time() - _t0, 1),
+                    "rooms": rows,
+                    "note": ("房间状态发生变化（提前返回，便于及时处置）；"
+                             "如需继续等请再次调用本命令")}
+        _last_sig = _sig
+        _first = False
+        if (time.time() - _t0) >= timeout:
+            return {"ok": True, "returned_because": "timeout",
+                    "elapsed_sec": round(time.time() - _t0, 1),
+                    "rooms": rows,
+                    "note": ("等待超时（%ss）。房间仍在跑属正常；"
+                             "请用 room-report-read 看进度，不要据此判死。"
+                             % int(timeout))}
+        time.sleep(max(1.0, min(interval, 60.0)))
+
+
+def _write_report_and_heartbeat(room, stage, detail=""):
+    """写入一条房间进度报告并刷新心跳（room-report 的实际落盘部分）。
+
+    【BUG-12 关联】抽出成函数，让"防线未过但仍要如实记录 done"这条路径
+    与正常路径共用同一套写盘逻辑，避免两处格式不一致导致读取侧解析失败。
+    """
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    path = _report_path(room)
+    rec = {"room": room, "stage": stage, "detail": detail,
+           "ts": time.time(), "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+    history = []
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                history = (json.load(f) or {}).get("history", [])
+    except Exception:
+        history = []
+    history.append(rec)
+    history = history[-20:]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"room": room, "latest": rec, "history": history},
+                  f, ensure_ascii=False, indent=2)
+    try:
+        hb = _heartbeat_path(room)
+        with open(hb, "w", encoding="utf-8") as f:
+            json.dump({"name": room, "ts": time.time(), "pid": os.getpid(),
+                       "via": "report"}, f)
+    except Exception:
+        pass
+    return rec
+
+
 def cmd_room_report(room, stage, detail=""):
     """【bug6修复】小屋进度旁路上报：写文件，不走对话通道。
 
@@ -2041,6 +2334,49 @@ def cmd_room_report(room, stage, detail=""):
                          "写入授权，之后本上报才会被接受。"
                          "沿用上一个零件的确认 = 违规，必须逐件确认。"),
             }
+
+    # ── 【BUG-12 修复】上报 done 前自动跑一次三大防线校验 ─────────────────
+    # 缺陷（2026-10-29 实测）：子代理只管建模、从不管验证；
+    #   dispose 之前没有任何自动校验，于是「没验证也算跑完」，
+    #   房间永远无法 room-end，而 reports/ 全程为空也没人发现。
+    # 修复：把"房间声称完成"这一动作变成【防线校验的触发点】——
+    #   · 这是【自报完成】，不是 room-end（room-end 仍会再校一次，双保险）；
+    #   · 未通过不阻断上报（子代理仍需如实记录它失败了），
+    #     但必须在返回里明确列出缺口，让父代理/模型看见"还差什么"；
+    #   · 强制阻断留给 room-end（那里的语义才是"不可逆下线"）。
+    if stage == "done":
+        try:
+            import defense_gate as _dg_done
+            _dv = _dg_done.check_room_defense(room)
+            if not _dv.get("ok"):
+                os.makedirs(REPORTS_DIR, exist_ok=True)
+                _hint = {
+                    "ok": False,
+                    "room": room,
+                    "stage": "done",
+                    "gate": "DEFENSE_INCOMPLETE_ON_DONE",
+                    "blockers": _dv.get("blockers") or [],
+                    "defense": _dv.get("details") or {},
+                    "error": ("【三大防线未过】房间 %s 自报 done，但防线校验未通过 ——"
+                              "这次上报仍被记录，但房间不会被判为真正完成。"
+                              % room),
+                    "how": [
+                        "① 物理：python sw_bridge.py physics-optimize "
+                        "<load_case.json> --room " + str(room),
+                        "② 领域：python sw_bridge.py physics-validate-domain "
+                        "<domain> --room " + str(room),
+                        "③ 材料：每个零件 new_part(material=...) 后重新 save()",
+                        "④ 复查：python defense_gate.py check-room " + str(room),
+                    ],
+                    "note": ("本上报仍会写入进度报告（如实记录你说过 done），"
+                             "但 room-end 时会再次强制拦截。"),
+                }
+                # 先把 done 写进去（如实记录），再追加缺口提示返回
+                _write_report_and_heartbeat(room, stage, detail)
+                return _hint
+        except Exception:
+            # 防线模块不可用时不阻断上报（room-end 会 fail-closed 拦截）
+            pass
 
     os.makedirs(REPORTS_DIR, exist_ok=True)
     path = _report_path(room)
@@ -2284,7 +2620,16 @@ def cmd_room_report_read(room=None):
 # 对策：waiting_sw 成为【一等状态】，看板直接给出 safe_to_restart=False
 #   与一句"严禁判死/重启"的理由，主对话不需要自己推理。
 ROOM_BOARD_STATES = ("starting", "running", "waiting_sw", "idle",
-                     "done", "failed", "dead", "unbound")
+                     "done", "failed", "dead", "unbound", "detached")
+#: 【2026-10-29 G04】detached = 房间绑定的 subagent 已不在平台注册表里
+#:   （最典型：DSH 崩溃重启后，上一轮 fork 的子代理全部消失，但 mode_state
+#:    仍记着它们的 id，插件注册表也可能残留 running —— 于是看板报 idle/存活，
+#:    而 send_message 实际返回 TEAM_MEMBER_NOT_FOUND，房间永远无法推进）。
+#: 判据给足宽限：刚 room-start 的房间（< DETACHED_GRACE_SEC）不判 detached，
+#:   因为插件登记有 300ms 节流、子代理也可能还没真正起来。
+DETACHED_GRACE_SEC = 90
+DETACHED_NEXT_ACTION = ("先 python mode_gate.py room-fail <房间>，再 room-start + "
+                        "subagent_fork（旧子代理已不在平台注册表，无法唤醒）")
 #: 多久没有【可观察改动】（报告/产物/待确认/刚绑定）就算"活着但当前没动作"
 BOARD_IDLE_SEC = 300
 #: waiting_sw 的统一阻断理由（契约文案，勿改）
@@ -2362,6 +2707,10 @@ def _board_guidance(board_state, room):
     if board_state == "dead":
         return True, None, ("平台已确认不在运行：可 python mode_gate.py room-fail %s "
                             "后重新 room-start/fork" % room)
+    if board_state == "detached":
+        return False, ("房间绑定的子代理已不在平台注册表（DSH 崩溃/重启后失联）——"
+                       "send_message 也唤不醒，但【不是】活房间，不可 reset 整局"), \
+            DETACHED_NEXT_ACTION
     if board_state == "unbound":
         return False, ("平台侧仍存活，禁止 reset；只是缺 subagent-assign 登记"), \
             ("python mode_gate.py subagent-assign %s <id>（subagent_fork 返回值）"
@@ -2371,8 +2720,16 @@ def _board_guidance(board_state, room):
             ("等待 SolidWorks 锁（正常排队），禁止重启；"
              "python mode_gate.py sw-status 查看队列")
     if board_state == "idle":
+        # ── 【BUG-02 修复】旧的 next_action 教主对话 send_message 问进度 ──────
+        # 缺陷（2026-10-29 实测）：fork 出来的建模小屋【不是 Team member】，
+        #   send_message 必然返回 'active teammate "X" not found'；
+        #   而 room-board 却写"send_message 问进度"，主对话照做 → 永远失败 →
+        #   房间卡在 idle 无人能推进（本次「驱动轮组」因此白做）。
+        # 修复：明确告知唯一可行的干预手段是【旁路读进度】，不是发消息。
         return False, ("平台侧确认仍存活（当前无可观察动作），禁止判死/重启"), \
-            ("平台存活但当前没动作：send_message 问进度或继续等待，禁止 reset")
+            ("旁路读进度：python mode_gate.py room-report-read %s "
+             "（fork 子代理不是 Team member，send_message/interrupt_agent 都唤不醒它，"
+             "别浪费回合；持续 idle 超 15 分钟再考虑 room-fail+重开）" % room)
     if board_state == "starting":
         return False, ("刚登记、仍在 %d 秒启动宽限内，等待即可" % SW_START_GRACE), \
             "等待启动宽限期结束（禁止判死）"
@@ -2426,10 +2783,48 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
         or (_assigned_age is not None and _assigned_age <= BOARD_IDLE_SEC)
     )
     # ── state 推导（顺序即优先级，勿随意调整）────────────────────────────
+    # ── 【2026-10-29 G04】detached 判定：绑定的 subagent 在平台侧查不到 ──────
+    # 只有在"注册表里确实有别的 agent、但没有它"时才算失联；
+    # 注册表整个不存在/为空（插件没跑、或本轮刚启动还没写入）时【不判】——
+    # 否则会把正常房间误判成失联（那是更糟的误杀）。
+    _registry_agents = _plugin_agents()
+    _detached = False
+    _detached_reason = None
+    # 判据 A：注册表里有别的 agent 却没有它（且无任何证据）
+    #
+    # -- 【2026-10-29 修复】_plat 的判断从 is None 改成 不在 running/inactive --
+    # 引入 pulse 后，_platform_liveness 在"脉冲活着但注册表里没这个 agent"时
+    #   会返回 missing（而不是 None）。旧的 _plat is None 条件因此永远不成立，
+    #   detached 就判不出来了 —— 这正是本次修复要覆盖的场景（DSH 重启后
+    #   上一轮的子代理全都不在注册表里）。
+    _plat_no_verdict = _plat in (None, "missing")
+    if (_sid and _registry_agents and _plat_no_verdict
+            and not _agent
+            and _assigned_age is not None
+            and _assigned_age > DETACHED_GRACE_SEC
+            and not _ev.get("any")):
+        _detached = True
+        _detached_reason = ("平台注册表里找不到该子代理（%s），"
+                            "send_message 也唤不醒 → 失联" % (_plat or "无结论"))
+    # 判据 B（G04 整批失联）：DSH 重启过（runId 变了）→ 本轮之前绑定的子代理
+    #   全部不可寻址，直接判 detached（不必逐个去注册表里碰运气）。
+    if (_sid and not _detached and not info.get("ended_at")
+            and not info.get("failed_at")):
+        try:
+            _rid_changed, _prev_rid, _cur_rid = _run_id_changed()
+        except Exception:
+            _rid_changed = False
+        if _rid_changed and _assigned_age is not None:
+            _detached = True
+            _detached_reason = ("DSH 已重启（runId %s -> %s），上一轮 fork 的子代理"
+                                "全部不可寻址" % (str(_prev_rid)[:18], str(_cur_rid)[:18]))
+
     if info.get("ended_at"):
         board_state = "done"
     elif info.get("failed_at"):
         board_state = "failed"
+    elif _detached:
+        board_state = "detached"
     elif _plat == "running" and not _sid:
         # 平台说活着，只是房间没绑 subagent —— 这是 assign 漏了，不是死
         board_state = "unbound"
@@ -2478,15 +2873,33 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
         _detail_bits.append("SW锁持有中(%ss)" % _swe.get("age_sec"))
     if _sid:
         _detail_bits.append("已绑定子代理=%s" % _sid)
+        if _detached:
+            _detail_bits.append(_detached_reason or (
+                "平台注册表里找不到该 id（DSH 崩溃/重启后失联，send_message 唤不醒）"))
     elif _plat == "running":
         _detail_bits.append("未绑定子代理(unbound)")
     _type = (type_map or {}).get(name) or info.get("type") or None
+    # ── 【未记录 BUG 修复】标注"属于上一轮任务"的房间 ──────────────────────
+    # 这类房间既不是本轮在跑，也不该继续 active；主对话据此可用
+    # room-fail / rooms-reset 清理，而不是以为"还有房间在干活"。
+    _task_of_room = info.get("task_id")
+    _cur_task = _current_workflow_task_id()
+    _stale_task = bool(_task_of_room and _cur_task
+                       and str(_task_of_room) != str(_cur_task))
+    _detail_bits_extra = []
+    if _stale_task:
+        _detail_bits_extra.append(
+            "归属上一轮任务(%s)，本轮=%s —— 不是活房间，可 room-fail 清理"
+            % (_task_of_room, _cur_task))
     return {
         "room": name,
         "type": _type,
         "state": board_state,
+        "stale_task": _stale_task,
+        "room_task_id": _task_of_room,
         "status_legacy": _legacy or None,
-        "detail": " / ".join(str(x) for x in _detail_bits),
+        "detail": " / ".join([str(x) for x in _detail_bits]
+                               + [str(x) for x in _detail_bits_extra]),
         "subagent_id": _sid or None,
         "subagent_label": (_agent.get("label") or None),
         "platform_status": _plat,
@@ -2508,7 +2921,13 @@ ROOM_BOARD_HINT = (
     "waiting_sw=在 SW 队列里正常等锁（严禁判死/重启）；"
     "idle=平台确认存活但当前没有可观察动作；done/failed=已收尾；"
     "dead=平台明确 inactive/disposed/missing 且无证据且超宽限（才可重启）；"
-    "unbound=平台还活着但房间没绑 subagent（补 subagent-assign，禁止 reset）。"
+    "unbound=平台还活着但房间没绑 subagent（补 subagent-assign，禁止 reset）；"
+    "detached=房间绑的 subagent 已不在平台注册表（崩溃/重启后失联）→ "
+    "room-fail 后重开，不要 reset 整局，也不要 send_message 干等。"
+    "★ 判活权威是 pulse：pulse.alive=True 表示 DSH 进程在跳（子代理忙/等锁都不影响），"
+    "此时上面的结论可信；pulse.alive=False 说明进程停了或插件没跑，"
+    "这时【不要】据此判死，改看磁盘产物/报告证据链。"
+    "🚫 禁止用 list_agents / wait_agent 判断 fork 出来的子代理死活 —— 它们看不到。"
     "只读：不要再用 platform-sync 造假心跳，平台状态由插件自动登记。"
 )
 
@@ -2983,6 +3402,12 @@ def cmd_room_status():
 
 
 def cmd_room_board(room=None, as_json=True):
+    # 【G04】顺手把本次 DSH 的 runId 记进 platform_status（只写 _meta，不影响房间结论）；
+    #   下一次运行读到不同 runId 即可判"整批失联"。
+    try:
+        _remember_run_id()
+    except Exception:
+        pass
     """【阶段 C】唯一权威看板：每个房间"到底怎么了"由代码 + 平台事实给出。
 
     ── 为什么必须有它 ────────────────────────────────────────────────────
@@ -3061,6 +3486,11 @@ def cmd_room_board(room=None, as_json=True):
             "source": _reg.get("source"),
             "agent_count": len(_reg.get("agents") or []),
         },
+        # ── 【2026-10-29】主进程脉冲：判断"平台判据本身还可不可信"──────────
+        # pulse.alive=True  → DSH 进程在跳，上面的 platform_status 判据可信；
+        # pulse.alive=False → DSH 进程已停（或插件没跑），此时【不要】据此判死，
+        #                     应改为看磁盘产物/报告等证据链。
+        "pulse": _pulse_state(),
         "hint": ROOM_BOARD_HINT,
     }
 
@@ -3105,7 +3535,8 @@ def cmd_platform_refresh():
         _row["agent_status"] = _a.get("status")
         _row["matched_by"] = ("id" if (_sid and str(_a.get("id")) == str(_sid))
                               else "label")
-        _pst, _page, _ = _plugin_liveness(_name, _sub_raw)
+        # 【2026-10-29】改用脉冲判据：agent 在册 + 脉冲新鲜 = 活着
+        _pst, _page = _platform_liveness(_name, _sub_raw)
         _ts = _parse_ts_any(_a.get("lastEventAtMs"))
         if _ts is None:
             _ts = _parse_ts_any(_a.get("lastEventAt"))
@@ -3435,6 +3866,54 @@ def _fresh_state():
     return {"mode": "1", "rooms": {}, "declared_at": None, "mode_name": MODE_NAMES["1"],
             "sw_lock": {"owner": None, "queue": [], "acquired_at": None,
                         "prev_owner": None, "sw_by_room": False}}
+
+
+def _current_workflow_task_id():
+    """当前任务 id（读 workflow_state；读不到返回 None）。
+
+    【未记录 BUG 修复】mode_state.json 原来【没有 task_id 字段】，
+    于是"哪些房间属于本轮任务"无从判断 —— 上一轮没收尾的房间
+    （实测 2026-10-29 遗留 3 个 active 房间，task_epoch 还是 10 月中旬）
+    会一直挂在 mode_state 里，被守卫当成"仍有 active 房间"，
+    导致【任何新会话都无法正常结束】（守卫每轮都 steer 拉回来）。
+    本函数提供跨文件关联所需的当前 task_id。
+    """
+    try:
+        if not os.path.exists(WORKFLOW_STATE_PATH):
+            return None
+        with open(WORKFLOW_STATE_PATH, "r", encoding="utf-8-sig") as f:
+            _wf = json.load(f) or {}
+        _t = _wf.get("task_id")
+        return str(_t) if _t else None
+    except Exception:
+        return None
+
+
+def stale_room_names(state=None):
+    """【未记录 BUG 修复】列出属于【已过期任务】的房间名。
+
+    判据（保守，宁可少判不可误判）：
+      房间记录里有 task_id、且与本轮 workflow 的 task_id 不同 → 过期。
+    没有 task_id 的历史记录【不判过期】（升级前的老数据无从判断，
+    误判会让正在跑的房间被当成残留）。
+
+    用途：守卫/room-board 判断"是否还有 active 房间"时，只看本轮任务的房间。
+    """
+    try:
+        st = state if isinstance(state, dict) else load_state()
+        cur = _current_workflow_task_id()
+        if not cur:
+            return []
+        out = []
+        for _n, _v in (st.get("rooms") or {}).items():
+            if not isinstance(_v, dict):
+                continue
+            _rt = _v.get("task_id")
+            if _rt and str(_rt) != cur:
+                out.append(_n)
+        return out
+    except Exception:
+        return []
 
 
 def load_state():
@@ -4567,7 +5046,15 @@ def cmd_room_start(name):
     except Exception:
         pass
 
-    rooms[name] = {"active": True, "started_at": time.time()}
+    # ── 【2026-10-29 G06】必须在覆盖前抓取"上一次是不是失败过" ────────────
+    # 坑：下一行就会把 rooms[name] 整体替换成 {"active":True,...}，
+    #   之后再读 rooms[name].failed_at 永远是 None → "失败后默认 fresh" 失效。
+    _prev_rec = dict(rooms.get(name) or {})
+    _was_failed = bool(_prev_rec.get("failed_at"))
+    rooms[name] = {"active": True, "started_at": time.time(),
+                   # 【未记录 BUG 修复】记录归属任务：让"过期房间"可被判出，
+                   # 否则上一轮遗留的 active 房间会永久卡住守卫与新任务。
+                   "task_id": _current_workflow_task_id()}
     # ── 【Bug#18 修复】room-start 不再销毁历史报告与授权 ─────────────────
     # 测试反馈：为恢复被清空的 mode_state 而重新 room-start，结果
     #   ① 小屋 latest_report 变 None（"失忆"，看不到此前干过的活）；
@@ -4584,7 +5071,27 @@ def cmd_room_start(name):
     #   · pending.json【完全不动】（授权令牌属于用户意志，任何自动流程
     #     都无权清除；要清必须显式调用 confirm-part 的撤销或 rooms-reset）。
     #   · 若调用方确实想要全新一波，可显式传 --fresh 强制清理。
-    _fresh = "--fresh" in sys.argv
+    # ── 【2026-10-29 G06 修复】上一次记录是 failed → 默认按【全新一波】清理 ──
+    # 实测：room-fail 之后重开房间，room-start 仍是 history_preserved=true，
+    #   保留旧报告与旧绑定，父代理容易误判"已建模"而跳过零件（BUG-G06）。
+    #   「失败重开」的语义本来就是要重做，因此默认 fresh；确实想保留时用 --keep。
+    _keep = "--keep" in sys.argv
+    _fresh_explicit = "--fresh" in sys.argv
+    _fresh = _fresh_explicit or (_was_failed and not _keep)
+    # ── 【BUG-05 修复】fresh 重开时把该房间的旧产物归档，避免新旧混在一起 ──
+    # 实测（2026-10-29 竞速小车）：底盘房间 room-fail 后重开，返回
+    #   fresh_reason=auto_fresh_after_fail，但 parts/ 里上一波的 3 个 .SLDPRT
+    #   原样留着。新小屋若重新建这 3 件会覆盖；判断失误就漏建/重复建，
+    #   而且事后无法区分"这批零件属于哪一波"。
+    # 做法：把本房间【已登记归属】的产物移到 parts/_archive/<房间>_<时间戳>/。
+    #   用 artifacts_registry 的归属信息定位（不猜文件名），
+    #   移动失败只记录警告，绝不阻断 room-start。
+    _archive_info = None
+    if _fresh:
+        try:
+            _archive_info = _archive_room_artifacts(name)
+        except Exception as _e_arc:
+            _archive_info = {"ok": False, "error": repr(_e_arc)}
     if _fresh:
         for _p in (_report_path(name), _heartbeat_path(name)):
             try:
@@ -4619,8 +5126,30 @@ def cmd_room_start(name):
     result = {"ok": True, "room": name, "message": msg}
     # ── 【Bug#18 修复】明确告知调用方：历史是否被保留 ─────────────────────
     result["history_preserved"] = (not _fresh)
+    result["fresh_reason"] = ("explicit_fresh" if _fresh_explicit else
+                              ("auto_fresh_after_fail" if _was_failed else None))
+    # 【BUG-05】把旧产物归档结果告诉调用方（成功/无产物/失败三种都如实报）
+    if _archive_info:
+        result["archived_artifacts"] = _archive_info
+    # 【G06】重开失败房间时必须把旧绑定清掉，否则 room-board 仍显示旧 subagent_id
     if _fresh:
-        result["note_fresh"] = "已按 --fresh 清理该房间的历史报告与心跳（全新一波）。"
+        try:
+            if (state.get("subagents") or {}).pop(name, None):
+                result["subagent_binding_cleared"] = True
+        except Exception:
+            pass
+        try:
+            _pending_path = _pending_confirm_path(name)
+            if _pending_path and os.path.exists(_pending_path):
+                result["pending_kept"] = True   # 授权令牌属用户意志，仍不清
+        except Exception:
+            pass
+    if _fresh:
+        result["note_fresh"] = (
+            ("已自动按【全新一波】清理该房间的历史报告/心跳/旧绑定"
+             "（上次记录为 failed，重开即重做；如确需保留请加 --keep）。"
+             if (_was_failed and not _fresh_explicit) else
+             "已按 --fresh 清理该房间的历史报告与心跳（全新一波）。"))
     else:
         result["note_preserved"] = (
             "本房间的历史进度报告与 confirm-part 授权【均已保留】。"
@@ -6117,6 +6646,27 @@ def main():
                               force=_re_force)
     elif cmd in ("room-fail", "room-restart"):
         result = cmd_room_fail(args[1] if len(args) > 1 else "小屋")
+    elif cmd in ("interrupt-agent", "interrupt_agent", "kill-agent", "subagent-kill"):
+        # ── 【BUG-06 修复】不再返回"未知命令"那种令人无从下手的错误 ──────────
+        # 实测：模型按旧文档调 mode_gate.py interrupt-agent <id>，得到
+        #   {"ok": false, "error": "未知命令: interrupt-agent"}，于是它以为
+        #   自己没有清理手段，反复重试。
+        # 事实：清理子代理是【DSH 工具 interrupt_agent】的职责，命令行做不到。
+        # 这里给出明确的可执行替代，而不是一句"未知命令"。
+        result = {
+            "ok": False,
+            "error": ("mode_gate.py 【没有】interrupt-agent 命令 —— "
+                      "清理子代理要用 DSH 工具 interrupt_agent <target>，不是命令行。"),
+            "why": ("本脚本只管理【门禁状态与 SW 锁】，不控制平台子代理生命周期；"
+                    "fork 出来的建模小屋不是 Team member，"
+                    "interrupt_agent 对它们通常也不生效。"),
+            "how": [
+                "① 只是想让房间可重开 → 直接 python mode_gate.py room-start <房间>（会清旧绑定）",
+                "② 已结束(completed/failed)的房间 → python mode_gate.py room-end/room-fail <房间>",
+                "③ 想停掉 Team member（spawn_teammate 建的）→ 用工具 interrupt_agent",
+                "④ 核对现状 → python mode_gate.py room-board --json",
+            ],
+        }
     elif cmd == "sw-request":
         result = cmd_sw_request(args[1] if len(args) > 1 else "unknown")
     elif cmd == "sw-wait":
@@ -6252,6 +6802,49 @@ def main():
                     result["self_bound"] = True
         except Exception:
             pass
+    elif cmd in ("wait-rooms", "wait-rooms-done"):
+        # ── 【BUG-03 修复】阻塞等待房间推进，替代"父代理反复轮询磁盘" ────────
+        # 缺陷（2026-10-29 实测）：fork 出来的子代理【不是 Team member】，
+        #   wait_agent 恒返回 noProgress(no-active-peer)，list_agents 也看不到它们。
+        #   父代理只能每 5~7 分钟轮询一次 room-board / parts 目录，
+        #   本次轮询数十次，烧掉大量 token 且延迟很高。
+        # 本命令用【单个命令行进程原地阻塞】替代这些轮询：
+        #   · 只轮询状态文件（零 token），到点一次性返回结论；
+        #   · 默认等全部房间离开 active（done/failed/dead）或超时；
+        #   · 中途房间状态发生变化也会提前返回，便于父代理及时处置。
+        # 用法:
+        #   python mode_gate.py wait-rooms "<房间1>,<房间2>" [--timeout 900] [--interval 10]
+        #   python mode_gate.py wait-rooms --all-active --timeout 900
+        _rargs = [a for a in args[1:] if not a.startswith("--")]
+        _timeout = 900.0
+        _intv = 10.0
+        _all_active = "--all-active" in args
+        for _i, _a in enumerate(args):
+            if _a == "--timeout" and _i + 1 < len(args):
+                try:
+                    _timeout = float(args[_i + 1])
+                except Exception:
+                    pass
+            elif _a == "--interval" and _i + 1 < len(args):
+                try:
+                    _intv = float(args[_i + 1])
+                except Exception:
+                    pass
+        _targets = []
+        if _all_active:
+            _st0 = load_state()
+            _targets = [n for n, v in (_st0.get("rooms") or {}).items()
+                        if isinstance(v, dict) and v.get("active")]
+        elif _rargs:
+            _targets = [x.strip() for x in _rargs[0].replace("，", ",").split(",")
+                        if x.strip()]
+        if not _targets and not _all_active:
+            result = {"ok": False,
+                      "error": "用法: wait-rooms \"<房间1>,<房间2>\" [--timeout 900] "
+                               "[--interval 10]；或用 --all-active 等全部 active 房间"}
+        else:
+            result = cmd_wait_rooms(_targets, timeout=_timeout, interval=_intv,
+                                    all_active=_all_active)
     elif cmd == "confirm-part":
         # 【Bug1 修复】由用户确认后授权某零件，之后 params_confirmed 才会被接受
         result = cmd_confirm_part(args[1] if len(args) > 1 else "",

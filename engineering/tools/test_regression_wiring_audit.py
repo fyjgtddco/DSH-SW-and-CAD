@@ -55,8 +55,32 @@ if _AUDIT_ROOT:
 else:
     _PLUGINS_ROOT = ROOT
 
-CLIENT = os.path.join(_PLUGINS_ROOT, "plugins", "dsh-engineering-ui", "lib", "client.js")
-HOST = os.path.join(_PLUGINS_ROOT, "plugins", "dsh-engineering-ui", "lib", "index.js")
+# ── 插件路径解析 ──────────────────────────────────────────────────────────
+# 【重要】必须优先尊重 DSH_AUDIT_ROOT：
+#   "反证"会在临时副本上改坏代码，再跑本审计，期望它报 FAIL。
+#   若这里无条件用 _plugin_paths 找到【真实仓库】的 client.js，
+#   审计就会去读真身（真身当然是对的）→ 变异永远抓不到 →
+#   反证 1/2 失败（实测：PASS=52 而非期望的 51）。
+# 因此顺序是：
+#   ① 设了 DSH_AUDIT_ROOT → 只认 <AUDIT_ROOT>/plugins/...（变异副本）
+#   ② 没设 → 才用 _plugin_paths 做智能定位（工作区 / 安装副本都适用）
+if _AUDIT_ROOT:
+    CLIENT = os.path.join(_PLUGINS_ROOT, "plugins", "dsh-engineering-ui",
+                          "lib", "client.js")
+    HOST = os.path.join(_PLUGINS_ROOT, "plugins", "dsh-engineering-ui",
+                        "lib", "index.js")
+else:
+    try:
+        import _plugin_paths as _pp
+        _ppdir = _pp.plugin_lib_dir()
+    except Exception:
+        _ppdir = None
+    if _ppdir:
+        CLIENT = os.path.join(_ppdir, "client.js")
+        HOST = os.path.join(_ppdir, "index.js")
+    else:
+        CLIENT = os.path.join(_PLUGINS_ROOT, "plugins", "dsh-engineering-ui", "lib", "client.js")
+        HOST = os.path.join(_PLUGINS_ROOT, "plugins", "dsh-engineering-ui", "lib", "index.js")
 
 PASS = 0
 FAIL = 0

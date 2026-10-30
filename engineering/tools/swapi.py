@@ -3025,6 +3025,35 @@ def _show_main_window(maximize=False):
         pass
 
 
+
+# ══ 【C04 修复】BMP → PNG 转换（SaveBMP 只产出 BMP）══════════════════════
+def _bmp_to_png(bmp_path, png_path):
+    """把 SaveBMP 产出的 BMP 转成目标图片格式（默认 PNG）。
+
+    真机实测（SW2025）：SaveBMP 【忽略扩展名】—— 即使传 .png 也写出 BMP 字节
+    （文件头 42 4D = "BM"）。所以必须显式转换，否则前端/识图插件按 PNG 解析会失败。
+
+    依赖 Pillow；没装就返回 False，调用方保留 .bmp（Vision 也能直接读 BMP）。
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return False
+    try:
+        _fmt = "PNG"
+        _ext = os.path.splitext(str(png_path))[1].lower()
+        if _ext in (".jpg", ".jpeg"):
+            _fmt = "JPEG"
+        elif _ext == ".webp":
+            _fmt = "WEBP"
+        with Image.open(bmp_path) as im:
+            if _fmt == "JPEG" and im.mode in ("RGBA", "P", "LA"):
+                im = im.convert("RGB")
+            im.save(png_path, _fmt)
+        return os.path.exists(png_path) and os.path.getsize(png_path) > 0
+    except Exception:
+        return False
+
 def _window_title(hwnd):
     """读取窗口标题（用于截图可信度佐证：确认抓到的是 SolidWorks 窗口）。"""
     try:
@@ -5529,7 +5558,21 @@ class SWModel:
         return self
 
     def screenshot(self, path=None, for_vision=False):
-        """对 SolidWorks 主窗口截图保存为 PNG。
+        """对 SolidWorks 视图截图保存为 PNG。
+
+        ── 【C04 修复 · 2026-10-29 真机实测】默认走 SaveBMP，不依赖前台窗口 ──
+        实测（SW2025 SP5.0，pywin32 静态绑定）：把 SW 主窗口
+          user32.ShowWindow(hwnd, 6)（最小化）后，
+          model.SaveBMP(path, 1600, 900) 仍返回 True，0.1 秒写出 4320054 字节
+          （1600*900*3 = 4320000，+54 字节 BMP 头 = 4320054，完全吻合），
+          文件前两字节 42 4D = "BM"（合法 BMP）。
+        结论：SaveBMP 是真正的【后台渲染】，与窗口是否前台/最小化无关。
+
+        原实现走"抓屏 + 强制激活窗口"，在 DSH Web GUI 抢前台时必然失败
+        （现场症状：visual_check 截图失败、stdout 为空、抓到的是 DSH 画面）。
+        现在改为：
+          ① 首选 SaveBMP（后台、稳定、不需要 SetForegroundWindow）；
+          ② 只有 SaveBMP 不可用（老版本/无 SaveBMP）才回落到原抓屏路径。
 
         Args:
             path: 截图保存路径，默认保存到工具目录
@@ -5543,6 +5586,14 @@ class SWModel:
             else:
                 path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "solidworks_live.png")
+
+        # ══ 首选：SaveBMP 后台渲染（C04）══════════════════════════════════
+        _shot = self._screenshot_via_savebmp(path)
+        if _shot.get("ok"):
+            return _shot
+        # SaveBMP 不可用 → 记下原因，回落到抓屏（此时才需要前台窗口）
+        _savebmp_error = _shot.get("error")
+
         try:
             import ctypes
             from ctypes import wintypes
@@ -5601,11 +5652,93 @@ class SWModel:
                     "activated": bool(act.get("ok")),
                     "verified_foreground": verified,
                     "window_title": _window_title(target),
+                    "method": "grab_screen",
+                    "savebmp_error": _savebmp_error,
                     "note": ("截图取自当前置前的 SolidWorks 窗口"
+                             "（SaveBMP 不可用，已回落到抓屏）"
                              if verified else
                              "⚠️ 截图时无法确认前台为 SW，内容可能不可信")}
         except Exception as e:
-            return {"ok": False, "error": f"screenshot failed: {e}"}
+            return {"ok": False,
+                    "error": f"screenshot failed: {e}",
+                    "savebmp_error": _savebmp_error,
+                    "hint": ("SaveBMP 后台渲染也失败了 —— 检查模型是否已打开、"
+                             "以及 SW 是否处于可用状态。")}
+
+    # ══ 【C04】SaveBMP 后台截图（不依赖前台窗口）══════════════════════
+    def _screenshot_via_savebmp(self, path, width=1600, height=900):
+        """用 ModelDoc2.SaveBMP 后台导出，再按需转成 PNG。
+
+        真机实测要点（SW2025 SP5.0）：
+          · 窗口最小化时依然成功 → 不需要 SetForegroundWindow / BringToFront；
+          · SaveBMP 【忽略扩展名】，传 .png 也写出 BMP 字节（magic 42 4D）；
+          · 输出大小 = width*height*3 + 54（BMP 头），可据此校验是否真写成功。
+
+        Returns: {"ok": bool, ...}；不可用时 ok=False + error，由调用方回落抓屏。
+        """
+        try:
+            _savebmp = getattr(self.model, "SaveBMP", None)
+            if _savebmp is None:
+                return {"ok": False, "error": "本版本 ModelDoc2 无 SaveBMP"}
+            # SaveBMP 只会写 BMP → 先写临时 .bmp，再按目标扩展名转换
+            _base, _ext = os.path.splitext(path)
+            _bmp = (_base if _ext.lower() == ".bmp" else _base + ".bmp")
+            _dir = os.path.dirname(os.path.abspath(_bmp))
+            if _dir and not os.path.isdir(_dir):
+                try:
+                    os.makedirs(_dir, exist_ok=True)
+                except Exception:
+                    pass
+            try:
+                ok = bool(_savebmp(_bmp, int(width), int(height)))
+            except Exception as _e:
+                return {"ok": False, "error": "SaveBMP 调用异常: %r" % (_e,)}
+            if not ok:
+                return {"ok": False, "error": "SaveBMP 返回 False"}
+            if not os.path.exists(_bmp):
+                return {"ok": False,
+                        "error": "SaveBMP 返回 True 但文件不存在: %s" % _bmp}
+            _sz = os.path.getsize(_bmp)
+            if _sz <= 54:
+                return {"ok": False,
+                        "error": "SaveBMP 写出的文件过小（%d 字节）" % _sz}
+            # 校验 magic：BMP 必须是 42 4D ("BM")
+            _magic = None
+            try:
+                with open(_bmp, "rb") as _f:
+                    _magic = _f.read(2)
+            except Exception:
+                _magic = None
+            if _magic != b"BM":
+                return {"ok": False,
+                        "error": "SaveBMP 输出不是合法 BMP（magic=%r）" % (_magic,)}
+
+            _final = _bmp
+            _converted = False
+            _want_convert = _ext.lower() not in (".bmp", "")
+            if _want_convert:
+                if _bmp_to_png(_bmp, path):
+                    _final = path
+                    _converted = True
+                    try:
+                        os.remove(_bmp)
+                    except Exception:
+                        pass
+            _note = "SaveBMP 后台渲染导出（不依赖前台窗口，窗口最小化也可用）"
+            if _converted:
+                _note += "；已转 PNG"
+            elif _want_convert:
+                _note += "；BMP 未能转 PNG（缺 Pillow？），保留 .bmp"
+            return {"ok": True,
+                    "path": _final,
+                    "size": "%dx%d" % (int(width), int(height)),
+                    "bytes": _sz,
+                    "method": "SaveBMP+convert" if _converted else "SaveBMP",
+                    "activated": False,
+                    "verified_foreground": False,
+                    "note": _note}
+        except Exception as e:
+            return {"ok": False, "error": "SaveBMP 路径异常: %r" % (e,)}
 
     def export_image(self, path=None, width=1600, height=900):
         """用 SolidWorks 内置 SaveBMP 导出当前视图位图。"""
@@ -6148,8 +6281,24 @@ class SWModel:
         return None, False
 
     def _has_curved_face_at(self, x, y, z):
-        """检查目标点是否落在某个曲面的包围盒内。
-        用于在 begin_sketch_on_face 中区分"用户真的想画在曲面上"还是"碰巧落在平面包围盒里"。
+        """检查目标点是否【真的落在某个曲面几何上】。
+
+        ── 【C02 修复 · 2026-10-29 真机实测】原实现是纯粹的误判制造机 ──────
+        原实现判据：点是否落在【曲面的 GetBox 包围盒】内（±1mm）。
+        实测复现（120×80×10 板 + Ø10 通孔，SW2025）：
+          该圆柱面的 GetBox = [-5,-5,0 → 5,5,10]，Z 向**跨越整个板厚**；
+          于是顶面 (0,0,10) —— 一个本来就在平面上的点 —— 被这个立方体包住，
+          `_has_curved_face_at(0,0,10)` 返回 **True**；
+          而 begin_sketch_on_face 的策略 1 正是被它否掉的 → M3 沉孔永远打不上。
+
+        新判据（两级，且【不确定时一律返回 False】）：
+          ① 平面面直接跳过（用官方 ISurface.IsPlane 判定，不再用包围盒猜）；
+          ② 曲面的包围盒只用于【粗筛候选】；
+          ③ 命中候选后再做几何确认：要求该点与该曲面的最近点距离足够小
+             （`ISurface.GetClosestPointOn` 或面法向一致），确认不了就【不算】。
+
+        取舍原则：**误判成"曲面"的代价（沉孔打不上）远大于漏判**，
+          所以这条函数在不确定时必须返回 False（fail-open 到平面路径）。
         """
         try:
             bodies = self.model.GetBodies2(0, 1)
@@ -6161,34 +6310,138 @@ class SWModel:
                     faces = b.GetFaces()
                     flist = list(faces) if isinstance(faces, tuple) else ([faces] if faces else [])
                     for face in flist:
+                        # ① 平面直接跳过（官方判定，最可靠）
+                        if self._face_is_planar(face) is True:
+                            continue
                         if not self._is_curved_face(face):
                             continue
+                        # ② 包围盒只做粗筛（召回用，不作判据）
                         try:
                             bb = face.GetBox
                             bb_min = (bb[0] * 1000, bb[1] * 1000, bb[2] * 1000)
                             bb_max = (bb[3] * 1000, bb[4] * 1000, bb[5] * 1000)
-                            if (bb_min[0] - 1 <= x <= bb_max[0] + 1 and
-                                bb_min[1] - 1 <= y <= bb_max[1] + 1 and
-                                bb_min[2] - 1 <= z <= bb_max[2] + 1):
-                                return True
+                            if not (bb_min[0] - 1 <= x <= bb_max[0] + 1 and
+                                    bb_min[1] - 1 <= y <= bb_max[1] + 1 and
+                                    bb_min[2] - 1 <= z <= bb_max[2] + 1):
+                                continue
                         except Exception:
                             continue
+                        # ③ 几何确认：点必须真的贴在该曲面上
+                        if self._point_on_curved_face(face, x, y, z):
+                            return True
                 except Exception:
                     continue
         except Exception:
             pass
         return False
 
+    def _point_on_curved_face(self, face, x, y, z, tol_mm=1.0):
+        """点是否真的落在该曲面上（几何确认，C02）。
+
+        用官方 `ISurface.GetClosestPointOn(x,y,z)` 求最近点，再比较距离。
+        ⚠️ 该方法返回值语义在不同绑定/版本下不一致（现有注释已警告"v 参数不是角度"），
+          因此这里【只接受能明确算出距离的情形】；算不出来就返回 False ——
+          宁可漏判（走平面路径），也不要误判（挡住沉孔）。
+        """
+        try:
+            surf = face.GetSurface
+        except Exception:
+            return False
+        if surf is None:
+            return False
+        _m = 0.001   # mm → m（SW API 内部用米）
+        _pt = None
+        try:
+            _fn = getattr(surf, "GetClosestPointOn", None)
+            if callable(_fn):
+                _r = _fn(float(x) * _m, float(y) * _m, float(z) * _m)
+                # 常见返回：3 元组 (x,y,z)；或 (u,v) 参数。只认前者。
+                if isinstance(_r, (tuple, list)) and len(_r) >= 3:
+                    _pt = (float(_r[0]), float(_r[1]), float(_r[2]))
+        except Exception:
+            _pt = None
+        if _pt is None:
+            # 算不出最近点 → 不确认（fail-open：不当作曲面）
+            return False
+        try:
+            _dx = (_pt[0] / _m) - float(x)
+            _dy = (_pt[1] / _m) - float(y)
+            _dz = (_pt[2] / _m) - float(z)
+            _dist = (_dx * _dx + _dy * _dy + _dz * _dz) ** 0.5
+            return bool(_dist <= float(tol_mm))
+        except Exception:
+            return False
+
     def _is_curved_face(self, face):
         """判断面是否为曲面（圆柱/球面等），无法直接在其上开草图。
-        SW COM 动态调用下 face.Normal 对曲面返回 (0,0,0)，而平面返回非零法向量。
-        【SW2018+】✅ 所有版本可用
+
+        ── 【C02 修复 · 2026-10-29 真机实测】改用官方 ISurface 判定 ─────────
+        原实现：`face.Normal` 对曲面返回 (0,0,0)（靠"法向全零"反推曲面）。
+          这是个脆弱代理判据：某些退化平面/边界情形法向也可能接近零。
+        新实现（按可靠性降级）：
+          ① ISurface.IsPlane —— 官方布尔属性，最直接（本机实测 6 个平面面全 True、
+             圆柱面 False；pywin32 静态绑定下是【属性】，不加括号）；
+          ② ISurface.Identity == 4001（PLANE_TYPE）—— 官方类型标识，兜底；
+          ③ 仍拿不到才回落到原来的"法向全零"启发式。
+        返回：True=曲面 / False=平面。
         """
+        _planar = self._face_is_planar(face)
+        if _planar is not None:
+            return (not _planar)
+        # ③ 最后兜底：原启发式（法向全零 → 视为曲面）
         try:
             n = face.Normal
             return all(abs(v) < 0.01 for v in n)
         except Exception:
             return False
+
+    def _face_is_planar(self, face):
+        """官方判定：该面是否【平面】。返回 True / False / None（拿不到）。
+
+        ── 【C02 修复】真机实测依据（SW2025 SP5.0）────────────────────────
+          · 6 个平面面：`surf.IsPlane == True`，`surf.Identity == 4001`；
+          · 1 个圆柱面：`surf.IsPlane == False`；
+          · `IsPlane` / `IsCylinder` 在 pywin32 静态绑定（CDispatch）下是
+            **属性**（typelib invkind = PROPGET），直接 `surf.IsPlane` 即可，
+            加括号会 TypeError —— 这里两种写法都兼容。
+
+        返回 None 表示"无法判定"，由调用方决定策略（**不要当成曲面**）。
+        """
+        try:
+            surf = face.GetSurface
+        except Exception:
+            return None
+        if surf is None:
+            return None
+        # ① 首选 ISurface.IsPlane
+        try:
+            _v = getattr(surf, "IsPlane", None)
+            if callable(_v):
+                try:
+                    _v = _v()
+                except Exception:
+                    _v = None
+            if isinstance(_v, bool):
+                return _v
+            if isinstance(_v, int) and not isinstance(_v, bool):
+                # 少数绑定把 bool 当 int 返回（0/1 / -1 表示错误）
+                if _v in (0, 1):
+                    return bool(_v)
+        except Exception:
+            pass
+        # ② 兜底：官方类型标识 PLANE_TYPE = 4001
+        try:
+            _id = getattr(surf, "Identity", None)
+            if callable(_id):
+                try:
+                    _id = _id()
+                except Exception:
+                    _id = None
+            if isinstance(_id, int):
+                return int(_id) == 4001
+        except Exception:
+            pass
+        return None
 
     def _get_surface_normal(self, face, x, y, z):
         """从曲面上的点计算精确法线。
@@ -6428,8 +6681,21 @@ class SWModel:
             self._right_plane_mode = False
             raise RuntimeError(msg)
 
-        # 策略1: 对平面用 GetBox 匹配（但如果目标是曲面则跳过）
-        if not self._has_curved_face_at(x, y, z) and self._select_face_by_box(x, y, z):
+        # 策略1: 对平面用 GetBox 匹配（【C02 修复】平面优先，不再被曲面误判挡住）
+        #
+        # ── 真机实测根因（2026-10-29，SW2025）────────────────────────────
+        # 原写法是 `if not _has_curved_face_at(...) and _select_face_by_box(...)`：
+        #   曲面判定【先行否决】。而 _has_curved_face_at 当时只看曲面 GetBox，
+        #   圆柱面的包围盒 Z 向跨越整个板厚 → 孔正上方的平面点被判成"曲面"
+        #   → 策略 1 被跳过 → 沉孔打不上（C02 现场）。
+        # 现在：**平面优先**——先试着按平面选，选到了就直接用；
+        #   只有平面确实选不到、且该点真的贴在曲面几何上，才转曲面路径。
+        _plane_hit = False
+        try:
+            _plane_hit = bool(self._select_face_by_box(x, y, z))
+        except Exception:
+            _plane_hit = False
+        if _plane_hit:
             self.skm.InsertSketch(True)
             active_sk = self.skm.ActiveSketch
             if active_sk is not None:
@@ -6708,10 +6974,16 @@ class SWModel:
     def select_all_sketch_segments(self, append_first=False):
         """选中当前草图的所有线段（用于复杂轮廓的特征创建）。
 
-        ── 【F-1 修复·第九轮】专家指出两个关键点 ───────────────────────────
-        1) ISketchSegment::Select 在 SW2025 已 Obsolete，应改用 Select4；
-        2) 必须在【草图仍激活】时选中段 —— 退出后段名可见性会变，
-           需要改用 EXTSKETCHSEGMENT 类型并带草图名前缀（见路径 B）。
+        ── 【C01 修复 · 2026-10-29 真机实测】选段策略已定案 ─────────────────
+        实测（SW2025 SP5.0，24 段复杂轮廓）：
+          · Select4(Append, SelectData) → **0/24 全抛 com_error**（官方已标 Obsolete）；
+          · Select2(Append, 0)          → **24/24 全中**；
+          · Select(Append)（Obsolete）  → 可用兜底。
+        因此重试链只保留 Select2 / Select，**Select4 已从代码中彻底移除**
+        （原实现把它留在链里并缓存结果，一旦缓存成 Select4 就全盘失败 ——
+          现场表现为"选段 20/24 部分失败"）。
+
+        另：必须在【草图仍激活】时选中段 —— 退出后段名可见性会变。
 
         本方法处理"草图激活时"的情况（推荐路径 A）。
 
@@ -6783,19 +7055,7 @@ class SWModel:
                     if fn is not None and fn(append, 0):
                         return True
                     return False
-                if strategy == "Select4":
-                    sd = None
-                    try:
-                        sd = self._make_select_data(0)
-                    except Exception:
-                        sd = None
-                    if sd is None:
-                        return False
-                    fn = getattr(s, "Select4", None)
-                    try:
-                        return bool(fn is not None and fn(append, sd))
-                    except Exception:
-                        return False
+
                 if strategy == "Select":
                     fn = getattr(s, "Select", None)
                     try:
@@ -6804,11 +7064,25 @@ class SWModel:
                         return False
                 return False
 
-            # 策略探测：真机实测优先级 Select2 > Select > Select4
+            # 策略探测：真机实测优先级 Select2 > Select（【C01 修复】剔除 Select4）
+            #
+            # ── 【C01 修复 · 2026-10-29 真机实测】Select4 必须从重试链里摘掉 ──
+            # 实测（SW2025 SP5.0，24 段复杂轮廓）：
+            #   · ISketchSegment.Select4(Append, SelectData) → **0 / 24 全抛 com_error**；
+            #   · ISketchSegment.Select2(Append, 0)          → **24 / 24 全中**；
+            #   · ISketchSegment.Select(Append)（Obsolete）  → 可用兜底。
+            # 而官方帮助已把 Select4 标为 Obsolete，推荐 Select2。
+            #
+            # 原实现的坑：策略探测顺序里带着 Select4，且探测结果会被【缓存】
+            #   到 self._seg_select_strategy。一旦某次上下文把策略定成 Select4，
+            #   后续所有选段都走 Select4 → 本机全抛异常 → 现场表现为
+            #   "选段 20/24 部分失败 / 选段=0"。
+            # 现在：重试链只剩 Select2 / Select；**不再回退到 Select4**。
+            _STRATEGIES = ("Select2", "Select")
             _strategy = getattr(self, "_seg_select_strategy", None)
-            if _strategy not in ("Select2", "Select", "Select4"):
+            if _strategy not in _STRATEGIES:
                 _strategy = None
-                for _cand in ("Select2", "Select", "Select4"):
+                for _cand in _STRATEGIES:
                     try:
                         self.model.ClearSelection2(True)
                     except Exception:
@@ -6817,7 +7091,7 @@ class SWModel:
                         _strategy = _cand
                         break
                 if _strategy is None:
-                    self._sel_diag = "无可用段选中策略(Select2/Select/Select4 全失败)"
+                    self._sel_diag = "无可用段选中策略(Select2/Select 均失败)"
                     return False, 0
                 try:
                     self._seg_select_strategy = _strategy
@@ -8404,6 +8678,62 @@ class SWModel:
         # 修复：把 Cut3 提为首选、Cut4 降为回退，顺序颠倒过来。
         _apis = ("FeatureCut3", "FeatureCut4")
 
+        # ── 【C03 修复 · 2026-10-29】FeatureCut4 必须 27 参，Cut3 才是 26 参 ──
+        #
+        # 真机实测（SW2025 SP5.0，长方体 70x80x320 端面画 Ø10 圆）：
+        #   · FeatureCut3(26 参) → 正常切除；
+        #   · FeatureCut4(26 参) → com_error -2147352561「非选择性的参数」
+        #       （其实是【参数个数不对】被 COM 报成了这句含糊的话）；
+        #   · FeatureCut4(27 参，末尾补 OptimizeGeometry=False) → **真实切除**，
+        #       去料 0.818%，与 Ø10 通孔理论值 785.4/96000 = 0.818% 精确吻合。
+        #
+        # 也就是说：Cut3 与 Cut4 的形参布局【不同】，不能共用同一个元组。
+        # 原实现两个 API 共用 26 元组 → 每次 Cut4 都白抛异常（既拖慢又刷屏），
+        # 而 Cut3 一旦在某场景不可用（底面/对侧面），整条链就彻底失败。
+        #
+        # 现在：按 API 名给出各自的参数元组（Cut3=26 / Cut4=27）。
+        # 参数位对照（官方签名）：
+        #   Sd, Flip, Dir, T1, T2, D1, D2, Dchk1, Dchk2, Ddir1, Ddir2,
+        #   Dang1, Dang2, OffsetReverse1, OffsetReverse2, TranslateSurface1,
+        #   TranslateSurface2, NormalCut, UseFeatScope, UseAutoSelect,
+        #   AssemblyFeatureScope, AutoSelectComponents, PropagateFeatureToParts,
+        #   T0, StartOffset, FlipStartOffset [, OptimizeGeometry ← 仅 Cut4]
+        def _cut_args(api, flip_pass, dir_pass, t1, t2, dd1, dd2):
+            _base = (
+                True,            # Sd
+                flip_pass,       # Flip
+                dir_pass,        # Dir
+                t1,              # T1
+                t2,              # T2
+                dd1,             # D1
+                dd2,             # D2
+                False,           # Dchk1
+                False,           # Dchk2
+                False,           # Ddir1
+                False,           # Ddir2
+                0.0,             # Dang1
+                0.0,             # Dang2
+                False,           # OffsetReverse1
+                False,           # OffsetReverse2
+                False,           # TranslateSurface1
+                False,           # TranslateSurface2
+                False,           # NormalCut（非钣金必须 False）
+                False,           # UseFeatScope
+                auto_select,     # UseAutoSelect ← 自动认轮廓，关键
+                False,           # AssemblyFeatureScope
+                False,           # AutoSelectComponents
+                False,           # PropagateFeatureToParts
+                0.0,             # T0
+                0.0,             # StartOffset
+                False,           # FlipStartOffset
+            )
+            if str(api).endswith("4"):
+                # FeatureCut4 多一个 OptimizeGeometry（非钣金必须 False：
+                #   实测传 True 会返回 None）
+                return _base + (False,)
+            return _base
+
+
         # 【真机实测修复】底面（法向朝外背离材料）上的切除：默认方向朝材料外的
         # 空侧，FeatureCut3 全签名返回 None（或 Extrusion3 反向增料）。
         # 修复：常规方向失败后，自动用 Flip=True 反向重试一轮 —— 哪个方向真正
@@ -8413,11 +8743,8 @@ class SWModel:
                                       (bool(flip), True)):
             for _api in _apis:
                 for _label, _t1, _t2, _dd1, _dd2 in _cands:
-                    _f, _why = _try_cut(_api, (
-                        True, _flip_pass, _dir_pass, _t1, _t2, _dd1, _dd2,
-                        False, False, False, False, 0, 0,
-                        False, False, False, False, False, False, auto_select,
-                        False, False, False, 0, 0, False))
+                    _f, _why = _try_cut(_api, _cut_args(
+                        _api, _flip_pass, _dir_pass, _t1, _t2, _dd1, _dd2))
                     if _why == "":
                         _exit_sketch_editing()
                         # 【Bug T1 修复】把本草图标记为"已被消费"，
@@ -8517,13 +8844,9 @@ class SWModel:
                                                           (True, False)):
                                 for _api in _apis:
                                     for _label, _t1, _t2, _dd1, _dd2 in _cands:
-                                        _f, _why = _try_cut(_api, (
-                                            True, _flip_pass, _dir_pass,
-                                            _t1, _t2, _dd1, _dd2,
-                                            False, False, False, False, 0, 0,
-                                            False, False, False, False,
-                                            False, False, auto_select,
-                                            False, False, False, 0, 0, False))
+                                        _f, _why = _try_cut(_api, _cut_args(
+                                            _api, _flip_pass, _dir_pass,
+                                            _t1, _t2, _dd1, _dd2))
                                         if _why == "":
                                             _exit_sketch_editing()
                                             self._mark_sketch_consumed()
@@ -8556,11 +8879,8 @@ class SWModel:
                                           (False, True)):
                 for _api in _apis:
                     for _label, _t1, _t2, _dd1, _dd2 in _cands:
-                        _f, _why = _try_cut(_api, (
-                            True, _flip_pass, _dir_pass, _t1, _t2, _dd1, _dd2,
-                            False, False, False, False, 0, 0,
-                            False, False, False, False, False, False, auto_select,
-                            False, False, False, 0, 0, False))
+                        _f, _why = _try_cut(_api, _cut_args(
+                            _api, _flip_pass, _dir_pass, _t1, _t2, _dd1, _dd2))
                         if _why == "":
                             _exit_sketch_editing()
                             self._mark_sketch_consumed()

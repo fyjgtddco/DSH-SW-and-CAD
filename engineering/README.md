@@ -199,6 +199,53 @@ python physics_bridge.py fatigue <case.json> --stress 45   # 直接给应力
 
 ---
 
+## PowerShell 调用约定（【BUG-10/11】中文化与退出码噪音）
+
+工程模式的所有门禁脚本都会输出**中文 JSON**。在 Windows PowerShell 5.1 里
+直接用管道（`| Select-String`、`| Select-Object -First N`）处理时有两个坑，
+都在实测中真实踩到过，写在此处固定下来：
+
+### 1. 必须先设 UTF-8，否则中文变乱码/丢行
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding          = [System.Text.Encoding]::UTF8
+```
+
+如果不设，PS 5.1 会按当前代码页（通常是 GBK/936）解码脚本输出的 UTF-8 字节，
+表现为房间名、阶段名变成 `�����복���ܳ�` 这样的乱码，主对话据此误判房间状态。
+脚本侧已做双保险（`sys.stdout.reconfigure(encoding='utf-8')` + 失败时退回
+`ensure_ascii=True`），但**在 PS 一侧设置仍然是正确做法**。
+
+### 2. `[exit code: 1]` 多数是管道截断，不是命令失败
+
+```powershell
+python mode_gate.py room-board --json | Select-Object -First 20   # 可能 exit 1
+```
+
+原因：`Select-Object -First` 取够 N 行后会主动关闭上游管道，Python 侧写入
+随即收到 broken pipe → 以非 0 退出。**这表示"输出被截断了"，不表示门禁失败。**
+
+判据：
+- 命令**本身**报错 → JSON 里会有 `"ok": false` + `"error"` 字段；
+- 只是想少看点输出 → 用 JSON 里的字段筛选，或干脆跑完整命令后再看。
+
+### 3. 推荐：别截断，直接读结构化字段
+
+门禁脚本输出的 JSON 都很短，且关键结论都在顶层字段里：
+
+```powershell
+python mode_gate.py room-board --json        # 一次拿全，别 Select-Object
+python mode_gate.py wait-rooms "<房间>" --timeout 900   # 阻塞等待，零轮询
+```
+
+> 【BUG-03 修复】父代理**不要**再用 `Start-Sleep` + 反复读盘的方式等房间。
+> fork 出来的子代理不是 Team member（`wait_agent` / `list_agents` 看不到它们），
+> 正确做法是 `mode_gate.py wait-rooms` 原地阻塞，或用
+> `room-report-read <房间>` 旁路读取进度。
+
+---
+
 ## 子代理（小屋）机制
 
 ### 身份自查（开工第一步）

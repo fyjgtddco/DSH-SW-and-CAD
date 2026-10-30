@@ -125,20 +125,74 @@ def _safe_room_stem(room):
 
 
 def _dsh_home():
-    """DSH 主目录（宿主安装位置）；缺失时返回空串。"""
+    r"""DSH 主目录（宿主安装位置）；缺失时返回空串。
+
+    -- 【隐藏 BUG 修复 · 2026-10-29】expanduser 未展开会产出【假路径】------
+    实测（本次任务盘查 check-room 输出）：
+      reports_dir_local_candidates 里出现了
+        <cwd>\~\.dsh\.agent-presets\...\reports
+      即 os.path.expanduser("~") 原样返回了字符串 "~"（HOME/USERPROFILE 在某
+      些子进程环境里没有注入），随后 os.path.abspath 把它拼到【当前目录】下，
+      于是候选集合里混进一堆"看起来合法、实际不存在"的路径。
+
+    危害：这不是"多几个无效候选"那么简单 --
+      · 排障时 check-room 会把这些假路径当成"宿主实际读的目录"回显，
+        把排查方向彻底带偏（本次就是先被它误导）；
+      · 若某台机器上恰好存在 <cwd>\~\ 这种目录，凭据解析会读到错误位置。
+
+    修复：① 先取 USERPROFILE / HOME 环境变量（Windows 上最可靠）；
+          ② 再试 expanduser，但【必须验证已展开】（结果不再含 "~" 才算数）；
+          ③ 都拿不到就返回空串 —— 宁可少一个候选，也不返回假路径。
+    """
     try:
         v = (os.environ.get("DSH_HOME") or "").strip()
         if v:
             return os.path.abspath(v)
     except Exception:
         pass
+    home = ""
+    for _k in ("USERPROFILE", "HOME", "HOMEDRIVE"):
+        try:
+            _v = (os.environ.get(_k) or "").strip()
+        except Exception:
+            _v = ""
+        if not _v:
+            continue
+        # HOMEDRIVE 只是盘符（"C:"），单独用没有意义
+        if _k == "HOMEDRIVE" and (not _v.endswith(":") or os.environ.get("HOMEPATH")):
+            continue
+        home = _v
+        break
+    if not home:
+        try:
+            home = os.path.expanduser("~")
+        except Exception:
+            home = ""
+    # ── 兜底：环境变量与 expanduser 都拿不到时，用 pwd/Path 模块再试一次 ──
+    # （某些宿主子进程只注入极少量环境变量，os.path.expanduser 会原样返回 "~"；
+    #   而 Python 的 pathlib/Path.home() 在 Windows 上会走 SHGetFolderPath，
+    #   不依赖环境变量，能拿到真实主目录。）
+    if not home or home == "~" or home.startswith("~"):
+        try:
+            from pathlib import Path as _Path
+            _h = str(_Path.home())
+            if _h and _h != "~" and not _h.startswith("~"):
+                home = _h
+        except Exception:
+            pass
+    if not home or home == "~" or home.startswith("~"):
+        try:
+            import pwd as _pwd   # 仅 POSIX 存在；Windows 会 ImportError
+            home = _pwd.getpwuid(os.getuid()).pw_dir or ""
+        except Exception:
+            home = ""
+    # 关键：未展开的 "~" 或空串都视为"取不到"，绝不拼进候选路径
+    if not home or home == "~" or home.startswith("~"):
+        return ""
     try:
-        home = os.path.expanduser("~")
-    except Exception:
-        home = ""
-    if home:
         return os.path.abspath(os.path.join(home, ".dsh"))
-    return ""
+    except Exception:
+        return ""
 
 
 def _installed_tools_dir_candidates():

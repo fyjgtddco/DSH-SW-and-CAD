@@ -1047,6 +1047,111 @@ def is_connected(target, allow_stale=False):
     return bool((st.get(key) or {}).get("connected"))
 
 
+# ══ 【BUG-S01 修复】gate 的【实时进程探测】════════════════════════════════
+# 现场缺陷（2026-10-29 循迹小车任务 20261029_082936_4159A331，父代理实测）：
+#   SLDWORKS.exe 明明在运行（Get-Process 有 PID），但
+#     python sw_bridge.py conn-gate --target sw
+#   返回 connected=false / skip_startup=false / stale=true，
+#   state_age_sec=125645（connection_state.json 两天没刷新）。
+#   根因：gate() 完全信任 state 文件的时间戳，【从不看实时进程】——
+#     状态一旦过期就被判成"未连接"，小屋于是重复走 SW 启动 7 步排查。
+# 修法（本段实现）：
+#   · 先做【实时探测】（只 tasklist / Get-Process，零 COM，绝不 Dispatch，
+#     所以"只想判断一下"绝不会把 SolidWorks 拉起来）；
+#   · 进程在   → connected=true / skip_startup=true / source="live_process"；
+#   · 进程不在 → 才回落到 state 文件判定（source="state_file"）；
+#   · stale / state_age_sec 仍【如实】反映 state 文件新旧（不改 false 骗人）。
+# 探测手段本身失败（抛异常/命令不可用）→ 保守回退 state 文件，
+#   并在返回里带 live_probe_error，让调用方知道"这次没探到"而不是"没在跑"。
+
+# 支持实时探测的目标（有稳定单进程名）。其余目标（abaqus/webots）仍以
+#   state 文件为准 —— 它们没有"单进程名"这种可靠判据，贸然实时探测会误判。
+_LIVE_PROBE_TARGETS = ("sw", "cad")
+
+
+def _pids_of(procs):
+    """从进程记录里取 PID 列表（去 None / 容错转 int）。
+
+    同时容忍两种输入形态：{"pid": 1234} 字典记录，或直接就是 1234 的裸 PID
+    （测试里常直接伪造 [1234]，不该因为形态不同就判"探测失败"）。
+    """
+    out = []
+    for p in (procs or []):
+        try:
+            if isinstance(p, dict):
+                _pid = p.get("pid")
+            elif isinstance(p, (int, str)):
+                _pid = p
+            else:
+                _pid = getattr(p, "pid", None)
+            if _pid is None:
+                continue
+            out.append(int(_pid))
+        except Exception:
+            continue
+    return out
+
+
+def _split_proc_result(res):
+    """把进程探测的返回值归一成 (procs, err)。
+
+    本模块 _sw_process_list() 返回 (procs, err)；但调用方/测试也可能直接塞
+    一个裸列表（[{"pid": 1234}] 或 [1234]）表示"进程列表"。两种都接受，
+    只在拿到完全无法解释的东西时才报错 —— 免得"探测成功"被误判成失败。
+    """
+    if isinstance(res, tuple) and len(res) == 2:
+        return res[0], res[1]
+    if res is None:
+        return None, "进程探测返回 None"
+    if isinstance(res, (list, tuple)):
+        return res, None
+    return None, "进程探测返回了无法解释的类型: %r" % (type(res).__name__,)
+
+
+def _live_process_probe(target):
+    """【实时】枚举目标进程（零 COM / 零副作用）。
+
+    Returns:
+        {"found": True/False/None, "pids": [int...], "method": str,
+         "error": str|None}
+        found=None + error 表示"探测手段本身失败"（≠ 进程不在），
+        调用方必须保守回退到 state 文件，绝不据此判"未连接"。
+    """
+    t = _norm_target(target)
+    out = {"found": None, "pids": [], "method": None, "error": None}
+    if t == "sw":
+        out["method"] = "tasklist/Get-Process(conn_state._sw_process_list)"
+        try:
+            procs, err = _split_proc_result(_sw_process_list())
+        except Exception as e:
+            out["error"] = "实时进程探测异常: %r" % (e,)
+            return out
+        if err:
+            # tasklist 与 PowerShell 回退都失败 → 无法判定，交给调用方回退
+            out["error"] = str(err)
+            return out
+        out["pids"] = _pids_of(procs)
+        out["found"] = bool(procs)
+        return out
+    if t == "cad":
+        out["method"] = "tasklist(conn_state._acad_process_list)"
+        try:
+            procs, _cerr = _split_proc_result(_acad_process_list())
+            # _acad_process_list() 自带异常吞掉，不会给 err；留字段以便将来扩展
+            if _cerr:
+                out["error"] = _cerr
+                return out
+        except Exception as e:
+            out["error"] = "实时进程探测异常: %r" % (e,)
+            return out
+        out["pids"] = _pids_of(procs)
+        out["found"] = bool(procs)
+        return out
+    # 其它目标不做实时探测（没有可靠单进程名判据）
+    out["method"] = None
+    return out
+
+
 def gate(target="sw"):
     """【流程判断入口】返回可直接照着执行的分支结论。
 
@@ -1056,6 +1161,16 @@ def gate(target="sw"):
 
     返回 dict（全部字段都是给 AI/脚本直接读的）：
       target, connected, skip_startup, next, paths, state_age_sec, stale, hint
+
+    ── 【BUG-S01 修复】新增两个字段 ──────────────────────────────────────
+      source        : "live_process" | "state_file" —— 本次结论的来源。
+                      live_process 表示【进程确实在跑】（事实优先）；
+                      state_file  表示实时没探到，按 state 文件口径判定。
+      live_process  : {found, pids, method, probed} —— 实时探测的证据。
+    stale / state_age_sec 【不因实时探测而改值】：它们永远如实反映
+      connection_state.json 的新旧（哪怕进程在跑、文件两天没更新）。
+    探测手段本身失败时额外带 live_probe_error；state 与实时冲突时额外带
+      live_conflict / live_conflict_note。
     """
     st = load()
     t = _norm_target(target)
@@ -1072,9 +1187,36 @@ def gate(target="sw"):
             "hint": "连接区新增了 Abaqus / NX 目标；拼写错误会被显式拒绝，不再退化成 CAD。",
         }
     stale = is_stale(st)
-    connected = is_connected(t)
     paths = st.get("paths") or {}
     entry = st.get(t) or {}
+
+    # ══ 【BUG-S01 修复】先【实时探测进程】，再看 state 文件 ═══════════════
+    # 现场缺陷：SLDWORKS.exe 在跑，但 state 文件两天没刷新 → 旧实现只看
+    #   时间戳，返回 connected=false / skip_startup=false（小屋白走启动排障）。
+    # 新判据（优先级从高到低）：
+    #   ① 实时进程在  → connected=true  + source="live_process"
+    #   ② 实时探测说"不在" → 才回落到 state 文件（source="state_file"，
+    #      stale / state_age_sec 仍如实反映 state 文件新旧，不改 false 骗人）
+    #   ③ 实时探测【本身失败】（found=None + error）→ 保守回退 state 文件，
+    #      返回体带 live_probe_error（"没探到"≠"没在跑"，不能据此判未连接）
+    _live = _live_process_probe(t)
+    _live_err = _live.get("error")
+    _state_connected = is_connected(t)
+    _live_usable = (t in _LIVE_PROBE_TARGETS) and (_live.get("found") is not None)
+    # 【真实冲突】state 文件说"已连接"，实时探测却说"进程不在" ——
+    #   按需求口径落到 state 判定，但必须显式标出来，不许悄悄当成没事。
+    _live_conflict = bool(_live_usable and (_live.get("found") is False)
+                          and _state_connected)
+    if _live_usable and _live.get("found"):
+        # ① 实时进程在 → 事实优先，直接判已连接（这就是 S01 的修复点）
+        connected = True
+        source = "live_process"
+    else:
+        # ② 进程不在 / 探测失败 → 回落到原来的 state 文件判定
+        #    （stale 时的"过期即未连接"保护仍在 is_connected 里）
+        connected = _state_connected
+        source = "state_file"
+    skip = bool(connected)
 
     # 各目标的"下一步"文案（新增目标在此登记，避免落到默认分支说错话）
     _NEXT_OK = {
@@ -1105,13 +1247,32 @@ def gate(target="sw"):
         nxt = _NEXT_NO.get(t, "目标未连接，请先启动或安装。")
         skip = False
 
+    _age = age_sec(st)
     hint = None
-    if not connected and stale and (entry.get("checked_at")):
+    if connected and source == "live_process" and stale:
+        # 进程在、但 state 文件旧 —— 这正是 S01 的现场：如实说明"以实时为准"
+        hint = ("已按【实时进程】判定为已连接（PID: %s）；连接状态文件本身已过期"
+                "（%.0f 秒前），stale 字段仍如实为 true —— 如需刷新元数据可运行 "
+                "python sw_bridge.py conn-probe --target %s。"
+                % (", ".join(str(x) for x in (_live.get("pids") or [])) or "?",
+                   _age or 0, t))
+    elif not connected and stale and (entry.get("checked_at")):
         hint = ("连接状态已过期（%.0f 秒前），判定为未连接 —— "
-                "可先运行 conn-probe 重新探测。" % (age_sec(st) or 0))
-    elif not entry.get("checked_at"):
+                "可先运行 conn-probe 重新探测。" % (_age or 0))
+    elif not connected and not entry.get("checked_at"):
         hint = ("从未探测过连接状态。请先在【设置 → 连接区】点『连接』，"
                 "或运行 python sw_bridge.py conn-probe --target %s。" % t)
+    if not connected and _live_err:
+        hint = ((hint + " ") if hint else "") + (
+            "另：实时进程探测本身失败（%s），本次结论来自 state 文件，"
+            "不能据此断定进程没在运行。" % _live_err)
+    if connected and source == "state_file":
+        # state 文件说连接、但没能实时确认 —— 提醒调用方"这是记忆，不是事实"
+        _n = "连接结论来自 state 文件（%s），本次未取得实时进程证据" % (
+            entry.get("checked_at") or "无时间戳")
+        _n += "（实时探测失败: %s）。" % _live_err if _live_err else (
+            "（该目标不支持实时进程探测）。")
+        hint = ((hint + " ") if hint else "") + _n
 
     out = {
         "ok": True,
@@ -1119,12 +1280,30 @@ def gate(target="sw"):
         "connected": connected,
         "skip_startup": skip,
         "next": nxt,
+        # ── 【BUG-S01】stale / state_age_sec 仍【如实】反映 state 文件新旧 ──
         "stale": stale,
-        "state_age_sec": age_sec(st),
+        "state_age_sec": _age,
         "checked_at": entry.get("checked_at"),
         "paths": paths,
         "hint": hint,
+        # ── 新增：本次结论的【来源】与实时进程证据（AI 可据此判断可信度）──
+        "source": source,
+        "live_process": {
+            "found": _live.get("found"),
+            "pids": _live.get("pids") or [],
+            "method": _live.get("method"),
+            "probed": bool(_live_usable),
+        },
     }
+    if _live_err:
+        out["live_probe_error"] = _live_err
+    if _live_conflict:
+        out["live_conflict"] = True
+        out["live_conflict_note"] = (
+            "state 文件记录为已连接，但实时探测未发现进程（PID 历史: %s）——"
+            "可能是进程已被关掉、或探测手段受限。若确认 SW 在跑，"
+            "请重试 python sw_bridge.py sw-proc 并运行 conn-probe --target %s。"
+            % (", ".join(str(x) for x in (_live.get("pids") or [])) or "无", t))
     # 把"该用哪个 exe"直接给出来 —— 免得 AI 再去全盘找（诉求2）
     _EXE_KEY = {"sw": "sldworks_exe", "cad": "acad_exe",
                 "abaqus": "abaqus_exe", "nx": "nx_exe",

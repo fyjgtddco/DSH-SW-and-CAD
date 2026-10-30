@@ -40,3 +40,57 @@ work/
 *.CORRUPTED-*
 _sync_backup/
 %SystemDrive%/
+
+# ── 运行时状态（每台机器/每次任务都不同，绝不能进仓库）────────────────
+# 这些文件由门禁脚本在运行时写入，包含本机路径、当前任务、房间状态等。
+# 提交它们会导致别人 clone 后拿到"上一局"的残留状态（实测会误判任务已完成）。
+engineering/tools/mode_state.json
+engineering/tools/workflow_state.json
+engineering/tools/sw_state.json
+engineering/tools/connection_state.json
+engineering/tools/platform_status.json
+engineering/tools/platform_agents.json
+engineering/tools/artifacts_registry*.json
+engineering/tools/part_registry.json
+engineering/tools/design_params.json
+engineering/tools/custom_materials.json
+engineering/tools/settings.json
+engineering/tools/model_chain.json
+engineering/tools/persona.json
+engineering/tools/TASK_FINISHED.json
+engineering/tools/defense_bypass.json
+engineering/tools/violations.json
+engineering/tools/guard.json
+engineering/tools/sw_monitor.pid
+
+# 根目录的少量运行时残留（历史布局遗留）
+tools/mode_state.json
+tools/workflow_state.json
+tools/sw_state.json
+tools/sw_monitor.pid
+
+# 运行时目录：报告/心跳/锁/物理运行产物/凭据
+engineering/tools/reports/
+engineering/tools/heartbeats/
+engineering/tools/load_cases/
+engineering/tools/physics_runs/
+engineering/tools/mode_logs/
+engineering/tools/.defense/
+engineering/output/
+
+# 交付产物（零件/图纸/截图）不随代码分发
+engineering/examples/
+engineering/*.SLDPRT
+engineering/*.png
+*.SLDPRT
+*.SLDASM
+*.SLDDRW
+*.dwg
+
+# 临时/校验残留（⚠️ 不能用 "_*" 通配：会误伤正式模块
+#   tools/_plugin_paths.py、_root.py、_store.py —— 它们是被 14 处引用的真代码）
+_verify_*/
+_tmp_*/
+_*.txt
+_*.log
+*.tmp
