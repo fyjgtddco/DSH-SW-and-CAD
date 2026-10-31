@@ -8,6 +8,11 @@ description: >-
 whenToUse: >-
   当任务被识别为 ② 型（大型复杂器械/多零件装配体）时自动激活。
   大屋（主对话）使用本流程编排各小屋完成设计。
+disable-model-invocation: false
+user-invocable: true
+source: engineering
+provider: filesystem
+---
 
 ## ██ 强制执行规则 ██
 
@@ -27,12 +32,6 @@ whenToUse: >-
    - 失败重试时，必须用 `subagent` 创建全新子代理
    - 新 prompt 必须包含失败原因和修正要求
    - 禁止在原子代理上 `send_message` 重试
-
-disable-model-invocation: false
-user-invocable: true
-source: engineering
-provider: filesystem
----
 
 # ② 大型复杂器械 - 多屋协作架构
 

@@ -1,11 +1,11 @@
 {
   "schema_version": "1.0",
   "meta": {
-    "problem_id": "GATE_0D6AE05C22B5",
+    "problem_id": "GATE_7F0805E722F5",
     "title": "回归测试：六轴机械臂",
     "revision": "A",
     "generated_by": "workflow_gate.estimate_mechanics",
-    "generated_at": "2026-10-30 17:00:29",
+    "generated_at": "2026-10-31 16:29:16",
     "task_type": "robot_arm",
     "task_type_label": "机械臂 / 关节机器人",
     "design_domain_mm": [

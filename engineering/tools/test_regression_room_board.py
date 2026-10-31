@@ -229,6 +229,69 @@ check("--room 只返回一个房间",
           capture_output=True, text=True, encoding="utf-8", timeout=120,
           env=env).stdout or "{}").get("rooms") or []) == 1)
 
+print("\n=== ⑥ 【R4 / B-28】进展看门狗：活着 ≠ 在干活 ===")
+# 实测缺陷（2026-10-30 四工位转台 15h）：wave2 总装房心跳一直活、报告停在
+#   modeling 超过 2 小时，看板仍给 safe_to_restart=False + next_action
+#   "无需动作（正在跑）"，主代理做了 8 轮逐字相同的轮询，5h40m 全烧在空转。
+# 现在必须额外给出 progress_stalled / progress_age_sec，并在停滞时解锁重启。
+_room_d = "停滞房"
+_old_ts = time.time() - (mg.BOARD_NO_PROGRESS_SEC_DEFAULT + 600)
+write_json("mode_state.json", fresh_mode_state(
+    rooms={_room_d: {"type": "structural", "active": True,
+                     "started_at": _old_ts, "task_id": "t-r4"}},
+    subs={_room_d: {"id": "sid-r4", "assigned_at": _old_ts}}))
+write_json("workflow_state.json", {"step": "design", "task_id": "t-r4"})
+try:
+    _pf = os.path.join(STATE, "platform_agents.json")
+    write_json("platform_agents.json", {
+        "pulse": {"seq": 1, "at": int(time.time()), "atMs": int(time.time() * 1000),
+                  "intervalMs": 10000, "staleMs": 35000, "alive": True},
+        "agents": [{"id": "sid-r4", "status": "running", "label": _room_d,
+                    "lastEventAt": int(time.time() * 1000)}]})
+except Exception:
+    pass
+# 把报告/产物的 mtime 也推旧，确保"没有任何进展"
+_rpt = os.path.join(STATE, "reports")
+try:
+    os.makedirs(_rpt, exist_ok=True)
+    _rf = os.path.join(_rpt, _room_d + ".report.json")
+    with open(_rf, "w", encoding="utf-8") as f:
+        json.dump({"room": _room_d,
+                   "latest": {"stage": "modeling", "ts": _old_ts}}, f,
+                  ensure_ascii=False)
+    os.utime(_rf, (_old_ts, _old_ts))
+except Exception:
+    pass
+
+_board6 = mg.cmd_room_board()
+_row6 = only(_board6, _room_d)
+check("★ 看板暴露 progress_age_sec", "progress_age_sec" in _row6, sorted(_row6.keys()))
+check("★ 看板暴露 progress_stalled", "progress_stalled" in _row6, sorted(_row6.keys()))
+check("★ 看板暴露 no_progress_limit_sec",
+      "no_progress_limit_sec" in _row6, sorted(_row6.keys()))
+check("★ 长时间无进展 → progress_stalled=True",
+      _row6.get("progress_stalled") is True, _row6.get("progress_age_sec"))
+check("★ 停滞时解除「禁止自救」→ safe_to_restart=True",
+      _row6.get("safe_to_restart") is True, _row6.get("restart_block_reason"))
+check("★ 停滞理由说明是「没有可观察进展」",
+      "进展" in str(_row6.get("restart_block_reason") or ""),
+      _row6.get("restart_block_reason"))
+check("★ 停滞不把 state 改死（不误判死，只解锁自救）",
+      _row6.get("state") not in ("dead", "failed"), _row6.get("state"))
+
+# 反证：把阈值调到极大 → 不再判停滞（证明是可配置阈值，不是写死）
+_prev = os.environ.get("DSH_BOARD_NO_PROGRESS_SEC")
+os.environ["DSH_BOARD_NO_PROGRESS_SEC"] = "999999"
+try:
+    _row6b = only(mg.cmd_room_board(), _room_d)
+    check("★ DSH_BOARD_NO_PROGRESS_SEC 可覆盖阈值（调大后不判停滞）",
+          _row6b.get("progress_stalled") is False, _row6b.get("progress_age_sec"))
+finally:
+    if _prev is None:
+        os.environ.pop("DSH_BOARD_NO_PROGRESS_SEC", None)
+    else:
+        os.environ["DSH_BOARD_NO_PROGRESS_SEC"] = _prev
+
 print("\nPASS=%d FAIL=%d" % (len(PASS), len(FAIL)))
 if FAIL:
     print("失败项：" + ", ".join(FAIL))

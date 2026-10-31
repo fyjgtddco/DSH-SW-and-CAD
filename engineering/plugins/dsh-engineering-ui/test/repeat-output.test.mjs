@@ -64,10 +64,26 @@ assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换�
 const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));
 
 function harness(rootAgents) {
-  const routes = new Map(), hooks = new Map();
+  const routes = new Map();
+  // ── 【测试脚手架修复】同名钩子可以被注册多次（生产环境会依次调用全部）──
+  // 原实现 Map<name, fn> 会让后注册的覆盖先注册的。本插件注册了【两个】
+  //   'agent/turn-stopping'：① 收尾守卫 ② 平台子代理存活登记。
+  //   Map 里只剩②，测试拿到的不是守卫 → "必须 steer 一次" 恒失败。
+  //   （compatibility.test.mjs 有同一个毛病，一并修了。）
+  const hooks = new Map();          // name -> [fn, ...]
   const roots = Array.isArray(rootAgents) ? rootAgents : [];
   const ctx = {
-    on(name, fn) { hooks.set(name, fn); return () => hooks.delete(name); },
+    on(name, fn) {
+      const list = hooks.get(name) || [];
+      list.push(fn);
+      hooks.set(name, list);
+      return () => {
+        const cur = hooks.get(name) || [];
+        const i = cur.indexOf(fn);
+        if (i >= 0) cur.splice(i, 1);
+        if (!cur.length) hooks.delete(name);
+      };
+    },
     webServer: { register(route) { routes.set(route.path, route.handler); return () => routes.delete(route.path); } },
     sessionPersistence: { async open() { throw new Error('no log'); }, async stat() { return null; } },
     sessions: { list() { return []; } },
@@ -76,6 +92,15 @@ function harness(rootAgents) {
     userQuestions: { ask() { return new Promise(() => {}); } },
   };
   const dispose = apply(ctx);
+  // 真实运行时会把同名钩子的【全部】处理函数依次调用，
+  // 因此 h.hooks.get(name) 也返回一个"调度器"，逐个调用。
+  hooks.all = (name) => hooks.get(name) || [];
+  const _rawGet = hooks.get.bind(hooks);
+  hooks.get = (name) => {
+    const list = _rawGet(name);
+    if (!list) return undefined;
+    return (payload) => { for (const fn of list) fn(payload); };
+  };
   return { ctx, routes, hooks, roots, dispose };
 }
 

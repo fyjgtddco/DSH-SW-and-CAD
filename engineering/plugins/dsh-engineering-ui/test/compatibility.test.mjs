@@ -70,10 +70,29 @@ const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewr
  * 并保留 stat() 供 parentOf() 回落使用（inspect() 已移除）。
  */
 function harness(handles = {}) {
-  const routes = new Map(), hooks = new Map(), asks = [];
+  const routes = new Map(), asks = [];
+  // ── 【测试脚手架修复】同一钩子名可以被注册多次（完全合法）──────────────
+  // 原实现 hooks 是 Map<name, fn>：第二个同名注册直接【覆盖】第一个。
+  // 本插件确实注册了两个 'agent/turn-stopping'：
+  //   ① 收尾守卫（先注册）  ② 平台子代理存活登记（后注册）
+  // 于是 Map 里只剩②，测试拿到的根本不是守卫，'未达终态必须 steer' 恒失败。
+  // 生产环境按注册顺序依次调用【全部】钩子，所以脚手架也必须保留列表。
+  // hooks 仍保持 Map 语义（size/has/get 均按"钩子名"计），额外提供
+  // hooks.all(name) 取该名字下的全部处理函数。
+  const hooks = new Map();          // name -> [fn, ...]
   const root = { id: 'root' };
   const ctx = {
-    on(name, fn) { hooks.set(name, fn); return () => hooks.delete(name); },
+    on(name, fn) {
+      const list = hooks.get(name) || [];
+      list.push(fn);
+      hooks.set(name, list);
+      return () => {
+        const cur = hooks.get(name) || [];
+        const i = cur.indexOf(fn);
+        if (i >= 0) cur.splice(i, 1);
+        if (!cur.length) hooks.delete(name);
+      };
+    },
     webServer: { register(route) { routes.set(route.path, route.handler); return () => routes.delete(route.path); } },
     sessionPersistence: {
       async open(id) {
@@ -107,6 +126,7 @@ function harness(handles = {}) {
     await routes.get(req.url.split('?')[0])(req, res);
     return { status: res.statusCode, ...body };
   }
+  hooks.all = (name) => hooks.get(name) || [];
   return { ctx, root, routes, hooks, asks, dispose, request };
 }
 
@@ -133,7 +153,15 @@ test('全部 27 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
     //   /settings   —— 本机设置（交付目录 / 各软件路径）读写
     // 判定逻辑全部在 Python 侧，JS 只做 HTTP 转接，保证"设置页看到的"
     //   与"Agent 跑出来的"是同一套结论。
-    assert.equal(h.routes.size, 27, '路由数量应为 27（新增 env-check/env-prompt/settings）');
+    // ── 【模型自动接替】新增 2 条 → 27 + 2 = 29 ────────────────────────
+    //   /model-catalog —— 收集各 provider 的可用模型目录（只读，给设置页用）
+    //   /model-chain   —— 读写"备用模型链"配置（GET 读 / POST 存）
+    // 旧断言写死 27 且清单里没有这两条 —— 代码早就是 29 条，
+    //   于是这条断言长期失败，而它恰恰是"路由注册完整性"的唯一守门人。
+    //   断言数量与清单必须同时维护：加路由时两处一起改。
+    assert.equal(h.routes.size, 29, '路由数量应为 29（含 env-check/env-prompt/settings + model-catalog/model-chain）');
+    // ── 清单必须与 lib/index.js 的 ctx.webServer.register 一一对应 ──────
+    // 漏写一条 → 路由存在但没被这条断言保护；多写一条 → 直接失败。
     for (const p of [
       '/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
       '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
@@ -147,13 +175,35 @@ test('全部 27 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/conn-state', '/dsh-engineering-ui/conn-probe',
       '/dsh-engineering-ui/conn-probe-process-only',
       '/dsh-engineering-ui/conn-launch', '/dsh-engineering-ui/conn-diagnose',
-      '/dsh-engineering-ui/suggest', '/dsh-engineering-ui/side-chat',
-      '/dsh-engineering-ui/persona', '/dsh-engineering-ui/chat-mode',
       '/dsh-engineering-ui/env-check', '/dsh-engineering-ui/env-prompt',
       '/dsh-engineering-ui/settings',
+      '/dsh-engineering-ui/suggest', '/dsh-engineering-ui/side-chat',
+      '/dsh-engineering-ui/chat-mode',
+      '/dsh-engineering-ui/model-catalog', '/dsh-engineering-ui/model-chain',
+      '/dsh-engineering-ui/persona',
     ]) {
       assert.ok(h.routes.has(p), 'missing route ' + p);
     }
+    // 反向校验：清单长度必须等于实际注册数，防止"数量对了但清单漏了"
+    assert.equal(new Set([
+      '/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
+      '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
+      '/dsh-engineering-ui/pending-child', '/dsh-engineering-ui/result-child',
+      '/dsh-engineering-ui/answer', '/dsh-engineering-ui/verify-subagent',
+      '/dsh-engineering-ui/notify-room', '/dsh-engineering-ui/sw-guard-job',
+      '/dsh-engineering-ui/defense/sign', '/dsh-engineering-ui/defense/verify',
+      '/dsh-engineering-ui/defense/verify-gate',
+      '/dsh-engineering-ui/defense/info', '/dsh-engineering-ui/defense/judge',
+      '/dsh-engineering-ui/conn-state', '/dsh-engineering-ui/conn-probe',
+      '/dsh-engineering-ui/conn-probe-process-only',
+      '/dsh-engineering-ui/conn-launch', '/dsh-engineering-ui/conn-diagnose',
+      '/dsh-engineering-ui/env-check', '/dsh-engineering-ui/env-prompt',
+      '/dsh-engineering-ui/settings',
+      '/dsh-engineering-ui/suggest', '/dsh-engineering-ui/side-chat',
+      '/dsh-engineering-ui/chat-mode',
+      '/dsh-engineering-ui/model-catalog', '/dsh-engineering-ui/model-chain',
+      '/dsh-engineering-ui/persona',
+    ]).size, h.routes.size, '路由清单与注册数必须一致（清单有重复或漏项）');
     assert.equal(h.hooks.has('agent/turn-stopping'), true);
   } finally { h.dispose(); }
   assert.equal(h.routes.size, 0, 'dispose 后路由必须清空');
@@ -179,7 +229,12 @@ test('收尾守卫：非终态时 steer，达到 finished 后放行，且 source
       },
       steer(message) { steered.push(message); },
     };
-    const stop = () => h.hooks.get('agent/turn-stopping')({ agent, signal: new AbortController().signal });
+    // 真实运行时按注册顺序调用【全部】turn-stopping 钩子，这里保持一致
+    const stop = () => {
+      for (const fn of h.hooks.all('agent/turn-stopping')) {
+        fn({ agent, signal: new AbortController().signal });
+      }
+    };
     stop();
     assert.equal(steered.length, 1, '未达代码级终态必须 steer 一次');
     // 【V4】steer 的消息 source 必须是生产者自有 kind，不得是通用 plugin
@@ -187,7 +242,9 @@ test('收尾守卫：非终态时 steer，达到 finished 后放行，且 source
     assert.equal(Object.hasOwn(steered[0].source, 'plugin'), false,
       '不得保留已退休的 plugin 字段（与 repeat-output.test.mjs 一致）');
     // 用户取消 → 放行
-    h.hooks.get('agent/turn-stopping')({ agent, signal: AbortSignal.abort() });
+    for (const fn of h.hooks.all('agent/turn-stopping')) {
+      fn({ agent, signal: AbortSignal.abort() });
+    }
     assert.equal(steered.length, 1, 'aborted 信号必须放行');
     // 门禁进入终态 → 放行
     writeFileSync(path.join(tools, 'workflow_state.json'), JSON.stringify({ step: 'finished' }));

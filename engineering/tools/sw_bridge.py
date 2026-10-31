@@ -2185,31 +2185,82 @@ def cmd_sketch_rect(sw, w, h, depth):
 
 
 def cmd_export_pdf(sw, path):
-    """导出 PDF（【Bug-45/46 修复】自动补 .pdf 后缀 + 多方法兜底）。
+    """导出 PDF（【Bug-45/46 + 本次出图链路加固】）。
 
-    原缺陷：① 未带 .pdf 后缀时 SaveAs3 返回 rc=1，用户必须自己记得加；
-           ② 直接调 doc.ExportToPDF 在 win32com 动态分发下失败；
-           ③ 失败时只回 rc=1，没有可操作信息。
-    现统一委托给 swapi.SWModel.export_pdf（多路径兜底 + 明确错误）。
+    原缺陷：
+      ① 未带 .pdf 后缀时 SaveAs3 返回 rc=1，用户必须自己记得加；
+      ② 直接调 doc.ExportToPDF 在 win32com 动态分发下失败；
+      ③ 失败时只回 rc=1，没有可操作信息。
+
+    ── 本次修复（BUG-45「导出 0 字节」假说，实测可复现的判据缺陷）──────
+      原实现把成功判据交给 swapi.export_pdf，而【退化路径】只回
+      os.path.exists(p) ——
+        · 0 字节 PDF 也判 ok；
+        · 目标路径上恰好有【上一轮的旧 PDF】，本次导出根本没写盘，
+          同样判 ok（rc==0 与"真写了"并不等价）。
+      → 两个房间都看不出"PDF 是空的/是旧的"。
+      现在：无论主路径还是退化路径，最后都过同一道
+      _verify_export_artifact（存在 + >0 字节 + 本次确有写入）。
+    另外 PDF 的合法文件头是 "%PDF-"，顺手做内容自检，
+      把"导出成 HTML 错误页/0 字节占位"这类情况也拦下来。
     """
     import swapi
     d = sw.ActiveDoc
     if d is None:
         return {"ok": False, "error": "no active document"}
+    # 统一的输出路径（先补后缀，供"导出前快照"使用）
+    p = str(path or "")
+    if p and not p.lower().endswith(".pdf"):
+        p = p + ".pdf"
+    if not p:
+        return {"ok": False, "error": "导出路径为空（需给出 .pdf 输出路径）"}
+    _before = _artifact_snapshot(p)
+    out = {}
     try:
         m = swapi.SWModel(sw, d)
-        return m.export_pdf(path)
+        out = m.export_pdf(p) or {}
     except Exception as e:
         # 退化路径：至少保证后缀正确
-        p = str(path or "")
-        if p and not p.lower().endswith(".pdf"):
-            p = p + ".pdf"
         try:
             rc = d.SaveAs3(p, 0, 0)
-            return {"ok": rc == 0, "path": p, "exists": os.path.exists(p),
-                    "rc": rc, "note": "swapi 封装不可用，已用 SaveAs3 回退"}
+            out = {"ok": rc == 0, "path": p, "exists": os.path.exists(p),
+                   "rc": rc, "note": "swapi 封装不可用，已用 SaveAs3 回退"}
         except Exception as e2:
-            return {"ok": False, "error": "PDF 导出失败: %r / %r" % (e, e2)}
+            return {"ok": False, "path": p,
+                    "error": "PDF 导出失败: %r / %r" % (e, e2)}
+    if not isinstance(out, dict):
+        out = {"ok": False, "error": "export_pdf 返回非 dict: %r" % (out,)}
+    out["path"] = out.get("path") or p
+    # ── 总闸：存在 + >0 字节 + 本次确实写入 ──────────────────────────────
+    _v = _verify_export_artifact(
+        out["path"], before=_before, kind="PDF",
+        hint=("① 确认当前活动文档是工程图/零件且已保存（view-only 文档不支持导 PDF）；"
+              "② 确认目标目录可写、文件未被占用；"
+              "③ 先用 drawing 命令生成 .slddrw，再导出 PDF。"))
+    out["verify"] = _v
+    if not _v.get("ok"):
+        out["ok"] = False
+        out["error"] = _v.get("error")
+        if _v.get("hint"):
+            out.setdefault("hint", _v["hint"])
+        return out
+    out["ok"] = True
+    out["size_bytes"] = _v.get("size")
+    out.pop("error", None)
+    # ── 内容自检：PDF 必须以 %PDF- 开头 ──────────────────────────────────
+    try:
+        with open(out["path"], "rb") as _f:
+            _head = _f.read(8)
+        out["content_check"] = ("pdf" if _head.startswith(b"%PDF-")
+                                else "unknown(%r)" % (_head[:8],))
+        if not _head.startswith(b"%PDF-"):
+            out["ok"] = False
+            out["error"] = ("导出的文件不是合法 PDF（文件头 %r，应以 b'%%PDF-' 开头）。"
+                            "多半是导出被 SW 静默拒绝后留下的占位文件。"
+                            % (_head,))
+    except Exception as _e_chk:
+        out["content_check_error"] = repr(_e_chk)
+    return out
 
 
 def _extract_output_paths(script_path):
@@ -2260,12 +2311,111 @@ def _case_insensitive_path(path):
     return None
 
 
-def _verify_run_artifacts(script_path, result):
-    """【C9 修复】校验脚本执行后预期产物是否存在。
+def _artifact_snapshot(path):
+    """记录文件当前的 (size, mtime_ns)，用于判定"这次导出到底写没写盘"。
 
-    Returns: {checked, expected:[], missing:[], present:[]}
+    【BUG-45/57 同类修复】SolidWorks 导出链路的典型静默失败是：
+      SaveAs3 返回 0（成功）、目标路径上【恰好已有上一轮的旧文件】，
+      于是"文件存在且 >0 字节"恒成立 → 调用方误判为本次导出成功。
+    只有把"调用前的状态"记下来再比对，才能区分「真写了」和「捡了旧文件」。
+    文件不存在时返回 None。
     """
-    out = {"checked": False, "expected": [], "missing": [], "present": []}
+    try:
+        if not path or not os.path.exists(path):
+            return None
+        _st = os.stat(path)
+        return {"size": int(_st.st_size), "mtime_ns": int(_st.st_mtime_ns)}
+    except Exception:
+        return None
+
+
+def _verify_export_artifact(path, before=None, min_bytes=1, kind="", hint=""):
+    """【出图链路 fail-closed 总闸】产物必须【真实存在、>0 字节、且本次确实被写入】。
+
+    背景（台账 BUG-34/45，本次实测确认的根因之一）：
+      annotate / export-pdf / dwg / dxf 这些出图命令原先的"成功判据"五花八门——
+      有的只看 SaveAs3 的返回值 rc，有的只看 os.path.exists，
+      于是「0 字节文件」「根本没写盘」「捡到上一轮旧文件」全都被报成 ok:true。
+      两个房间都因此把空图纸当成交付物继续往下走。
+
+    本函数是这些命令【统一】的最终判据，任一条不满足即 ok=False：
+      ① 文件存在；② 大小 > min_bytes；③ 不是"调用前后完全没变"的旧文件。
+
+    Args:
+        path:      产物绝对路径
+        before:    _artifact_snapshot(path) 在调用导出【之前】的结果（None=原本不存在）
+        min_bytes: 最小字节数（默认 1，即禁止 0 字节）
+        kind:      产物类型，仅用于错误信息（"PDF"/"DWG"/"DXF"/"SLDDRW"…）
+        hint:      失败时的可操作提示
+    Returns: {ok, path, exists, size, written, error?, hint?}
+    """
+    _k = kind or "产物"
+    out = {"ok": False, "path": path, "exists": False, "size": 0,
+           "written": False, "kind": _k}
+    try:
+        if not path:
+            out["error"] = "%s路径为空" % _k
+            return out
+        if not os.path.exists(path):
+            out["error"] = ("%s【未生成】：磁盘上不存在 %s。"
+                            "（导出调用可能被 SW 静默忽略/被对话框阻塞）"
+                            % (_k, path))
+            if hint:
+                out["hint"] = hint
+            return out
+        out["exists"] = True
+        try:
+            _size = int(os.path.getsize(path))
+        except Exception:
+            _size = 0
+        out["size"] = _size
+        if _size <= min_bytes:
+            out["error"] = ("%s【是空文件】：%s 只有 %d 字节（要求 > %d）。"
+                            "这是 SW 导出链路最常见的静默失败，"
+                            "绝不能当成功交付。"
+                            % (_k, path, _size, min_bytes))
+            if hint:
+                out["hint"] = hint
+            return out
+        _after = _artifact_snapshot(path)
+        if before is not None and _after is not None:
+            _same = (before.get("size") == _after.get("size") and
+                     before.get("mtime_ns") == _after.get("mtime_ns"))
+            if _same:
+                out["error"] = ("%s【本次未写入】：%s 存在且 %d 字节，"
+                                "但大小与修改时间与导出前完全一致 —— "
+                                "说明导出调用没有真正写盘，"
+                                "当前文件是上一轮留下的旧文件。"
+                                % (_k, path, _size))
+                if hint:
+                    out["hint"] = hint
+                return out
+            out["previous"] = before
+        elif before is None:
+            out["created"] = True
+        out["written"] = True
+        out["ok"] = True
+        return out
+    except Exception as _e:
+        out["error"] = "%s校验异常: %r" % (_k, _e)
+        return out
+
+
+def _verify_run_artifacts(script_path, result):
+    """【C9 修复】校验脚本执行后预期产物是否存在【且非 0 字节】。
+
+    ── 【BUG-57/86 修复】只判存在性不够 ──────────────────────────────────
+    原实现用 os.path.exists 判产物，于是：
+      · SW 中途崩溃/RPC 中断时留下 0 字节 .SLDPRT → 判为"已生成"；
+      · 本次 run 其实什么也没做（wrapper 缺 __name__），但目录里躺着
+        上一轮的旧零件 → 同样判为"已生成"。
+    这正是"脚本跑了、零件没变"却一路 ok:true 的最后一环。
+    现改为：0 字节 = 缺失；并额外回传 sizes 便于排查。
+
+    Returns: {checked, expected:[], missing:[], present:[], zero_size:[], sizes:{}}
+    """
+    out = {"checked": False, "expected": [], "missing": [], "present": [],
+           "zero_size": [], "sizes": {}}
     try:
         declared = None
         _biz = result.get("script_result")
@@ -2280,10 +2430,21 @@ def _verify_run_artifacts(script_path, result):
         out["checked"] = True
         out["expected"] = expected
         for p in expected:
-            if os.path.exists(p):
-                out["present"].append(p)
-            else:
+            _real = _case_insensitive_path(p) or p
+            if not os.path.exists(_real):
                 out["missing"].append(p)
+                continue
+            try:
+                _size = int(os.path.getsize(_real))
+            except Exception:
+                _size = 0
+            out["sizes"][p] = _size
+            if _size <= 0:
+                # 0 字节 = 没真正落盘，与"不存在"同等对待（fail-closed）
+                out["zero_size"].append(_real)
+                out["missing"].append(p)
+            else:
+                out["present"].append(_real)
     except Exception:
         pass
     return out
@@ -2499,19 +2660,56 @@ def cmd_run(sw, script_path, extra_args, room=None):
             #   → wrapper 崩在打印结果前，run 恒返回空输出 + exit 1，
             #     脚本的真实异常被完全吞掉（最恶劣的静默失败）。
             #   只有 f-string 才需要 {{ }} 转义，此处必须写单花括号。
-            "_ns = {'sw': sw, 'json': json, 'os': os, 'sys': sys, '__file__': __file__}\n"
+            # ══ 【BUG-57/86 修复】_ns 必须包含 __name__ = '__main__' ══════════
+            # 实测故障（两个房间各踩一次）：建模脚本几乎都写成
+            #     def main(): ...
+            #     if __name__ == '__main__':
+            #         main()
+            # 而原 wrapper 的 _ns 里【没有 __name__】。
+            #
+            # 关键实证（本机 Python 3.13 实测，勿凭直觉改）：
+            #   exec(src, ns) 的 ns 缺 __name__ 时，【不会】抛 NameError，
+            #   而是回退到 __builtins__ 模块的 __name__，其值是字符串
+            #   'builtins'。实测输出：  NAME IS 'builtins'
+            #   → 'builtins' == '__main__' 为 False → main() 永远不执行。
+            #   脚本"顺利跑完"、没有异常 → wrapper 返回 ok:true，
+            #   而零件根本没变 —— 这是最难排查的静默空跑。
+            #
+            # 修复：显式补全模块级 dunder，让脚本的 __main__ 分支真正成立；
+            #   同时保留 __file__（脚本里读 __file__ 求同目录资源）。
+            #   注意必须把 __builtins__ 也显式放进去：exec 在给定了
+            #   __builtins__ 时不再注入默认值，行为与"直接跑脚本"一致。
+            "_ns = {'__name__': '__main__', '__file__': __file__,\n"
+            "       '__builtins__': __builtins__, '__package__': None,\n"
+            "       '__spec__': None, '__doc__': None,\n"
+            "       'sw': sw, 'json': json, 'os': os, 'sys': sys}\n"
             "try:\n"
             f"    exec(compile(open({script_abs!r}, encoding='utf-8').read(), {script_abs!r}, 'exec'), _ns)\n"
             "    _ok, _err = True, ''\n"
-            "except Exception:\n"
+            "except SystemExit as _e_sysexit:\n"
+            "    # 【BUG-57 配套】脚本用 sys.exit(0/None) 表示成功、非 0 表示失败。\n"
+            "    #   原写法只 catch Exception → SystemExit 穿透，wrapper 在打印\n"
+            "    #   结果前就退出，父进程只拿到 exit_code、没有任何 error 文本\n"
+            "    #   （表现为「no JSON in output」，真实原因完全丢失）。\n"
+            "    _sc = _e_sysexit.code\n"
+            "    if _sc in (None, 0):\n"
+            "        _ok, _err = True, ''\n"
+            "    else:\n"
+            "        _ok = False\n"
+            "        _err = ('脚本以 SystemExit(%r) 结束 → 判定为业务失败' % (_sc,))\n"
+            "except BaseException:\n"
             "    _ok, _err = False, traceback.format_exc()[-3000:]\n"
             "finally:\n"
             "    sys.stdout, sys.stderr = _old_out, _old_err\n"
             "_biz = _ns.get('__RESULT__')\n"
+            "# 【BUG-57 配套】回显脚本实际看到的 __name__，便于核对 __main__ 分支\n"
+            "#   到底成不成立（这是本次静默空跑的根因，必须可见）。\n"
+            "_ns_name = _ns.get('__name__')\n"
             # 【BUG-A 修复】同上：普通字符串用单花括号
             "print(json.dumps({'ok': _ok, 'error': _err,\n"
             "                  'script_stdout': _cap_out.getvalue()[-8000:],\n"
             "                  'script_stderr': _cap_err.getvalue()[-8000:],\n"
+            "                  'script_name': _ns_name,\n"
             "                  'script_result': _biz}, ensure_ascii=False))\n"
         )
     try:
@@ -2653,15 +2851,76 @@ def cmd_run(sw, script_path, extra_args, room=None):
             # 脚本显式报告失败 → 整体判失败，绝不"静默成功"
             result["ok"] = False
             result.setdefault("error", _biz.get("error") or "脚本自报失败")
-    # ── 【C9 修复】产物校验：脚本声称成功，但文件没生成 → 必须报错 ──────
+    # ── 【C9 修复 + BUG-57/86 加固】产物校验 ────────────────────────────
+    # 脚本声称成功、但文件没生成（或只是 0 字节 / 只是上一轮的旧文件）
+    #   → 必须判失败。这是"脚本跑了、零件没变却返回 ok:true"的最后一道闸。
     _art = _verify_run_artifacts(script_abs, result)
     if _art.get("checked"):
         result["artifacts"] = _art
         if _art.get("missing"):
             result["ok"] = False
-            result["error"] = ("脚本执行完毕但预期产物未生成: %s。"
-                               "（原实现此处会误报成功，请检查脚本的保存逻辑）"
-                               % ", ".join(_art["missing"]))
+            _zero = _art.get("zero_size") or []
+            result["error"] = (
+                "脚本执行完毕但预期产物未生成或为 0 字节: %s。"
+                "%s"
+                "（原实现只判 os.path.exists，0 字节文件也会被当成成功）"
+                % (", ".join(_art["missing"]),
+                   ("其中 0 字节文件: %s；" % ", ".join(_zero)) if _zero else ""))
+    # ══ 【BUG-57/86】静默空跑检测 ═══════════════════════════════════════
+    # 核心故障：脚本的 if __name__ == '__main__': main() 分支从未执行，
+    #   于是"什么也没做"却一路 ok:true。
+    # 现在 wrapper 会回传 script_name（脚本实际看到的 __name__）与其
+    #   script_stdout / script_result，本处做二次判定：
+    #   ① script_name != '__main__' → 说明模型脚本的 __main__ 分支不可能成立，
+    #      即使脚本没报错也必须显式标记（fail-closed，不静默）；
+    #   ② 脚本一行输出都没有、也没声明 __RESULT__、预期产物又全都没出现
+    #      → 高度疑似空跑，同样显式标记。
+    _sn = result.get("script_name")
+    if _sn is not None and _sn != "__main__":
+        result["ok"] = False
+        result["silent_noop_suspected"] = True
+        result["error"] = (
+            "【BUG-57】建模脚本执行时的 __name__ = %r（应为 '__main__'），"
+            "脚本里的 if __name__ == '__main__': main() 分支【不会执行】，"
+            "本次 run 极可能是静默空跑（零件没变）。"
+            "已判定为失败，以免把空跑当成建模成功。" % (_sn,))
+    if result.get("ok") and not (result.get("error") or "").strip():
+        _so = (result.get("script_stdout") or "").strip()
+        _se = (result.get("script_stderr") or "").strip()
+        _biz0 = result.get("script_result")
+        _has_art = bool(_art.get("present"))
+        if _biz0 is None and not _has_art:
+            # 既没声明 __RESULT__，也没有任何可核对的产物。
+            # 先看脚本里有没有"建模/保存/导出"意图 —— 有意图却零产物，
+            # 才是真正值得报警的空跑；纯查询脚本不该被误报。
+            _src_txt = ""
+            try:
+                with open(script_abs, "r", encoding="utf-8",
+                          errors="replace") as _f_src:
+                    _src_txt = _f_src.read(200000)
+            except Exception:
+                _src_txt = ""
+            _intent = bool(re.search(
+                r"(\.save\s*\(|SaveAs|ExportTo|export_pdf|export_image|"
+                r"新建|建模|另存|导出)", _src_txt))
+            if not _so and not _se:
+                # 一点输出都没有 → 直接判失败（最典型的静默空跑形态）
+                result["ok"] = False
+                result["silent_noop_suspected"] = True
+                result["error"] = (
+                    "【BUG-57/86】脚本执行完毕但【没有任何输出、没有 "
+                    "__RESULT__、也没有可核对的产物】—— 判定为静默空跑。"
+                    "最常见原因是脚本的 if __name__ == '__main__': 分支"
+                    "没有执行到（main() 从未被调用），"
+                    "或脚本逻辑提前 return 了。")
+            elif _intent:
+                # 有保存/导出意图却零产物 → 至少显式告警，绝不"静默成功"
+                result["silent_noop_suspected"] = True
+                result["warning"] = (
+                    "脚本看起来有建模/保存意图，但既没有声明 __RESULT__，"
+                    "也没有在磁盘上留下任何可核对的产物 —— 疑似空跑或"
+                    "保存路径写错。建议用 __RESULT__ = {'artifacts': [...]} "
+                    "显式声明产物，让 run 能替你核对。")
     # ══ 【三大防线 · 防线①材料】建模出口强制校验 ═══════════════════════
     # "AI 到了这一步就必须过"：脚本落盘 .sldprt 的那一刻，材料事实即被
     #   swapi.save() 固化；此处【当场】读取凭据并校验，不合格直接判本次
@@ -3853,13 +4112,34 @@ def cmd_drawing(sw, part_path, output_path=None):
         except Exception:
             pass
 
+    # ══ 【本次修复】保存必须被【验证】，不能只看 SaveAs3 的 rc ═══════════
+    # 原实现：result["saved"] = os.path.exists(output_path)，而 ok 完全由
+    #   排版校验(all_ok)决定 —— 于是可能出现「视图排好了、SaveAs3 静默失败、
+    #   磁盘上根本没有 .slddrw」却仍然 ok:true 的交付。
+    #   （实测同类现象：路径上恰好有上一轮旧图时，exists 恒为 True。）
+    # 现在：保存后走统一总闸（存在 + >0 字节 + 本次确写入），
+    #   不达标就把整个 drawing 判失败。
+    _draw_before = _artifact_snapshot(output_path)
     try:
         rc = final_doc.SaveAs3(output_path, 0, 2)
-        result["saved"] = os.path.exists(output_path)
         result["path"] = output_path
         result["rc"] = rc
     except Exception as e:
         result["save_error"] = str(e)
+    _dv = _verify_export_artifact(
+        output_path, before=_draw_before, kind="SLDDRW",
+        hint=("① 确认目标目录可写、文件未被 SW 占用；"
+              "② 确认图纸已成功创建（本命令排版校验是否通过见 views/bounds 字段）；"
+              "③ 必要时先用 status 确认 SW 连接正常。"))
+    result["verify"] = _dv
+    result["saved"] = bool(_dv.get("ok"))
+    if not _dv.get("ok"):
+        result["ok"] = False
+        result["error"] = _dv.get("error")
+    elif result.get("save_error"):
+        # 保存抛了异常但文件居然被写出来了（SW 常见：抛异常后仍落盘）
+        result.setdefault("warnings_list", []).append(
+            "SaveAs3 抛异常但产物已生成: %s" % result["save_error"])
 
     try:
         m = swapi.from_active(sw)
@@ -3970,10 +4250,11 @@ def _annotation_api_candidates(dim_types=None):
     顺序（首选 → 兜底）：
       ① InsertModelDimensions(Option)  —— 单参，专用于「插入模型尺寸」，
          最贴合「自动标注关键尺寸」的诉求，故置于首位；
-      ② InsertModelAnnotations3(6 参)  —— 最新版插入模型标注；
-      ③ InsertModelAnnotations2(6 参)  —— 旧版兜底；
-      ④ InsertModelAnnotations(4 参)   —— 最旧版兜底；
-      ⑤ AutoDimension(5 参)            —— SW 自带自动标注（逐个激活视图后调用）。
+      ② InsertModelAnnotations4(8 参)  —— 最新版插入模型标注（老版本自动跳过）；
+      ③ InsertModelAnnotations3(6 参)  —— 上一版插入模型标注；
+      ④ InsertModelAnnotations2(6 参)  —— 旧版兜底；
+      ⑤ InsertModelAnnotations(4 参)   —— 最旧版兜底；
+      ⑥ AutoDimension(5 参)            —— SW 自带自动标注（逐个激活视图后调用）。
     Types 位掩码依次尝试：调用方显式 dim_types > swInsertDimensions(8) > 1(旧行为)。
     """
     _types = []
@@ -3990,9 +4271,19 @@ def _annotation_api_candidates(dim_types=None):
     out = []
     # ① InsertModelDimensions：1 参。Option 的语义随版本而异且无法离线核实，
     #    故按 1 → 0 → 2 依次尝试（失败即换下一个，不影响正确性）。
+    #    类型库实证：IDrawingDoc.InsertModelDimensions(Option) 返回 VT_VOID。
     for _opt in (1, 0, 2):
         out.append(("InsertModelDimensions", (_opt,)))
-    # ② InsertModelAnnotations3：6 参
+    # ② InsertModelAnnotations4：8 参（SW 较新版本才有；老版本 getattr=None
+    #    会自动跳过，因此放在链首不会破坏 SW 2018~2024 的兼容性）。
+    #    类型库实证：IDrawingDoc.InsertModelAnnotations4(Option, Types, AllViews,
+    #      DuplicateDims, HiddenFeatureDims, UsePlacementInSketch,
+    #      InsertAllAnnotations, InsertAllReferenceGeometry) —— 8 参
+    for _opt in (1, 2):
+        for _t in _types:
+            out.append(("InsertModelAnnotations4",
+                        (_opt, _t, True, False, False, False, False, False)))
+    # ③ InsertModelAnnotations3：6 参
     for _opt in (1, 2):
         for _t in _types:
             out.append(("InsertModelAnnotations3",
@@ -4175,11 +4466,38 @@ def annotate_drawing(sw, drawing_path, dim_types=None, tol_mm=0.05):
                 out["annotated_views"] += 1
             out["total_annotations"] += _delta
 
+        # ══ 【本次修复】标注插入后必须【确认图纸真的被写回磁盘】════════════
+        # 原实现把 EditRebuild3 + SaveAs3 整个包在 try/except: pass 里：
+        #   · 保存失败被完全吞掉（连字段都不留）；
+        #   · ok 只看 total_annotations > 0 →
+        #     "标注插进内存了、但图纸没存盘" 会返回 ok:true，
+        #     调用方打开 .slddrw 发现还是空的（正是 BUG-34 的现场之一）。
+        # 现在：保存前快照、保存后过统一总闸；标注数为 0 或保存失败，
+        #   都判 ok=False 并说清是哪一种。
+        _ann_before = _artifact_snapshot(drawing_path)
+        out["saved"] = False
         try:
             doc.EditRebuild3()
-            doc.SaveAs3(drawing_path, 0, 2)
-        except Exception:
-            pass
+        except Exception as _e_rb:
+            out["rebuild_error"] = repr(_e_rb)
+        try:
+            _ann_rc = doc.SaveAs3(drawing_path, 0, 2)
+            out["save_rc"] = _ann_rc
+        except Exception as _e_sv:
+            out["save_error"] = repr(_e_sv)
+        _ann_v = _verify_export_artifact(
+            drawing_path, before=_ann_before, kind="SLDDRW",
+            hint=("① 确认 .slddrw 未被 SW 独占锁定；② 目标目录可写；"
+                  "③ 若只是内存中的标注未落盘，请在 SW 里手动保存一次确认。"))
+        out["verify"] = _ann_v
+        out["saved"] = bool(_ann_v.get("ok"))
+        if not _ann_v.get("ok"):
+            out["ok"] = False
+            out["error"] = ("标注已尝试插入，但工程图【未能写回磁盘】："
+                            + str(_ann_v.get("error") or ""))
+            out["total_annotations"] = out.get("total_annotations") or 0
+            out["gbt_report"] = _gbt_annotation_report(out)
+            return out
 
         out["ok"] = out["total_annotations"] > 0
         # ── 【Bug-34 建议④】给出 GB/T 检查报告（逐项通过/缺失）──────────
@@ -4474,8 +4792,18 @@ def cmd_dwg(sw, part_path, output_path=None, force_redraw=False):
     # 处理：
     #   · 默认（无 --redraw）：存在就直接用它，并在返回里如实说明 reused；
     #   · 显式 --redraw：强制重建（保留旧能力，但要用户自己要求）。
+    # ── 【本次修复·实测发现的真实崩溃】变量名 bug：_force_redraw 未定义 ──
+    # 参数名是 force_redraw，这里却写成 _force_redraw（多一个下划线）。
+    # 由于 Python 的短路求值，该表达式在
+    #   「drawing_path 为空」或「.slddrw 不存在」时根本不会求值到 _force_redraw
+    # → 首次出图（还没有 .slddrw）一切正常；
+    #   而【只要工程图已经存在】，就必然抛
+    #   NameError: name '_force_redraw' is not defined
+    #   → BUG-21 专门加的那条"复用已有图纸、别覆盖手工标注"的分支
+    #     从上线起【从未真正执行过】，第二次调 dwg 必定崩在这里。
+    # 这也是"出图链路从未被验证"的直接后果之一（没人跑过第二次）。
     _reuse = False
-    if drawing_path and os.path.exists(drawing_path) and not _force_redraw:
+    if drawing_path and os.path.exists(drawing_path) and not force_redraw:
         _reuse = True
     if _reuse:
         dwg_result = {"ok": True, "path": drawing_path, "reused": True,
@@ -4516,15 +4844,44 @@ def cmd_dwg(sw, part_path, output_path=None, force_redraw=False):
                     "open_attempts": _open_info.get("attempts")}
 
         # 导出 DWG（SaveAs3 直接另存为 .dwg）
+        # 【本次修复】原判据只有 os.path.exists(output_path)：
+        #   0 字节 DWG、或"上一轮就躺在那里的旧 DWG"都会被判成功。
+        #   现改为统一总闸（存在 + >0 字节 + 本次确写入），并补
+        #   SaveAs2 回退（部分版本/中文版上 SaveAs3 静默失败）。
+        _dwg_before = _artifact_snapshot(output_path)
+        _dwg_rc = None
         try:
-            rc = doc.SaveAs3(output_path, 0, 2)
-            if os.path.exists(output_path):
-                result["ok"] = True
-                result["method"] = "SaveAs3"
-                result["exists"] = True
-                result["rc"] = rc
+            _dwg_rc = doc.SaveAs3(output_path, 0, 2)
+            result["rc"] = _dwg_rc
+            result["method"] = "SaveAs3"
         except Exception as e:
             result["saveas3_error"] = str(e)
+        if not _verify_export_artifact(output_path, before=_dwg_before,
+                                       kind="DWG").get("ok"):
+            # 回退：IModelDoc2.SaveAs2(NewName, SaveAsVersion, SaveAsCopy, Silent)
+            # （签名取自本机已注册 SldWorks 类型库，见 _open_doc6 注释）
+            try:
+                _rc2 = doc.SaveAs2(output_path, 0, False, True)
+                result["saveas2_rc"] = _rc2
+                result["method_fallback"] = "SaveAs2"
+            except Exception as e2:
+                result["saveas2_error"] = str(e2)
+        _dwg_v = _verify_export_artifact(
+            output_path, before=_dwg_before, kind="DWG",
+            hint=("① 确认 .slddrw 已成功生成且能正常打开；"
+                  "② 目标目录可写、文件未被 AutoCAD 占用；"
+                  "③ 可改用 dxf 子命令直接出 DXF 供 cad-validate 验证。"))
+        result["verify"] = _dwg_v
+        result["exists"] = bool(_dwg_v.get("exists"))
+        if _dwg_v.get("ok"):
+            result["ok"] = True
+            result["method"] = result.get("method") or "SaveAs3"
+            result["size_bytes"] = _dwg_v.get("size")
+        else:
+            result["ok"] = False
+            result["error"] = _dwg_v.get("error")
+            if _dwg_v.get("hint"):
+                result["hint"] = _dwg_v["hint"]
     except Exception as e:
         result["error"] = str(e)
 
@@ -4842,36 +5199,71 @@ def cmd_dxf(sw, part_path, output_path=None):
             return {"ok": False, "error": "cannot open drawing for DXF export"}
 
         # ── 方法1: SaveAs3 直接另存 DXF ──────────────────────────────
+        # 【本次修复】导出前先快照：目标路径若已有上一轮的旧 DXF，
+        #   原判据（exists + size>0）恒成立 → 本次根本没写盘也报成功。
+        _dxf_before = _artifact_snapshot(output_path)
         try:
             rc = doc.SaveAs3(output_path, 0, 2)
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                result["ok"] = True
+            result["saveas3_rc"] = rc
+            if _verify_export_artifact(output_path, before=_dxf_before,
+                                       kind="DXF").get("ok"):
                 result["method"] = "SaveAs3"
         except Exception as e:
             result["saveas3_error"] = str(e)
 
         # ── 方法2: SaveAs2 旧接口回退 ────────────────────────────────
-        if not result.get("ok"):
+        # 签名（本机 SldWorks 类型库实证）：
+        #   IModelDoc2.SaveAs2(NewName, SaveAsVersion, SaveAsCopy, Silent)  —— 4 参
+        # 原实现传了 3 参且第 3 参给了 0（当 bool 用），属参数个数错误，
+        #   在晚期绑定下直接 TypeError，回退分支从未真正生效。
+        if not result.get("method"):
             try:
-                rc2 = doc.SaveAs2(output_path, 0, 0)
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    result["ok"] = True
+                rc2 = doc.SaveAs2(output_path, 0, False, True)
+                result["saveas2_rc"] = rc2
+                if _verify_export_artifact(output_path, before=_dxf_before,
+                                           kind="DXF").get("ok"):
                     result["method"] = "SaveAs2"
             except Exception as e:
                 result["saveas2_error"] = str(e)
 
-        # ── 方法3: ExportToDWG2（SW 专用 DWG/DXF 导出器）─────────────
-        if not result.get("ok"):
+        # ── 方法3: ExportToDWG2 ──────────────────────────────────────
+        # 【本次修复·参数个数错误】原实现给 ExportToDWG2 传了 12 个实参
+        #   （..., False, False, 0, None, False, False, 0），必然 TypeError。
+        # 本机已注册 SldWorks 类型库实证（权威依据，勿凭记忆改）：
+        #   接口归属 = IPartDoc（不是 IDrawingDoc/IModelDoc2！）
+        #   IPartDoc.ExportToDWG2(FilePath, ModelName, Action, ExportToSingleFile,
+        #       Alignment, IsXDirFlipped, IsYDirFlipped, SheetMetalOptions, Views)
+        #       —— 共 9 参
+        # 且它作用于【零件】，用于钣金展开/DXF 导出，对【工程图文档】
+        #   不适用 → 本命令（导出工程图）保留该分支仅作最后兜底，
+        #   失败信息如实回写，绝不因"调用没抛异常"就判成功。
+        if not result.get("method"):
             try:
-                # swExportToDWG_Drawing 过滤器常量为 2（图纸）；版本差异较大，
-                # 失败不影响主流程，仅作为最后尝试。
-                ok3 = doc.ExportToDWG2(output_path, saving, 2, False, False,
-                                       False, False, 0, None, False, False, 0)
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    result["ok"] = True
+                ok3 = doc.ExportToDWG2(output_path, saving, 1, True, None,
+                                       False, False, 0, None)
+                result["exporttodwg2_rc"] = ok3
+                if _verify_export_artifact(output_path, before=_dxf_before,
+                                           kind="DXF").get("ok"):
                     result["method"] = "ExportToDWG2"
             except Exception as e:
                 result["exporttodwg2_error"] = str(e)
+
+        # ── 统一总闸：三种方法都试完后，用同一判据定性 ────────────────
+        _dxf_v = _verify_export_artifact(
+            output_path, before=_dxf_before, kind="DXF",
+            hint=("① 确认 .slddrw 已生成且能打开；② 目标目录可写；"
+                  "③ 若 SW 弹出了 DXF/DWG 映射对话框，导出会被阻塞 —— "
+                  "可在 SW 选项里关闭『每次保存时显示映射关系』。"))
+        result["verify"] = _dxf_v
+        result["size_bytes"] = _dxf_v.get("size")
+        if _dxf_v.get("ok"):
+            result["ok"] = True
+            result.setdefault("method", "SaveAs3")
+        else:
+            result["ok"] = False
+            result["error"] = _dxf_v.get("error")
+            if _dxf_v.get("hint"):
+                result["hint"] = _dxf_v["hint"]
 
     except Exception as e:
         result["error"] = str(e)

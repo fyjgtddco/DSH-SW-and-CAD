@@ -1664,17 +1664,271 @@ def _archive_room_artifacts(room):
                 try:
                     if os.path.exists(_tgt):
                         os.remove(_tgt)
+                    # ── 【R8 / B-20·B-25 修复】搬走前先记下指纹 ──────────────
+                    # 事后回填时【必须】能判断"哪份才是最新/最该回填的"，
+                    # 否则就会出现实测中的事故：三路 fork 互相搬文件，
+                    # "原样恢复"把已过门的 L200/L230 覆盖成最旧的 L114/L109，
+                    # 全盘无第三份副本，差点把错误几何带进总装和 12 张工程图。
+                    _meta = _file_fingerprint(_src)
                     import shutil as _shutil
                     _shutil.move(_src, _tgt)
                     out["moved"].append(_c)
+                    out.setdefault("files", []).append(dict(_meta, archived_as=_c))
                 except Exception:
                     continue
+        # ── 【R8】落一份清单：归档里到底有什么、各自什么指纹、什么时候回的 ──
+        # 没有这份清单，回填就只能靠人肉猜（B-25 里转台轴就是这么丢的）。
+        try:
+            _manifest = {
+                "schema": "dsh-engineering/archive-manifest@1",
+                "room": str(room),
+                "archived_at": time.time(),
+                "archived_at_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "reason": "room-start fresh 重开（上一波产物归档）",
+                "files": out.get("files") or [],
+            }
+            with open(os.path.join(_dst, ARCHIVE_MANIFEST_NAME), "w",
+                      encoding="utf-8") as _mf:
+                json.dump(_manifest, _mf, ensure_ascii=False, indent=2)
+            out["manifest"] = os.path.join(_dst, ARCHIVE_MANIFEST_NAME)
+        except Exception as _e_mf:
+            out.setdefault("warnings", []).append("归档清单写入失败: %r" % (_e_mf,))
         out["note"] = ("已把该房间上一波的 %d 个文件移到 %s"
-                       "（新一波从干净目录开始，避免新旧混淆）"
-                       % (len(out["moved"]), _dst))
+                       "（新一波从干净目录开始，避免新旧混淆；"
+                       "清单见 %s，可用 archive-list / archive-restore 查看与回填）"
+                       % (len(out["moved"]), _dst, ARCHIVE_MANIFEST_NAME))
     except Exception as _e:
         out["ok"] = False
         out["warning"] = "归档旧产物失败（不影响 room-start）：%r" % (_e,)
+    return out
+
+
+ARCHIVE_MANIFEST_NAME = "_archive_manifest.json"
+
+
+def _file_fingerprint(p):
+    """文件指纹（大小 / mtime / sha1 前 16 位）—— 归档与回填的仲裁依据。
+
+    实测教训（B-20）：三路 fork 互相搬文件，"原样恢复"把已过门的
+      L200/L230 覆盖成最旧的 L114/L109，全盘无第三份副本。
+      没有指纹就无法回答"这两份到底哪份是最新的/过门的"。
+    """
+    out = {"name": os.path.basename(str(p)), "path": str(p)}
+    try:
+        st = os.stat(p)
+        out["size"] = st.st_size
+        out["mtime"] = st.st_mtime
+        out["mtime_str"] = time.strftime("%Y-%m-%d %H:%M:%S",
+                                         time.localtime(st.st_mtime))
+    except Exception as e:
+        out["stat_error"] = repr(e)
+        return out
+    try:
+        import hashlib as _hl
+        h = _hl.sha1()
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 256), b""):
+                h.update(chunk)
+        out["sha1_16"] = h.hexdigest()[:16]
+    except Exception as e:
+        out["hash_error"] = repr(e)
+    return out
+
+
+def _archive_root(room=None):
+    """归档根目录 <work_dir>/parts/_archive。"""
+    try:
+        _work = _default_work_dir()
+    except Exception:
+        _work = os.getcwd()
+    base = os.path.join(str(_work), "parts", "_archive")
+    if room:
+        return base, str(room)
+    return base, None
+
+
+def _archive_dirs(room):
+    """该房间的全部归档批次（新→旧）。"""
+    base, _ = _archive_root()
+    out = []
+    try:
+        if not os.path.isdir(base):
+            return out
+        _pfx = _safe_room_name(room) + "_"
+        for d in os.listdir(base):
+            if not d.startswith(_pfx):
+                continue
+            full = os.path.join(base, d)
+            if not os.path.isdir(full):
+                continue
+            try:
+                mt = os.path.getmtime(full)
+            except Exception:
+                mt = 0.0
+            out.append({"dir": full, "name": d, "mtime": mt})
+    except Exception:
+        return out
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out
+
+
+def _load_archive_manifest(d):
+    p = os.path.join(d, ARCHIVE_MANIFEST_NAME)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def cmd_archive_list(room=None, as_json=True):
+    """列出归档批次及其指纹（只读）。room 为空时列出所有房间的归档。"""
+    base, _ = _archive_root()
+    batches = []
+    try:
+        names = ([room] if room else
+                 sorted({d.rsplit("_", 2)[0] for d in (os.listdir(base) or [])
+                         if os.path.isdir(os.path.join(base, d))})
+                 if os.path.isdir(base) else [])
+    except Exception:
+        names = [room] if room else []
+    for _rn in names:
+        for b in _archive_dirs(_rn):
+            mf = _load_archive_manifest(b["dir"])
+            batches.append({
+                "room": _rn,
+                "batch": b["name"],
+                "dir": b["dir"],
+                "mtime": b["mtime"],
+                "mtime_str": time.strftime("%Y-%m-%d %H:%M:%S",
+                                           time.localtime(b["mtime"])),
+                "has_manifest": bool(mf),
+                "files": (mf or {}).get("files") or [],
+                "archived_at_str": (mf or {}).get("archived_at_str"),
+            })
+    out = {"ok": True, "archive_root": base, "batches": batches,
+           "count": len(batches)}
+    if not batches:
+        out["note"] = "没有任何归档批次（parts/_archive 为空或不存在）"
+    return out
+
+
+def cmd_archive_restore(room, batch=None, part=None, dry_run=False,
+                        force=False, as_json=True):
+    """【R8 / B-25 修复】按指纹仲裁把归档产物回填到 parts/。
+
+    为什么要"仲裁"而不是"原样恢复"：
+      归档副本【不一定是最新版】。实测中把已过门（看图门 PASS、尺寸正确）的
+      新版覆盖成了最旧的版本，且全盘没有第三份副本，唯一暴露信号是
+      副轴看图门 passed=false —— 错误几何差点静默进总装与 12 张工程图。
+
+    仲裁规则（宁可不动，也不覆盖更新的东西）：
+      ① 默认只回填【目标不存在】的文件（安全）；
+      ② --force 才允许覆盖，且覆盖前把现有文件备份成 <name>.bak-restore-<时间戳>；
+      ③ 若归档件的 mtime 比现有目标【更旧】，默认拒绝并说明（--force 可越过）；
+      ④ 每一步都报告指纹，可审计。
+
+    Returns: {ok, room, batch, restored:[], skipped:[], backup_dir, notes}
+    """
+    out = {"ok": True, "room": str(room), "batch": batch, "part": part,
+           "dry_run": bool(dry_run), "restored": [], "skipped": [],
+           "backup_dir": None, "notes": []}
+    batches = _archive_dirs(room)
+    if not batches:
+        out["ok"] = False
+        out["error"] = "房间 [%s] 没有任何归档批次" % (room,)
+        return out
+    if batch:
+        batches = [b for b in batches if b["name"] == batch]
+        if not batches:
+            out["ok"] = False
+            out["error"] = "找不到归档批次 [%s]" % (batch,)
+            return out
+    src = batches[0]                       # 默认取【最新】的归档批次
+    out["batch"] = src["name"]
+    out["batch_dir"] = src["dir"]
+    mf = _load_archive_manifest(src["dir"])
+    files = (mf or {}).get("files") or []
+    if not files:
+        # 没有清单（旧归档）→ 退化为按文件名扫描，但【仍然仲裁】
+        try:
+            files = [{"name": n, "archived_as": n,
+                      "path": os.path.join(src["dir"], n)}
+                     for n in os.listdir(src["dir"])
+                     if os.path.isfile(os.path.join(src["dir"], n))
+                     and n != ARCHIVE_MANIFEST_NAME]
+        except Exception:
+            files = []
+        out["notes"].append("该归档批次没有清单（旧归档），已退化为按文件名扫描")
+    try:
+        _work = _default_work_dir()
+    except Exception:
+        _work = os.getcwd()
+    parts_dir = os.path.join(str(_work), "parts")
+    for it in files:
+        _an = it.get("archived_as") or it.get("name")
+        _src = os.path.join(src["dir"], _an)
+        if not os.path.exists(_src):
+            out["skipped"].append({"file": _an, "why": "归档文件已不存在"})
+            continue
+        if part and part not in _an:
+            continue
+        _tgt = os.path.join(parts_dir, _an)
+        _cur = _file_fingerprint(_tgt) if os.path.exists(_tgt) else None
+        _arc = _file_fingerprint(_src)
+        if _cur is None:
+            rec = {"file": _an, "action": "restore", "archived": _arc}
+            if not dry_run:
+                try:
+                    os.makedirs(parts_dir, exist_ok=True)
+                    import shutil as _shutil
+                    _shutil.copy2(_src, _tgt)
+                    rec["target"] = _file_fingerprint(_tgt)
+                except Exception as e:
+                    out["skipped"].append({"file": _an, "why": "回填失败: %r" % (e,)})
+                    continue
+            out["restored"].append(rec)
+            continue
+        # 目标已存在 → 比指纹再决定
+        _same = (_cur.get("sha1_16") and _arc.get("sha1_16")
+                 and _cur["sha1_16"] == _arc["sha1_16"])
+        if _same:
+            out["skipped"].append({"file": _an,
+                                   "why": "内容与归档件一致（sha1 相同），无需回填",
+                                   "sha1_16": _arc.get("sha1_16")})
+            continue
+        _cur_mt = _cur.get("mtime") or 0
+        _arc_mt = _arc.get("mtime") or 0
+        if _arc_mt < _cur_mt and not force:
+            out["skipped"].append({
+                "file": _an,
+                "why": ("归档件比现有文件【更旧】，拒绝覆盖（这正是 B-20 的覆"
+                        "盖事故：把过门的新版换成了旧版）；确需覆盖请加 --force"),
+                "archived": _arc, "current": _cur})
+            continue
+        rec = {"file": _an, "action": "overwrite", "archived": _arc,
+               "current": _cur}
+        if not dry_run:
+            try:
+                _bd = os.path.join(parts_dir, "_restore_backup",
+                                   time.strftime("%Y%m%d-%H%M%S"))
+                os.makedirs(_bd, exist_ok=True)
+                out["backup_dir"] = _bd
+                import shutil as _shutil
+                _shutil.copy2(_tgt, os.path.join(_bd, _an))
+                _shutil.copy2(_src, _tgt)
+                rec["backup"] = os.path.join(_bd, _an)
+                rec["target"] = _file_fingerprint(_tgt)
+            except Exception as e:
+                out["skipped"].append({"file": _an,
+                                       "why": "覆盖失败: %r" % (e,)})
+                continue
+        out["restored"].append(rec)
+    out["note"] = ("%s%d 个文件（跳过 %d 个）"
+                   % ("[dry-run] 将回填 " if dry_run else "已回填 ",
+                      len(out["restored"]), len(out["skipped"])))
     return out
 
 
@@ -2632,6 +2886,30 @@ DETACHED_NEXT_ACTION = ("先 python mode_gate.py room-fail <房间>，再 room-s
                         "subagent_fork（旧子代理已不在平台注册表，无法唤醒）")
 #: 多久没有【可观察改动】（报告/产物/待确认/刚绑定）就算"活着但当前没动作"
 BOARD_IDLE_SEC = 300
+# ── 【R4 / B-28 修复】"活着" ≠ "在干活"：进展超时看门狗 ─────────────────────
+# 实测（2026-10-30 四工位转台，15h）：wave2 总装房 06:03 之后 2 小时 03 分
+#   零新文件、报告停在 modeling，而心跳一直是活的 →
+#   safe_to_restart=false、next_action="无需动作（正在跑）"
+#   → 主代理做了 8 轮【逐字相同】的轮询，5 小时 40 分全部烧在"等一个不会动的流程"。
+# 根因：看板只测"存活"（心跳/平台登记），从不测"进展"。两者被完全解耦。
+# 修复：把"多久没有可观察进展"变成机器可判定字段 progress_stalled，
+#   超阈值后把 safe_to_restart 翻成 True —— 不改变 state（不误判死），
+#   只解除"禁止自救"的锁，让主对话有正当出路。
+# 阈值取 30 分钟：一次完整建模+保存+出图实测常 5~10 分钟，
+#   30 分钟无任何报告/产物/待确认，几乎只可能是卡死。
+# 可用 DSH_BOARD_NO_PROGRESS_SEC 覆盖（排障/长任务时放宽）。
+BOARD_NO_PROGRESS_SEC_DEFAULT = 1800
+
+
+def _board_no_progress_sec():
+    """进展超时阈值（秒）。环境变量可覆盖，非法值回落默认。"""
+    try:
+        _v = int(os.environ.get("DSH_BOARD_NO_PROGRESS_SEC", "") or 0)
+        if _v > 0:
+            return _v
+    except Exception:
+        pass
+    return BOARD_NO_PROGRESS_SEC_DEFAULT
 #: waiting_sw 的统一阻断理由（契约文案，勿改）
 WAITING_SW_BLOCK_REASON = "正在排队等 SolidWorks 锁，属正常等待，严禁判死/重启"
 UNBOUND_NEXT_ACTION = ("python mode_gate.py subagent-assign <房间> <id>"
@@ -2856,6 +3134,41 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
         board_state = "running" if _legacy == "running" else "idle"
     _safe, _block, _next = _board_guidance(board_state, name)
     _latest = st.get("latest_report") if isinstance(st.get("latest_report"), dict) else {}
+    # ── 【R4 / B-28 修复】进展超时看门狗（详见 BOARD_NO_PROGRESS_SEC_DEFAULT）──
+    # "多久没有任何可观察进展"：取【最近一次能证明它在动】的时间差——
+    #   进度报告 mtime / 产物 mtime / 刚绑定的 subagent / 刚 room-start，
+    #   取其中最小的 age（= 最近的那次动静）。全都取不到 → 无法判定，不误杀。
+    _prog_ages = []
+    for _a in (_report_age, _art_age, _assigned_age):
+        if _a is not None:
+            try:
+                _prog_ages.append(float(_a))
+            except Exception:
+                pass
+    try:
+        if _started:
+            _prog_ages.append(float(now) - float(_started))
+    except Exception:
+        pass
+    _progress_age = min(_prog_ages) if _prog_ages else None
+    _no_prog_limit = _board_no_progress_sec()
+    _progress_stalled = bool(
+        _progress_age is not None
+        and _progress_age > _no_prog_limit
+        # 只有"还活着"的状态才谈得上"停滞"；done/failed/dead 已经是结论
+        and board_state in ("running", "idle", "starting", "unbound")
+    )
+    if _progress_stalled and not _safe:
+        # 关键：不把 state 改死（心跳/平台仍可能活着，误判死的代价更大），
+        #   只解除"禁止自救"的锁，并给出可执行的下一步。
+        _safe = True
+        _block = ("已 %.0f 分钟没有任何可观察进展（进度报告/产物/待确认都没更新），"
+                  "判定为【停滞】：允许重启，不必再等"
+                  % (_progress_age / 60.0))
+        _next = ("python mode_gate.py room-fail %s → room-start %s → 重新 subagent_fork"
+                 "（停滞超过 %d 分钟，继续等只会空转；"
+                 "若确认是长任务可临时调大 DSH_BOARD_NO_PROGRESS_SEC）"
+                 % (name, name, int(_no_prog_limit / 60)))
     _detail_bits = ["state=%s" % board_state, "legacy=%s" % (_legacy or "?")]
     if _plat:
         _detail_bits.append("平台=%s(%ss)" % (
@@ -2912,6 +3225,11 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
         "safe_to_restart": bool(_safe),
         "restart_block_reason": _block,
         "next_action": _next,
+        # ── 【R4】进展看门狗字段（机器可判定，别只看 state）──────────────
+        "progress_age_sec": (round(_progress_age, 1)
+                             if _progress_age is not None else None),
+        "progress_stalled": _progress_stalled,
+        "no_progress_limit_sec": _no_prog_limit,
     }
 
 
@@ -2927,6 +3245,11 @@ ROOM_BOARD_HINT = (
     "★ 判活权威是 pulse：pulse.alive=True 表示 DSH 进程在跳（子代理忙/等锁都不影响），"
     "此时上面的结论可信；pulse.alive=False 说明进程停了或插件没跑，"
     "这时【不要】据此判死，改看磁盘产物/报告证据链。"
+    "★ 【进展看门狗】每行还有 progress_age_sec / progress_stalled："
+    "progress_stalled=True 表示【活着但已超过阈值没有任何可观察进展】"
+    "（报告/产物/待确认全不更新）—— 此时 safe_to_restart 已翻为 True，"
+    "【不要再轮询干等】，直接 room-fail + room-start + 重新 fork。"
+    "这是『活着 ≠ 在干活』的机器判据：心跳正常不代表它在推进。"
     "🚫 禁止用 list_agents / wait_agent 判断 fork 出来的子代理死活 —— 它们看不到。"
     "只读：不要再用 platform-sync 造假心跳，平台状态由插件自动登记。"
 )
@@ -5737,10 +6060,37 @@ def _visual_gate_for_room(name):
                            _rec_g.get("final_verdict")
                            or (_rec_g.get("blockers") or ["未说明"])[0]))
             continue
+        # ── 【R1 / BUG-25·BUG-84 修复】取闭环记录的键名必须与写入方一致 ──
+        # 真实写入方 visual_check.enforce_visual_gate 落盘的是
+        #   out["loop_file"] = <visual_loop.json 的绝对路径>   （字符串）
+        # 旧代码只读 _rec_g.get("loop") —— 生产环境该键【从不存在】，
+        #   于是回落成 _rec_g 本身；而 gate 记录里没有 rounds
+        #   → verify_visual_evidence 报"没有看过图的痕迹"
+        #   → 100% 假阴性（证据齐全也一律 VISUAL_EVIDENCE_REQUIRED）。
+        # 回归测试一直绿，是因为它的夹具恰好写的是 "loop": {...} 这个键。
+        # 修法：按优先级取 ①内嵌 loop 记录 ②loop_file 指向的文件 ③自证 rounds。
+        _loop_rec = _rec_g.get("loop")
+        if not _loop_rec:
+            _lf = _rec_g.get("loop_file")
+            if isinstance(_lf, str) and _lf:
+                if not os.path.isabs(_lf):
+                    _lf = os.path.join(os.path.dirname(_gate_file), _lf)
+                if os.path.exists(_lf):
+                    # verify_visual_evidence 支持直接传 visual_loop.json 路径
+                    _loop_rec = _lf
+                else:
+                    _bad.append("%s：看图闭环记录文件不存在（%s）"
+                                % (os.path.basename(_p), _lf))
+                    continue
+            elif isinstance(_rec_g.get("rounds"), list):
+                _loop_rec = _rec_g
+        if not _loop_rec:
+            _bad.append("%s：看图证据里没有闭环记录（既无 loop 也无 loop_file）"
+                        % os.path.basename(_p))
+            continue
         # 复核证据文件里引用的截图是否仍真实存在（防事后删除/替换）
         try:
-            _ev = _vc.verify_visual_evidence(
-                _rec_g.get("loop") or _rec_g, out_dir=None)
+            _ev = _vc.verify_visual_evidence(_loop_rec, out_dir=None)
             if not _ev.get("ok"):
                 _mis = (_ev.get("missing") or []) + (_ev.get("bad") or [])
                 _why = (_mis[0].get("why") if _mis and isinstance(_mis[0], dict)
@@ -6593,6 +6943,11 @@ def main():
                   "room-end <房间名> [--force]": "小屋完成：清理+释放SW锁+关SW"
                                                    "（--force 强制释放 SW 锁，Bug-25/27）",
                   "room-fail <房间名>": "小屋失败回退，待重做",
+                  "archive-list [房间名]": "【R8】列出归档批次与文件指纹"
+                                              "（只读；归档≠最新版，回填前先看）",
+                  "archive-restore <房间> [--batch B] [--part 关键字] [--force]":
+                      "【R8/B-25】按指纹仲裁回填归档产物：默认只补缺、"
+                      "归档件更旧时拒绝覆盖（--force 才越过，且先备份）",
                   "room-heartbeat <房间名>": "心跳保活（【Bug-23】已非必需，仅兼容）",
                   "room-report <房间> <阶段> <详情>": "进度旁路上报（小屋可调）",
                   "room-stage <房间> [阶段] [详情]": "【Bug⑨】长任务推进阶段"
@@ -6638,6 +6993,41 @@ def main():
         result = cmd_declare(args[1] if len(args) > 1 else "1")
     elif cmd == "room-start":
         result = cmd_room_start(args[1] if len(args) > 1 else "小屋")
+    elif cmd in ("archive-list", "archive_ls"):
+        # ── 【R8 / B-20·B-25】查看归档批次与指纹（只读）──────────────────
+        _al_room = None
+        for _i, _a in enumerate(args[1:]):
+            if not _a.startswith("--"):
+                _al_room = _a
+                break
+        result = cmd_archive_list(room=_al_room)
+    elif cmd in ("archive-restore", "archive_restore"):
+        # ── 【R8 / B-25】按指纹仲裁回填归档产物 ───────────────────────────
+        # 用法: archive-restore <房间> [--batch <批次名>] [--part <关键字>]
+        #                      [--force] [--dry-run]
+        # 默认只回填【目标不存在】的文件；归档件比现有文件旧时【拒绝覆盖】
+        #   （这正是 B-20 把过门新版覆盖成旧版的事故），确需覆盖加 --force。
+        _ar_pos = [a for a in args[1:] if not a.startswith("--")]
+        _ar_batch = None
+        _ar_part = None
+        for _i, _a in enumerate(args[1:]):
+            if _a == "--batch" and _i + 2 < len(args):
+                _ar_batch = args[_i + 2]
+            if _a == "--part" and _i + 2 < len(args):
+                _ar_part = args[_i + 2]
+        if _ar_batch in _ar_pos:
+            _ar_pos = [p for p in _ar_pos if p != _ar_batch]
+        if _ar_part in _ar_pos:
+            _ar_pos = [p for p in _ar_pos if p != _ar_part]
+        if not _ar_pos:
+            result = {"ok": False,
+                      "error": "用法: archive-restore <房间> [--batch <批次>] "
+                               "[--part <关键字>] [--force] [--dry-run]"}
+        else:
+            result = cmd_archive_restore(
+                _ar_pos[0], batch=_ar_batch, part=_ar_part,
+                dry_run=("--dry-run" in args),
+                force=("--force" in args))
     elif cmd == "room-end":
         # 【Bug-25/27】支持 --force 强制释放 SW 锁（小屋忘记 close-all 时兜底）
         _re_args = [a for a in args[1:] if not a.startswith("--")]

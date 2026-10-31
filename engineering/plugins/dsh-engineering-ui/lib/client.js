@@ -724,6 +724,13 @@ window.__ModuleLoader__.load({
       '.eng-mc-empty{background:rgba(37,99,235,.06);border:1px dashed #b9cdf3;border-radius:6px;color:#3b5bdb;font-size:11px;line-height:1.55;margin-top:6px;padding:6px 9px}',
       // 行内"手动填写"切回链接
       '.eng-mc-manual{background:none;border:0;color:#2563eb;cursor:pointer;font-size:10.5px;padding:0 0 0 4px;text-decoration:underline}',
+      // ── "+ 添加模型" 一行（用户要求：默认 3 个，+ 让他们自己加）──────────
+      '.eng-mc-addrow{display:flex;justify-content:center;padding:4px 0 2px}',
+      '.eng-mc-add{background:rgba(37,99,235,.08);border:1px dashed #9db8ee;border-radius:6px;color:#2563eb;cursor:pointer;font-family:inherit;font-size:11px;padding:3px 14px;transition:background .15s}',
+      '.eng-mc-add:hover{background:rgba(37,99,235,.16)}',
+      // 每行的删除按钮（配合 + 使用；只剩 1 行时置灰）
+      '.eng-mc-del{background:none;border:0;color:#b91c1c;cursor:pointer;font-size:11px;line-height:1;padding:2px 4px}',
+      '.eng-mc-del:disabled{color:#c8ccd4;cursor:default}',
       // ── 【连接区】状态徽标 + 连接按钮（当前仅 UI，真实连接后续接入）──────
       '.eng-chip{align-items:center;border-radius:999px;display:inline-flex;flex:none;font-size:11px;font-weight:600;gap:5px;padding:2px 9px;white-space:nowrap}',
       '.eng-chip-dot{border-radius:50%;flex:none;height:6px;width:6px}',
@@ -1463,6 +1470,9 @@ window.__ModuleLoader__.load({
         '.eng-row-chev{color:#5b6270}' +
         // 模型接替表格（深色）
         '.eng-mc-in{background:#15181d;border-color:#33383f;color:#e5e7eb}' +
+        '.eng-mc-add{background:rgba(96,165,250,.12);border-color:#3b5bdb;color:#93c5fd}' +
+        '.eng-mc-add:hover{background:rgba(96,165,250,.22)}' +
+        '.eng-mc-del{color:#f87171}' +
         '.eng-mc-table{border-top-color:#2f333c}' +
         '.eng-mc-head{color:#8b95a3}' +
         // 连接区徽标（深色）
@@ -5254,9 +5264,14 @@ window.__ModuleLoader__.load({
           return n;
         });
       }
+      // ── 【2026-10-30 改版】默认 3 个槽位，且【不限个数】 ─────────────────
+      // 用户要求：「默认3个，然后后面给一个"+"，让他们自己加模型，
+      //            不限制他们应该加多少个」。
+      // 所以这里不再 slice(0,10)，只保证至少有 3 行可用。
+      var MIN_SLOTS = 3;
       function withTen(ms) {
-        var a = Array.isArray(ms) ? ms.slice(0, 10) : [];
-        while (a.length < 10) a.push({ provider: '', model: '' });
+        var a = Array.isArray(ms) ? ms.slice() : [];
+        while (a.length < MIN_SLOTS) a.push({ provider: '', model: '' });
         return a;
       }
       function load() {
@@ -5324,6 +5339,45 @@ window.__ModuleLoader__.load({
         for (var k in S.manual) m[k] = S.manual[k];
         m[i] = !m[i];
         patch({ manual: m });
+      }
+      /** 追加一个空槽位（"+" 按钮）。不限个数。 */
+      function addSlot() {
+        var ms = S.models.slice();
+        ms.push({ provider: '', model: '' });
+        patch({ models: ms, saved: '' });
+      }
+      /** 删除某一槽位（至少保留 1 行，避免界面空掉）。 */
+      function removeSlot(i) {
+        var ms = S.models.slice();
+        if (ms.length <= 1) { ms[0] = { provider: '', model: '' }; }
+        else { ms.splice(i, 1); }
+        // 手动标记是按下标存的，删除后要整体重映射
+        var nm = {};
+        var k2 = 0;
+        for (var k in S.manual) {
+          var idx = parseInt(k, 10);
+          if (idx === i) continue;
+          nm[idx > i ? idx - 1 : idx] = S.manual[k];
+        }
+        patch({ models: ms, manual: nm, saved: '' });
+      }
+      /**
+       * 清空全部备用模型。
+       * 用户要求：「加一个清空，没填模型就是使用默认的，用户自己选择的模型即可」。
+       * 清空后只留 3 个空槽位，保存即等于"关闭兜底"。
+       */
+      function clearAll() {
+        var ms = [];
+        for (var i = 0; i < MIN_SLOTS; i++) ms.push({ provider: '', model: '' });
+        patch({ models: ms, manual: {}, saved: '' });
+        // 立刻落盘：空链 = 不兜底
+        save({ enabled: true, models: [] });
+      }
+      /** 保存前裁掉尾部连续空槽位，避免把一堆空行写进配置。 */
+      function trimEmpty(ms) {
+        var a = ms.slice();
+        while (a.length && !(a[a.length - 1].provider && a[a.length - 1].model)) a.pop();
+        return a;
       }
 
       var groups = (S.cat && S.cat.groups) || [];
@@ -5481,27 +5535,21 @@ window.__ModuleLoader__.load({
               className: 'eng-mc-manual', type: 'button',
               title: isManual ? '改回下拉选择' : '目录里没有？手动填写',
               onClick: function () { toggleManual(i); }
-            }, isManual ? '下拉' : '手填')));
+            }, isManual ? '下拉' : '手填'),
+            // 删除本行（与"+"配对，形成自由增删；只有 1 行时置灰）
+            h('button', {
+              className: 'eng-mc-del', type: 'button',
+              disabled: S.models.length <= 1,
+              title: '删除这一行',
+              onClick: function () { removeSlot(i); }
+            }, '\u2715')));
       });
 
+      // ── 【2026-10-30 改版】去掉"额度不足自动换模型"开关 ──────────────────
+      // 用户要求：「把那个选项『额度不足自动换模型』给去掉」。
+      // 语义改为：只要列表里填了模型，就按顺序兜底；没填就用默认（用户自己选的）。
+      // 因此不再需要一个显式开关 —— 空列表天然等于"关闭"。
       return h(EngGroup, { title: '模型自动接替' },
-        h('div', { className: 'eng-row sw' },
-          h('div', { className: 'eng-row-txt' },
-            h('div', { className: 'eng-row-label' }, '额度不足自动换模型'),
-            h('div', { className: 'eng-row-hint' },
-              S.enabled
-                ? '仅当当前模型报额度/限流错误时才切下一个；平时不影响你在设置里选的模型。'
-                : '已关闭：额度耗尽时本轮直接失败。')),
-          h(EngSwitch, {
-            bare: true,
-            checked: S.enabled,
-            label: '额度不足自动换模型',
-            onChange: function (next) {
-              patch({ enabled: next, saved: '' });
-              save({ enabled: next, models: S.models });
-            }
-          })),
-
         h('div', {
           className: 'eng-row clickable',
           role: 'button',
@@ -5511,7 +5559,7 @@ window.__ModuleLoader__.load({
         },
           h('div', { className: 'eng-row-txt' },
             h('div', { className: 'eng-row-label' },
-              (S.open ? '\u25be ' : '\u25b8 ') + '模型列表（最多 10 个，按顺序优先）'),
+              (S.open ? '\u25be ' : '\u25b8 ') + '备用模型（按顺序兜底）'),
             h('div', { className: 'eng-row-hint' }, summary)),
           h('span', { className: 'eng-row-chev' },
             filled.length ? String(filled.length) : '\u203a')),
@@ -5544,16 +5592,29 @@ window.__ModuleLoader__.load({
             h('span', { className: 'eng-mc-cell eng-mc-effort' }, '档位'),
             h('span', { className: 'eng-mc-ops' }, '')),
           rows,
+          // "+" 添加一行（不限个数）—— 用户要求：默认 3 个，后面给个 + 让他们自己加
+          h('div', { className: 'eng-mc-addrow' },
+            h('button', {
+              className: 'eng-mc-add', type: 'button',
+              title: '再加一个备用模型',
+              onClick: function () { addSlot(); }
+            }, '\uFF0B 添加模型')),
           h('div', { className: 'eng-mc-ft' },
             h('button', {
               className: 'eng-conn-btn tiny', type: 'button',
-              onClick: function () { save({ enabled: S.enabled, models: S.models }); }
+              onClick: function () { save({ enabled: true, models: trimEmpty(S.models) }); }
             }, '保存'),
             h('button', {
               className: 'eng-conn-btn tiny', type: 'button',
               title: '重新读取宿主可用模型',
               onClick: function () { patch({ catLoading: true }); loadCatalog(); }
             }, S.catLoading ? '读取中…' : '刷新目录'),
+            // 清空 —— 用户要求：没填模型就用默认（自己选的）模型
+            h('button', {
+              className: 'eng-conn-btn tiny', type: 'button',
+              title: '清空所有备用模型（等于不兜底，始终用你自己选的模型）',
+              onClick: function () { clearAll(); }
+            }, '清空'),
             h('span', { className: 'eng-row-hint' },
               S.catLoading
                 ? '正在读取模型目录…'
@@ -5606,6 +5667,10 @@ window.__ModuleLoader__.load({
             h(EngConnRow, { target: 'webots', label: 'Webots连接' }),
             h(EngRow, { label: '子栏目选项设置3' })),
 
+          // ── 主栏目 2.5：模型自动接替（用户需求 2026-10-30）──────────────
+          // 「第一个模型额度不够嘎了，第二个立马接上，可以直接指定10个模型，
+          //   一般是收起来那个表」。默认收起，点摘要行展开 10 行槽位。
+          h(EngModelChainPanel, {}),
           // ── 主栏目2：设计过程优化（用户指定名称）───────────────────────
           // 首行「右键引用调出AI解释」= 划词/右键「问问AI」功能的开关与控制。
           //   用户强调「这个功能是必须要有效的」，因此它是一个【真开关】：
@@ -5643,11 +5708,6 @@ window.__ModuleLoader__.load({
                 }
               })),
             h(EngRow, { label: '子栏目选项设置3' })),
-
-          // ── 主栏目 2.5：模型自动接替（用户需求 2026-10-30）──────────────
-          // 「第一个模型额度不够嘎了，第二个立马接上，可以直接指定10个模型，
-          //   一般是收起来那个表」。默认收起，点摘要行展开 10 行槽位。
-          h(EngModelChainPanel, {}),
 
           // ── 主栏目3：美化工程模式（第 1 行 = 子代理显示页开关）────────
           h(EngGroup, { title: '美化工程模式' },

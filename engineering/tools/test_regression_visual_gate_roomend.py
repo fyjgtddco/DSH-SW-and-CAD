@@ -195,6 +195,65 @@ def main():
         check("最新证据为 FAIL 时拦截（证明读的是最新那份）",
               mg._visual_gate_for_room("结构件") is not None)
 
+        # ═══════════════════════════════════════════════════════════
+        section("9. ★★ R1 回归：证据用【真实写入方】的形状（loop_file 而非 loop）")
+        # 锁定的真实缺陷（2026-10-30 四工位转台 15h 实测，台账 BUG-25/BUG-84）：
+        #   生产落盘方 visual_check.enforce_visual_gate 写的是
+        #       {"passed":true, ..., "loop_file": "<visual_loop.json 路径>"}
+        #   —— 里面【没有】"loop" 键。而旧门禁只读 _rec_g.get("loop")，
+        #   取不到就回落成 gate 记录本身，gate 记录没有 rounds
+        #   → verify_visual_evidence 报"没有看过图的痕迹"
+        #   → 10 个房间 3 次正常调用 0 次成功，100% 假阴性，
+        #     最终逼出 8 次 --force，让三大防线在交付意义上不可证。
+        #   旧测试夹具写的是 "loop": {...}，所以一直假绿。
+        shutil.rmtree(os.path.join(work, "visual_check"), ignore_errors=True)
+        mg._save_artifact_registry({"结构件": [{"path": part, "name": "TestPart"}]})
+        stem = os.path.splitext(os.path.basename(part))[0]
+        vd = os.path.join(work, "visual_check", "%s_20260102_000000" % stem)
+        os.makedirs(vd, exist_ok=True)
+        png9 = os.path.join(vd, "%s__front.png" % stem)
+        with open(png9, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"9" * 900)
+        # ① 真实形状：visual_loop.json 单独一个文件，gate 里只放路径
+        loop_file = os.path.join(vd, "visual_loop.json")
+        with open(loop_file, "w", encoding="utf-8") as f:
+            json.dump({"rounds": [{"round": 1,
+                                   "views": {"shots": {"front": {"path": png9}}},
+                                   "verdict": "PASS"}],
+                       "final_verdict": "PASS"}, f, ensure_ascii=False)
+        with open(os.path.join(vd, "visual_gate.json"), "w", encoding="utf-8") as f:
+            json.dump({"ok": True, "passed": True, "final_verdict": "PASS",
+                       "loop_file": loop_file,
+                       "enforced_by": "visual_check.enforce_visual_gate"},
+                      f, ensure_ascii=False)
+        r9 = mg._visual_gate_for_room("结构件")
+        check("★★ 真实形状（loop_file 指向 visual_loop.json）→ 必须放行",
+              r9 is None, r9)
+
+        # ② 同上，但 loop_file 用相对路径（真实实现可能是相对的）
+        with open(os.path.join(vd, "visual_gate.json"), "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "final_verdict": "PASS",
+                       "loop_file": "visual_loop.json"}, f, ensure_ascii=False)
+        check("★ loop_file 为相对路径时也要能解析（按 gate 所在目录）",
+              mg._visual_gate_for_room("结构件") is None,
+              mg._visual_gate_for_room("结构件"))
+
+        # ③ loop_file 指向的文件不存在 → 必须拦（不得静默放行）
+        with open(os.path.join(vd, "visual_gate.json"), "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "final_verdict": "PASS",
+                       "loop_file": os.path.join(vd, "nope.json")},
+                      f, ensure_ascii=False)
+        r9c = mg._visual_gate_for_room("结构件")
+        check("★ loop_file 指向不存在的文件 → 拦截", r9c is not None, r9c)
+
+        # ④ 真实形状 + 截图被删 → 仍必须拦（防伪造，确认走的是真闭环记录）
+        with open(os.path.join(vd, "visual_gate.json"), "w", encoding="utf-8") as f:
+            json.dump({"passed": True, "final_verdict": "PASS",
+                       "loop_file": loop_file}, f, ensure_ascii=False)
+        os.remove(png9)
+        r9d = mg._visual_gate_for_room("结构件")
+        check("★ 真实形状下截图被删 → 重新拦下（防伪造）", r9d is not None, r9d)
+
     finally:
         os.chdir(cwd0)
         shutil.rmtree(work, ignore_errors=True)

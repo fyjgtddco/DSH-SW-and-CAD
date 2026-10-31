@@ -128,11 +128,33 @@ const GUARD_PRESET = 'engineering';
 // 5. 失败后从【当前实际在用的模型】往后找候选，而不是从链首重来；
 //    tried 集合按 turn 重置。
 const MODEL_CHAIN_FILE = 'model_chain.json';
-/** 被认为"该换模型"的错误码（宿主 dsh-llm 的 provider-neutral 码）。 */
+/**
+ * 被认为"该换模型"的错误码（宿主 dsh-llm 的 provider-neutral 码）。
+ *
+ * ── 【2026-10-30 补充】加上 EMPTY_RESPONSE ────────────────────────────
+ * 用户原话：「只要模型在 DSH 中重试超过 5 次那么，反正就是报错了，
+ *            模型输不出内容了，那就换下去，尽量保证不要断掉」。
+ * EMPTY_RESPONSE 正是"模型正常返回但没有任何内容"（dsh-llm 的规范码）：
+ * 适配器把它当失败而不是空消息，因为空消息会让回合静默结束、用户干瞪眼。
+ * 这种情况换模型往往立刻就好，所以必须纳入自动接替。
+ */
 const MODEL_CHAIN_SWITCH_CODES = new Set([
   'QUOTA', 'ACCOUNT_QUOTA', 'QUOTA_EXCEEDED', 'RATE_LIMIT',
   'CONTEXT_WINDOW_EXCEEDED',
+  'EMPTY_RESPONSE',            // 模型输不出内容（空响应）
 ]);
+
+/**
+ * 单轮内同一模型连续失败多少次就强制换下一个。
+ *
+ * 用户要求：「重试超过 5 次就换下去，尽量保证不要断掉」。
+ * 为什么不能只靠错误码：有些失败是【反复同一个错】但不属于上面那些码
+ * （比如某家 provider 的网关间歇性 5xx、适配器抛了别的 code）。
+ * 那些情况下宿主会一直重试同一个模型，用户体验就是"卡住不动"。
+ * 所以这里再加一道【计数兜底】：同一模型在同一轮里失败到第 N 次，
+ * 不管什么错误码，都直接换下一个候选。
+ */
+const MODEL_CHAIN_MAX_SAME_FAILS = 5;
 
 /**
  * 规整一条链配置。纯函数，供 host 与测试共用。
@@ -158,7 +180,10 @@ function normalizeModelChain(raw) {
       const eff = String(m.reasoningEffort || '').trim();
       if (eff) entry.reasoningEffort = eff;
       out.entries.push(entry);
-      if (out.entries.length >= 10) break;            // 上限 10 个（用户要求）
+      // ── 【2026-10-30 改版】不再限制 10 个 ──────────────────────────────
+      // 用户要求：「不限制他们应该加多少个」。
+      // 原上限 10 已移除；只保留一个防御性极端上限，避免异常输入撑爆内存。
+      if (out.entries.length >= 100) break;
     }
     return out;
   } catch (e) {
@@ -1114,7 +1139,12 @@ export function apply(ctx) {
   function modelChainApplies(agent) {
     try {
       const cfg = readModelChainConfig();
-      if (!cfg.enabled || !cfg.entries.length) return false;
+      // ── 【2026-10-30 改版】空链 = 不兜底 ────────────────────────────────
+      // 用户要求：「没填模型就是使用默认的，用户自己选择的模型即可」。
+      // 因此不再依赖 enabled 开关（该开关已从 UI 移除）：
+      //   · 链里【没有】模型  → 完全不管，用用户自己选的默认模型；
+      //   · 链里【有】模型    → 按顺序兜底。
+      if (!cfg.entries.length) return false;
       // ① 与守卫同口径
       if (isGuardSession(agent)) return true;
       // ② header 直接标明
@@ -1124,16 +1154,34 @@ export function apply(ctx) {
         if (agent && String(agent.agentPreset || '') === GUARD_PRESET) return true;
       } catch (e) {}
       // ③ 子代理继承父级 preset 判断
+      //
+      // ── 【R15 / 子代理不换模型修复】不能只看父级"已经跑过一轮"的缓存 ──
+      // 原实现的链路是：parentChainStateOf(agent).isEng —— 而 isEng 只在
+      //   modelChainStateOf() 里赋值，也就是【父级必须先发过一次 agent/request】。
+      // 实测缺陷（用户反馈"子代理额度用完不换模型"）：
+      //   9 个建模小屋是【同批 fork】出来的，父对话这一刻可能还没发过请求
+      //   （或父级状态在压缩/重启后被清掉）→ parentChainStateOf 返回 null
+      //   → modelChainApplies=false → 子代理的 QUOTA 错误走 next() 直接透传
+      //   → 该子代理当场死掉，而主对话却正常换模型。
+      // 正确语义：**有父会话 = 属于父会话的作用域**。
+      //   父级已知 → 用父级的 isEng；父级未知 → 先查预设缓存，
+      //   再不行就【保守按工程模式处理】（子代理本来就只可能由工程模式 fork 出来，
+      //   且链路副作用仅是"换一个模型"，远小于"子代理直接死掉"的代价）。
       try {
-        const pst = parentChainStateOf(agent);
-        // 父级必须是【当前】判定为工程模式（isEng 已改非粘性，每轮重算）
-        if (pst && pst.isEng === true) return true;
-        const pid = agent && (agent.parentSession
-          || (agent.session && agent.session.header && agent.session.header.parentSession));
+        const pid = parentSessionId(agent);
         if (pid) {
+          const pst = parentChainStateOf(agent);
+          if (pst && pst.isEng === true) return true;
+          if (pst && pst.isEng === false) return false;   // 父级明确不是工程 → 不管
           const cached = presetCache.get(String(pid));
           if (cached === GUARD_PRESET) return true;
+          if (cached && cached !== GUARD_PRESET && isKnownPreset(cached)) {
+            return false;                                  // 父级明确是别的预设
+          }
           if (cached === undefined) readPreset(String(pid)).catch(() => {});
+          // 父级预设未知（还没跑过请求 / 刚重启 / 读不到日志）——
+          //   子代理场景下按工程模式处理，宁可多兜一次也不让小屋里断。
+          return true;
         }
       } catch (e) {}
       return false;
@@ -1146,7 +1194,12 @@ export function apply(ctx) {
   function modelChainStateOf(agent, turn) {
     let st = modelChainState.get(agent.id);
     if (!st) {
-      st = { key: null, tried: new Set(), turn: null, isEng: false, switched: false };
+      st = {
+        key: null, tried: new Set(), turn: null, isEng: false,
+        switched: false, prevKey: null,
+        /** 本轮内每个模型失败了几次（key=provider\0model）→ 用于"反复失败就换" */
+        failCounts: new Map(),
+      };
       modelChainState.set(agent.id, st);
     }
     if (st.turn !== turn) {
@@ -1155,6 +1208,8 @@ export function apply(ctx) {
       // 新的一轮：接替状态复位（否则上一轮切换会一直粘住，
       // 表现为"用户重新选了模型却还被按在旧候选上"）
       st.switched = false;
+      st.prevKey = null;
+      st.failCounts = new Map();   // 新一轮：失败计数清零，重新给每个模型机会
     }
     // 记录"这个 agent 是否工程模式"，供子代理顺着父级判断作用域。
     // ⚠️ 必须是【非粘性】判定：每轮重算、允许从 true 变回 false。
@@ -1188,11 +1243,21 @@ export function apply(ctx) {
    */
   function parentChainStateOf(agent) {
     try {
-      const pid = agent && (agent.parentSession || agent.parentId
-        || (agent.session && agent.session.header && agent.session.header.parentSession));
+      const pid = parentSessionId(agent);
       if (!pid) return null;
       const st = modelChainState.get(String(pid));
       return st || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 取该 agent 的父会话 id（fork 谱系的唯一可靠来源）。 */
+  function parentSessionId(agent) {
+    try {
+      return agent && (agent.parentSession || agent.parentId
+        || (agent.session && agent.session.header && agent.session.header.parentSession))
+        || null;
     } catch (e) {
       return null;
     }
@@ -1234,17 +1299,36 @@ export function apply(ctx) {
       const cur = cfg.entries.find((e) => modelKey(e.provider, e.model) === st.key) || null;
       if (!cur) return resolved;
 
-      // 用户此刻选的路由与我们要切的不同 → 视为用户重新手动接管，交还控制权
+      // ── 【2026-10-30 修复·误判用户改选】────────────────────────────────
+      // 场景（用户实际问到的）：设置页选 A，链里第一个填的是 B。
+      //   A 失败 → 我们切到 B → 下一轮 agent/request 的 resolved 仍来自
+      //   【上一个成功请求头】，也就是还是 A（A 那次失败了，头没更新）。
+      //   旧代码看到 "resolved=A ≠ st.key=B" 就判定"用户改选了"，
+      //   于是放弃接替、退回 A → A 又失败 → 死循环，接替形同虚设。
+      //
+      // 修复：记住【切换前用户实际在用的模型】(st.prevKey)。
+      //   只有 resolved 既不是当前候选、也【不是】切换前那个模型时，
+      //   才真的是用户又改了选，此时才交还控制权。
       const wantP = String((resolved && resolved.provider) || '');
       const wantM = String((resolved && resolved.model) || '');
-      if (wantP && wantM && modelKey(wantP, wantM) !== st.key) {
-        st.switched = false;
-        st.key = null;
-        try {
-          console.warn('[dsh-engineering-ui] 检测到手动选型变更（'
-            + wantP + '/' + wantM + '），已放弃接替、交还用户选择');
-        } catch (e) {}
-        return resolved;
+      const wantKey = (wantP && wantM) ? modelKey(wantP, wantM) : '';
+      if (wantKey && wantKey !== st.key) {
+        // resolved 是"上一个成功请求头"的模型：
+        //   · 等于 st.prevKey（切换前的模型）→ 正常，这是我们自己切走的，
+        //     继续用候选，不算用户改选；
+        //   · 其它值 → 用户确实又手动换了，交还控制权。
+        if (st.prevKey && wantKey === st.prevKey) {
+          // 正常接替路径，继续往下走
+        } else {
+          st.switched = false;
+          st.key = null;
+          st.prevKey = null;
+          try {
+            console.warn('[dsh-engineering-ui] 检测到手动选型变更（'
+              + wantP + '/' + wantM + '），已放弃接替、交还用户选择');
+          } catch (e) {}
+          return resolved;
+        }
       }
 
       try {
@@ -1271,10 +1355,35 @@ export function apply(ctx) {
       const failure = payload && payload.failure;
       const code = String((failure && failure.code) || '');
       if (!agent || !agent.id) return next();
-      if (!MODEL_CHAIN_SWITCH_CODES.has(code)) return next();   // 其它错误交给默认链路
       if (!modelChainApplies(agent)) return next();
       const cfg = readModelChainConfig();
       const st = modelChainStateOf(agent, payload.turn);
+
+      // ── 【2026-10-30 强化】判定"这个模型是否还能正常工作" ────────────────
+      // 用户要求（原话）：
+      //   「不只是失败 5 次就换，就模型输不出文字就换，
+      //     模型无法正常工作就换的那种」
+      // 所以判断标准不是"错误码在不在白名单里"，而是：
+      //   ① 明确的致命类型（额度耗尽/限流/上下文爆掉/空响应/凭据失效）
+      //       → 立刻换，不用等次数；
+      //   ② 其它任何错误 → 同一模型在同一轮内累计失败到 N 次 → 换；
+      //   ③ 不属于错误、但模型确实没产出（空文本）→ 也算不正常。
+      // 这样"卡在那儿一直重试同一个模型"就不可能发生了。
+      const _failModelKey = modelKey(payload.provider, (failure && failure.model) || '');
+      st.failCounts = st.failCounts || new Map();
+      const _cnt = (st.failCounts.get(_failModelKey) || 0) + 1;
+      st.failCounts.set(_failModelKey, _cnt);
+
+      // ① 致命类型：立刻换
+      const _fatal = MODEL_CHAIN_SWITCH_CODES.has(code);
+      // ② 反复失败：达到阈值也换（覆盖各种没被列入白名单的错）
+      const _tooMany = _cnt >= MODEL_CHAIN_MAX_SAME_FAILS;
+      // ③ 模型明显不正常：空响应 / 编码类错误（输不出内容）
+      const _broken = /^(EMPTY_RESPONSE|INVALID_RESPONSE|DECODE|MALFORMED|UNSUPPORTED)/i.test(code)
+        || /empty response|no content|invalid response|decode/i.test(String((failure && failure.message) || ''));
+
+      // 达到任一条件才换；否则交回默认重试链路（让宿主自己重试本模型）
+      if (!_fatal && !_tooMany && !_broken) return next();
       // 把"刚失败的模型"记为已试，避免又切回它
       st.tried.add(modelKey(payload.provider, (failure && failure.model) || ''));
       st.tried.add(modelKey(payload.provider, ''));
@@ -1289,19 +1398,31 @@ export function apply(ctx) {
       // 现在：先定位当前模型在链中的下标，之后只往后找（找不到再回到链首
       //       找没过期的，保持"兜底"语义但不打乱用户偏好）。
       const _curKey = modelKey(payload.provider, (failure && failure.model) || '');
-      let _start = cfg.entries.findIndex((e) => modelKey(e.provider, e.model) === _curKey);
-      if (_start < 0) _start = -1;          // 当前模型不在链里：从链首开始找
-      let nxt = null;
-      for (let _i = _start + 1; _i < cfg.entries.length; _i++) {
-        const e = cfg.entries[_i];
-        if (st.tried.has(modelKey(e.provider, e.model))) continue;
-        nxt = e; break;
-      }
+      // ── 【2026-10-30 最终定案】严格【从上到下】按列表顺序替换 ─────────────
+      // 用户原话：「不应该是按照从上到下开始替换吗？」
+      //
+      // 这是对的，也是列表语义（"按顺序优先"）本来的意思。此前实现是
+      // "从当前模型的下标往后找"，导致：
+      //   · 用户用 A，列表 [B,C,D]，A 失败 → 从链首 B 开始（碰巧对）；
+      //   · 但若当前是 C（已在链中），C 失败 → 只往 D 找，跳过了 B；
+      //   · 若当前是列表最后一个，还会回绕到链首，顺序完全乱掉。
+      // 现在统一为：**永远从第 1 行开始，取第一个本轮还没试过的**。
+      //   · 与"当前用的是哪个模型"完全无关；
+      //   · tried 集合保证同一轮不重复试；
+      //   · 已试过的（含刚失败的）自动跳过 → 不会死循环；
+      //   · 全部试完 → 明确返回"耗尽"，交还宿主。
+      let nxt = nextModelCandidate(cfg.entries, st.tried);
       if (!nxt) {
-        // 后面没有了 → 回到链首找还没试过的（真正的兜底）
-        nxt = nextModelCandidate(cfg.entries, st.tried);
+        // 链已试完 → 交回默认（明确失败，绝不空转）
+        try {
+          console.warn('[dsh-engineering-ui] 链内候选已全部失败（'
+            + cfg.entries.length + ' 个），交还宿主处理');
+        } catch (e) {}
+        return next();
       }
-      if (!nxt) return next();        // 链已试完 → 交回默认（明确失败）
+      // 记下【切换前用户实际在用的模型】——下一轮 agent/request 会用它
+      // 区分"这是我们自己切走的" 还是 "用户又手动改了选型"。
+      st.prevKey = _curKey;
       st.key = modelKey(nxt.provider, nxt.model);
       st.switched = true;             // ← 关键：只有这个标记置位，下一轮才会覆盖请求
       try {
@@ -4528,7 +4649,9 @@ export function apply(ctx) {
           enabled: cfg.enabled,
           models: cfg.entries,
           file: p,
-          limit: 10,
+          // 【2026-10-30 改版】不再限制数量（用户要求「不限制加多少个」）。
+          // 这里仅给出建议下限，供 UI 决定初始显示几行。
+          min_slots: 3,
           host_default: hostDefault,
           head_matches_default: headMatchesDefault,
           switch_codes: [...MODEL_CHAIN_SWITCH_CODES],
