@@ -41,6 +41,10 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 // 【三大防线 · 签名式信任根】仅工程模式装配；密钥只存宿主内存。
 import { DefenseSigner } from './defense-sign.js';
+// 【卡死修复 · 宿主层】job_output 长等待守卫。纯本地实现、零外部依赖：
+//   宿主层少了任何一个包都会让整块 import 求值失败 → 插件不装配 → 修复白做，
+//   所以这里只引本插件自己的文件。
+import { installJobWaitGuard } from './job-wait-guard.js';
 
 // 纯本地兜底：最后一次 agent-preset/selected，否则 header.agentPreset。
 function resolvePresetFallback(header, events) {
@@ -3078,6 +3082,25 @@ export function apply(ctx) {
             ? body.applied_density_kg_m3 : null,
           yield_deviation_pct: typeof body.yield_deviation_pct === "number"
             ? body.yield_deviation_pct : null,
+          // == [A-48 修复] 几何指纹纳入待签体 ========================
+          // 原待签体只含材料事实，防线①因此对【零件几何】零约束：
+          //   实测（2026-11-01）外径 φ160（规范 φ200）、体积缺 35% 的
+          //   旧草稿凭"材料凭据 ok"直通总装。
+          // 现在把几何事实一并签名。注意：这些是【事实陈述】而非判定结论，
+          //   真实值仍由宿主的 md5 绑定保护（part_md5 覆盖整个文件内容，
+          //   改几何必然改变 md5 → 签名与文件绑定仍然成立）。
+          // 校验端（defense_gate.check_material_attestation）据此与
+          //   load_case 的 design_domain / expected_volume_mm3 比对。
+          part_bbox_mm: Array.isArray(body.part_bbox_mm)
+            ? body.part_bbox_mm.map((x) => (typeof x === "number" ? x : null))
+            : null,
+          part_dims_mm: Array.isArray(body.part_dims_mm)
+            ? body.part_dims_mm.map((x) => (typeof x === "number" ? x : null))
+            : null,
+          part_volume_mm3: typeof body.part_volume_mm3 === "number"
+            ? body.part_volume_mm3 : null,
+          part_body_count: typeof body.part_body_count === "number"
+            ? body.part_body_count : null,
         };
       } else {
         return send(res, 400, { ok: false, error: "unknown kind: " + kind });
@@ -5182,6 +5205,20 @@ export function apply(ctx) {
       stagePlatformAgent(rec);
     } catch (e) {}
   }));
+
+  // ══ 【卡死修复 · 宿主层】job_output 长等待守卫 ═══════════════════════════
+  // 事故：job_output { wait:true, timeout_ms:270000/240000 } 静默阻塞数分钟，
+  //   用户以为死机而强退；宿主停机时 ctx.jobs 的 fiber 失活 → cordis 抛
+  //   cannot get required service "jobs" in inactive context → 整轮 turn/end{interrupted}。
+  // 修法：把单次等待切成短窗口（默认 45s，到点照常返回"仍在运行"），
+  //   并把上下文失活异常降级成普通工具错误。详见 lib/job-wait-guard.js。
+  // 注意：ctx.on('tools/execute') 是官方包装点（dsh-tool-call-timeout-policy 同款）。
+  try {
+    disposers.push(installJobWaitGuard(ctx));
+  } catch (e) {
+    // 守卫装配失败绝不能影响插件本身（它是兜底，不是主功能）
+    try { console.warn('[dsh-engineering-ui] job-wait-guard install failed', e); } catch (e2) {}
+  }
 
   return () => {
     // 卸载前把待写记录落盘（尽力而为；失败也绝不能抛）

@@ -1203,9 +1203,22 @@ def estimate_mechanics(task, context=None):
     _proc_k_user = _extract_process_load_factor(t)
     _is_mass_hit = bool(matched) and any(
         u in matched for u in ("kg", "公斤", "千克", "t", "吨", "g", "克"))
+    # == [A-37 修复] load_is_estimate 必须反映【真实的推导状态】=======
+    # 原实现写成 `user_load is None`：只要解析出一个数值就报"不是估算"。
+    #   而"工件 5kg × 加工工艺系数 20"这条分支拿到的 user_load 只是【质量】,
+    #   真正的额定载荷是推导出来的 —— 却被标记成 load_is_estimate=false，
+    #   于是"必须先向用户复核"的强制闸完全不触发。
+    # 实测（2026-11-01）：门禁落盘 nominal_load_n=980.665 /
+    #   user_load_n=null / load_is_estimate=false，而用户原话是"按额定
+    #   100N 口径校核" —— 差 9.8 倍的估算值被当成用户确认值直接下发全流程，
+    #   十阶段分析与门禁载荷差 9.8 倍（BUG-PRIME-1）。
+    # 现在：只要载荷不是【用户直接给出的工作载荷】，就一律标 estimate。
+    _load_is_estimate = (user_load is None)
     if user_load is not None and _is_mass_hit and _proc_k_user:
         _grav_u = float(user_load)          # _extract_load_n 已把质量换成 N
         nominal_load = _grav_u * _proc_k_user
+        # 质量 → 载荷 是推导，不是用户给定的工作载荷
+        _load_is_estimate = True
         load_source = ("按「工件质量 %s（%.1f N 重力）× %s工艺系数 %.0f」推导"
                        "（%.1f N）—— 质量不是工作载荷，加工力远大于重力；"
                        "请用 confirm-load 复核"
@@ -1215,6 +1228,7 @@ def estimate_mechanics(task, context=None):
         nominal_load = float(user_load)
         load_source = "用户输入: %s" % (matched or "")
     else:
+        _load_is_estimate = True
         # ── 【BUG-09 修复】小尺度对象不再被固定 500N 严重高估 ───────────────
         # 缺陷（2026-10-29 竞速小车实测）：650g 的小车被估成 500N
         #   （≈76 倍自重），动载系数又默认 1.0，寿命默认 30 年 / 20 万次/年。
@@ -1367,7 +1381,10 @@ def estimate_mechanics(task, context=None):
         "design_life_years": life_years,
         "cycles_per_year": cycles_per_year,
         # ── 【BUG-07】口径警告：粗估时必须让调用方与用户都看得见 ──
-        "load_is_estimate": user_load is None,
+        # == [A-37 修复] 用真实推导状态（见上方 _load_is_estimate 的说明）==
+        "load_is_estimate": bool(_load_is_estimate),
+        "load_estimate_reason": (
+            (load_source or "") if _load_is_estimate else "用户直接给出额定载荷"),
         # ── 【Bug-04/11 新增】材料来源与可落盘的完整材料规格 ──
         "material_source": mat_source,
         "material_spec": material_spec,
@@ -1842,6 +1859,19 @@ def cmd_confirm_assembly(parts_payload):
       再回头改单个零件就要重做总装 —— 所以这是"最后一个能便宜地拦下
       材料/强度/领域问题"的时刻，必须在这里把三道防线全部卡住。
     """
+    # == [A-20 修复] 总装前确认"判定逻辑未被静默改动" ==================
+    # 实测（2026-11-01）：门禁源码在一轮任务里被改了 33 次（fea_solver 21、
+    #   swapi 5、domain_validator 2、physics_bridge 2、mode_gate 1、
+    #   sw_bridge 2），其中一次改完 domain_validator 后同一条 check-room
+    #   从 ok=false → ok=true，磁盘零件没变。
+    # 这里不阻断（避免把正常迭代锁死），但把结论如实挂进返回体并留痕，
+    #   让"判定逻辑被动过"这件事无法静默。
+    _gi_report = None
+    try:
+        import gate_integrity as _gi2
+        _clean2, _gi_report = _gi2.assert_clean(where="confirm-assembly")
+    except Exception as _e_gi2:
+        _gi_report = {"ok": None, "note": "完整性自检不可用: %r" % (_e_gi2,)}
     _root_guard = _require_root_session("confirm-assembly")
     if _root_guard:
         return _root_guard
@@ -1969,11 +1999,19 @@ def cmd_confirm_assembly(parts_payload):
     state["assembly_inputs"] = payload
     state["assembly_confirmed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save_state(state)
-    return {"ok": True, "gate": "ASSEMBLY_CONFIRMED",
-            "assembly_inputs": payload,
-            "message": ("总装确认通过（全部建模房间已完成 + 零件清单已登记）。"
-                        "现在调用 select 获取『总装与验证』房间；总装小屋 prompt 必须原样包含"
-                        "零件清单，只做装配+干涉检查+整体验证，禁止重新建模/简化任何零件。")}
+    _out_ca = {"ok": True, "gate": "ASSEMBLY_CONFIRMED",
+               "assembly_inputs": payload,
+               "message": ("总装确认通过（全部建模房间已完成 + 零件清单已登记）。"
+                           "现在调用 select 获取『总装与验证』房间；总装小屋 prompt 必须原样包含"
+                           "零件清单，只做装配+干涉检查+整体验证，禁止重新建模/简化任何零件。")}
+    # 【A-20】把判定逻辑完整性结论如实挂上（不阻断，但绝不静默）
+    if isinstance(_gi_report, dict):
+        _out_ca["gate_integrity"] = _gi_report
+        if _gi_report.get("ok") is False:
+            _out_ca["gate_integrity_warning"] = (
+                "⚠️ 门禁判定逻辑相对基线发生过改动 —— 本房间的防线结论可信度取决于"
+                "该改动是否经人工审阅；请核对 .defense/gate_integrity_log.jsonl。")
+    return _out_ca
 
 
 
@@ -3915,6 +3953,12 @@ def _parse_choice_args(raw_args):
             toks.append(("parallel", a.split("=", 1)[1]))
             i += 1
             continue
+        # ── 【F-03】--brief 是【开关型】参数，不带值 ────────────────────────
+        # 必须在"按分隔符切分"之前拦下，否则会被切成 unknown token
+        # 从而触发 FL-06 的"无法识别的参数"拒绝。
+        if a in ("--brief", "-b"):
+            i += 1
+            continue
         # 一个 token 里可能塞了 "C, E" / "C/E" / "C E"
         for piece in _re.split(r"[,;，；/\s]+", a):
             piece = piece.strip()
@@ -3954,7 +3998,102 @@ def _parse_choice_args(raw_args):
     return choice, parallel, _unknown
 
 
-def cmd_select(choice, parallel=None, unknown=None):
+# ══ 【F-03 修复 · 2026-10-31】select --brief：大配置改文件引用 ═══════════
+# 实测缺陷：select 回包把 subagent_config / subagent_plan / part_ownership /
+#   prime_report_contract 等【全量内联】，主体十几 KB（实测 grep brief 零匹配，
+#   即根本没有 brief 通道）。后果：
+#     · 每次 select 都把十几 KB 灌进主对话上下文，多波次时上下文被反复挤占；
+#     · 其中绝大部分是"配置详情"，主对话真正需要的只是
+#       "本波开哪些房间 / 门禁结论 / 下一步做什么"。
+# 修复：新增 --brief —— 把大对象写成文件并返回路径引用，其余关键结论字段全保留。
+#   默认（不加 --brief）行为**完全不变**，避免破坏既有调用方。
+_BRIEF_KEEP_KEYS = (
+    # 门禁结论 / 流程位置
+    "ok", "step", "choice", "choice_label", "parallel_mode", "parallel_label",
+    "subagent_strategy", "ready_to_build", "message", "conflict_warning",
+    # 房间调度（主对话真正要用的）
+    "pending_rooms", "wave_rooms", "all_pending_rooms", "all_pending_count",
+    "pending_rooms_note", "completed_count", "total_rooms", "wave", "wave_name",
+    # 一致性 / 门禁自检结论
+    "sync", "assembly_confirmed", "subagent_plan_required", "prime_room",
+    "workflow_advanced", "unproven_rooms", "note",
+)
+# 这些键在 brief 模式下【改成文件引用】
+_BRIEF_TO_FILE = {
+    "subagent_config": "select_subagent_config.json",
+    "subagent_plan": "select_subagent_plan.json",
+    "part_ownership": "select_part_ownership.json",
+    "prime_report_contract": "select_prime_report_contract.json",
+}
+
+
+def _brief_file_path(name):
+    """brief 引用文件的落盘路径（优先交付目录，退回 load_cases）。"""
+    base = None
+    try:
+        st = load_state()
+        base = st.get(WORKDIR_STATE_KEY)
+    except Exception:
+        base = None
+    if not base:
+        base = os.path.join(BASE_DIR, "load_cases")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        base = BASE_DIR
+    return os.path.join(base, name)
+
+
+def _select_brief(full):
+    """【F-03】把全量 select 回包瘦身成 brief（大对象 → 文件引用）。
+
+    保留：门禁结论 / 房间调度 / 一致性自检 / 下一步提示（见 _BRIEF_KEEP_KEYS）。
+    转文件：subagent_config、subagent_plan、part_ownership、prime_report_contract
+            —— 这四个是体积大头，且主对话通常只需知道"去哪读"。
+
+    设计约束：
+      · 默认行为不变（只有显式 --brief 才走这里）；
+      · **关键结论字段必须齐全** —— 缺了会让主对话无法判断能否开工，
+        所以是"白名单保留 + 显式列出被外置的键"，而不是"删掉几个键"；
+      · 写文件失败时【回退成全量内联】并标注，绝不因瘦身而丢信息。
+    """
+    out = {}
+    for k in _BRIEF_KEEP_KEYS:
+        if k in full:
+            out[k] = full[k]
+    out["brief"] = True
+    _external = {}
+    _failed = []
+    for k, fname in _BRIEF_TO_FILE.items():
+        if k not in full or full.get(k) is None:
+            continue
+        try:
+            p = _brief_file_path(fname)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(full[k], f, ensure_ascii=False, indent=2)
+            _external[k] = p
+            out[k + "_file"] = p
+        except Exception as e:
+            # 写不出去 → 该键回退成全量内联（宁可大，绝不丢）
+            out[k] = full[k]
+            _failed.append({"key": k, "error": repr(e)})
+    # 未在保留名单、也没被外置的键：一并保留（避免"瘦身"变成"悄悄丢字段"）
+    for k, v in full.items():
+        if k in out or k in _BRIEF_TO_FILE:
+            continue
+        out[k] = v
+    out["brief_externalized"] = _external
+    out["brief_note"] = (
+        "【F-03 brief 模式】大对象已写入文件，按 *_file 路径读取：%s。"
+        "门禁结论/房间调度/一致性自检字段已全量保留。"
+        "需要全量内联时去掉 --brief 重新调用。"
+        % ("、".join(sorted(_external)) if _external else "（本次无大对象）"))
+    if _failed:
+        out["brief_write_errors"] = _failed
+    return out
+
+
+def cmd_select(choice, parallel=None, unknown=None, brief=False):
     _root_guard = _require_root_session("select")
     if _root_guard:
         return _root_guard
@@ -4074,14 +4213,73 @@ def cmd_select(choice, parallel=None, unknown=None):
     # 兜底清房间残留；后续波次推进的 select 绝不能再清，否则 room-end 记录被抹掉、
     # 波次永远卡在第1波
     _first_select = (state.get("step") == "mechanics_done")
-    choice = choice.upper().strip()
+    choice = (choice or "").upper().strip()
+    parallel = (parallel or "").upper().strip()
+
+    # == [A-02 修复] select 不带参数时沿用上次已确认的选择 ==================
+    # 原实现：无参 -> choice 为空串 -> 直接命中 CHOICES 校验 -> 报
+    #   "缺少搭建方式 A/B/C"，且【不提示当前已选是什么】。实测（2026-11-01）：
+    #   父代理想"推进到波2"时调了 select（把 select 当成推进命令用），
+    #   拿到 usage 后【自己编了参数】，于是有了下面的 A-01。
+    # 现在：首次 select（step==mechanics_done）必须显式给参数（此时确实还没有
+    #   任何选择）；波次推进时（step==user_selected）允许省略，沿用既有值。
+    _prev_choice = str(state.get("user_choice") or "").strip().upper()
+    _prev_pmode = str(state.get("parallel_mode") or "").strip().upper()
+    _is_advance = (state.get("step") == "user_selected")
+    if not choice and _is_advance and _prev_choice in CHOICES:
+        choice = _prev_choice
+    if not parallel and _is_advance and _prev_pmode in PARALLEL_CHOICES:
+        parallel = _prev_pmode
     if choice not in CHOICES:
-        return {"ok": False, "error": "选择必须是 A, B, 或 C！"}
-    if parallel is None:
+        return {
+            "ok": False,
+            "error": "选择必须是 A, B, 或 C！",
+            "current": {"user_choice": _prev_choice or None,
+                        "parallel_mode": _prev_pmode or None,
+                        "step": state.get("step")},
+            "usage": "python workflow_gate.py select <A|B|C> <D|E>",
+            "note": ("若只是想【推进波次】，同一任务再次 select 可省略参数沿用"
+                     "既有选择：python workflow_gate.py select"
+                     if _is_advance else
+                     "本次是首次 select，必须显式给出搭建方式与并行策略。"),
+        }
+    if not parallel:
         parallel = "D"
-    parallel = parallel.upper().strip()
     if parallel not in PARALLEL_CHOICES:
         return {"ok": False, "error": "并行模式必须是 D 或 E！"}
+
+    # == [A-01 修复] 禁止【静默】改写已确认的策略 =========================
+    # 原实现无条件写 state["user_choice"] / ["parallel_mode"]，只在
+    #   step=="finished" 与参数非法两处拦截。实测（2026-11-01，全案枢纽）：
+    #   首次 select 返回 choice="A" / parallel_mode="D"（8 房并行）；
+    #   父代理误把 select 当"推进阶段"命令，无参调用拿到 usage 提示后
+    #   【自己补了 C,E】，第二次 select 返回 ok=true —— 策略被静默改写成
+    #   C（步步确认）+ E（单小屋串联），此后所有 room-start 都被串行锁挡住，
+    #   全案无法自愈。返回体里【没有任何"你在覆盖既有策略"的警告】。
+    # 现在：已选过且本次取值不同 -> 必须显式加 --force-override 才改写，
+    #   否则拒绝并回显"当前是什么、你想改成什么"。
+    if (not _first_select and _prev_choice in CHOICES
+            and (_prev_choice != choice
+                 or (_prev_pmode in PARALLEL_CHOICES
+                     and _prev_pmode != parallel))):
+        if "--force-override" not in sys.argv:
+            return {
+                "ok": False,
+                "gate": "STRATEGY_ALREADY_CONFIRMED",
+                "error": ("【A-01】本任务的搭建方式/并行策略已确认过，"
+                          "本次 select 想改写它，但未加 --force-override。"
+                          "改写会作废已登记的波次与房间，因此默认拒绝。"),
+                "current": {"user_choice": _prev_choice,
+                            "parallel_mode": _prev_pmode},
+                "requested": {"user_choice": choice,
+                              "parallel_mode": parallel},
+                "how_to": ("(1) 只想推进波次 -> 直接 python workflow_gate.py "
+                           "select（不带参数，沿用既有选择）； "
+                           "(2) 确实要改写 -> python workflow_gate.py select "
+                           "%s %s --force-override； "
+                           "(3) 要重来 -> python workflow_gate.py reset"
+                           % (choice, parallel)),
+            }
     config = CHOICES[choice]
     pconfig = PARALLEL_CHOICES[parallel]
     if _first_select:
@@ -4791,7 +4989,8 @@ def cmd_select(choice, parallel=None, unknown=None):
                     for r in _all_rooms
                     if isinstance(r, (list, tuple)) and len(r) >= 1
                     and str(r[0]) not in _done_rooms]
-    return {
+    # 【F-03】先赋给变量，末尾统一做 brief 瘦身（默认全量不变）
+    _sel_out = {
         "ok": True, "step": "user_selected", "choice": choice,
         "choice_label": config["label"], "parallel_mode": parallel,
         "parallel_label": pconfig["label"],
@@ -4882,6 +5081,7 @@ def cmd_select(choice, parallel=None, unknown=None):
         }) if (_m2_block and _m2mod is not None) else None,
         "ready_to_build": True
     }
+    return _select_brief(_sel_out) if brief else _sel_out
 
 # ══ 【Bug-38 修复】零件归属清单（machine-readable）══════════════════════════
 # 台账现象：多房间并行时，小屋在"自主设计"时会按自己的理解补建相邻房间的
@@ -5020,8 +5220,28 @@ def _existing_owner_of(part_name):
     """
     try:
         _stem, _probe = _norm_part_probe(part_name)
-        _reg_path = os.path.join(STATE_DIR, "artifacts_registry.json")
-        if os.path.exists(_reg_path):
+        # ── 【A-22 修复】登记表按【当前任务】隔离读取 ────────────────────
+        # 原实现硬编码裸名 artifacts_registry.json，而写端（mode_gate
+        # _registry_file / defense_gate artifact_registry_file）在存在
+        # workflow_state.task_id 时一律写 artifacts_registry.<task_id>.json。
+        # 结果：磁盘里只有带任务后缀的那份，这里读裸名永远读到"不存在" →
+        #   verify-ownership / check-part 判"零件无人认领" → 归属门形同虚设。
+        # 现在：带任务后缀优先；裸名作为【历史回退】（老任务/未 declare 时）。
+        _reg_paths = []
+        try:
+            _wf = os.path.join(STATE_DIR, "workflow_state.json")
+            if os.path.exists(_wf):
+                with open(_wf, "r", encoding="utf-8") as _f:
+                    _tid = (json.load(_f) or {}).get("task_id")
+                if _tid:
+                    _reg_paths.append(
+                        os.path.join(STATE_DIR, "artifacts_registry.%s.json" % _tid))
+        except Exception:
+            pass
+        _reg_paths.append(os.path.join(STATE_DIR, "artifacts_registry.json"))
+        for _reg_path in _reg_paths:
+            if not os.path.exists(_reg_path):
+                continue
             with open(_reg_path, "r", encoding="utf-8") as f:
                 _reg = json.load(f) or {}
             if isinstance(_reg, dict):
@@ -5793,16 +6013,26 @@ def _main_body():
     elif cmd == "select":
         # 【BUG-03 修复】用一个参数解析器统一吃掉 "C, E" / "C E" / --choice 等写法
         # 【FL-06 修复】解析器现在还会回传"无法识别的参数"，由 cmd_select 显式拒绝
-        _choice, _parallel, _unknown = _parse_choice_args(sys.argv[2:])
-        if _choice is None:
-            print(json.dumps({"ok": False,
-                              "error": "缺少搭建方式 A/B/C",
-                              "unknown_args": _unknown or [],
-                              "usage": "python workflow_gate.py select C,E  "
-                                       "（或 select C E / select \"C, E\"）"},
-                             ensure_ascii=False, indent=2))
-            sys.exit(2)
-        print(json.dumps(cmd_select(_choice, _parallel, _unknown), ensure_ascii=False, indent=2))
+        # == [A-01 修复] --force-override 是【标志】不是取值 ==============
+        # 原实现把全部 sys.argv[2:] 交给 _parse_choice_args，未知标志会被
+        #   当成 unknown 参数拒绝（FL-06），所以 --force-override 必须在这里
+        #   先摘出来，再解析 A/B/C 与 D/E。
+        _sel_args = [a for a in sys.argv[2:]
+                     if a not in ("--force-override",)]
+        _choice, _parallel, _unknown = _parse_choice_args(_sel_args)
+        # == [A-02 修复] 无参 select 不再直接拒绝 ============================
+        # 波次推进时（step==user_selected）允许省略参数、沿用既有选择；
+        #   是否允许由 cmd_select 自行判定（那里能读到 state），这里只把
+        #   choice="" 传下去，由 cmd_select 决定放行还是回显当前选择。
+        # 首次 select（step==mechanics_done）仍必须显式给参数 —— cmd_select
+        #   的 STRATEGY_ALREADY_CONFIRMED / 选择校验会给出可操作提示。
+        # ── 【F-03】--brief：大配置改文件引用（默认不加 = 全量，行为不变）──
+        _sel_brief = ("--brief" in sys.argv[2:]) or ("-b" in sys.argv[2:])
+        _sel_out = cmd_select(_choice, _parallel, _unknown, brief=_sel_brief)
+        print(json.dumps(_sel_out, ensure_ascii=False, indent=2))
+        # 门禁类失败用非零退出码，便于调用方用 $? 判定（原先一律 exit 0）
+        if isinstance(_sel_out, dict) and _sel_out.get("ok") is False:
+            sys.exit(1)
     elif cmd == "confirm-load":
         print(json.dumps(cmd_confirm_load(sys.argv[2] if len(sys.argv) > 2 else ""),
                          ensure_ascii=False, indent=2))

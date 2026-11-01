@@ -41,13 +41,18 @@ if (!existsSync(path.join(LIB, 'index.js'))) {
 
 const source = readFileSync(path.join(LIB, 'index.js'), 'utf8');
 const signSource = readFileSync(path.join(LIB, 'defense-sign.js'), 'utf8');
+// 【卡死修复】插件新增了 job-wait-guard.js（job_output 长等待守卫）。
+//   本测试把源码改写成 data: URL 再 import，所以任何本地相对 import 都必须
+//   一并内联，否则 ERR_INVALID_URL（./job-wait-guard.js 无法解析）。
+const guardSource = readFileSync(path.join(LIB, 'job-wait-guard.js'), 'utf8');
 const SHIM_LLM = 'export function createUserMessage(i){return {role:"user",content:i.content,source:i.source};}';
 const SHIM_REG = 'export function resolveSessionPreset({header,events}){const e=Array.isArray(events)?events:[];for(let i=e.length-1;i>=0;i--){const ev=e[i];if(ev&&ev.type==="agent-preset/selected"&&ev.data&&ev.data.agentPreset)return String(ev.data.agentPreset);}return (header&&header.agentPreset)??null;}export const agentPresetProjectionDefinition={init:h=>(h&&h.agentPreset)??null,apply:(s,e)=>s};';
 const url = (s) => 'data:text/javascript;base64,' + Buffer.from(s).toString('base64');
 const rewritten = source
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + url(SHIM_LLM) + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + url(SHIM_REG) + "'")
-  .replace("from './defense-sign.js'", "from '" + url(signSource) + "'");
+  .replace("from './defense-sign.js'", "from '" + url(signSource) + "'")
+  .replace("from './job-wait-guard.js'", "from '" + url(guardSource) + "'");
 
 async function boot(models) {
   const home = mkdtempSync(path.join(tmpdir(), 'chainr15_'));

@@ -545,9 +545,21 @@ def main():
     # 原默认 1800s（30 分钟）远超外壳上限 → 首次提问必被掐断，
     #   而 host 侧 pending 仍然存活 → 面板堆积多张待答卡，重试又重复登记。
     # 现默认 540s（留 60s 余量），并允许 DSH_ASK_TIMEOUT 环境变量覆盖。
+    #
+    # ── 【长等待修复 2026-10-31】为什么还要一个"分段上限" ──────────────────
+    # 事故（session-6019cd4b）：ask_user.py 以 540s 一次性阻塞在 pwsh 里，
+    #   若再套上 "Start-Sleep + job_output wait:true" 的轮询，GUI 会连续
+    #   好几分钟没有任何反馈 —— 用户以为 DSH 卡死而强制退出，退出瞬间
+    #   所有 fiber 失活，等待中的 job_output 抛 inactive context 并结束整轮。
+    #   本脚本自身【绝不会】调用 job_output，但调用方会包装它，所以这里给出
+    #   单段上限 SEG_MAX，并在超时返回体里【明确要求分段等待】而不是盲目重发。
     _def_to = int(os.environ.get("DSH_ASK_TIMEOUT", "540"))
+    _SEG_MAX = 90          # 单段最长阻塞（秒）：超过就返回"仍在等待，请分段续等"
     ap.add_argument("--timeout", type=int, default=_def_to,
                     help="等待用户作答的最长秒数（默认 540，须 < DSH shell 上限 600）")
+    ap.add_argument("--seg-max", type=int, default=_SEG_MAX,
+                    help="单段最长阻塞秒数（默认 90；到点返回『仍在等待』，"
+                         "由调用方分段续等，避免长时间静默）")
     ap.add_argument("--interval", type=float, default=2.0, help="轮询间隔秒数")
     args = ap.parse_args()
 
@@ -785,10 +797,15 @@ def main():
     #    修复：一旦"pending 消失 + result 取不到（连续 N 次确认）"，
     #      立即以明确错误退出，让小屋据此上报 failed，进入主对话介入流程。
     deadline = time.time() + int(args.timeout)
+    # ── 【长等待修复】把整段等待再切成若干"短段"，每段到点就返回可续等的结果 ──
+    #   目的：任何一次 pwsh 调用都不会静默阻塞超过 seg-max 秒，
+    #   用户随时能在 GUI 看到进度、随时能打断（2026-10-31 卡死事故的直接成因）。
+    _seg_cap = max(5, min(int(getattr(args, "seg_max", 90) or 90), int(args.timeout)))
+    _seg_deadline = min(deadline, time.time() + _seg_cap)
     base = args.host + PREFIX
     _gone_streak = 0          # pending 消失但取不到 result 的连续次数
     _GONE_LIMIT = 3           # 连续 3 次（约 6 秒）即确认为"过期消失"
-    while time.time() < deadline:
+    while time.time() < _seg_deadline:
         try:
             pending = _get("%s/pending-child?childSessionId=%s" % (base, args.child))
             still = [p for p in (pending.get("pending") or []) if p.get("pendingId") == pending_id]
@@ -825,27 +842,44 @@ def main():
             pass
         time.sleep(args.interval)
 
-    # ── 【C5 修复】超时输出必须可自救：说明 pending 仍在、如何继续等待 ──
-    # 原实现只说"超时"，调用方（小屋）不知道卡片还在、会重新登记导致堆积。
+    # ── 【C5 修复 + 长等待修复】超时输出必须可自救，且区分两种情况 ────────
+    #   · 分段窗口到点、但总预算还没用完 → return 1 + "仍在等待，请续等"，
+    #     调用方应当【立刻再调一次】（同一张卡会被复用，不会重复登记）。
+    #   · 总预算（--timeout）用尽 → return 1 + "彻底超时"，
+    #     调用方应当上报 room-report failed 并交给主对话介入。
+    # 禁止的做法（2026-10-31 事故）：把本脚本套进 "Start-Sleep + job_output wait:true"
+    #   的长阻塞轮询 —— 静默数分钟会让用户以为 DSH 卡死，强退后整轮 turn 作废。
+    _left = deadline - time.time()
+    if _left > 0:
+        emit({"ok": False,
+              "error": "本段等待窗口已到（%d 秒），用户尚未作答" % _seg_cap,
+              "pendingId": pending_id,
+              "pending_alive": True,
+              "expired": False,
+              "segmented": True,
+              "remaining_sec": int(_left),
+              "hint": ("提问卡片仍在面板上，答案还没来 —— 这是【正常的分段返回】，不是失败。"
+                       "请【立刻再调一次本脚本】继续等（同题会复用同一张卡，不会重复登记，"
+                       "也不会产生第二张卡）；每次调用最多阻塞 %d 秒，"
+                       "总预算还剩 %d 秒。"
+                       "🚫不要用 Start-Sleep + job_output wait:true 包住本脚本："
+                       "静默长阻塞会让用户以为 DSH 卡死（2026-10-31 事故根因）。")
+                      % (_seg_cap, int(_left)),
+              "room": args.room or None,
+              "child": args.child})
+        return 1
+
     emit({"ok": False,
-          "error": "等待用户作答超时（%d 秒）" % args.timeout,
+          "error": "等待用户作答超时（总预算 %d 秒已用尽）" % args.timeout,
           "pendingId": pending_id,
           "pending_alive": True,
           "expired": False,
-          "hint": ("提问卡片仍在面板上等待作答。请【不要重新提问】，"
-                   "直接再调一次本脚本（同题会自动复用同一张卡，不会重复登记）；"
-                   "或延长 --timeout（须低于外壳上限 600s）。")})
-    return 1
-
-    # ── 【C5 修复】超时输出必须可自救：说明 pending 仍在、如何继续等待 ──
-    # 原实现只说"超时"，调用方（小屋）不知道卡片还在、会重新登记导致堆积。
-    emit({"ok": False,
-          "error": "等待用户作答超时（%d 秒）" % args.timeout,
-          "pendingId": pending_id,
-          "pending_alive": True,
-          "hint": ("提问卡片仍在面板上等待作答。请【不要重新提问】，"
-                   "直接再调一次本脚本（同题会自动复用同一张卡，不会重复登记）；"
-                   "或延长 --timeout（须低于外壳上限 600s）。")})
+          "segmented": False,
+          "hint": ("提问卡片仍在面板上，但总等待预算已用尽。请【不要盲目重发同一题】，"
+                   "先看 /pending-child 确认卡片是否还在："
+                   "还在 → 上报 room-report <房间> failed '等待用户作答超时'，由主对话介入；"
+                   "不在 → 按卡片过期处理（重问会登记新卡）。"
+                   "需要更长等待可用 --timeout（须低于外壳上限 600s）配合分段续等。")})
     return 1
 
 

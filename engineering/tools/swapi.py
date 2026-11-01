@@ -1159,34 +1159,85 @@ DEFAULT_PART_MATERIAL = "Q235"
 def default_part_material_name():
     """【GB 外部数据源配套】返回当前【可用】的默认零件材料名。
 
-    ── 为什么需要这个函数 ────────────────────────────────────────────────
-    国标材料数值已改为【外部 JSON 导入】（不再内置）。若尚未导入数据，
-      COMMON_MATERIALS 里就没有 "Q235" —— 此时仍硬拿它当默认值，
-      赋材质必然失败（"材料不在库中"），看起来像工具坏了。
-    这里优雅降级：
-      ① 有国标数据 → 沿用 Q235（工程最常用的碳钢）；
-      ② 无国标数据 → 退回仍可用的等效结构钢牌号（密度/E 接近）。
-    降级【只影响默认值】，不影响调用方显式指定的材料。
+    ── 语义（F-05 重定义）──────────────────────────────────────────────
+    返回【当前真的可用的】默认零件材料名；不可用时返回 None。
+
+    ══ 【F-05 修复·核心】默认材料必须是【防线合法牌号】，禁止静默降级 ═══
+    原缺陷：Q235 不在表里时，按顺序降级到 PlainCarbonSteel /
+      AlloySteel4140 / StainlessSteel304 / Aluminum6061 —— 全是【欧美牌号】；
+      最后还给了一个「任意首项」兜底（字典里第一项是什么就返回什么，
+      可能直接返回个 3D 打印材料 PLA）。
+      后果不是「能用」，而是【悄悄换材料】：
+        · 图纸/工况写 Q235（GB 碳素结构钢，σy=235MPa）；
+        · 零件里却是 PlainCarbonSteel（σy=250）或更离谱的 4140（σy=655）；
+        · 强度校核基准整体错位，而返回值看起来一切正常。
+
+    现在：
+      · Q235 可用（在库 + 有密度 + 防线认）→ 返回 "Q235"；
+      · 否则 → 返回 None。这是一个【明确的信号】，不是「没有默认值」：
+        调用方（resolve_default_material_or_raise / new_part）据此
+        显式报错并给出可执行路径，绝不让非法名流到下游去炸。
+    """
+    if is_default_material_available():
+        return "Q235"
+    return None
+
+
+def is_default_material_available():
+    """【F-05 新增】默认材料 Q235 当前是否【真的可写、且合法】。
+
+    判据（两条都必须成立）：
+      ① 在 COMMON_MATERIALS 中（内置/GB JSON 已导入）；
+      ② is_valid_material("Q235") 通过 —— 即材料防线【认这个名字】。
+         这两条不是一回事：表里有条目但缺密度时，set_material 仍写不进去，
+         防线仍会判 material_invalid。
+
+    Returns: bool
     """
     try:
-        if "Q235" in COMMON_MATERIALS:
-            return "Q235"
+        if "Q235" not in COMMON_MATERIALS:
+            return False
     except Exception:
-        pass
-    for _cand in ("Q235", "PlainCarbonSteel", "AlloySteel4140",
-                  "StainlessSteel304", "Aluminum6061"):
-        try:
-            for _canon, _info in COMMON_MATERIALS.items():
-                if _canon == _cand or _cand in (_info.get("aliases") or []):
-                    return _canon
-        except Exception:
-            continue
+        return False
     try:
-        for _k in COMMON_MATERIALS:
-            return _k
+        _ok, _info, _ = is_valid_material("Q235")
+        if not _ok or not _info:
+            return False
+        # 必须有密度 —— 没有密度就写不进 SW，读回会掉回 1000（水）
+        return bool(_info.get("density") or _info.get("density_kg_m3"))
     except Exception:
-        pass
-    return DEFAULT_PART_MATERIAL
+        return False
+
+
+def default_material_unavailable_error():
+    """【F-05 新增】默认材料不可用时的【可执行】错误说明（给 new_part 用）。
+
+    原则：绝不静默降级成欧美牌号（那会让「图纸写 Q235、零件是别的钢」），
+    而是把「怎么修」直接写清楚，让上层能照做。
+    """
+    try:
+        _st = gb_materials_status()
+    except Exception:
+        _st = {}
+    _files = (" / ".join(str(x) for x in (_st.get("searched") or [])[:3])
+              or "tools/physics/gb_materials.json")
+    return (
+        "默认材料 Q235 当前【不可用】：COMMON_MATERIALS 中没有该牌号，"
+        "或它缺少密度/力学属性。\n"
+        "本仓库【绝不】为默认值静默降级成欧美牌号（PlainCarbonSteel 等）——"
+        "那会造成「图纸写国标、零件是另一种材料」，强度校核基准整体错位。\n"
+        "可执行路径（任选其一）：\n"
+        "  ① 导入国标数据（推荐，一次到位）：把 gb_materials.json 放到 "
+        "%s 之一，或设环境变量 DSH_GB_MATERIALS 指向它，"
+        "然后调用 swapi.gb_materials_status() 确认 loaded=True；\n"
+        "  ② 显式登记该牌号：swapi.save_custom_material('Q235', "
+        "density_kg_m3=7850, e_mpa=206000, yield_mpa=235, uts_mpa=375)；\n"
+        "  ③ 显式指定其它【合法】牌号：new_part(material='6061-T6', "
+        "density=2700) —— 但要与图纸一致；\n"
+        "  ④ 显式指定密度兜底：new_part(material='Q235', density=7850)"
+        "（牌号仍需可解析，否则密度也救不回材料身份）。\n"
+        "当前国标数据状态：loaded=%s, count=%s, error=%s"
+        % (_files, _st.get("loaded"), _st.get("count"), _st.get("error")))
 
 
 def _material_standard_of(name):
@@ -1592,9 +1643,51 @@ def _material_from_load_case():
         }
         if mid in _ID_TO_NAME:
             return _ID_TO_NAME[mid]
+        # ── 【F-05 修复·核心】只允许返回【防线合法牌号】，绝不返回标准文件全名 ──
+        # 事故（两小屋独立复现）：工况文件里
+        #     {"id": "Q235", "name": "GB/T 700-2006 碳素结构钢"}
+        #   id 是 "Q235"（已合法），但不在上面的 _ID_TO_NAME 表里（表里只有
+        #   "GB_Q235" 这类 GB_ 前缀 id）→ 继续往下走，拿 name 做正则匹配。
+        #   而 name 是【标准文件的名字】("GB/T 700-2006 碳素结构钢")，里面
+        #   根本没有 "Q235" 子串 → 正则不中 → **原样 return nm**。
+        #   于是 new_part 默认材料 = "GB/T 700-2006 碳素结构钢"，
+        #   is_valid_material() 判 False → 凭据 material_invalid=true、
+        #   不签发 → 材料防线直接拦下，正常建模路径必然走不通。
+        # 修复：按【可靠性从高到低】三条路取牌号，且每条都必须过
+        #   is_valid_material() 校验 —— 交不出合法名就返回 None，
+        #   由调用方回落到 DEFAULT_PART_MATERIAL（Q235），绝不把标准名当牌号。
+        def _as_legal_grade(_cand):
+            """把一个候选名规整成合法牌号；不合法返回 None。"""
+            _c = str(_cand or "").strip()
+            if not _c:
+                return None
+            try:
+                _ok, _info, _ = is_valid_material(_c)
+                if _ok and _info:
+                    # 命中就用 canonical（"GB_Q235" → "Q235"），保证是牌号口径
+                    return str(_info.get("canonical") or _c)
+            except Exception:
+                pass
+            return None
+
         nm = str(mat.get("name") or "").strip()
+        # ① id 本身可能就是牌号（"Q235" / "Q355" / "6061-T6" / "ABS"）
+        _g = _as_legal_grade(mid)
+        if _g:
+            return _g
+        # ② name 可能正好是某个牌号的【标准全名】——
+        #    COMMON_MATERIALS 每条都有 "name" 字段（如 Q235 的
+        #    "GB/T 700-2006 碳素结构钢"），这里做一次【反向查表】。
+        #    这是"标准名 → 牌号"最准的一条路：表内是精确串比对，不猜。
         if nm:
-            # "Aluminum 6061-T6" → "6061-T6"；"Q235 碳素结构钢 (GB/T 700)" → "Q235"
+            try:
+                for _canon, _info in COMMON_MATERIALS.items():
+                    if str((_info or {}).get("name") or "").strip() == nm:
+                        return _canon
+            except Exception:
+                pass
+        # ③ 最后才用正则从 name 里抠牌号（如 "Q235 碳素结构钢 (GB/T 700)"）
+        if nm:
             import re as _re
             m = _re.search(
                 r"(6061(?:-T\d)?|7075|5052|1060|2024|2A12|LY12|304|316|316L|"
@@ -1602,8 +1695,9 @@ def _material_from_load_case():
                 r"GCr15|Cr12MoV|65Mn|HT200|HT250|QT500-7|ZCuSn10P1|H62|"
                 r"ZL104|Ti-6Al-4V)", nm)
             if m:
-                return m.group(1)
-            return nm
+                _g = _as_legal_grade(m.group(1))
+                if _g:
+                    return _g
     except Exception:
         pass
     return None
@@ -1627,8 +1721,100 @@ def default_part_material():
     if lc:
         return lc
     # 【GB 外部数据源配套】默认值必须【当前真的可用】：
-    #   未导入国标数据时 Q235 不在库中，硬用会导致赋材质失败
+    #   未导入国标数据时 Q235 不在库中，硬用会导致赋材质失败。
+    # 【F-05 修复】default_part_material_name() 现在【只会】返回合法牌号或 None，
+    #   不再降级成 PlainCarbonSteel 之类的欧美牌号 —— 见该函数 docstring。
+    #   若它返回 None，这里【必须】返回 None 而不是硬塞一个名字：
+    #   调用方（new_part）据此显式报错并给出可执行路径，
+    #   绝不让一个"防线不认识的材料名"流到下游去炸。
     return default_part_material_name()
+
+
+def resolve_default_material_or_raise(material=None, density=None):
+    """【F-05 新增】确定本次建模要用的默认材料（并给出可用性诊断）。
+
+    这是 new_part 与 default_part_material 之间的【唯一裁定点】：
+      · 返回 {"ok": True, "material": <合法牌号>, "density": <kg/m3>, "source": ...}
+      · 无法给出【合法】默认材料时，返回 ok=False + error（含可执行路径），
+        **绝不**返回一个"看起来能用、实际防线不认"的名字。
+
+    优先级（与既有文档一致）：
+      显式 material 参数 > DSH_PART_MATERIAL 环境变量
+      > gate_load_case.json 材料 > DEFAULT_PART_MATERIAL(Q235)
+
+    Args:
+        material: 调用方显式指定的材料名（可为 None）
+        density:  调用方显式指定的密度（可为 None）
+    Returns:
+        dict {ok, material, density, source, error?, hint?}
+    """
+    _d = None
+    try:
+        _d = float(density) if density is not None else None
+    except Exception:
+        _d = None
+    out = {"ok": False, "material": None, "density": _d, "source": None}
+    # ① 显式参数（最高优先，且同样要求合法 —— 非法名照样显式报错）
+    _nm = None
+    _src = None
+    if material and str(material).strip():
+        _nm = str(material).strip()
+        _src = "explicit(new_part material=)"
+    else:
+        try:
+            _env = (os.environ.get("DSH_PART_MATERIAL") or "").strip()
+        except Exception:
+            _env = ""
+        if _env:
+            _nm, _src = _env, "env(DSH_PART_MATERIAL)"
+        else:
+            _lc = _material_from_load_case()
+            if _lc:
+                _nm, _src = _lc, "load_case(gate_load_case.json)"
+            else:
+                _nm, _src = default_part_material_name(), "default(DEFAULT_PART_MATERIAL)"
+    if not _nm:
+        # 走不到"名称"这一步 —— 默认材料根本不可用
+        out["error"] = default_material_unavailable_error()
+        out["hint"] = ("调用方无法拿到合法默认材料。最省事的修法："
+                       "new_part(material='Q235', density=7850) 显式指定，"
+                       "或先导入 gb_materials.json。")
+        out["source"] = _src
+        return out
+    # ② 合法性校验：不合法就【显式失败】，绝不静默换成别的材料
+    _ok, _info, _why = is_valid_material(_nm)
+    if not _ok:
+        out["material"] = _nm
+        out["source"] = _src
+        out["error"] = ("材料 %r 不是合法牌号（%s）。"
+                        "本仓库不允许用非法材料名建模 —— 否则 .sldprt 里"
+                        "没有可信的材质身份，材料防线会判 material_invalid。\n%s"
+                        % (_nm, _why,
+                           _gb_material_advice(_nm)
+                           if _material_standard_of(_nm) == "GB"
+                           else ("可执行路径：① 用内置库中的合法牌号"
+                                 "（见 swapi.list_materials()）；"
+                                 "② 或 swapi.save_custom_material(%r, ...) 显式登记。"
+                                 % (_nm,))))
+        out["hint"] = ("显式指定一个防线认识的牌号，例如 "
+                       "new_part(material='Q235', density=7850)。"
+                       "自定义材料请先用 save_custom_material() 登记。")
+        return out
+    # ③ 密度【随牌号表带出】—— 这是"读回 1000（水）"的直接解法
+    #    显式 density 优先；否则取牌号表里的密度（Q235 → 7850）。
+    #    以前 new_part 不传 density，set_material 只能靠 SW 库近似值，
+    #    库里没这个牌号时读回就是 1000。
+    if out["density"] is None:
+        try:
+            out["density"] = float((_info or {}).get("density")
+                                   or (_info or {}).get("density_kg_m3") or 0.0) or None
+        except Exception:
+            out["density"] = None
+    out["material"] = _nm
+    out["source"] = _src
+    out["canonical"] = (_info or {}).get("canonical") or _nm
+    out["ok"] = True
+    return out
 
 # ── 【BUG-08 修复】SW 导出 DXF 的标准图层名（与 CADX mechanical 规则一致）──
 # CADX ac_validate 的 mechanical 规则要求图层:
@@ -3226,7 +3412,24 @@ def _ring_clearance_mm(circles):
         x1, y1, r1 = pts[i]
         for j in range(i + 1, len(pts)):
             x2, y2, r2 = pts[j]
-            gap = _m.hypot(x2 - x1, y2 - y1) - (r1 + r2)
+            _d = _m.hypot(x2 - x1, y2 - y1)
+            # == [A-42 / BUG-ZZ-7 修复] 同心圆环不是"两个分离圆" ============
+            # 原实现一律用【分离圆】间隙公式 gap = 圆心距 - r1 - r2：
+            #   同心圆（圆心距 = 0）→ gap = -(r1 + r2)，恒为负。
+            #   例：端盖密封槽 r=24 / r=18 → 0 - 24 - 18 = -42.0mm
+            #       → 被判"净距 -42.000mm < 合并容差 0.100mm"→ 拒绝。
+            # 但【同心圆环(annulus)】恰恰是轴承座/端盖/轴套的标准合法剖面，
+            #   内圈是孔、外圈是外形，二者"相交"是设计意图而不是错误。
+            # 实测（2026-11-01 底座支承室）：端盖密封槽因此永远切不出来；
+            #   加工头室 4 同心圆轴承也在这条预检上被反复拦截。
+            # 正确判据：
+            #   · 同心（圆心距 < 容差）→ 两环是【嵌套】，净距应为 |r1 - r2|
+            #     （壁厚方向的实际间距）；只有壁厚 < 容差才算真粘连。
+            #   · 非同心 → 分离圆公式（圆心距 - r1 - r2）仍然正确。
+            if _d <= 1e-6:
+                gap = abs(r1 - r2)
+            else:
+                gap = _d - (r1 + r2)
             if best is None or gap < best:
                 best = gap
     return best
@@ -3889,11 +4092,64 @@ def new_part(sw=None, material=None, density=None):
         sw = get_sw()
     _disable_snapping(sw)
 
-    # Bug 10: 关闭所有遗留文档
+    # == [A-105 修复] 只关【无名残留文档】，绝不关别人的已命名文档 ======
+    # 原实现（Bug 10 修复）在 new_part 开头循环 50 次
+    #   sw.ActiveDoc.CloseDoc(0)
+    # —— 无归属判断、无未保存判断、失败一律 except: pass 静默。
+    # 实测事故（2026-11-01，共享单 SW 实例 + 多房间并行）：
+    #   · 任一房间跑含 new_part() 的脚本（含诊断探针），就会把【其他房间
+    #     正在编辑、尚未保存】的文档一起关掉 → 未保存建模直接丢失；
+    #   · 这份代码藏在【每个建模脚本的第一行】，是全线最高频的破坏源；
+    #   · 日志实证：夹紧机构室诊断探针 new_part() 运行期间，SW 活动文档
+    #     连续出现 零件4/5/6/7，至少 3 组 python 建模进程并存，双方互踩
+    #     导致 extrude 静默失败（BUG-JG-LS-3 / BUG-MT-1）。
+    # 另：CloseDoc(0) 的参数是【错的】—— 真实签名要文档标题，传 0 会让 SW
+    #   弹"是否保存"模态框并阻塞 CloseAllDocuments（KI-22 实测）。
+    # 正确语义：
+    #   · 带文件路径的文档 = 别人（或本脚本之前）的成果 → 【绝不关闭】；
+    #   · 无路径的未命名文档（零件1/零件2…）= 本轮被中断留下的垃圾 → 关掉，
+    #     但即使关闭失败也只告警，不中断新建。
+    # 需要旧行为（单线程独占 SW）时设 DSH_SW_CLOSE_ALL_ON_NEW=1。
+    import os as _os_np
+    _close_all = str(_os_np.environ.get("DSH_SW_CLOSE_ALL_ON_NEW") or "").strip().lower()
+    _keep_named = not (_close_all in ("1", "true", "yes", "on"))
+    _closed = []
+    _kept = []
     for _ in range(50):
         try:
-            if sw.ActiveDoc:
-                sw.ActiveDoc.CloseDoc(0)
+            _ad = sw.ActiveDoc
+        except Exception:
+            _ad = None
+        if _ad is None:
+            break
+        _title = ""
+        _path = ""
+        try:
+            _t = getattr(_ad, "GetTitle", None)
+            _title = (_t() if callable(_t) else _t) or ""
+            _p = getattr(_ad, "GetPathName", None)
+            _path = (_p() if callable(_p) else _p) or ""
+        except Exception:
+            _title, _path = "", ""
+        if _keep_named and str(_path).strip():
+            # 已命名的文档属于别的房间/别的轮次 —— 保留，不再往下关
+            _kept.append(_title or _path)
+            break
+        try:
+            # CloseDoc 必须传标题（传 0 会触发模态"是否保存"框）
+            sw.ActiveDoc.CloseDoc(_title if _title else "")
+            _closed.append(_title)
+        except Exception as _e_cd:
+            try:
+                SWModel(sw, _ad)._warn("关闭残留文档失败（不阻断）: %r" % (_e_cd,))
+            except Exception:
+                pass
+            break
+    if _kept:
+        # 只要还有已命名文档开着，就在新建前明确告知调用方（不静默）
+        try:
+            print(u"[swapi][WARN] new_part: 检测到 %d 个已命名文档仍在 SW 中打开，按共享会话保护策略【未关闭】它们：%s"
+                  % (len(_kept), ", ".join(str(x) for x in _kept[:5])))
         except Exception:
             pass
 
@@ -3928,23 +4184,25 @@ def new_part(sw=None, material=None, density=None):
     #   "图纸材料 vs 实际材料"不一致。
     # 优先级（与文档一致）：显式 material 参数 > DSH_PART_MATERIAL 环境变量
     #   > gate_load_case.json 材料 > DEFAULT_PART_MATERIAL。
-    if material and str(material).strip():
-        m._pending_material = str(material).strip()
-        m._material_source = "explicit(new_part material=)"
-    else:
-        _env = (os.environ.get("DSH_PART_MATERIAL") or "").strip()
-        if _env:
-            m._pending_material = _env
-            m._material_source = "env(DSH_PART_MATERIAL)"
-        else:
-            _lc = _material_from_load_case()
-            if _lc:
-                m._pending_material = _lc
-                m._material_source = "load_case(gate_load_case.json)"
-            else:
-                m._pending_material = DEFAULT_PART_MATERIAL
-                m._material_source = "default(DEFAULT_PART_MATERIAL)"
-    m._pending_density = density
+    # ── 【F-05 修复】统一由 resolve_default_material_or_raise 裁定 ──────────
+    # 原实现分三路各自写 _pending_material，且【不校验合法性】：
+    #   · load_case 路径会把标准文件全名 "GB/T 700-2006 碳素结构钢" 当材料名；
+    #   · 默认路径硬塞 DEFAULT_PART_MATERIAL，不管它在不在库里；
+    #   · 三条路都【不带密度】—— 这是"读回 1000（水）"的直接成因。
+    # 现在：合法性 + 密度解析集中在一处裁决；非法即显式报错，绝不静默降级。
+    _mres = resolve_default_material_or_raise(material=material,
+                                              density=density)
+    if not _mres.get("ok"):
+        # 材料身份不可信 → 明确失败（不建出一个"没有材质身份"的零件）
+        raise RuntimeError(
+            "new_part 无法确定合法的默认材料：\n%s\n%s"
+            % (_mres.get("error"), _mres.get("hint") or ""))
+    m._pending_material = _mres.get("material")
+    m._material_source = _mres.get("source")
+    # ★ 密度【随牌号表带出】（Q235 → 7850），不再依赖 SW 库近似值。
+    #   显式 density 参数优先（已在 resolve_default_material_or_raise 内处理）。
+    m._pending_density = _mres.get("density")
+    m._material_canonical = _mres.get("canonical")
     # ── 【观察点 13 修复】单独记录【用户传入的原始材料名】，且永不清空 ──────
     # `_pending_material` 在材质成功写入后会被置 None（见
     # _try_apply_pending_material）。于是 save() 生成凭据时只能回退到从 SW
@@ -4310,6 +4568,15 @@ class SWModel:
         self._last_begin_plane = None
         self._plane_generation = 0
         self._sketch_open_count = 0
+        # ══ 【F-04 修复】end_sketch 的轮廓预选证据（诊断用，不参与判定）══
+        # end_sketch 退出前会在激活态预选草图段（Bug T2 的修复，见 :7609）。
+        # extrude 需要的轮廓是【草图特征本身】而非段，所以它不复用这份预选
+        #   （_reset_selection_state 清选择后由 _select_extrude_profile 按名重选）。
+        # 这里只把"预选过几段"记成可观测事实：若 extrude 仍然失败，
+        #   这条记录能立刻区分"草图根本没闭合/没段"与"选择被清掉了"。
+        self._end_sketch_preselect = None
+        # 最近一次 extrude 实际使用的轮廓草图名（诊断/测试可断言）
+        self._extrude_profile_used = None
 
     def early(self, iface_name="IModelDoc2"):
         """把 self.model 包装成【早期绑定接口】对象（失败原样返回 self.model）。
@@ -4363,7 +4630,57 @@ class SWModel:
             return None
         try:
             res = self.set_material(name, density=self._pending_density)
-            self.material_result = res
+            # ══ 【F-05 修复】SW 内置库写不进去 → 走【自定义材质登记路径】══════
+            # 事故：new_part(material="Q235") 正常建模路径必然失败。
+            #   SW 官方材质库【不收录 GB 牌号】，set_material 走遍
+            #   (库 × 候选名) 仍写不进 → 读回密度掉回 1000（水）→ 防线拦下。
+            #   唯一跑得通的路径是手工 set_custom_material(...) 登记。
+            # 现在把它固化进默认链路：内置库失败后【自动】按
+            #   custom_materials.json + 牌号表属性登记并重写，
+            #   属性（E/σy/σb/ρ）取自 resolve_material_props（Q235→7850）。
+            #   —— 这不是"降级成别的材料"，而是"用同一个牌号换一条写入通道"。
+            if not res.get("ok"):
+                _cf = self._apply_material_via_custom_registry(
+                    name, density=self._pending_density)
+                if _cf and _cf.get("ok"):
+                    # 保留内置库失败的证据，便于审计"为什么走了自定义通道"
+                    _cf["sw_library_attempt"] = {
+                        "ok": False,
+                        "error": (res.get("error") or "")[:400],
+                        "method": res.get("method"),
+                    }
+                    res = _cf
+            # == [A-25 修复] 不得用【失败】结果覆盖已成功的 material_result ==
+            # 原实现无条件 self.material_result = res。实测（2026-11-01）：
+            #   [r4] set_custom_material: ok=True（40Cr / ρ7820 已写入）
+            #   [r4] sidecar: ok=False density=7849.99
+            #   AssertionError: material ok != True
+            # 链路：save() 内部会【再跑一次】_try_apply_pending_material(force)
+            #   （见 save 的"材质兜底赋值"段），这次 SW 库候选全部 ρ=1000 被拒
+            #   -> res.ok=False -> 把已经签好 ok=True/ρ7820 的结论覆盖成
+            #   "水"记录 -> 侧车 ok=false -> 防线①拒收 -> 小屋删件重建死循环。
+            # 语义：material_result 是"这个零件当前的材质事实"，
+            #   一次【未成功】的尝试不应该降级已有的事实；但成功的结果
+            #   永远可以覆盖（例如换了材料）。
+            _prev_mr = self.material_result if isinstance(self.material_result, dict) else {}
+            if res.get("ok") or not _prev_mr.get("ok"):
+                self.material_result = res
+            else:
+                # 保留成功结论，但把这次失败尝试留痕（可审计，不静默）
+                _keep = dict(_prev_mr)
+                _try = _keep.get("rejected_attempts")
+                if not isinstance(_try, list):
+                    _try = []
+                _try.append({
+                    "ok": False,
+                    "requested": name,
+                    "error": (res.get("error") or "")[:400],
+                    "method": res.get("method"),
+                    "note": "本次重新赋材失败，已保留先前成功结论（A-25）",
+                })
+                _keep["rejected_attempts"] = _try[-10:]
+                self.material_result = _keep
+                res = _keep
             if res.get("ok"):
                 self._pending_material = None
                 self._pending_density = None
@@ -4375,6 +4692,105 @@ class SWModel:
             self.material_result = {"ok": False, "error": repr(e)}
             self._warn("赋材质异常(%s): %r" % (name, e))
             return self.material_result
+
+    def _apply_material_via_custom_registry(self, name, density=None):
+        """【F-05 新增】用【自定义材质登记路径】写入材料（GB 牌号的正规出路）。
+
+        ══ 为什么需要它 ══════════════════════════════════════════════════════
+        SolidWorks 官方材质库（SolidWorks Materials / DIN Materials）
+        【不收录 GB/T 牌号】（Q235 / 45# / 40Cr …），这是库的事实，不是
+        调用方式错了。所以对国标牌号，唯一能既保住"图纸牌号"又保住
+        "零件里真的是这个材料"的路径是：
+          ① 把该牌号的属性登记进 custom_materials.json（可审计、可复用）；
+          ② 用 SetMaterialPropertyName2 把【该牌号名 + 密度】写进零件。
+        本方法就是这么做的，并且和 set_custom_material 共用同一份属性来源
+        （resolve_material_props），保证"台账 / SW / 凭据"三处口径一致。
+
+        Args:
+            name:    材料牌号（如 "Q235"）
+            density: 显式密度；None 则取牌号表（Q235 → 7850）
+        Returns: dict（形如 set_material 的返回体）
+        """
+        out = {"ok": False, "method": None, "material": name,
+               "warnings": [], "error": None}
+        nm = str(name or "").strip()
+        if not nm:
+            out["error"] = "材料名为空"
+            return out
+        _ok, _info, _why = is_valid_material(nm)
+        if not _ok:
+            out["error"] = "材料 %r 非法（%s）—— 不登记、不写入" % (nm, _why)
+            out["hint"] = _gb_material_advice(nm)
+            return out
+        props = resolve_material_props(nm) or {}
+        _canon = (_info or {}).get("canonical") or props.get("name") or nm
+        _d = density
+        if _d is None:
+            _d = ((_info or {}).get("density")
+                  or (_info or {}).get("density_kg_m3")
+                  or props.get("density_kg_m3"))
+        _e = props.get("e_mpa") or (_info or {}).get("e_mpa")
+        _y = props.get("yield_mpa") or (_info or {}).get("yield_mpa")
+        _u = props.get("uts_mpa") or (_info or {}).get("uts_mpa")
+        _nu = props.get("poissons_ratio") or (_info or {}).get("poissons_ratio")
+        # ① 登记（幂等）—— 让材料身份可审计、可复用
+        try:
+            reg = save_custom_material(nm, e_mpa=_e, yield_mpa=_y, uts_mpa=_u,
+                                       density_kg_m3=_d, poissons_ratio=_nu,
+                                       note="F-05: new_part 默认链路自动登记"
+                                            "（SW 官方库不收录 GB 牌号）")
+            out["registry"] = reg
+        except Exception as _e_reg:
+            out.setdefault("warnings", []).append("登记自定义材料失败: %r" % (_e_reg,))
+        # ② 写入 SW（先把密度打头试，让"读回 1000"尽快消失）
+        try:
+            _wr = self.set_material(nm, density=(float(_d) if _d else None))
+        except Exception as _e_w:
+            _wr = {"ok": False, "error": repr(_e_w)}
+        if _wr.get("ok"):
+            out.update(_wr)
+            out["method"] = "custom_registry(%s)" % (_wr.get("method") or "?")
+            out["custom_material"] = True
+            out["density_kg_m3"] = _wr.get("density_kg_m3") or _d
+            out["applied_name"] = _wr.get("applied_name") or nm
+            out["canonical"] = _canon
+            return out
+        # ③ 名字写不进 SW → 如实失败，但把【已完成的登记】和【真实原因】交出去
+        # ── 【F-05 · 类型库核查结论】SolidWorks 没有"直接写密度"的 API ──────
+        # 核查（本机类型库 83A33D31-…x0x33x0.py）：
+        #   · IPartDoc.SetMaterialPropertyName2(ConfigName, Database, Name) —— 3 参
+        #     只能按【材质库里的材料名】写，没有密度参数（L47899）；
+        #   · IPartDoc.MaterialPropertyValues 是【外观颜色】9 元组，不是密度
+        #     （L47917，可写但语义是可视属性）；
+        #   · IMassProperty.Density / IMassProperty2.Density 都是【只读】
+        #     （L30525 / L30591 只出现在 _prop_map_get_，_prop_map_put_ 里
+        #      没有任何 Density 条目）；
+        #   · IMassProperty.SetOverrideMassValue 覆盖的是【质量】而非密度
+        #     （L30650），用它假造密度会让质心/惯量一起错，不可接受。
+        # ⇒ 密度只能【跟随材料身份】进入 SW。所以本方法不谎称"写了密度"：
+        #   · 登记成功 + 命名失败 → ok=False，但明确告知"牌号已登记、可审计"；
+        #   · 同时把牌号表密度原样带出（density_kg_m3），供 physics / 凭据使用。
+        out["ok"] = False
+        out["custom_material"] = True
+        out["canonical"] = _canon
+        out["applied_name"] = nm
+        out["density_kg_m3"] = _d
+        out["density_source"] = "COMMON_MATERIALS/牌号表（未写入 SW）"
+        out["sw_internal_material"] = None
+        out["sw_internal_matches_request"] = None
+        out["error"] = (
+            "SW 材质库无法按名写入 %r（%s）。\n"
+            "【已完成的处置】已把该牌号登记进 custom_materials.json"
+            "（E=%s / σy=%s / σb=%s / ρ=%s），材料身份可审计、可复用；"
+            "但 .sldprt 内部的密度/材质仍是 SW 库里的默认值。\n"
+            "【为什么不能只写密度】SolidWorks 没有「直接设置密度」的 API"
+            "（类型库：IMassProperty2.Density 只读，无 put；"
+            "IPartDoc.SetMaterialPropertyName2 无密度参数）—— "
+            "密度只能跟随材料身份进入 SW。"
+            % (nm, (_wr.get("error") or "SW 库无此牌号"),
+               _e, _y, _u, _d))
+        out["hint"] = _gb_material_advice(nm)
+        return out
 
     def _warn(self, msg):
         """记录一条非致命告警（不抛异常，不影响建模流程）。
@@ -5042,18 +5458,50 @@ class SWModel:
             #   凭据是防线①的判定依据，因此必须在【写凭据之前】用
             #   "请求名 vs 实际生效名"做一次与 SW 无关的独立判定。
             try:
+                # == [A-86 修复] 跨标准检测【不能拿请求名跟它自己比】========
+                # 原实现比的是 requested_material vs applied_name，而
+                #   applied_name 在 swapi 里就是"我们登记的名字"（= 请求名）：
+                #     L5299  "applied_name": _mr.get("applied_name") or _mr.get("material")
+                #     L4655/4676  out["applied_name"] = ... or nm   （nm = 请求名）
+                #   于是 _detect_cross_standard(requested, applied) 在
+                #     L1572  _rq.lower() == _ap.lower() -> 立即 return False
+                #   —— 这段"强制兜底检测"【从未触发过一次】。
+                # 实测（2026-11-01）：请求 40Cr，SW 实际材质是
+                #   "SolidWorks DIN Materials|1.2312 (40CrMnMoS8-6)|90"（德国 DIN
+                #   体系），凭据却写 applied_name="40Cr" / cross_standard=false，
+                #   防线①据此认为"精确匹配"。
+                # 修复：优先拿【SW 内部真实材质名】(sw_internal_material) 做比对，
+                #   它才是"实际生效了什么材料"的事实；拿不到才退回 applied_name。
+                _ap_for_cross = (_att_info.get("sw_internal_material")
+                                 or _att_info.get("applied_name")
+                                 or _att_info.get("attested_material_name"))
                 _final_cross, _final_note = _detect_cross_standard(
-                    _att_info.get("requested_material"),
-                    _att_info.get("applied_name") or _att_info.get("attested_material_name"))
+                    _att_info.get("requested_material"), _ap_for_cross)
                 if _final_cross:
                     _att_info["cross_standard"] = True
                     _att_info["cross_standard_note"] = _final_note
                     _att_info["approximate_match"] = True
                     self._warn("跨标准材料替代（凭据层强制检测）：%s" % _final_note)
                 elif _is_equivalent_naming(_att_info.get("requested_material"),
-                                           _att_info.get("applied_name")
-                                           or _att_info.get("attested_material_name")):
+                                           _ap_for_cross):
                     _att_info["equivalent_naming"] = True
+                # == [A-86 补充] "名字对不上但没被判跨标准"也必须留痕 ========
+                # 裸牌号（灰铸铁(SN) / DIN 1.2312）在 _material_standard_of
+                #   里查不到体系 -> L1579 `if not _s1 or not _s2: return False`
+                #   -> 既不算跨标准、也不告警，凭据看起来完全干净。
+                #   这类"SW 库近似命中"正是材质被写坏的主因之一，
+                #   必须显式标记出来交给防线①。
+                elif (_ap_for_cross
+                      and str(_att_info.get("requested_material") or "").strip()
+                      and (str(_att_info.get("requested_material")).strip().casefold()
+                           != str(_ap_for_cross).strip().casefold())):
+                    _att_info["name_substituted"] = True
+                    _att_info["name_substituted_note"] = (
+                        "请求材质 %r 与 SW 实际生效材质 %r 名称不一致"
+                        "（未识别为标准体系差异，可能是 SW 材质库的近似命中）。"
+                        "请人工确认二者是否等价。"
+                        % (_att_info.get("requested_material"), _ap_for_cross))
+                    self._warn(_att_info["name_substituted_note"])
             except Exception:
                 pass
             # ── 【Bug-C 运行时修复】凭据补【属性指纹】供防线做属性级比对 ────
@@ -5080,6 +5528,50 @@ class SWModel:
                         _att_info["yield_deviation_pct"] = round(_yre * 100, 2)
                     except Exception:
                         pass
+            except Exception:
+                pass
+            # == [A-48 修复] 把【零件几何指纹】提交给宿主一并签名 ==========
+            # 原防线①只校验"材料凭据本身是否可信"（签名/md5/密度/家族），
+            #   对【零件几何】零约束 —— 实测（2026-11-01）：
+            #     外径 φ160（规范要求 φ200）、体积缺 35% 的旧草稿，
+            #     因"材料凭据 ok=true"直接通过防线①并进入总装。
+            #   防线①能证明"这件的材料写对了"，但无法回答
+            #   "这是不是设计要的那件"。
+            # 现在把几何事实（bbox / 三向尺寸 / 体积 / 实体数）纳入待签体；
+            #   校验端据 load_case 的 design_domain 与 expected_volume_mm3
+            #   （若有）做范围判定。
+            # 注意：几何是"事实陈述"，不是"判定结论"—— 判定仍在校验端做；
+            #   取不到值只表示"该项未验证"，绝不伪造合格。
+            try:
+                _bbox_att = None
+                try:
+                    _bbox_att = self.body_box_mm()
+                except Exception:
+                    _bbox_att = None
+                _vol_att = None
+                try:
+                    _vol_att = self._body_volume_mm3()
+                except Exception:
+                    _vol_att = None
+                _bodies_att = None
+                try:
+                    _b = self.model.GetBodies2(0, 1)
+                    _bl = list(_b) if isinstance(_b, tuple) else ([_b] if _b else [])
+                    _bodies_att = len(_bl)
+                except Exception:
+                    _bodies_att = None
+                if _bbox_att:
+                    _att_info["part_bbox_mm"] = [round(float(x), 3) for x in _bbox_att]
+                    try:
+                        _att_info["part_dims_mm"] = [
+                            round(float(_bbox_att[3 + _i]) - float(_bbox_att[_i]), 3)
+                            for _i in range(3)]
+                    except Exception:
+                        pass
+                if _vol_att is not None:
+                    _att_info["part_volume_mm3"] = round(float(_vol_att), 3)
+                if _bodies_att is not None:
+                    _att_info["part_body_count"] = int(_bodies_att)
             except Exception:
                 pass
             # [主防线] 材料凭据必须由【宿主签发】—— 密钥只在宿主内存，
@@ -5156,6 +5648,11 @@ class SWModel:
                 "applied_yield_mpa": _att_info.get("applied_yield_mpa"),
                 "applied_density_kg_m3": _att_info.get("applied_density_kg_m3"),
                 "yield_deviation_pct": _att_info.get("yield_deviation_pct"),
+                # == [A-48] 几何指纹（宿主纳入待签体；校验端据此判"是不是这件"）
+                "part_bbox_mm": _att_info.get("part_bbox_mm"),
+                "part_dims_mm": _att_info.get("part_dims_mm"),
+                "part_volume_mm3": _att_info.get("part_volume_mm3"),
+                "part_body_count": _att_info.get("part_body_count"),
             })
             if _signed_m and _signed_m.get("ok") and isinstance(_signed_m["credential"], dict):
                 # ── 【观察点 13/15 修复】材料被近似替换时必须显式告警 ────────
@@ -6692,9 +7189,24 @@ class SWModel:
         except Exception:
             _repeat_with_body = False
         if _switch or _repeat_with_body:
-            self._reset_plane_context(
-                plane,
-                reason=("cross-plane" if _switch else "multi-feature"))
+            # 【Bug-40b】原实现调 _reset_plane_context（内含 rebuild）。
+            # 实测（夹紧凸轮 96 环扇形拼接，每环一次 begin_sketch）：
+            #   · rebuild 并非幂等——多次 rebuild 后【按名选基准面反而间歇性
+            #     失败】，旧逻辑随即静默降级到实体面 → 草图坐标系错位 →
+            #     后续所有 extrude/cut 返回 None；
+            #   · rebuild 每次 1~3s，多特征零件上是主要耗时来源。
+            # 结论：退出残留草图态 + 清选择集已足够让 COM 上下文干净，
+            #   rebuild 仅保留给 begin_sketch 重试分支显式调用。
+            try:
+                if self.skm.ActiveSketch is not None:
+                    self.skm.InsertSketch(True)
+            except Exception:
+                pass
+            try:
+                self.model.ClearSelection2(True)
+            except Exception:
+                pass
+            self._plane_generation = int(getattr(self, "_plane_generation", 0)) + 1
         self._last_begin_plane = str(plane)
         try:
             self._sketch_open_count = int(getattr(self, "_sketch_open_count", 0)) + 1
@@ -6710,14 +7222,26 @@ class SWModel:
         #   4) 只有按名确实失败，才降级到实体面 fallback。
         import time as _t
         _plane_selected = False
-        for retry in range(5):
+        # ══ 【Bug-18 精修：杜绝"落到实体面"的静默错位】═══════════════════
+        # 多特征零件上按名选基准面会间歇性失败；旧逻辑失败 5 次后静默降级到
+        # begin_sketch_on_face，草图被开到【实体面】上，本地坐标系错位，导致
+        # 后续所有 extrude/cut 返回 None（FeatureExtrusion3 None，segs=4）。
+        # 现在：① 每轮先 rebuild 清 SW 残留态；② 按名只试 2 轮（清态后第二轮
+        # 通常必成）；③ 两轮都失败 → 直接抛错让调用方重试，【禁止】面降级。
+        for retry in range(2):
+            if retry > 0:
+                try:
+                    self.rebuild()
+                except Exception:
+                    pass
+                _t.sleep(0.2)
             try:
                 _sel = self.select_plane(plane)
                 if _sel:
                     _plane_selected = True
                 self.skm.InsertSketch(True)
                 active_sk = self.skm.ActiveSketch
-                if active_sk is not None:
+                if active_sk is not None and _plane_selected:
                     self._normal_to(self._PLANE_VIEW.get(plane, "*Front"))
                     try:
                         self.clear_selection()
@@ -6727,14 +7251,18 @@ class SWModel:
                     # 【Bug T3 修复】统一走 _finalize_new_sketch，避免漏分支
                     self._finalize_new_sketch(plane)
                     return self
-                # ActiveSketch 为空：清残留再试
+                # ActiveSketch 为空或基准面没选中：清残留再试
                 try:
                     self.skm.InsertSketch(False)
                 except Exception:
                     pass
             except Exception:
                 pass
-            _t.sleep(0.12)
+        # 两轮清态后仍选不中基准面 → 明确失败（不落到实体面造成坐标错位）
+        raise RuntimeError(
+            u"begin_sketch(%s): 按名选择基准面失败（已 rebuild 清态重试）。"
+            u"为避免草图落到实体面导致坐标错位，已禁用实体面降级，请重试或"
+            u"检查基准面名称。" % plane)
 
         # ── 【C7 修复 + BUG-C 收紧】基准面彻底选不中时才走实体面 fallback ──
         # C7 场景：实体含圆柱面后，第 3 次调 begin_sketch("Front Plane") 必失败
@@ -7606,9 +8134,18 @@ class SWModel:
         # 退出草图瞬间 SW 会清空选择集；激活态是唯一能直接用
         # select_all_sketch_segments() 稳定选段的窗口。此处预选不改变
         # 建模结果，只为 cut() 的选择链路留一份"已被验证可选段"的证据。
+        # ── 【F-04 修复】预选的是【草图段】，并打上轮廓标记 ──────────────
+        # 说明：extrude 需要的轮廓是【草图特征本身】("SKETCH")，不是段，
+        #   所以这份预选对 extrude 不能直接复用（extrude 会自己按名重选，
+        #   见 _select_extrude_profile）。但它是 cut 的唯一稳定窗口，
+        #   而且"预选存在"本身就是"草图已完成"的可观测证据 ——
+        #   因此【保留】这段预选，只在旁边记一笔，绝不再让它被误当成
+        #   拉伸轮廓（历史事故里正是"选了段却以为选了轮廓"）。
         try:
             if self.skm.ActiveSketch is not None:
-                self.select_all_sketch_segments()
+                _seg_ok, _seg_n = self.select_all_sketch_segments()
+                self._end_sketch_preselect = {"ok": bool(_seg_ok),
+                                              "count": int(_seg_n or 0)}
         except Exception:
             pass
         try:
@@ -7906,6 +8443,262 @@ class SWModel:
             self._sel_diag = "select_all_sketch_segments 异常: %r" % (e,)
             return False, 0
 
+    # ══ 【F-04 修复 · 2026-10-31】拉伸轮廓选择（清选择之后必须重新选）══
+    # 事故（两个小屋各自复现）：标准写法 begin_sketch → rect/circle →
+    # end_sketch → extrude() 连续失败，FeatureExtrusion3 返回 None，
+    # 报「选择集为 0：轮廓没被选中」。
+    # 根因链（Lead 已定位，本方法负责第 ③ 步）：
+    #   ① end_sketch 退出前在激活态预选轮廓段（Bug T2 修复，:7609）；
+    #   ② extrude 开头无条件 _reset_selection_state() → ClearSelection2(True)
+    #      + ForceRebuild3(False)，把①的预选【清掉】；
+    #   ③ 之后直接调 FeatureExtrusion3，中间【没有任何重选轮廓的步骤】
+    #      → 选择集 0 → 返回 None。
+    # 结论：清选择本身是对的（cut 需要它自愈脏选择），错的是"清了不重选"。
+    #   本方法就是"重选"那一步，且与 _ensure_cut_profile_selected 明确分工：
+    #     · cut  → 需要的是【草图内的段/边】（切入已有实体）；
+    #     · extrude → 需要的是【草图特征本身】（"SKETCH" 类型，拉伸基体）。
+    #   两者不可互换：拿段去拉伸同样会失败。
+    #
+    # 【类型库依据】engine...\83A33D31-...x0x33x0.py
+    #   · IModelDocExtension.SelectByID2(Name, Type, X, Y, Z, Append, Mark,
+    #       Callout, SelectOption) → 9 参（L42978；vtable L89320），
+    #       Callout 封送类型 (9,1) = VT_DISPATCH 接口 IID 9CAAA1AA-...，
+    #       所以【必须】传 VARIANT(VT_DISPATCH, None)，传裸 None 会类型不匹配。
+    #   · ISelectionMgr.GetSelectedObjectCount2(Mark)（L53146）
+    #   · ISelectionMgr.SetSelectedObjectMark(AtIndex, Mark, Action)（L53411）
+    #   · IFeatureManager.FeatureExtrusion3 为 23 参（L22598；vtable L82748），
+    #       第 20 位 UseAutoSelect 传 True 时 SW 会【忽略选择集】自己找轮廓。
+    #
+    # 标记位（沿用仓库既有约定）：1 = 轮廓/草图（与 cut 的选择标记一致）。
+
+    EXTRUDE_PROFILE_MARK = 1
+
+    def _selection_count(self, mark=-1):
+        """读当前选择集数量；读不到返回 -1（调用方必须按"未知"处理）。"""
+        try:
+            return int(self.model.SelectionManager.GetSelectedObjectCount2(mark))
+        except Exception:
+            return -1
+
+    def _mark_current_selection(self, mark):
+        """把当前选择集里所有对象打上 mark 标记（拉伸轮廓标记位）。
+
+        【类型库】ISelectionMgr.SetSelectedObjectMark(AtIndex, Mark, Action)
+        （L53411）。Action 传 0 = 设置标记（swSelectionSetMarkAction 的默认值）。
+        整段失败不致命：FeatureExtrusion3 在本仓库既有行为下并不强制要求标记，
+        这里打标记是为了让"轮廓 = mark 1"成为可观测事实（便于诊断与测试）。
+        Returns: 打标成功的数量
+        """
+        n = self._selection_count(-1)
+        if n <= 0:
+            return 0
+        _ok = 0
+        for i in range(1, n + 1):
+            try:
+                self.model.SelectionManager.SetSelectedObjectMark(i, int(mark), 0)
+                _ok += 1
+            except Exception:
+                continue
+        return _ok
+
+    def _select_extrude_profile(self):
+        """【F-04 修复】在【已退出草图】的状态下选中"可拉伸的草图轮廓特征"。
+
+        ══ 为什么必须单独有这个步骤 ══════════════════════════════════════
+        extrude() 开头会 _reset_selection_state()（清选择 + 强制重建），
+        这两步都会让 SW 的当前选择集归零；而 FeatureExtrusion3 在
+        UseAutoSelect=True 时也不保证能找到轮廓（实测返回 None）。
+        因此清完之后【必须】显式按名选中草图特征，再调 FeatureExtrusion3。
+
+        ══ 选哪些（跨版本/跨 locale）════════════════════════════════════
+        只认 _is_sketch_feature()（本文件既有封装，:13632）判定的特征：
+          · "Sketch"          未消费草图
+          · "ProfileFeature"  已被消费过的草图特征（最常见）
+        并【排除】"OriginProfileFeature"（原点），它是 ProfileFeature 的子类
+        名，误选它必然拉伸失败 —— 小屋绕行方案里专门踩过这个坑。
+        优先用 begin_sketch 记录的 _active_sketch_name（显式名，不猜）；
+        名字不可靠时退回"特征树里最后一个未被消费的草图特征"。
+
+        Returns: dict {ok, selected, name, method, tried, error?}
+        """
+        out = {"ok": False, "selected": 0, "name": None, "method": None,
+               "tried": [], "reason": ""}
+        # ── 步骤 1：确定候选草图名（显式名优先，绝不瞎猜「草图1」）────────
+        _cand = None
+        try:
+            _nm = getattr(self, "_active_sketch_name", None)
+            _cons = getattr(self, "_consumed_sketches", None) or set()
+            if _nm and str(_nm) not in _cons:
+                _cand = str(_nm)
+                out["tried"].append(u"显式名=%s" % _cand)
+        except Exception as _e:
+            out["tried"].append("显式名读取异常: %r" % (_e,))
+        if not _cand:
+            # 兜底：特征树里最后一个草图特征（排除原点）
+            try:
+                f = self.model.FirstFeature()
+                _guard = 0
+                while f is not None and _guard < 5000:
+                    _guard += 1
+                    try:
+                        # 【F-04】GetTypeName2 是【方法】(类型库 L21627)，
+                        # 用兼容方法/属性两种暴露方式的 _feature_type_name
+                        _tn = _feature_type_name(f)
+                        _excl = ("OriginProfileFeature", "SketchBlock",
+                                 "SketchPicture")
+                        if (_tn not in _excl and _is_sketch_feature(f)):
+                            _cand = str(f.Name)
+                    except Exception:
+                        pass
+                    try:
+                        f = f.GetNextFeature()
+                    except Exception:
+                        break
+                out["tried"].append(u"特征树兜底=%s" % _cand)
+            except Exception as _e:
+                out["tried"].append("特征树遍历异常: %r" % (_e,))
+
+        # ── 步骤 2：选中草图特征 ──────────────────────────────────────────
+        # ══ 【F-04 修复·路径优先级按官方建议排序】══════════════════════════
+        # 【网页】CodeStack《Selecting SOLIDWORKS objects by name and
+        #   coordinates using API》（IModelDocExtension::SelectByID2）
+        #   https://www.codestack.net/solidworks-api/document/selection/select-by-id/
+        #   原文：「Sketch elements (lines, arcs, points, splines etc.) do not
+        #   have permanent names. So it is not valid to use the name recorded
+        #   by the macro in SelectByID2 method.」
+        #   「...Use this method instead of using the selection methods on the
+        #   following objects: IAnnotation, IComponent2, IFeature ...」
+        #   → 结论：SelectByID2 是"能用但有已知缺陷"的通用手段；
+        #     对【特征】（草图特征就是 IFeature）应优先用 IFeature::Select2。
+        # 【类型库】IFeature.Select2(Append, Mark) —— 2 参（L21957，vtable 21957）
+        #   比 SelectByID2 的 9 参更简单、无 Callout 封送风险。
+        # 因此本步骤顺序：① IFeature.Select2 → ② SelectByID2（Callout 必须 VARIANT）
+        #   两条都保留：①是官方推荐，②是小屋实测跑通过的绕行方案（兜底）。
+
+        def _feature_by_name(name):
+            """按名从特征树取 IFeature 对象；找不到返回 None。"""
+            if not name:
+                return None
+            try:
+                f = self.model.FirstFeature()
+                _g = 0
+                while f is not None and _g < 5000:
+                    _g += 1
+                    try:
+                        if str(f.Name) == str(name):
+                            return f
+                    except Exception:
+                        pass
+                    try:
+                        f = f.GetNextFeature()
+                    except Exception:
+                        break
+            except Exception:
+                pass
+            return None
+
+        def _try_select_feature(name):
+            """① IFeature.Select2(Append, Mark)（官方推荐）→ (ok, 选中数, used)"""
+            feat = _feature_by_name(name)
+            if feat is None:
+                out["tried"].append(u"IFeature.Select2(%s): 特征树无此特征" % (name,))
+                return False, -1, False
+            try:
+                self.model.ClearSelection2(True)
+            except Exception:
+                pass
+            try:
+                _ok = feat.Select2(False, int(self.EXTRUDE_PROFILE_MARK))
+            except Exception as _e:
+                out["tried"].append("IFeature.Select2(%s) 异常: %r" % (name, _e))
+                return False, -1, False
+            _n = self._selection_count(-1)
+            out["tried"].append(u"IFeature.Select2(%s)->ok=%s n=%s"
+                                % (name, _ok, _n))
+            return bool(_ok), (int(_n) if _n is not None else -1), True
+
+        def _try_select(name):
+            """② SelectByID2（Callout 必须 VARIANT 封送）→ (ok, 选中数)"""
+            if not name:
+                return False, 0
+            try:
+                self.model.ClearSelection2(True)
+            except Exception:
+                pass
+            try:
+                _sel = self.ext.SelectByID2(
+                    str(name), "SKETCH", 0.0, 0.0, 0.0,
+                    False,          # Append
+                    int(self.EXTRUDE_PROFILE_MARK),   # Mark
+                    # ── 【F-04 关键】Callout 必须是 VARIANT(VT_DISPATCH,None)
+                    # 类型库 (8,Name)(5,1)(9,1) → Callout 是接口指针
+                    # 9CAAA1AA-F2FC-11D5-AF66-00C04F603FAF（L7155 证实该 IID
+                    # 就是 ICallout）；传裸 None 会报"类型不匹配"，
+                    # 这正是小屋绕行方案里被卡住的那一步。
+                    self._empty,
+                    0)              # SelectOption: 0 = 默认（按名选）
+                _n = self._selection_count(-1)
+                return bool(_sel), (int(_n) if _n is not None else -1)
+            except Exception as _e:
+                out["tried"].append("SelectByID2(%s) 异常: %r" % (name, _e))
+                return False, -1
+
+        def _select_any(name):
+            """① IFeature.Select2 优先，② SelectByID2 兜底。返回 (ok, n, method)"""
+            _o1, _n1, _used = _try_select_feature(name)
+            if _o1 and _n1 > 0:
+                return True, _n1, "IFeature.Select2"
+            _o2, _n2 = _try_select(name)
+            if _o2 and _n2 > 0:
+                return True, _n2, "SelectByID2/SKETCH"
+            return False, max(_n1, _n2), None
+
+        _ok, _n, _how = _select_any(_cand)
+        if _ok and _n > 0:
+            out.update({"ok": True, "selected": _n, "name": _cand,
+                        "method": _how})
+            self._mark_current_selection(self.EXTRUDE_PROFILE_MARK)
+            return out
+
+        # ── 步骤 3：按名失败 → 遍历特征树逐个试（每个候选都先清选择）────
+        try:
+            f = self.model.FirstFeature()
+            _guard = 0
+            _hit = None
+            while f is not None and _guard < 5000:
+                _guard += 1
+                try:
+                    _tn = _feature_type_name(f)
+                    if (_tn != "OriginProfileFeature"
+                            and _is_sketch_feature(f)):
+                        _nm2 = str(f.Name)
+                        _ok2, _n2, _how2 = _select_any(_nm2)
+                        if _ok2 and _n2 > 0:
+                            _hit = (_nm2, _n2, _how2)
+                            break
+                except Exception:
+                    pass
+                try:
+                    f = f.GetNextFeature()
+                except Exception:
+                    break
+            if _hit:
+                out.update({"ok": True, "selected": _hit[1], "name": _hit[0],
+                            "method": "%s/遍历特征树" % _hit[2]})
+                self._mark_current_selection(self.EXTRUDE_PROFILE_MARK)
+                return out
+        except Exception as _e:
+            out["tried"].append("遍历试选异常: %r" % (_e,))
+
+        # ── 步骤 4：全都失败 → 显式给出可读诊断，绝不静默返回 ────────────
+        out["reason"] = (
+            "无法选中可拉伸的草图轮廓。已尝试：%s。"
+            "常见原因：①草图已被上一个特征消费（_consumed_sketches 记录）；"
+            "②草图特征类型既不是 Sketch 也不是 ProfileFeature（草图块/图片）；"
+            "③装配体/零件文档不是活动文档；④草图是空草图。"
+            % (" | ".join(out["tried"])[-600:],))
+        return out
+
     def extrude(self, depth, symmetric=False, draft_deg=0, auto_select=True):
         """拉伸凸台。depth 单位 mm；symmetric=True 两侧对称。
 
@@ -7919,6 +8712,33 @@ class SWModel:
             self._reset_selection_state(reason="extrude 前置")
         except Exception:
             pass
+        # ══ 【F-04 修复】清完脏选择之后【必须重新选中轮廓】再调 API ═══════
+        # 事故：_reset_selection_state 会 ClearSelection2(True) +
+        #   ForceRebuild3(False)，把 end_sketch 刚预选好的轮廓段一起清掉，
+        #   而下面直接调 FeatureExtrusion3 —— 中间没有任何重选步骤，
+        #   于是「选择集为 0」→ 返回 None → 标准路径 100% 失败。
+        # 注意选择目标不同：cut 要的是【草图里的段/边】，extrude 要的是
+        #   【草图特征本身】("SKETCH")，所以这里不能复用 cut 的那套选段逻辑。
+        _prof = self._select_extrude_profile()
+        if not _prof.get("ok"):
+            # 选不中轮廓 → 显式报错（绝不静默返回 None 让上层瞎猜）
+            _diag0 = diagnose_feature_failure(
+                self, api="FeatureExtrusion3",
+                extra={"depth_mm": depth,
+                       "profile_tried": _prof.get("tried")})
+            raise RuntimeError(
+                "拉伸前【未能选中草图轮廓】，FeatureExtrusion3 必然返回 None。\n"
+                "  选择集: %s\n"
+                "  尝试记录: %s\n"
+                "【诊断】原因=%s（%s）\n"
+                "建议：%s\n"
+                "另：标准写法必须是 begin_sketch → rect()/circle() → "
+                "end_sketch → extrude()；若草图已被上一特征消费，"
+                "请重新 begin_sketch 画新轮廓。"
+                % (_prof.get("selected"), _prof.get("reason"),
+                   _diag0.get("cause"), _diag0.get("detail"),
+                   _diag0.get("advice")))
+        self._extrude_profile_used = _prof.get("name")
         T1 = _get_midplane_enum(self.sw) if symmetric else SW_END_BLIND
         reverse = bool(depth < 0)  # 负深度 → 反转拉伸方向
         d = abs(depth) * MM
@@ -7941,6 +8761,26 @@ class SWModel:
         #     solidworks-modeling.md 第 289 行遗留项），这里一并补上。
         _draft_on = bool(draft_deg)
         _draft_rad = math.radians(float(draft_deg or 0.0))
+        # ══ 【F-04 修复】调用前【再确认一次】选择集非空 ══════════════════════
+        # 理由：从 _select_extrude_profile() 成功到真正调 FeatureExtrusion3
+        #   之间还隔着若干语句（含可能触发 SW 内部清选择的属性访问）。
+        #   事故里的报错正是「选择集为 0」—— 那就在调用前把它变成【断言】：
+        #   一旦归零，这里立刻抛出可读错误，而不是让 SW 返回一个 None
+        #   让上层猜"是不是参数错了"。
+        _n_sel = self._selection_count(-1)
+        if _n_sel == 0:
+            _diag_s = diagnose_feature_failure(
+                self, api="FeatureExtrusion3",
+                extra={"depth_mm": depth,
+                       "profile": self._extrude_profile_used})
+            raise RuntimeError(
+                "调 FeatureExtrusion3 前【选择集为 0】—— 轮廓在选好之后又被"
+                "清掉了（典型是中间某步触发了 SW 清空选择）。\n"
+                "  轮廓=%s\n"
+                "【诊断】原因=%s（%s）\n建议：%s"
+                % (self._extrude_profile_used,
+                   _diag_s.get("cause"), _diag_s.get("detail"),
+                   _diag_s.get("advice")))
         feat = self.fm.FeatureExtrusion3(
             True,            # Sd      单向
             False,           # Flip    反转切除侧（增料特征无意义，恒 False）
@@ -10210,7 +11050,10 @@ class SWModel:
         self.end_sketch()
         _time.sleep(0.3)
 
-        feat = self.revolve(360)
+        # 球体包围盒是 (D,D,D)——三个方向相等；而 revolve(verify=True)
+        # 的形态校验只认"圆柱"=(D,D,L) 两等一大，会把球体误判为绕错轴。
+        # 球体本就不是圆柱，这里跳过该形态校验（旋转轴仍由 centerline 决定）。
+        feat = self.revolve(360, verify=False)
         if feat is None:
             raise RuntimeError("FeatureRevolve2 返回 None，球体创建失败")
 
@@ -13629,23 +14472,54 @@ _SKETCH_TYPE_MARKERS = ("Sketch", "ProfileFeature")
 _SKETCH_TYPE_EXCLUDE = ("SketchBlock", "SketchPicture")
 
 
+def _feature_type_name(feat):
+    """取 IFeature 的类型名（兼容"方法"与"属性"两种暴露方式）。
+
+    ── 【F-04 修复】为什么需要它 ────────────────────────────────────────
+    _is_sketch_feature() 原先用 getattr(feat, "GetTypeName2") 当【属性】读。
+    但【类型库】IFeature.GetTypeName2() 是【方法】(L21627)：
+      · 真 COM late-binding 下 getattr 返回的是 bound method 对象，
+        str() 出来是 "<bound method ...>"，任何类型判定都恒为 False；
+      · 某些版本的 early-binding 封装会把它暴露成属性（字符串）。
+    两种写法都试，谁的返回像类型名就用谁 —— 只读、失败返回 ""。
+
+    影响范围：本函数是新增的只读助手，不改变任何既有行为；
+    只有 _select_extrude_profile（拉伸轮廓选择）使用它。
+    """
+    for _how in (lambda: feat.GetTypeName2(),
+                 lambda: feat.GetTypeName2,
+                 lambda: feat.GetTypeName(),
+                 lambda: feat.GetTypeName):
+        try:
+            _v = _how()
+        except Exception:
+            continue
+        if isinstance(_v, str) and _v and not _v.startswith("<bound method"):
+            return _v
+    return ""
+
+
 def _is_sketch_feature(feat):
     """判定一个 Feature 是否【可拉伸草图】特征（跨版本、跨 locale）。
 
     同时看 GetTypeName2 与 GetTypeName：前者对已消费草图返回
     "ProfileFeature"，后者多数情况下返回 "Sketch"。任一命中即认为是草图。
     """
-    for _attr in ("GetTypeName2", "GetTypeName"):
-        try:
-            t = str(getattr(feat, _attr) or "")
-        except Exception:
-            t = ""
-        if not t:
-            continue
-        if any(x in t for x in _SKETCH_TYPE_EXCLUDE):
-            return False
-        if any(m in t for m in _SKETCH_TYPE_MARKERS):
-            return True
+    # ── 【F-04 修复】属性式读取在 late-binding 下恒为 False ────────────────
+    # 【类型库】IFeature.GetTypeName2() 是【方法】(L21627)，getattr 拿到的是
+    #   bound method，str() 出来是 "<bound method ...>"，永远匹配不上
+    #   _SKETCH_TYPE_MARKERS —— 于是"特征树里一个草图都找不到"。
+    # 这正是"标准拉伸路径选不中轮廓"的隐藏放大器：即使把选择步骤补上，
+    #   类型判定失败也照样选不中。改走 _feature_type_name（方法/属性都兼容）。
+    # ⚠️ 兼容性：老调用方（test_regression_bug12_select_sketch.py）用
+    #   【属性式】假特征，_feature_type_name 同样支持，行为不变。
+    _t = _feature_type_name(feat)
+    if not _t:
+        return False
+    if any(x in _t for x in _SKETCH_TYPE_EXCLUDE):
+        return False
+    if any(m in _t for m in _SKETCH_TYPE_MARKERS):
+        return True
     return False
 
 

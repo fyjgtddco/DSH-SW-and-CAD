@@ -54,11 +54,15 @@ const REG_URL = 'data:text/javascript;base64,' + Buffer.from(SHIM_REGISTRY).toSt
 const source = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8');
 const signSource = readFileSync(new URL('../lib/defense-sign.js', import.meta.url), 'utf8');
 const SIGN_URL = 'data:text/javascript;base64,' + Buffer.from(signSource).toString('base64');
+// 【卡死修复】job-wait-guard.js 也必须内联（data: URL 加载无法解析相对路径）
+const guardSource = readFileSync(new URL('../lib/job-wait-guard.js', import.meta.url), 'utf8');
+const GUARD_URL = 'data:text/javascript;base64,' + Buffer.from(guardSource).toString('base64');
 
 const rewritten = source
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + LLM_URL + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + REG_URL + "'")
-  .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'");
+  .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'")
+  .replace("from './job-wait-guard.js'", "from '" + GUARD_URL + "'");
 assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换成功');
 
 const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));

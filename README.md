@@ -574,14 +574,53 @@ DSH-SW-and-CAD-main/
 │       ├── lib/index.js          # Host 半（HTTP 路由 / 提问桥接 / 防线签名）
 │       ├── lib/client.js         # 浏览器半（三栏工作区）
 │       ├── lib/defense-sign.js   # HMAC 凭据签名
+│       ├── lib/job-wait-guard.js # ★ job_output 长等待守卫（防"卡死"，见下）
 │       ├── preset-engineering.patch.yml  # ★ 运行时真正加载的人设
-│       └── test/                 # 12 个插件测试
+│       └── test/                 # 13 个插件测试
 ├── profiles/                     # 宿主层 patch 模板
 └── third-party-patched/          # 打过补丁的第三方插件
 ```
 
 > 动手改之前先读 `engineering/README.md`：那里记着每个历史 bug 的**现场现象 / 根因 / 修复判据**，
 > 很多看起来"多余"的代码，是为了防止某个已经踩过两次的坑复发。
+
+---
+
+## 🩹 防"卡死"：`job_output` 长等待守卫
+
+> 2026-10-31 事故：`job_output { wait: true, timeout_ms: 270000 }` 静默阻塞数分钟，
+> GUI 毫无反馈 → 用户以为 DSH 死机 → 强制退出 → 退出瞬间所有插件 fiber 失活 →
+> `cannot get required service "jobs" in inactive context` → `turn/end{interrupted}`，整轮对话作废。
+> 完整复盘见 [docs/DSH卡死事故分析_job_output阻塞.md](docs/DSH卡死事故分析_job_output阻塞.md)。
+
+修复分两层，**两层都装才完整**：
+
+| 层 | 位置 | 生效方式 |
+|---|---|---|
+| **宿主层** | `plugins/dsh-engineering-ui/lib/job-wait-guard.js`（经官方 `ctx.on('tools/execute')` 接线） | 装进 profile 后**重启 DSH** |
+| **仓库层** | `preset-engineering.patch.yml` 人设 + 各 SKILL + `ask_user.py` | 热生效（同步到安装副本即可） |
+
+宿主层做两件事：
+
+1. **把长等待切成 ≤45s 的窗口**：到点就返回"仍在运行"（正常成功结果，不是失败）——
+   GUI 保持响应，用户随时能打断，模型也不会把整轮挂在等待上；
+2. **把上下文失活异常降级**成 `JOB_CONTEXT_LOST` 工具错误（`isError=true` + 操作指引），
+   不再让框架异常冒到 turn 级把整轮打断。
+
+安装 / 重装（**DSH 每次升级都会覆盖安装目录，升级后重跑一次即可**）：
+
+```powershell
+.\install-job-wait-guard.ps1 -DryRun     # 先看会动哪些文件
+.\install-job-wait-guard.ps1            # 装进每个 profile（逐文件 .bak-guard-时间戳）
+.\install-job-wait-guard.ps1 -Verify     # 只核对
+```
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `DSH_ENG_JOB_WAIT_GUARD` | 开 | 设 `0` 关闭守卫 |
+| `DSH_ENG_JOB_WAIT_MAX_MS` | `45000` | 单次等待窗口上限（最小 5000） |
+
+回归：`node --test engineering\plugins\dsh-engineering-ui\test\job-wait-guard.test.mjs`（6/6）。
 
 ---
 

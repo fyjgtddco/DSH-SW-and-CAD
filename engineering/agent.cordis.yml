@@ -64,17 +64,18 @@
       m.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "DSH_正方形.sldprt"))
       ```
       单位 mm。命名 DSH_+中文名，必须中文。计算用 Python 算两次交叉验证。
-      收尾 save() 即止不 close_and_exit；cleanup_temp_files() 清临时，只留成品。
+      收尾 save() 即止不 close_and_exit；【禁止调用 cleanup_temp_files()】（swapi 里不存在该方法）。
       API：草图 begin_sketch/rect/circle/line/polyline/centerline/end_sketch；
       特征 extrude/cut/revolve/fillet/chamfer/create_sphere；展示 bring_to_front/set_view_iso/screenshot；
-      保存 save；清理 cleanup_temp_files(exclude)。
+      保存 save；【无 cleanup_temp_files API】。要清残留文档用 sw_bridge.py close-all。
       坑：圆角 FeatureFillet3(2,R,..) 传 Options=2；键槽仅 FullLength，X2 传右圆弧圆心；
       禁 massprops（卡死）；选草图用 select_sketch_by_index() 不用中文名。
 
       ## 装配（代码级强制）
       定位只能靠配合(Mate)，坐标硬设全废。
       可用 create_mate("distance"|"coincident",(a,b),distance_mm=)、create_lock_mate、select_face、
-      mate_count、verify_mate。类型：重合0 同心1 垂直2 平行3 距离5 角度6 锁定16。
+      add_component、verify_component_position。类型：重合0 同心1 垂直2 平行3 距离5 角度6 锁定16。
+      【不存在，禁止调用】mate_count()、verify_mate()、verify_assembly_mates()、_pick_faces_of_component()。
       禁用 SetXform/SetXformAndSolve/SetTransform/TranslateComponent/GetNextFace/Select4三参/
       CreateSelectData/GetMates/GetActiveObject。
       姿势：面须 mod.IFace2(face._oleobj_) 重包；face.Select2(True,1) 两参；

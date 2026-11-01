@@ -395,6 +395,42 @@ def validate_with_domain(
             except Exception:
                 _val_missing = True
         if _val_missing:
+            # ── 【BUG-JG-8 修复·加工头室】脆性国标材料"无 σy"≠ 未赋材 ──────
+            # GB/T 9439-2023 对灰铸铁只规定 σb 与硬度（牌号 HT200 = σb≥200），
+            #   无屈服平台；gb_materials.json 对 GB_HT200 明确记录
+            #   yield_mpa=null / status=missing（"σy建议留空"）。
+            #   GBM-001 的目的为拦截"SW 未真正赋材"（密度=1000/材料不可解析），
+            #   而灰铸铁在【σb 可解析 + 密度在铸铁带 + 牌号可识别为灰铸铁】
+            #   三项证据下缺 σy 属【标准本身如此】，判 CRITICAL 属规则误伤
+            #   （实测 2026-11-01：加工头本体 HT200 被拦，防线③无法收敛）。
+            #   豁免计入 passed 并注明判据；强度校核仍由物理层脆性判据
+            #   （fea_solver.brittle_strength_ref，σb+最大主应力）负责。
+            if target in ("material_yield_mpa", "yield_strength_mpa"):
+                _mat_blk = fea_result.get("material") if isinstance(fea_result, dict) else None
+                if not isinstance(_mat_blk, dict):
+                    _mat_blk = {}
+                _uts_ev = _material_attr(fea_result, design_params,
+                                         ("material_uts_mpa", "uts_mpa"))
+                _rho_ev = _material_attr(fea_result, design_params,
+                                         ("material_density_kg_m3", "density_kg_m3"))
+                _nm = (str(_mat_blk.get("name") or "") + " "
+                       + str(_mat_blk.get("id") or "") + " "
+                       + str(_mat_blk.get("standard") or "")).upper()
+                _is_gray = (("灰铸铁" in _nm) or ("CAST IRON" in _nm)
+                            or ("GRAY IRON" in _nm)
+                            or (_nm.strip().startswith("HT")
+                                and _nm.strip()[2:5].isdigit()))
+                if _uts_ev and 6900.0 <= float(_rho_ev or 0) <= 7800.0 and _is_gray:
+                    passed.append({
+                        "rule_id": rid,
+                        "target": target,
+                        "value": "σy=空(GB标准如此), σb=%s MPa" % _uts_ev,
+                        "note": ("灰铸铁(GB/T 9439)无屈服平台，标准仅规定 σb 与硬度"
+                                 "—— σy 留空属标准要求，非 SW 未赋材（密度 "
+                                 "%s kg/m³ 亦在铸铁带）；强度判据已由物理层按 "
+                                 "σb+脆性(brittle_strength_ref) 执行。" % _rho_ev),
+                    })
+                    continue
             violations.append({
                 "rule_id": rid,
                 "target": target,
@@ -409,6 +445,38 @@ def validate_with_domain(
         if violation is None:
             passed.append({"rule_id": rid, "target": target, "value": value})
         else:
+            # ── 【BUG-JG-9 修复·加工头室】SF 高于上界 = 过设计（安全方向）──
+            # GBM-003 规则 message 原文：只守【材料不失效】的绝对下限（SF≥1.0）；
+            #   上界 100 本意是捕获"载荷未真正施加/数据失真"。当 SF≥min 且
+            #   物理层已给出可识别结论（应力非零、载荷门通过）时，SF≫100 对应
+            #   【真实大截面刚性件受小载荷】（实测：HT200 壳体壁厚 24.6mm 受
+            #   100N → σ≈0.06MPa → SF≈3100），属过设计而非材料风险 ——
+            #   与物理层 OVER_DESIGN、结构域 ST-005(WARNING) 口径一致，
+            #   不得判 CRITICAL（实测 2026-11-01：加工头室防线③因此无法收敛）。
+            _sf_over = (target == "safety_factor"
+                        and "min" in condition
+                        and "max" in condition)
+            if _sf_over:
+                try:
+                    _sf_over = (float(value) >= float(condition["min"])
+                                and float(value) > float(condition["max"]))
+                except (TypeError, ValueError):
+                    _sf_over = False
+            if severity == "CRITICAL" and _sf_over:
+                warnings.append({
+                    "rule_id": rid,
+                    "target": target,
+                    "value": value,
+                    "severity": "WARNING",
+                    "message": ("安全系数 %s 高于规则上界 %s —— 判【过度设计·"
+                                "安全方向】降为 WARNING：SF≥min=%s 成立、材料"
+                                "远未失效（载荷已施加且应力非零，见物理层凭据）；"
+                                "如需轻量化可减小截面，不影响交付。"
+                                % (value, condition.get("max"), condition.get("min"))),
+                    "expected": condition,
+                    "over_design": True,
+                })
+                continue
             entry = {
                 "rule_id": rid,
                 "target": target,

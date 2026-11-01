@@ -309,9 +309,12 @@ wave3 = 工程图输出                                       ← wave2 room-end
 
 SW 使用窗口互斥（进程级强制，检测 SLDWORKS.EXE 进程）+ 锁排队：
   - 每个小屋的 sw_bridge.py 调用自动检测 SW 进程并 FIFO 排队（谁先排队谁先用）
-  - 某个小屋在用 SW 时，其他小屋的调用返回 sw_busy:true → 执行 Start-Sleep -Seconds 90
-    后重试同一条命令（必须带 --room 房间名），队列位置保留，**禁止放弃**
+  - 某个小屋在用 SW 时，其他小屋的调用返回 sw_busy:true → 用【阻塞式等待】把锁等回来：
+    `python mode_gate.py sw-wait <房间> --timeout 90`（或 `wait-rooms <房间> --timeout 90`），
+    Python 进程内原地轮询、零 token、队列位置保留，**禁止放弃**
     （`room-board` 里这时显示 `waiting_sw`，**属正常等待，不是死亡**）
+  - 🚫不要用 `Start-Sleep 90 + job_output wait:true` 这类长阻塞轮询：静默数十秒会让用户
+    以为 DSH 卡死（2026-10-31 事故根因，见 docs/DSH卡死事故分析_job_output阻塞.md）
   - 队首完全关闭 SW 进程后，下一个房间才获得 SW 使用权
   - 小屋完成建模后必须 sw_bridge.py close-all 完全关闭 SW 再收工
   - room-end 兜底：发现本房间启动的残留 SW 进程，等 20 秒后强制关闭

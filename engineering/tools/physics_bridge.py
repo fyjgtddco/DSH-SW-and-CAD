@@ -1722,10 +1722,18 @@ def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
     #   （见 _eq_guard_applies：未知类型视为承力类，不再静默豁免）。
     _ROOM_TYPE = _resolve_room_type(_DEFENSE_ROOM or room)
     _RUN_STAMP = int(time.time())
-    run_dir = os.path.join(
+    # ── 【BUG-PHYS-RPTPATH-1 修复】运行目录必须归一化 ────────────────────
+    # 原实现直接 join(_HERE, "..", "..", ...)，得到的 run_dir 带 ".." 片段；
+    # 由它派生的 report_path 同样带 ".."。宿主签名服务（defense-sign.js）
+    # 按【字符串包含关系】判定"报告是否落在受管 output/physics_runs 根内"，
+    # 含 ".." 的路径判否 → 以 "report path outside managed physics_runs root"
+    # 拒签，防线②凭据（reports/<房间>.physics.json）永远签不出来。
+    # 实测：同一份报告，把 report_path 归一化后 _sig/_kid/_nonce 立即生成。
+    # os.path.abspath 只做词法归一化，落到的目录与原实现完全一致。
+    run_dir = os.path.abspath(os.path.join(
         _HERE, "..", "..", "output", design_state.STATE_DIR_NAME,
         f"opt_{problem_id}_{_RUN_STAMP}",
-    )
+    ))
     os.makedirs(run_dir, exist_ok=True)
 
     ds = design_state.DesignState(run_dir, case_path)
@@ -1946,7 +1954,9 @@ def cmd_optimize(case_path: str, max_iter: int = 5, room: str = "",
                 report["room"] = _DEFENSE_ROOM
         except Exception:
             pass
-        report_path = sim_report.save_report(report, output_dir)
+        report_path = os.path.abspath(sim_report.save_report(report, output_dir))
+        # 【BUG-PHYS-RPTPATH-1】双保险：无论 output_dir 是否已归一化，
+        # 落进凭据的 report_path 一律是无 ".." 的绝对路径，避免宿主拒签。
         report["report_path"] = report_path
 
         ds.new_run(run_id)
@@ -2099,6 +2109,39 @@ def _emit_physics_attestation(room, report, case_path="", run_dir="",
         "room": str(room),
         "source": "physics_bridge",
     }
+    # ══ 【A-68 修复】凭据必须绑定【它实际校核的那件零件】════════════════
+    # 原凭据只记 room + run_id + report_path，【没有零件维度】——
+    #   实测（2026-11-01）：某房"通过"的物理凭据，run_id 是另一个进程
+    #   06:37:29 写进去的，part_path=null / material=null，
+    #   而本房真正想校核的是另一件。等于"你过的是别人的成绩单"。
+    #   同房 2 小时内结论还能 2.39x → 2.82x → 1.45x，每次都"恰好更好"。
+    # 现在把零件路径 + sha256 写进凭据（宿主会纳入待签体），校验端据此
+    #   确认"这份结论确实是为当前这件零件算的"。取不到零件时如实标 null
+    #   （校验端会判"未绑定"，不静默放行）。
+    try:
+        _pp_att = str((report or {}).get("part_path") or "").strip()
+        if not _pp_att:
+            _pp_att = str(((_fea or {}).get("real_geometry") or {}).get("part_path")
+                          or "").strip()
+        if _pp_att and os.path.isfile(_pp_att):
+            payload["part_path"] = os.path.abspath(_pp_att)
+            payload["part_name"] = os.path.basename(_pp_att)
+            try:
+                import hashlib as _hl_att
+                _h_att = _hl_att.sha256()
+                with open(_pp_att, "rb") as _pf_att:
+                    for _ch_att in iter(lambda: _pf_att.read(1 << 20), b""):
+                        _h_att.update(_ch_att)
+                payload["part_sha256"] = _h_att.hexdigest()
+                payload["part_size_bytes"] = int(os.path.getsize(_pp_att))
+            except Exception:
+                pass
+        else:
+            payload["part_path"] = None
+            payload["part_name"] = None
+            payload["part_sha256"] = None
+    except Exception:
+        pass
     # [主防线] 凭据必须由【宿主签发】—— 本地只提交磁盘事实，宿主自己读报告后签名。
     #   这样 AI 即使手写一份格式完美的 JSON，也拿不到合法签名。
     _signed = _dg.request_signed_credential({

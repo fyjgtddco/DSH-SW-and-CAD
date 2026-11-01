@@ -16,7 +16,7 @@
  * 运行：node --test test/eng-limit-popup-runtime.test.mjs
  * （可用环境变量 DSH_ENG_CLIENT 指向别的 client.js 副本，便于回归对照。）
  */
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +26,30 @@ import vm from 'node:vm';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLIENT = process.env.DSH_ENG_CLIENT || join(__dirname, '..', 'lib', 'client.js');
 const SRC = readFileSync(CLIENT, 'utf8');
+
+// == 受控定时器：记录 vm 内创建的所有 handle，便于测试结束时统一清理 ==
+const _vmTimers = new Set();
+const _vmSetTimeout = (fn, ms, ...a) => {
+  const h = setTimeout(fn, ms, ...a);
+  _vmTimers.add(h);
+  return h;
+};
+const _vmSetInterval = (fn, ms, ...a) => {
+  const h = setInterval(fn, ms, ...a);
+  _vmTimers.add(h);
+  return h;
+};
+const _vmClearTimeout = (h) => { _vmTimers.delete(h); clearTimeout(h); };
+const _vmClearInterval = (h) => { _vmTimers.delete(h); clearInterval(h); };
+// 全部用例跑完后统一清理（必须用 after 钩子：process.on('exit') 只在
+//   事件循环已清空后才触发，对"还有 interval 挂着"的场景无效——
+//   恰恰是那些 interval 让进程永远退不出去）。
+after(() => {
+  for (const h of _vmTimers) {
+    try { clearTimeout(h); clearInterval(h); } catch (e) {}
+  }
+  _vmTimers.clear();
+});
 
 /** 最小 React shim：只求值出 exports，不做真渲染。 */
 const REACT = {
@@ -143,7 +167,17 @@ function boot(opts = {}) {
       log() {}, warn() {}, error() {},
       info(...a) { infoLogs.push(a.map(String).join(' ')); },
     },
-    setTimeout, clearTimeout, setInterval, clearInterval,
+    // == 测试卫生修复：定时器必须受控 ==============================
+    // 原实现直接把宿主的真实 setInterval 注入 vm。client.js 里有些
+    //   定时器（倒计时/轮询）在测试结束时不会自行清理 -> Node 事件循环
+    //   永不为空 -> 进程跑完全部用例后【永不退出】-> `node --test` 只能
+    //   等外部超时并收到 SIGTERM，被记成「测试失败」，而实际 0 条断言失败。
+    //   这也是它在 CI/批量跑里恒红、单独看却全绿的原因。
+    // 现在：注入一层受控定时器，记录所有 handle，测试结束统一清掉。
+    setTimeout: _vmSetTimeout,
+    clearTimeout: _vmClearTimeout,
+    setInterval: _vmSetInterval,
+    clearInterval: _vmClearInterval,
   });
 
   let applyError = null;

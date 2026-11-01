@@ -1229,12 +1229,257 @@ def check_material_attestation(part_path):
             "poissons_ratio) 登记国标牌号 → 重新赋材 → 重做校核"
             if _sw_missing else
             "改用材料库中精确存在的牌号")
+    # ══ 【A-48 修复】防线①补齐【零件几何】判据 ═════════════════════════
+    # 原 check_material_attestation 只回答"材料是否可信"（签名/md5/密度/
+    #   家族/跨标准），对【零件几何】零约束 —— 实测（2026-11-01）：
+    #     DSH_夹紧凸轮 外径 φ160（规范 φ200）、体积 352,447（规范 540,884，
+    #     缺 35%）的早期错误草稿，凭"材料凭据 ok=true（20CrMnTi/7820）"
+    #     直接通过防线①进入总装候选。也就是说这道门能证明"材料写对了"，
+    #     却完全无法回答"这是不是设计要的那件"。
+    # 现在：凭据里带宿主签名的几何指纹（part_bbox_mm / part_dims_mm /
+    #   part_volume_mm3 / part_body_count，A-48 已纳入待签体），这里与
+    #   load_case 的设计域做对照。
+    # 判据分级（全部 fail-closed 到"不可采信"，不静默放行）：
+    #   · 缺几何指纹（老凭据）→ 不阻断，但显式标注 not_evaluated；
+    #   · 三向尺寸超出 design_domain 外接盒（含 5% 容差）→ BLOCK；
+    #   · 有 expected_volume_mm3 时体积偏差 > 40% → BLOCK（错件/占位件）；
+    #   · 实体数为 0 → BLOCK（空壳件）。
+    try:
+        _geo = _material_geometry_check(att, str(part_path))
+        out["geometry"] = _geo
+        if _geo.get("blocking"):
+            out["reasons"].append(_geo["reason"])
+        elif _geo.get("warning"):
+            out.setdefault("warnings", []).append(_geo["warning"])
+    except Exception as _e_geo:
+        # 几何校验自身异常 → 记为未评估，但绝不因此判合格
+        out["geometry"] = {"evaluated": False, "error": repr(_e_geo)}
     # (6) 未赋材兜底警告：近似匹配按 WARNING 处理，不阻断
     if not out["reasons"]:
         out["ok"] = True
         out["level"] = "WARN" if att.get("approximate_match") else "PASS"
         if att.get("approximate_match"):
             out["reasons"].append("材料为近似匹配（库中无精确同名），建议核对")
+    return out
+
+
+def _material_geometry_check(att, part_path):
+    """【A-48】用凭据里的几何指纹回答"这是不是设计要的那件零件"。
+
+    背景：防线①原先只校验材料的可信性（签名 / part_md5 / 密度 / 家族 /
+      跨标准），对零件几何零约束。实测（2026-11-01）出现过：
+        · DSH_夹紧凸轮 旧草稿 φ160（规范 φ200）、体积缺 35%，
+          凭"材料 ok=true"直通总装；
+        · room-start --fresh 归档后零件数变 0，防线①反而"更绿"。
+
+    判据（分级，任何一条都不静默放行）：
+      · 凭据无几何字段（老凭据/取不到）→ evaluated=False，不阻断但标注；
+      · 实体数 == 0                        → BLOCK（空壳件）；
+      · 三向尺寸超出 design_domain 外接盒  → BLOCK（尺寸越界）；
+      · 有 expected_volume_mm3 且偏差>30%  → BLOCK（错件/占位件）。
+
+    Returns: {evaluated, ok, blocking, reason|warning, facts}
+    """
+    out = {"evaluated": False, "ok": True, "blocking": False, "facts": {}}
+    _bb = att.get("part_bbox_mm")
+    _dims = att.get("part_dims_mm")
+    _vol = att.get("part_volume_mm3")
+    _bodies = att.get("part_body_count")
+    if not (isinstance(_dims, (list, tuple)) and len(_dims) == 3) \
+            and not (isinstance(_bb, (list, tuple)) and len(_bb) == 6):
+        out["reason_note"] = (
+            "凭据未携带几何指纹（老凭据或建模时取不到 bbox/体积）——"
+            "本次【未评估】零件几何，不能据此认为几何正确。"
+            "新零件保存后凭据会自动带上 part_dims_mm / part_volume_mm3。")
+        return out
+    out["evaluated"] = True
+    try:
+        if isinstance(_dims, (list, tuple)) and len(_dims) == 3:
+            _d = [abs(float(x)) for x in _dims]
+        else:
+            _d = [abs(float(_bb[3 + _i]) - float(_bb[_i])) for _i in range(3)]
+    except Exception:
+        out["evaluated"] = False
+        out["reason_note"] = "凭据里的几何字段无法解析，本次未评估"
+        return out
+    out["facts"]["dims_mm"] = [round(x, 3) for x in _d]
+    out["facts"]["volume_mm3"] = _vol
+    out["facts"]["body_count"] = _bodies
+
+    if isinstance(_bodies, int) and _bodies <= 0:
+        out["blocking"] = True
+        out["ok"] = False
+        out["reason"] = (
+            "【A-48】凭据记录该零件实体数为 0 —— 这是空壳件"
+            "（拉伸/切除全部静默失败时 SW2025 的典型产物），不能作为交付件。")
+        return out
+
+    _lc = None
+    try:
+        _lc_path = os.path.join(STATE_DIR, "load_cases", "gate_load_case.json")
+        if os.path.isfile(_lc_path):
+            _lc = _read_json(_lc_path)
+    except Exception:
+        _lc = None
+
+    _dom = _lc.get("design_domain") if isinstance(_lc, dict) else None
+    if isinstance(_dom, dict):
+        try:
+            _span = []
+            for _ax in ("x", "y", "z"):
+                _mn = _dom.get(_ax + "_min", _dom.get("min_" + _ax))
+                _mx = _dom.get(_ax + "_max", _dom.get("max_" + _ax))
+                if _mn is None or _mx is None:
+                    _span = []
+                    break
+                _span.append(abs(float(_mx) - float(_mn)))
+            if len(_span) == 3:
+                out["facts"]["design_span_mm"] = [round(x, 3) for x in _span]
+                _ds = sorted(_d)
+                _ss = sorted(_span)
+                _over = []
+                for _i in range(3):
+                    if _ss[_i] > 0 and _ds[_i] > _ss[_i] * 1.05:
+                        _over.append("%.1f > %.1f" % (_ds[_i], _ss[_i]))
+                if _over:
+                    out["blocking"] = True
+                    out["ok"] = False
+                    out["reason"] = (
+                        "【A-48】零件三向尺寸超出 load_case 的设计域：%s。"
+                        "（零件 %s，设计域 %s）—— 该件不是按本任务设计域建的，"
+                        "疑似旧草稿或错件。" % ("；".join(_over),
+                                                [round(x, 1) for x in _ds],
+                                                [round(x, 1) for x in _ss]))
+                    return out
+        except Exception:
+            pass
+
+    _exp_vol = None
+    try:
+        if isinstance(_lc, dict):
+            _exp_vol = (_lc.get("expected_volume_mm3")
+                        or (_lc.get("acceptance") or {}).get("expected_volume_mm3"))
+    except Exception:
+        _exp_vol = None
+    if _exp_vol and _vol:
+        try:
+            _dev = abs(float(_vol) - float(_exp_vol)) / float(_exp_vol)
+            out["facts"]["volume_deviation_pct"] = round(_dev * 100, 2)
+            # 阈值 30%：实测那次错件（夹紧凸轮旧草稿 φ160 vs 规范 φ200）
+            #   体积缺 34.7%。若取 40% 会漏放，30% 才能拦住这一类。
+            if _dev > 0.30:
+                out["blocking"] = True
+                out["ok"] = False
+                out["reason"] = (
+                    "【A-48】零件体积 %.1f mm3 与设计预期 %.1f mm3 相差 %.1f%%"
+                    "（容差 30%%）—— 这不是设计要的那件（错件或占位件）。"
+                    % (float(_vol), float(_exp_vol), _dev * 100))
+                return out
+            elif _dev > 0.20:
+                out["warning"] = (
+                    "【A-48】零件体积与设计预期相差 %.1f%%（容差内但偏大），"
+                    "建议复核是否为同一件。" % (_dev * 100))
+        except Exception:
+            pass
+    return out
+
+
+def _physics_part_binding_check(att, room):
+    """【A-68】确认物理凭据绑定的是【本房间这件零件】。
+
+    背景：凭据原先只有 room + run_id + report_path，没有零件维度。实测
+      （2026-11-01）某房"通过"的凭据 run_id 来自另一个进程的另一次运行，
+      part_path=null / material=null，而本房真正要校核的是另一件；同房
+      2 小时内结论还能 2.39x → 2.82x → 1.45x，每次都"恰好更好"。
+
+    三级判定（fail-closed，绝不把"没绑定"当成"已绑定"）：
+      · 有 part_sha256 → 与【磁盘当前零件】比对，不一致即 BLOCK；
+        对不上任何已登记零件也 BLOCK（无法证明这份结论属于本房）。
+      · 有 part_path 无 sha256 → 该文件必须存在；与已登记零件集合不交集时
+        只记 note（老凭据兼容），不阻断。
+      · 两者都无 → note 提示重跑，不阻断（避免让历史任务全红）。
+
+    Returns: {evaluated, ok, blocking, bound_part, reason|note, evidence}
+    """
+    out = {"evaluated": False, "ok": True, "blocking": False,
+           "bound_part": None, "evidence": {}}
+    _sha = str(att.get("part_sha256") or "").strip()
+    _pp = str(att.get("part_path") or "").strip()
+    # 本房间已登记的零件（mode_gate 的 artifacts_registry，按任务隔离）
+    _parts = []
+    try:
+        _parts = _modeling_parts(room)
+    except Exception:
+        _parts = []
+    _paths = [str(a.get("path") or "") for a in _parts if a.get("path")]
+    out["evidence"]["room_registered_parts"] = [os.path.basename(p) for p in _paths]
+
+    if _sha:
+        out["evaluated"] = True
+        _matched = None
+        try:
+            import hashlib as _hl2
+            for _p in _paths:
+                if not os.path.isfile(_p):
+                    continue
+                _h2 = _hl2.sha256()
+                with open(_p, "rb") as _f2:
+                    for _c2 in iter(lambda: _f2.read(1 << 20), b""):
+                        _h2.update(_c2)
+                if _h2.hexdigest() == _sha:
+                    _matched = _p
+                    break
+        except Exception:
+            _matched = None
+        if _matched:
+            out["bound_part"] = _matched
+            out["ok"] = True
+            return out
+        # 没对上任何已登记零件 —— 分两种情况
+        if not _paths:
+            # 房间还没登记零件（登记链断裂时常见）→ 只告警，不阻断
+            out["note"] = (
+                "物理凭据绑定了零件（sha256=%s…），但本房间当前【没有任何已登记的"
+                "零件】可比对 —— 无法确认这份结论属于本房。请先确认零件已落盘并"
+                "用 mode_gate.py room-artifact 登记归属。" % _sha[:12])
+            return out
+        out["blocking"] = True
+        out["ok"] = False
+        out["reason"] = (
+            "【A-68】物理凭据绑定的零件与本房间已登记的零件【都不匹配】"
+            "（凭据 sha256=%s…，本房登记 %d 件：%s）—— 这份校核结论不是为"
+            "本房当前这组零件算的，属于「别人的成绩单」，不能作为本房强度依据。"
+            "请用 --part <本房零件.SLDPRT> 重跑 physics-optimize。"
+            % (_sha[:12], len(_paths),
+               ", ".join(os.path.basename(p) for p in _paths[:5])))
+        return out
+
+    if _pp:
+        out["evaluated"] = True
+        _exists = os.path.isfile(_pp)
+        out["evidence"]["part_path_exists"] = bool(_exists)
+        if not _exists:
+            out["blocking"] = True
+            out["ok"] = False
+            out["reason"] = (
+                "【A-68】物理凭据记录的零件 %r 已不存在 —— 无法证明这份结论"
+                "对应的是哪一件零件（可能已被覆盖/改名/删除）。"
+                "请用当前零件重跑 physics-optimize。" % os.path.basename(_pp))
+            return out
+        _norm_pp = os.path.normcase(os.path.abspath(_pp))
+        if _paths and not any(os.path.normcase(os.path.abspath(p)) == _norm_pp
+                              for p in _paths):
+            out["note"] = (
+                "物理凭据绑定的零件 %r 不在本房已登记清单内（本房登记 %d 件）——"
+                "老凭据无 sha256 无法强校验，建议用 --part 重跑以固化零件绑定。"
+                % (os.path.basename(_pp), len(_paths)))
+        out["bound_part"] = _pp
+        return out
+
+    out["note"] = (
+        "物理凭据【未携带零件绑定信息】（老凭据）—— 无法确认这份结论属于"
+        "哪一件零件。本次不作阻断，但该结论的强度依据不可追溯；"
+        "请用 --part <本房间零件.SLDPRT> 重跑 physics-optimize 以固化绑定。")
     return out
 
 
@@ -2108,6 +2353,27 @@ def check_physics_attestation(room):
             "物理凭据缺少真实运行记录背书（%s）—— 凭据不可信，疑似手工伪造。" % _why)
         out["hint"] = ("请真实运行: python sw_bridge.py physics-optimize "
                        "<load_case.json> --room %s" % str(room))
+    # ══ 【A-68 修复】物理凭据必须绑定【当前这件零件】 ═══════════════════
+    # 原凭据只有 room + run_id + report_path，【没有零件维度】，于是出现：
+    #   · 某房"通过"的凭据 run_id 来自另一个进程的另一次运行，
+    #     part_path=null / material=null，本房真正要校核的是另一件；
+    #   · 同一房间 2 小时内结论 2.39x → 2.82x → 1.45x，每次都"恰好更好"。
+    # 也就是说防线②能证明"某个零件某次算过且过了"，但无法回答
+    #   "这份结论属于本房这件零件吗"。
+    # 现在按三级判定（fail-closed）：
+    #   · 凭据带 part_sha256 → 与磁盘当前零件比对，不一致即 BLOCK；
+    #   · 凭据带 part_path 但不带 sha256 → 路径必须存在且与登记件一致；
+    #   · 两者都没有（老凭据）→ 显式标 not_bound，不阻断但留痕，
+    #     并在 hints 里要求重跑（绝不静默当成"已绑定"）。
+    try:
+        _pb = _physics_part_binding_check(att, str(room))
+        out["part_binding"] = _pb
+        if _pb.get("blocking"):
+            out["reasons"].append(_pb["reason"])
+        elif _pb.get("note"):
+            out.setdefault("binding_notes", []).append(_pb["note"])
+    except Exception as _e_pb:
+        out["part_binding"] = {"evaluated": False, "error": repr(_e_pb)}
     _overall = str(att.get("overall") or "").upper()
     if _overall == "FAIL":
         _failed = att.get("failed_gates") or []
@@ -2405,14 +2671,26 @@ def check_room_defense(room, require_physics=None):
                     #   verify-gate 完成（本地判定不改任何签名强度）。
                     _conv = _host_missing_but_local_has_credentials(room, _hj)
                     if not _conv.get("convert"):
+                        # ══ 【A-21 修复】宿主判定【不覆盖】材料防线 ═══════════
+                        # 原实现拿到宿主结论后【直接 return】，下面整段本地校验
+                        #   （含 ① 材料 check_material_attestation）永不执行。
+                        # 而宿主 checkRoomMaterials 依赖 artifacts_registry.json
+                        #   的【裸名】文件；A-22 修复前写端只写带 task_id 后缀的
+                        #   那份 → 宿主恒得 part_count=0 → 材料维度【完全不存在】
+                        #   → 即便 ok=true 也不代表材料过了（A-63 铁证：
+                        #   ok=true 时磁盘 3/6 件 md5 已不符）。
+                        # 现在：宿主结论【只覆盖它真正判定过的维度】——
+                        #   physics / domain 以宿主为准；材料维度由本地补齐
+                        #   （本地 check_material_attestation 同样严格验签，
+                        #     不降低强度，只是把"没人判"变成"有人判"）。
                         _res = {
                             "ok": bool(_hj.get("ok")),
                             "room": room,
                             "room_type": (rtypes.get(room, "") or None),
                             "require_physics": bool(require_physics),
-                            "blockers": _hj.get("blockers") or [],
-                            "warnings": _hj.get("warnings") or [],
-                            "details": _hj.get("details") or {},
+                            "blockers": list(_hj.get("blockers") or []),
+                            "warnings": list(_hj.get("warnings") or []),
+                            "details": dict(_hj.get("details") or {}),
                             "judged_by": "host",
                         }
                         # 排障字段（Bug⑤ 要求）：宿主实际读的 reports 目录
@@ -2422,6 +2700,57 @@ def check_room_defense(room, require_physics=None):
                             or reports_dir_candidates())
                         if _conv.get("note"):
                             _res["host_judge_note"] = _conv["note"]
+                        # ── 【A-21】宿主结论补齐【本地材料防线】──
+                        try:
+                            _hk = (_res.get("details") or {}).get("material")
+                            _host_judged_material = bool(
+                                isinstance(_hk, dict)
+                                and _hk.get("judged_by") == "host"
+                                and _hk.get("results"))
+                            if not _host_judged_material:
+                                _lp = _modeling_parts(room)
+                                _lm = []
+                                for _a in _lp:
+                                    _lr = check_material_attestation(_a["path"])
+                                    _lr["part_name"] = (_a.get("name")
+                                                        or os.path.basename(_a["path"]))
+                                    _lm.append(_lr)
+                                    if not _lr["ok"]:
+                                        _res["blockers"].append(
+                                            "【防线①材料】%s: %s"
+                                            % (_lr["part_name"],
+                                               "；".join(_lr["reasons"])))
+                                        _res["ok"] = False
+                                    elif _lr.get("level") == "WARN":
+                                        _res["warnings"].append(
+                                            "【防线①材料】%s: %s"
+                                            % (_lr["part_name"],
+                                               "；".join(_lr["reasons"])))
+                                _needs_parts2 = True
+                                try:
+                                    _needs_parts2 = room_type_requires_physics(rtype)
+                                except Exception:
+                                    _needs_parts2 = True
+                                if not _lp and _needs_parts2:
+                                    _res["blockers"].append(
+                                        "【防线①材料】零件登记数为 0 —— 该房间没有"
+                                        "任何已登记零件，无法执行材料校验"
+                                        "（这不是'通过'，是'未验证'）。"
+                                        "房间类型=%s。请先 room-artifact 登记，"
+                                        "或把非建模房间的类型改为 drafting/assembly/prime。"
+                                        % (rtype or "未知(按建模类处理)"))
+                                    _res["ok"] = False
+                                _res.setdefault("details", {})["material"] = {
+                                    "part_count": len(_lp),
+                                    "results": _lm,
+                                    "judged_by": "local(host 未判定该维度，已由本地补齐)",
+                                }
+                        except Exception as _e_lm:
+                            # 本地补判自身异常 → fail-closed，不能当成通过
+                            _res["blockers"].append(
+                                "【防线①材料】本地材料校验异常，按未通过处理: %r"
+                                % (_e_lm,))
+                            _res["ok"] = False
                         return _res
                     # 转到本地验签：把宿主 missing 的成因与本地命中的路径都留痕
                     _degrade_code = "HOST_MISSING_LOCAL_CREDENTIAL"
@@ -2469,7 +2798,31 @@ def check_room_defense(room, require_physics=None):
                 warnings.append("【防线①材料】%s: %s"
                                 % (r["part_name"], "；".join(r["reasons"])))
     else:
-        mat_results = []
+        # ══ 【A-06 修复】parts 为空【不得】静默放行 ═══════════════════════
+        # 原实现只有 if parts: ... else: mat_results = [] —— 没有 else 分支，
+        #   于是 part_count=0 时【不产生任何 blocker】，check-room 返回 ok=true。
+        # 实测（2026-11-01 任务 20261101_002006_024C510A）：
+        #   · 加工头室 check-room → ok=true / blockers=[] / material.part_count=0，
+        #     而同房手工复核 4/15 件实际 BLOCK —— 防线①【全程空转】；
+        #   · 三房间"34/34 材质全绿"全是模型手工复核，门禁一次都没真正跑过；
+        #   · room-start 的 fresh 归档把别的房间零件搬走后，part_count 变 0，
+        #     看起来"更绿了"—— 丢件反而让门禁通过。
+        # 正确语义（fail-closed）：建模类房间【必须】有登记零件；
+        #   登记表为空 = "无法验证" ≠ "验证通过"。
+        #   豁免仅限本来就【不产出零件】的纯出图/协调类房间。
+        _needs_parts = True
+        try:
+            _needs_parts = room_type_requires_physics(rtype)
+        except Exception:
+            _needs_parts = True
+        if _needs_parts:
+            blockers.append(
+                "【防线①材料】零件登记数为 0 —— 该房间没有任何已登记零件，"
+                "无法执行材料校验（这不是'通过'，是'未验证'）。"
+                "房间类型=%s。请确认：① 建模脚本已 save 且落盘到 parts/；"
+                "② 已调 mode_gate.py room-artifact <房间> <文件> 登记归属；"
+                "③ 若确为非建模房间，请在编制里改为 drafting/assembly/prime 类型。"
+                % (rtype or "未知(按建模类处理)"))
     details["material"] = {"part_count": len(parts), "results": mat_results}
 
     # ── ② 物理 ──
@@ -2585,11 +2938,44 @@ def main():
     args = sys.argv[1:]
     cmd = args[0] if args else "status"
     if cmd == "check-room":
-        room = args[1] if len(args) > 1 else ""
+        # == [A-24 修复] --force / DSH_DEFENSE_BYPASS 必须被识别并留痕 ===
+        # 原实现只取 args[1] 当房间名，【不解析任何 flag】：
+        #   · `check-room X --force` 里的 --force 被静默忽略，结果一字不差；
+        #   · `$env:DSH_DEFENSE_BYPASS=1` 也不影响 check-room；
+        #   · 两者都【不留痕】，与模块自己"唯一合法绕行必定留痕"的承诺相反。
+        # 实测（2026-11-01）：设了 BYPASS + --force 重跑，返回与之前完全一致，
+        #   模型据此误判"BYPASS 无效"，转而去改门禁源码（A-20）。
+        # 现在：识别 --force / --json / --bypass，命中即显式留痕并回显。
+        _flags = ("--force", "-f", "--bypass")
+        _pos = [a for a in args[1:] if not str(a).startswith("-")]
+        room = _pos[0] if _pos else ""
+        _force = any(a in _flags for a in args[1:])
         if not room:
-            print(json.dumps({"ok": False, "error": "需要房间名"}, ensure_ascii=False))
+            print(json.dumps({"ok": False, "error": "需要房间名",
+                              "usage": "defense_gate.py check-room <room> [--force]"},
+                             ensure_ascii=False))
             sys.exit(2)
         r = check_room_defense(room)
+        _bypass_env = bypass_requested()
+        if (_force or _bypass_env) and isinstance(r, dict):
+            # 留痕：与 room-end --force 走同一本账（reports/defense_bypass.json）
+            try:
+                log_bypass(
+                    where="check-room:%s" % room,
+                    reason=("显式请求绕行（%s）；check-room 为只读判定，"
+                            "仍返回真实结论，不伪造 ok=true"
+                            % ("--force" if _force else "DSH_DEFENSE_BYPASS=1")),
+                    by="defense_gate.py check-room")
+            except Exception:
+                pass
+            r["bypass_requested"] = True
+            r["bypass_source"] = ("--force" if _force else "DSH_DEFENSE_BYPASS=1")
+            r["bypass_note"] = (
+                "本次带绕行标志调用；check-room 是【只读判定】，绕行标志不会让它"
+                "返回 ok=true（那样等于伪造结论）。真正放行请在 room-end / "
+                "confirm-assembly 上用 --force，那两处会留痕并允许继续。")
+        elif isinstance(r, dict):
+            r["bypass_requested"] = False
         print(json.dumps(r, ensure_ascii=False, indent=2))
         sys.exit(0 if r["ok"] else 1)
     if cmd == "check-task":

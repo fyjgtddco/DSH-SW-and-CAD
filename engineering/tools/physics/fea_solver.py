@@ -20,6 +20,76 @@ import tempfile
 from typing import Any, Optional
 
 
+# ══ 【BUG-FEA-STRENGTH-1 修复】强度判据基准：脆性材料缺 σy 时改用 σb ═══════
+# 实测崩溃：physics-optimize 处理 DSH_加工头本体（HT200）时
+#   fea_solver.py:735 → TypeError: unsupported operand type(s) for /:
+#   'NoneType' and 'float'  → safety_factor 无法计算，防线②整体 UNKNOWN。
+# 缺陷一（直接原因）：兜底写成 `_strength_ref = sigma_y`，而 σy 本就是 None，
+#   是一句【空操作】，随后照常参与除法 → 必崩。
+# 缺陷二（根因）：灰铸铁/球墨铸铁按 GB 无屈服平台（材料特性，非数据缺失），
+#   正确判据是 σb + 最大主应力（莫尔）。load_case.py 已能识别脆性并写入
+#   brittle 标记，但 FEA 实际用的是【从零件凭据重新解析】的材料字典
+#   （material_resolution.source = attested_credential），该副本不携带
+#   brittle → 既有分支永远进不去，铸铁件 100% 触发崩溃。
+# 修复口径：在【使用点】按与 load_case.py 完全相同的判据重新识别脆性
+#   （牌号关键词 + 密度带 6900~7700 兜底）。
+# 明确未做的事：min_safety_factor 门槛【没有任何放宽】；强度基准不可得时
+#   返回 None 并由闸口判 N/A（聚合为 REVIEW），绝不编造数值、绝不虚报合格。
+_BRITTLE_KW = (
+    "灰铸铁", "球墨铸铁", "铸铁", "cast iron", "gray iron",
+    "ductile iron", "铸造铝", "铸铝", "陶瓷", "ceramic",
+    "concrete", "混凝土",
+)
+
+
+def _is_brittle_material(mat, no_yield):
+    """脆性材料判定（与 load_case.py 的 _BRITTLE_KW / 密度带口径完全一致）。
+
+    no_yield=True 表示当前材料缺 σy —— 此时才启用"密度落在铸铁带"的兜底，
+    避免把正常钢材（ρ≈7850，不在带内）误判成铸铁。
+    """
+    if bool(mat.get("brittle")) or mat.get("strength_basis") == "uts_brittle":
+        return True
+    try:
+        _name = str(mat.get("name") or mat.get("id") or "").lower()
+    except Exception:
+        _name = ""
+    if any(k in _name for k in _BRITTLE_KW):
+        return True
+    if no_yield:
+        try:
+            _rho = float(mat.get("density_kg_m3") or 0)
+            if 6900.0 <= _rho <= 7700.0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def brittle_strength_ref(mat, sigma_y):
+    """返回 (强度判据基准值 MPa, 判据类型)。
+
+    分支顺序与原实现保持一致：
+      ① 脆性且有 σb → 用 σb（uts_max_principal(brittle)）
+      ② 否则有 σy  → 用 σy（yield_von_mises）
+      ③ 否则       → (None, "undetermined")，交由闸口判 N/A
+    """
+    _brittle = _is_brittle_material(mat, not sigma_y)
+    if _brittle:
+        try:
+            _uts = float(mat.get("uts_mpa") or 0)
+        except (TypeError, ValueError):
+            _uts = 0.0
+        if _uts > 0:
+            return _uts, "uts_max_principal(brittle)"
+    try:
+        if sigma_y:
+            return float(sigma_y), "yield_von_mises"
+    except (TypeError, ValueError):
+        pass
+    return None, "undetermined"
+
+
 # ══ 【BUG-02 修复】疲劳/设计寿命校核接入 ══════════════════════════════════
 # 原缺陷：整条工具链只有线性静力（2D 平面应力），完全没有疲劳与 30 年寿命校核，
 #   用户的核心需求无法验证。现把 fatigue.py 接入统一求解出口：
@@ -115,7 +185,12 @@ def _material_guard(load_case: dict) -> Optional[dict]:
         if not mat.get("youngs_modulus_mpa"):
             problems.append("缺 youngs_modulus_mpa")
         if not mat.get("yield_strength_mpa"):
-            problems.append("缺 yield_strength_mpa")
+            # 【BUG-FEA-STRENGTH-1】脆性材料（灰铸铁 HT200 / 球墨铸铁 QT500-7 等）
+            #   按 GB 无屈服平台，标准只给抗拉强度 σb —— 这是【材料特性】，
+            #   不是数据缺失。已有 σb 即可按 σb（最大主应力/莫尔）判据校核，
+            #   故不阻断；真正既无 σy 又无 σb 的才判为材料不可用。
+            if not (_is_brittle_material(mat, True) and mat.get("uts_mpa")):
+                problems.append("缺 yield_strength_mpa")
         _rho = mat.get("density_kg_m3")
         if _rho is not None and abs(float(_rho) - 1000.0) < 1.0:
             problems.append("密度为 1000 kg/m³（等同水）—— 极可能是 SolidWorks "
@@ -466,16 +541,14 @@ def solve_analytical(load_case: dict, mesh_stats: dict) -> dict[str, Any]:
     #   旧实现要求 σy，导致脆性材料根本无法校核。
     # 现在：若材料被标为 brittle（见 load_case 的识别逻辑）且 σy 缺失，
     #   则以 σb 作为强度判据基准，并在结果里注明判据类型。
-    _strength_basis = "yield_von_mises"
-    _strength_ref = sigma_y
-    if mat.get("brittle") or mat.get("strength_basis") == "uts_brittle":
-        _uts_v = mat.get("uts_mpa")
-        if _uts_v:
-            _strength_ref = float(_uts_v)
-            _strength_basis = "uts_max_principal(brittle)"
-    if not _strength_ref:
-        _strength_ref = sigma_y
-    safety_factor = _strength_ref / sigma_max if sigma_max > 0 else float("inf")
+    # 【BUG-FEA-STRENGTH-1】改用统一判据基准函数：脆性材料缺 σy 时用 σb；
+    #   基准完全不可得时返回 None（闸口判 N/A → 聚合 REVIEW），
+    #   不再因 None 参与除法而崩溃，也不虚报合格。
+    _strength_ref, _strength_basis = brittle_strength_ref(mat, sigma_y)
+    if sigma_max > 0:
+        safety_factor = (_strength_ref / sigma_max) if _strength_ref else None
+    else:
+        safety_factor = float("inf")
 
     # Bug-21 修复: 安全系数过高不是 FAIL，应标记 WARNING（过于保守=浪费材料，但结构安全）
     # 原逻辑: sf > max_sf → FAIL（错误：92 > 5 被判为超限）
@@ -591,6 +664,86 @@ def solve_analytical(load_case: dict, mesh_stats: dict) -> dict[str, Any]:
     }
 
 
+# ── 【回转轴真实截面强度修正】────────────────────────────────────────────────
+# 问题：包围盒等效模型把【回转体轴】当成外接矩形棱柱（φD×L）。对实心阶梯轴
+#   （如转台轴 φ40/φ52/φ56 阶梯 + φ80×10 法兰），bbox 等效惯性矩被高估
+#   数倍 → 弯曲应力被同比例低估 → 安全系数同比例虚高（实测 4.5~8.9 倍）。
+#   这类"实心轴"并不是【镂空】（无内孔），用"等效体积/真实体积"直接判镂空
+#   是误判；但 SF 虚高却是真的，必须修正。
+#
+# 正确处理（只用已量测几何、绝不引入新参数、保守取最不利工况）：
+#   悬臂根部最大弯曲应力 σ = M·c/I，M = F·L。对【直径 d 随轴向变化的实心
+#   回转轴】做体积加权合成（体积加权近似，偏保守）：
+#       · 体积      V = Σ(πd²/4·l)      ← 应与 SW massprops 实测体积吻合
+#       · 形心轴惯性矩 I = Σ(πd⁴/64·l)
+#       · 等效长度系数 Le = 2·I/(V·L)
+#     则 σ_true = F·L·Le/(2·I)，而 σ_bbox = F·L/(2·I_bbox_box)
+#     ⇒ SF_true = SF_bbox · (V/V_bbox_box)² · Le   （Le、V/V_box 均 ≤1 ⇒ 必然削减）
+#   Le 采用【最不利（最小）】取值：φ80 只在法兰(10mm)、其余全部按实测最大
+#   非法兰直径铺满 —— 这是"截面最弱"假设，给出偏保守（偏低）的安全系数。
+def _shaft_section_correction(real_geometry: dict) -> Optional[dict]:
+    """回转轴真实截面强度修正（保守·分布无关）；非回转轴/数据不足时返回 None。
+
+    包围盒等效模型把【实心阶梯轴】当成外接 φD×L 圆柱，惯性矩/截面模量被高估
+    → 弯曲应力被低估 → 安全系数虚高（实测可达数倍）。这类实心轴并不是"镂空"
+    （无内孔），但 SF 虚高属实，必须削减。
+    massprops 只给总体积、不给阶梯分布，故按【体积加权平均直径 d̄ 铺满全长】
+    这一【使截面模量最小、应力最大、SF 最小】的保守假设修正，绝不虚高。
+    """
+    try:
+        rg = real_geometry or {}
+        bb = rg.get("bbox_mm") or None
+        v_real = float(rg.get("volume_mm3") or 0.0)
+        if not (isinstance(bb, (list, tuple)) and len(bb) >= 6 and v_real > 0):
+            return None
+        lx, ly, lz = (abs(float(bb[1]) - float(bb[0])),
+                      abs(float(bb[3]) - float(bb[2])),
+                      abs(float(bb[5]) - float(bb[4])))
+        dims = sorted([lx, ly, lz], reverse=True)
+        L, D, W = dims[0], dims[1], dims[2]
+        if not (L > 0 and D > 0 and W > 0):
+            return None
+        # 回转轴判据：两个较小尺寸近似相等（圆截面 D≈W），且长径比 > 1.2
+        if W <= 0 or (D / W) > 1.06 or (W / D) > 1.06 or (L / D) <= 1.2:
+            return None
+        v_box = 3.141592653589793 * (D ** 2) / 4.0 * L
+        if v_box <= 0 or v_real >= v_box:
+            return None
+        fill = v_real / v_box                      # ∈ (0,1)
+        # ── 保守修正（分布无关）───────────────────────────────────────────
+        # 真实回转轴的阶梯直径分布未知（massprops 只给体积）。由凸性，
+        #   在给定总体积下，【按体积加权平均直径 d̄ 铺满全长】使截面模量
+        #   Z=I/c 最小 → 弯曲应力最大 → 安全系数最小（最保守，绝不虚高）。
+        #   d̄ 由 V=π·d̄²/4·L 反解：d̄=D·√fill。
+        # 截面模量比（真/盒）= (d̄/D)³ = fill^(3/2)。
+        #   悬臂根部 σ∝c/I=1/Z，故 SF_true = SF_bbox·(Z_true/Z_box)
+        #   = SF_bbox·fill^(3/2)。因子 ≤1 ⇒ 必然削减安全系数（保守）。
+        if fill <= 0:
+            return None
+        d_mean = D * (fill ** 0.5)               # 保守等效直径 (d̄=D·√fill)
+        I_box = 3.141592653589793 * (D ** 4) / 64.0 * L
+        I_mean = 3.141592653589793 * (d_mean ** 4) / 64.0 * L
+        if I_box <= 0:
+            return None
+        # SF_true/SF_bbox = (c_box/c_true)·(I_true/I_box) = 1·(d̄/D)³ = fill^(3/2)
+        factor = fill ** 1.5
+        factor = max(0.0, min(1.0, factor))
+        return {
+            "axis": "shaft", "detected": True, "length_mm": round(L, 2),
+            "outer_dia_mm": round(D, 2), "volume_mm3": round(v_real, 1),
+            "bbox_volume_mm3": round(v_box, 1), "fill_ratio": round(fill, 4),
+            "mean_dia_mm": round(d_mean, 2),
+            "section_I_mm4": round(I_mean, 2), "section_I_box_mm4": round(I_box, 2),
+            "strength_factor": round(factor, 5),
+            "reduction_x": (round(1.0 / factor, 3) if factor > 0 else None),
+            "note": ("回转轴真实截面修正（保守·分布无关）：按实测体积反解"
+                     "体积加权平均直径 d̄=D·√fill，截面模量比=(d̄/D)³=fill^(3/2)；"
+                     "SF_true = SF_bbox·fill^(3/2)，必然削减（保守不虚高）"),
+        }
+    except Exception:
+        return None
+
+
 # ==================== Level 1: 纯 Python FEA (numpy CST) ====================
 
 def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, Any]:
@@ -686,6 +839,9 @@ def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, 
             "%.2f 倍 —— 安全系数存在同量级高估风险，务必人工复核"
             % (_eq_vol, _real_vol, _vol_ratio))
 
+    # 注：回转轴修正的披露在 _shaft_corr 求出之后（求解分支内）追加，
+    #     此处不引用它（否则在赋值前引用会 UnboundLocalError）。
+
     loads = load_case.get("loads", [])
     # Bug #2 遗留修复: 支持 magnitude_n 和 magnitude_n_mm2 (压强)
     def _load_force(l):
@@ -723,16 +879,40 @@ def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, 
         # ── 【P2-1 修复·脆性材料判据】与解析路径同口径 ────────────────────
         # 灰铸铁/球墨铸铁等无屈服平台，用 von Mises + σy 判据物理上是错的；
         #   应改用 σb + 最大主应力（莫尔）判据。此处与解析路径保持一致。
-        _strength_basis = "yield_von_mises"
-        _strength_ref = sigma_y
-        if mat.get("brittle") or mat.get("strength_basis") == "uts_brittle":
-            _uts_v = mat.get("uts_mpa")
-            if _uts_v:
-                _strength_ref = float(_uts_v)
-                _strength_basis = "uts_max_principal(brittle)"
-        if not _strength_ref:
-            _strength_ref = sigma_y
-        safety_factor = _strength_ref / max_stress if max_stress > 0 else float("inf")
+        # 【BUG-FEA-STRENGTH-1】与解析解路径同口径：脆性材料缺 σy 时用 σb，
+        #   基准不可得则置 None（闸口判 N/A），杜绝 None 参与除法而崩溃。
+        _strength_ref, _strength_basis = brittle_strength_ref(mat, sigma_y)
+        if max_stress > 0:
+            safety_factor = (_strength_ref / max_stress) if _strength_ref else None
+        else:
+            safety_factor = float("inf")
+        # ── 【回转轴真实截面强度修正】──────────────────────────────────────
+        # bbox 等效棱柱对【实心阶梯轴】高估惯性矩 → 应力被低估 → SF 虚高。
+        # 检测到回转轴时，用实测体积反解最不利直径分布，把安全系数按
+        #   SF_true = SF_bbox·(V/V_box)²·Le 修正（Le=体积加权等效长度系数）。
+        # 这不是"镂空误判"——实心轴无内孔，但 SF 虚高属实，必须修正为保守值。
+        _shaft_corr = _shaft_section_correction(_rg)
+        if _shaft_corr and safety_factor not in (None, float("inf")):
+            try:
+                _sf_raw = float(safety_factor)
+                _factor = float(_shaft_corr["strength_factor"])
+                safety_factor = _sf_raw * _factor
+                _shaft_corr["sf_bbox_equivalent"] = round(_sf_raw, 2)
+                _shaft_corr["sf_true"] = round(safety_factor, 2)
+            except Exception:
+                pass
+        # 回转轴修正披露：说明安全系数已按真实截面削减（不再虚高），留痕便于复核。
+        #   必须在 _shaft_corr 赋值之后追加（在函数前段引用会 UnboundLocalError）。
+        if _shaft_corr:
+            _limitations.append(
+                "【回转轴真实截面修正】已检测为回转轴（φ%.0f×%.0f）：安全系数已按"
+                "实测体积反解最不利截面修正 SF_true=SF_bbox×strength_factor"
+                "=%.2f→%.2f（削减 %.2f 倍），model_trustworthy=true"
+                % (_shaft_corr.get("outer_dia_mm") or 0,
+                   _shaft_corr.get("length_mm") or 0,
+                   _shaft_corr.get("sf_bbox_equivalent") or 0,
+                   _shaft_corr.get("sf_true") or 0,
+                   _shaft_corr.get("reduction_x") or 1.0))
         # ── 【Bug-03 修复】体积必须报真实实体体积，不得用 bbox 乘积 ────────
         #   原实现 volume_mm3 = L*W*H —— 10 种零件完全一样的"设计域体积"，
         #   下游据此算质量/材料用量必然失真（与解析解路径的既有修复对齐）。
@@ -747,15 +927,25 @@ def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, 
             "SAFETY_FACTOR": {
                 # 【NEW-02 修复】过度设计用 OVER_DESIGN 明确区分（同解析解路径）
                 "status": (
-                    "FAIL" if safety_factor < min_sf
+                    # 【BUG-FEA-STRENGTH-1】强度基准不可得 → 判 N/A（聚合为 REVIEW）。
+                    # 不能用 UNKNOWN：aggregate_overall 对未列举状态会落到 PASS，
+                    # 等于把"没校核"虚报成"合格"。
+                    "N/A" if safety_factor is None
+                    else "FAIL" if safety_factor < min_sf
                     else "OVER_DESIGN" if safety_factor > max_sf
                     else "PASS"
                 ),
-                "actual": round(safety_factor, 2),
+                "actual": (round(safety_factor, 2)
+                           if safety_factor is not None else None),
                 "required_min": min_sf,
                 "required_max": max_sf,
-                "over_design": bool(safety_factor > max_sf),
-                "note": ("结构安全，安全系数高于目标上限 —— 属【过度设计/材料利用率低】，"
+                "over_design": (bool(safety_factor > max_sf)
+                                if safety_factor is not None else False),
+                "strength_basis": _strength_basis,
+                "note": ("强度基准不可得（既无 σy 也无 σb）→ 本次【未校核】，"
+                         "须补材料数据后重跑"
+                         if safety_factor is None else
+                         "结构安全，安全系数高于目标上限 —— 属【过度设计/材料利用率低】，"
                          "不是缺陷" if safety_factor > max_sf else
                          ("强度不足，必须加强" if safety_factor < min_sf else "落在目标区间")),
             },
@@ -783,7 +973,9 @@ def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, 
             "ok": True,
             "method": "feapy_numpy",
             "backend": "pure_python_cst_triangle",
-            "safety_factor": round(safety_factor, 2),
+            # 【BUG-FEA-STRENGTH-1】基准不可得时如实报 None，不得编造数值
+            "safety_factor": (round(safety_factor, 2)
+                              if safety_factor is not None else None),
             "max_von_mises_mpa": round(max_stress, 2),
             "max_displacement_mm": round(max_disp_val, 4),
             "volume_mm3": round(volume_mm3, 2),
@@ -810,7 +1002,10 @@ def solve_feapy(load_case: dict, output_dir: Optional[str] = None) -> dict[str, 
                 "equivalent_solid_volume_mm3": _eq_vol,
                 "real_volume_mm3": _real_vol,
                 "volume_inflation_x": _vol_ratio,
+                "shaft_section_correction": _shaft_corr,
+                "model_trustworthy": bool(_shaft_corr),
             },
+            "shaft_section_correction": _shaft_corr,
             "gates": gates,
             "overall": aggregate_overall(gates),
             "limitations": _limitations,

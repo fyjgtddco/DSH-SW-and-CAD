@@ -33,6 +33,57 @@ import json
 import os
 import sys
 
+# ══ 【F-02 修复 · 2026-10-31】UTF-8 输出防护 ═══════════════════════════════
+# 实测缺陷：python _root.py 默认输出中文全乱码（exit 0，乱码被静默吞掉）。
+#   根因：本脚本用 print() 直接输出中文（"工程模式根目录"/"门禁脚本"/"（缺失）"），
+#     而 Windows 控制台/pwsh 捕获时默认代码页是 GBK(936)；
+#     一旦 stdout 被重定向成管道（AI 工具链里 100% 如此），Python 会按
+#     locale 编码（GBK）写出，中文被写坏 —— 且因为 errors 默认是
+#     "strict"，某些字符还会直接抛 UnicodeEncodeError 把整条命令打断。
+#   其它主工具链（mode_gate.py L34-38 / sw_bridge.py L202-203 /
+#     defense_gate.py L2582）都有同样的 reconfigure 防护，
+#    唯独 _root.py 漏了 —— 本修复把它对齐。
+# 写法与 mode_gate.py 保持一致：try/except 包裹，兼容无 reconfigure 属性的
+#   环境（如 stdout 被替换成 StringIO / 老版本 Python）。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
+def _utf8_print(text=""):
+    """【F-02 修复】以 UTF-8 字节写出，绕开控制台代码页（与 mode_gate.emit 同源）。
+
+    为什么 reconfigure 还不够：
+      reconfigure 只在 sys.stdout 是可重配置的 TextIOWrapper 时生效；
+      若调用方把 stdout 换成别的对象（测试框架捕获、DSH 插件重定向），
+      reconfigure 会静默失败，print() 又回到 locale 编码 → 乱码重现。
+    这里做第二道保险：优先直接写 sys.stdout.buffer 的 UTF-8 字节；
+      没有 buffer 才退回普通 print；再不行退回 ASCII 转义（宁可转义也不乱码）。
+    """
+    s = str(text)
+    try:
+        _buf = getattr(sys.stdout, "buffer", None)
+        if _buf is not None:
+            _buf.write((s + "\n").encode("utf-8", "replace"))
+            _buf.flush()
+            return
+    except Exception:
+        pass
+    try:
+        sys.stdout.write(s + "\n")
+        sys.stdout.flush()
+    except UnicodeEncodeError:
+        # 代码页无法编码中文 → 退回 ASCII 转义（无损，绝不留乱码）
+        try:
+            sys.stdout.write((s.encode("ascii", "backslashreplace")
+                              .decode("ascii")) + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
 # 根目录必须同时包含这些"指纹"文件，才算真的工程模式根目录
 _ROOT_FINGERPRINTS = (
     os.path.join("tools", "mode_gate.py"),
@@ -258,18 +309,20 @@ def root_report() -> dict:
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     rep = root_report()
+    # 【F-02 修复】全部输出走 _utf8_print，保证中文在任何代码页下都可读
     if "--json" in argv:
-        print(json.dumps(rep, ensure_ascii=False, indent=2))
+        _utf8_print(json.dumps(rep, ensure_ascii=False, indent=2))
     else:
-        print("工程模式根目录 : %s" % (rep["engineering_root"] or "（未找到）"))
-        print("tools/ 目录    : %s" % (rep["tools_dir"] or "（未找到）"))
-        print("环境变量       : %s=%s" % (rep["env_var"], rep["env_value"] or "（未设置）"))
-        print("门禁脚本:")
+        _utf8_print("工程模式根目录 : %s" % (rep["engineering_root"] or "（未找到）"))
+        _utf8_print("tools/ 目录    : %s" % (rep["tools_dir"] or "（未找到）"))
+        _utf8_print("环境变量       : %s=%s"
+                    % (rep["env_var"], rep["env_value"] or "（未设置）"))
+        _utf8_print("门禁脚本:")
         for k, v in rep["gate_scripts"].items():
-            print("  %-20s %s" % (k, v or "（缺失）"))
+            _utf8_print("  %-20s %s" % (k, v or "（缺失）"))
         if rep["hint"]:
-            print("")
-            print(rep["hint"])
+            _utf8_print("")
+            _utf8_print(rep["hint"])
     return 0 if rep["ok"] else 1
 
 

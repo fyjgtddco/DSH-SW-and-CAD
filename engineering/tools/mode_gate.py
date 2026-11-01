@@ -1634,6 +1634,60 @@ def _archive_room_artifacts(room):
         if not _files:
             out["note"] = "该房间没有已登记的产物，无需归档"
             return out
+        # == [A-07 第二重保险] 归档范围守卫 ==============================
+        # 即便归属表被污染，也不允许【一次归档把整个 parts 目录搬空】：
+        #   · 只受理【当前任务 work_dir 之下】的文件（历史任务路径一律跳过）；
+        #   · 单次归档超过 20 件时要求显式 --force-archive 才执行，
+        #     否则只报告"疑似归属污染"而不动文件（宁可让人看一眼）。
+        # 实测事故：一次重启搬走 15 件跨 3 个房间的成品，全案返工。
+        # 解析"当前任务目录"：优先 workflow_state.work_dir；取不到则用
+        #   待归档文件所在目录的公共祖先（等价于"它们本来就在同一个交付
+        #   目录里"，同样能拦住"跨任务/跨盘"的历史残留）。
+        _cur_wd = None
+        try:
+            _wf_st0 = _read_json_file(WORKFLOW_STATE_PATH) or {}
+            _wd0 = str(_wf_st0.get("work_dir") or "").strip()
+            if _wd0:
+                _cur_wd = os.path.abspath(_wd0)
+        except Exception:
+            _cur_wd = None
+        if not _cur_wd and _files:
+            try:
+                _cur_wd = os.path.commonpath(
+                    [os.path.abspath(os.path.dirname(x)) for x in _files])
+            except Exception:
+                _cur_wd = None
+        _in_scope, _out_scope = [], []
+        for _p in _files:
+            try:
+                _ap = os.path.abspath(_p)
+            except Exception:
+                continue
+            if _cur_wd and not os.path.normcase(_ap).startswith(
+                    os.path.normcase(_cur_wd)):
+                _out_scope.append(_p)
+            else:
+                _in_scope.append(_p)
+        if _out_scope:
+            out["skipped_out_of_scope"] = [os.path.basename(x) for x in _out_scope]
+        _files = _in_scope
+        if not _files:
+            out["ok"] = True
+            out["note"] = ("登记表里的产物都不在当前任务目录下，未归档任何文件"
+                           "（suspected_registry_pollution=%d）" % len(_out_scope))
+            return out
+        _FORCED = ("--force-archive" in sys.argv)
+        if len(_files) > 20 and not _FORCED:
+            out["ok"] = False
+            out["warning"] = (
+                "【A-07】本次归档将移动 %d 个文件（>20），疑似归属登记被污染。"
+                "已【拒绝执行】，零件留在原地。请先核对："
+                "python mode_gate.py room-board --json / residue-check；"
+                "确认无误后加 --force-archive 重试。"
+                % len(_files))
+            out["pending_files"] = [os.path.basename(x) for x in _files[:40]]
+            out["pending_count"] = len(_files)
+            return out
         _work = _default_work_dir()
         _stamp = time.strftime("%Y%m%d-%H%M%S")
         _dst = os.path.join(str(_work), "parts", "_archive",
@@ -4735,9 +4789,27 @@ def _reclaim_lock(state, reason, requester=None):
     return False, None
 
 
+def _lock_ident():
+    """== [A-55] 当前【执行体】的身份串（pid + 会话片段）=================
+    为什么需要：SW 锁原先只记"房间名"。同一房间名下若有两个执行体
+      （room-fail 后重开、旧子代理仍活着；或子代理与主对话共用房间名）,
+      两者都满足 owner==name，于是都会命中"我自己持有"的续期分支，
+      同时以为自己独占 SW，并发写同名零件互相覆盖。
+    这里给每次进程一份身份：pid 必变，session 片段用于跨进程区分。
+    """
+    try:
+        _pid = os.getpid()
+    except Exception:
+        _pid = 0
+    _sid = str(os.environ.get("DSH_SESSION_ID") or "")[:8]
+    # 子代理进程与主对话可能同 pid（同机不同会话）→ 带上会话片段
+    return "%s:%s" % (_pid, _sid)
+
+
 def _sw_lock(state):
     return state.setdefault("sw_lock", {"owner": None, "queue": [], "acquired_at": None,
-                                        "prev_owner": None, "sw_by_room": False})
+                                        "prev_owner": None, "sw_by_room": False,
+                                        "owner_ident": None})
 
 
 def _lock_needed(state):
@@ -5785,7 +5857,75 @@ def _auto_register_room_artifacts(name):
                 _existing.add(os.path.normcase(os.path.abspath(str(_it.get("path")))))
             except Exception:
                 continue
+        # == [A-07 / A-45 修复] 只补登记【本房间自己的】零件 ==============
+        # 原实现扫描整个 parts 目录，把【所有】.SLDPRT 都登记到 name 名下。
+        #   实测事故（2026-11-01，CRITICAL）：
+        #     · 加工头室 名下挂了 19 件（编制只有 6 件），其中 13 件是别的
+        #       房间的产物 + 4 个 _probe_* 探针件；
+        #     · 归因污染的直接后果 —— room-start --fresh 调
+        #       _archive_room_artifacts（它"只归档本房间已登记产物"），
+        #       而"本房间已登记产物"被这条逻辑污染成【整个 parts 目录】,
+        #       于是重启一间房就把跨 3 个房间的 15 件已完成已签名零件
+        #       全部搬进 _archive/加工头室_20261101-043935/，监工 real=22->7；
+        #     · 丢件又让 check-room 的 material.part_count 变 0，
+        #       防线①"空过" —— 丢件反而看起来更绿。
+        # 现在按【三重证据】判定归属，任何一条命中才补登记：
+        #   ① 本房间的 part_ownership keywords（workflow_gate 下发的归属清单）
+        #   ② 文件名里带本房间名（跨房同名件用 _房间名 后缀区分的情况）
+        #   ③ 同目录下 <零件>.origin.json / .material.json 记录的 room 字段
+        # 三条都不命中 -> 视为"归属不明"，不登记（宁可漏登记让人工补，
+        #   也不能把别人的件挂到自己名下 —— 后者的代价是丢件）。
+        _own_kw = []
+        try:
+            _wf_st = _read_json_file(WORKFLOW_STATE_PATH) or {}
+            _cfg = _wf_st.get("subagent_config") or {}
+            for _row in (_cfg.get("rooms") or []):
+                _rn = _rkw = None
+                if isinstance(_row, (list, tuple)) and len(_row) >= 2:
+                    _rn, _rkw = _row[0], _row[1]
+                elif isinstance(_row, dict):
+                    _rn = _row.get("name") or _row.get("room")
+                    _rkw = _row.get("keywords")
+                if _rn and str(_rn) == str(name):
+                    if isinstance(_rkw, (list, tuple)):
+                        _own_kw = [str(x) for x in _rkw if str(x).strip()]
+                    elif isinstance(_rkw, str) and _rkw.strip():
+                        _own_kw = [x for x in _rkw.replace(",", " ").split() if x]
+                    break
+        except Exception:
+            _own_kw = []
+
+        def _belongs_to_room(_fp):
+            """三重证据判定该文件是否属于本房间（任一命中即可）。"""
+            _base = os.path.basename(_fp)
+            _stem = os.path.splitext(_base)[0]
+            # ① part_ownership keywords
+            for _k in _own_kw:
+                if _k and _k in _stem:
+                    return True, "keyword:%s" % _k
+            # ② 文件名带房间名（跨房同名件惯例：DSH_夹紧凸轮_主传动齿轮凸轮室）
+            _rn_s = _safe_room_name(name)
+            if _rn_s and _rn_s in _stem:
+                return True, "room_suffix"
+            # ③ 伴生 sidecar 里记录的 room 字段
+            for _sfx in (".origin.json", ".SLDPRT.material.json",
+                         ".sldprt.material.json"):
+                _sp = _fp + _sfx if not _sfx.startswith(".SLDPRT") else (
+                    os.path.splitext(_fp)[0] + _sfx)
+                if not os.path.isfile(_sp):
+                    continue
+                try:
+                    with open(_sp, "r", encoding="utf-8") as _f:
+                        _sj = json.load(_f) or {}
+                    for _key in ("room", "room_name"):
+                        if str(_sj.get(_key) or "") == str(name):
+                            return True, "sidecar:%s" % _key
+                except Exception:
+                    continue
+            return False, None
+
         _added = []
+        _skipped_other = []
         for _d in _dirs:
             try:
                 if not _d or not os.path.isdir(_d):
@@ -5802,17 +5942,27 @@ def _auto_register_room_artifacts(name):
                     _key = os.path.normcase(os.path.abspath(_fp))
                     if _key in _existing:
                         continue
+                    _ok_belong, _why = _belongs_to_room(_fp)
+                    if not _ok_belong:
+                        _skipped_other.append(_fn)
+                        continue
                     _r = cmd_room_artifact(name, _fp)
                     if _r.get("ok"):
                         _existing.add(_key)
                         _added.append(_fp)
             except Exception:
                 continue
+        # 把"归属不明被跳过"的件显式报出来 —— 需要人工 room-artifact 补登记
+        if _skipped_other:
+            out["skipped_unowned"] = _skipped_other[:40]
+            out["skipped_unowned_count"] = len(_skipped_other)
         out["registered"] = len(_added)
         out["paths"] = _added
         out["ok"] = True
-        out["note"] = ("按磁盘实际补登记：新增 %d 件（防子代理提前退出导致漏登记）"
-                       % len(_added))
+        out["note"] = ("按磁盘实际补登记：新增 %d 件（防子代理提前退出导致漏登记）；"
+                       "跳过归属不明 %d 件（不在本房间 keywords/命名/sidecar 证据内，"
+                       "如需纳入请显式 room-artifact 登记）"
+                       % (len(_added), out.get("skipped_unowned_count", 0)))
     except Exception as e:
         out["error"] = repr(e)
     return out
@@ -5845,6 +5995,17 @@ def _finalize_room(name, failed=False, force=False):
             rooms[name]["ended_at"] = None
             rooms[name]["failed_at"] = time.time()
         else:
+            # == [A-04 修复] 成功收尾必须清掉上次的 failed_at ==================
+            # 原实现：失败分支只写 failed_at，成功分支只写 ended_at，【从不清除】。
+            #   实测（2026-11-01）mode_state.json 里同一房间三戳并存：
+            #     started_at=04:54:13  failed_at=05:14:17  ended_at=05:26:58
+            #   而 workflow_gate._check_wave1_done 里 failed_at 的【优先级高于】
+            #   ended_at -> 房间实际已成功收尾，仍被判"失败待重做"，总装门禁
+            #   永久红灯，最终只能靠 --force 收口（进而触发杀进程丢件事故）。
+            # 语义：ended_at 是"这一次的终态"，failed_at 是"上一次的失败"；
+            #   既然这一次成功了，上一次的失败就不该继续定义房间状态。
+            rooms[name].pop("failed_at", None)
+            rooms[name].pop("fail_reason", None)
             rooms[name]["ended_at"] = time.time()
     lk = _sw_lock(state)
     was_owner = (lk.get("owner") == name)
@@ -5856,7 +6017,7 @@ def _finalize_room(name, failed=False, force=False):
     # 避免死房间永久占队列位。
     if name in lk.get("queue", []):
         lk["queue"] = [x for x in lk.get("queue", []) if x != name]
-    # ── 【Bug-25/27】--force：无条件释放本房间的 SW 使用权 ──────────────
+    # ── 【Bug-25/27】--force：释放本房间的 SW 使用权 ────────────────────
     if force:
         _had_owner = lk.get("owner")
         if _had_owner:
@@ -5864,11 +6025,40 @@ def _finalize_room(name, failed=False, force=False):
         lk["owner"] = None
         lk["acquired_at"] = None
         lk["sw_by_room"] = False
-        if _sw_running():
+        # == [A-73 修复] --force 不再无差别杀掉共享 SW 进程 ==============
+        # 原实现：读出 _had_owner 只写日志，然后【无条件】_sw_force_close()。
+        #   实测事故（2026-11-01，CRITICAL）：父代理对 3 个房间依次执行
+        #   room-end --force，每次都强制关闭【共享单实例 SW】；而此时另外
+        #   的房间正在 SaveAs3 重存零件 —— SW 保存是"先删旧 .SLDPRT、
+        #   再写新 .SLDPRT"，进程在空窗期被杀 = 旧文件已删、新文件未落地
+        #   -> 零件【凭空消失】，sidecar 一并消失，_archive 无归档，
+        #   回收站与全盘均无副本（转台轴/51208轴承/夹爪轴/可换阶梯钳口块/
+        #   增力摇杆 5 件永久丢失）。此后又出现 parts 内文件被改名
+        #   .wrong<HHMMSS> 后删除的同类现象。
+        # 正确语义（与 lock-doctor 一致）：
+        #   · owner 是本房间或无人持有 -> 释放锁并允许清场；
+        #   · owner 是【别的房间】且该房间仍活着 -> 只释放本房间的队列位，
+        #     【绝不杀 SW 进程】，并把原因回传给调用方。
+        _owner_now = lk.get("owner") or lk.get("prev_owner")
+        _kill_ok = True
+        _kill_skip_reason = None
+        if _owner_now and _owner_now != name:
+            try:
+                _other_alive = _lock_owner_alive(state, _owner_now)
+            except Exception:
+                _other_alive = True   # 判不了就当活着，fail-closed 不杀
+            if _other_alive:
+                _kill_ok = False
+                _kill_skip_reason = (
+                    "SW 正被房间 [%s] 使用且仍存活：--force 只释放本房间队列位，"
+                    "【不关闭 SW 进程】，以免抹掉它正在保存的零件。" % (_owner_now,))
+        if _kill_ok and _sw_running():
             _sw_force_close()
             killed = True
         save_state(state)
         _release_reason = ("--force 强制释放（原 owner=%s）" % (_had_owner or "无"))
+        if _kill_skip_reason:
+            _release_reason = _release_reason + "；" + _kill_skip_reason
         # ── 【Bug-05 修复】强制释放分支同样要补登记（失败房间更常见漏登记）──
         try:
             _ar_f = _auto_register_room_artifacts(name)
@@ -6130,7 +6320,7 @@ def _visual_gate_for_room(name):
     }
 
 
-def cmd_room_end(name, force=False):
+def cmd_room_end(name, force=False, dry_run=False):
     """【三大防线】room-end 是"房间下线"这个不可逆动作 —— 就在这里强制执行三道防线。
 
     设计意图（用户要求）：不是让 AI 自己选择要不要校核，而是 AI 一旦走到
@@ -6140,8 +6330,15 @@ def cmd_room_end(name, force=False):
         · 防线③领域：本房间有 DSVA 校验凭据且无 CRITICAL 违规。
     放行：--force 或环境变量 DSH_DEFENSE_BYPASS=1（都会留痕，绝不静默）。
     """
-    if force:
+    # ══ 【F-01 修复】dry_run：零副作用预演 ═══════════════════════════════
+    # 语义（严格）：
+    #   · 只读检查（防线/看图证据/锁状态）照常跑，结论照常回报；
+    #   · 但【绝不】写任何文件：不 log_bypass、不 _finalize_room、不 _maybe_advance。
+    # 旧实现根本没有 dry_run 参数 —— 传进来的 --dry-run 在 CLI 层就被丢弃，
+    #   于是"预演"变成了真实下线（还写了 defense_bypass.json）。见 _CMD_FLAGS。
+    if force and not dry_run:
         # [审计] --force 也是绕行，必须留痕（原实现直接跳过、零审计）。
+        # 【F-01】dry_run 时【不留痕】—— 预演不该在审计里留下"真的绕过过"的记录。
         try:
             import defense_gate as _dg0
             _dg0.log_bypass("mode_gate.room-end:" + str(name),
@@ -6253,6 +6450,77 @@ def cmd_room_end(name, force=False):
                             "确需放行：--force 或 DSH_DEFENSE_BYPASS=1（会留痕）。"
                             % (name, _e_other)),
             }
+    # ══ 【F-01 修复】dry_run 在这里【提前返回】—— 此后才是真正的副作用 ═══
+    # 走到这一行说明三道防线 / 看图证据都已检查完（dry_run 下这些只读检查
+    #   照常执行，结论照常回报 —— 这正是"预演"的价值：能提前发现会被拦）。
+    # 从这里往下 _finalize_room 会：改 mode_state（active=False / ended_at）、
+    #   释放 SW 锁、杀 SW 进程、补登记产物；_maybe_advance 还会改
+    #   workflow_state.step。**dry_run 时这些一律不执行。**
+    if dry_run:
+        _st = load_state()
+        _rooms = _st.get("rooms") or {}
+        _rm = _rooms.get(str(name)) or {}
+        _lk = _sw_lock(_st)
+        _lk_owner = _lk.get("owner")
+        _sw_run = False
+        try:
+            _sw_run = bool(_sw_running())
+        except Exception:
+            _sw_run = None
+        _would = [
+            "把房间 [%s] 标记为已结束（mode_state.rooms.%s.active=False，"
+            "写 ended_at）" % (name, name),
+            ("从 SW 锁队列中移除本房间" if str(name) in (_lk.get("queue") or [])
+             else "SW 锁队列中本来就没有本房间（无需移除）"),
+        ]
+        if force:
+            _would.append(
+                "【--force】无条件释放 SW 锁（当前 owner=%s）%s"
+                % (_lk_owner or "无",
+                   "，并强制关闭正在运行的 SW 进程" if _sw_run else ""))
+        elif _lk_owner == str(name):
+            _would.append("释放 SW 锁（当前 owner 就是本房间）")
+        else:
+            _would.append("不释放 SW 锁（当前 owner=%s，不是本房间）"
+                          % (_lk_owner or "无"))
+        _would.append("按磁盘实际补登记本房间产物（Bug-05）")
+        _would.append("检查是否可自动推进 workflow_state.step → finished（Bug#6）")
+        _would.append("写审计留痕 reports/defense_bypass.json（仅 --force 时）"
+                      if force else
+                      "不写 defense_bypass.json（未使用 --force）")
+        return {
+            "ok": True,
+            "dry_run": True,
+            "room": str(name),
+            "gate": "DRY_RUN",
+            "force": bool(force),
+            "room_active_now": bool(_rm.get("active")),
+            "room_type": _rm.get("type"),
+            "sw_lock_owner_now": _lk_owner,
+            "sw_running_now": _sw_run,
+            "would_do": _would,
+            "side_effects": [],
+            "defense_checks": "passed" if force else "passed（三道防线 + 看图证据均已通过）",
+            "message": ("【dry-run 预演】房间 [%s] 的三道防线/看图证据已检查通过，"
+                        "下面是【本会执行】的动作 —— 本次【未做任何修改】：\n  · %s\n"
+                        "确认无误后去掉 --dry-run 再执行一次即可真正下线。"
+                        % (name, "\n  · ".join(_would))),
+            "hint": ("--dry-run 是零副作用预演：不写 mode_state、不释放 SW 锁、"
+                     "不杀进程、不写 defense_bypass.json。"),
+        }
+    # ══ 【A-20 修复】门禁关键路径做一次"判定逻辑是否被改过"的自检 ═══════
+    # 实测（2026-11-01）：一次任务里门禁源码被 7 个代理改了 33 次，
+    #   其中改完 domain_validator / fea_solver 之后，同一条 check-room 从
+    #   ok=false(4 条 CRITICAL) 变成 ok=true —— 而磁盘零件没有任何变化。
+    # 这是"裁判被被告改写"：判定逻辑与判定对象在同一可写目录。
+    # 本模块不能阻止有写权限的进程改文件（那是 OS 权限的事），
+    #   但能让改动【无法静默】：留痕 + 在返回体里如实标注。
+    _integrity = None
+    try:
+        import gate_integrity as _gi
+        _clean, _integrity = _gi.assert_clean(where="room-end", room=name)
+    except Exception as _e_gi:
+        _integrity = {"ok": None, "note": "完整性自检不可用: %r" % (_e_gi,)}
     was_owner, killed, waited, _reason = _finalize_room(name, failed=False,
                                                         force=force)
     # ── 【Bug#6 修复】房间收尾后自动推进门禁到 finished（若无活动房间）──
@@ -6275,6 +6543,14 @@ def cmd_room_end(name, force=False):
         _out["hint"] = ("若该房间确实已停、需要立刻让出 SW 给下一个房间，"
                         "用: python mode_gate.py room-end \"%s\" --force"
                         % name)
+    # 【A-20】把完整性结论如实挂到返回体（不阻断，但绝不静默）
+    if isinstance(_integrity, dict):
+        _out["gate_integrity"] = _integrity
+        if _integrity.get("ok") is False:
+            _out["gate_integrity_warning"] = (
+                "⚠️ 门禁判定逻辑（defense_gate / fea_solver / domain_validator "
+                "等）相对基线发生过改动 —— 本次房间结论的可信度取决于该改动是否"
+                "经人工审阅。请核对 .defense/gate_integrity_log.jsonl 与 diff。")
     if _adv.get("advanced"):
         _out["workflow_advanced"] = True
         # ── 【Bug-33 修复】提示语必须准确：自动 finished 只在"全部房间都有
@@ -6337,8 +6613,21 @@ def cmd_sw_request(name):
     # 现在改为：持有者再次取锁时，先做公平体检——若队列里有别人在等，
     # 且自己已达连跑上限（SW_FAIR_CMDS）或连续独占超时（SW_FAIR_SECONDS），
     # 则主动让位；否则才允许续期。
+    # == [A-55 修复] 锁身份不能只有"房间名字符串" ====================
+    # 原实现只比较 lk["owner"] == name。实测（2026-11-01 CRITICAL）：
+    #   同一房间名下跑了【两个】执行体（重开房间时旧子代理还活着，
+    #   或子代理与主对话共用房间名），后者每次 sw-request 都命中这条
+    #   分支、无条件 renewed=True —— 两者同时以为自己持有 SW 使用权，
+    #   并发写同名零件（一方 20CrMnTi/56x60x30，另一方 45/170x140x24），
+    #   后写者覆盖先写者，双方都以为成功。
+    # 现在：owner 记录里同时保存【执行体身份】(pid + session 片段)，
+    #   只有身份也一致才算"我自己持有"；身份不同则视为争用，走公平排队。
+    #   旧状态文件没有 owner_ident 时保持原行为（向后兼容）。
+    _ident_now = _lock_ident()
     q0 = lk.setdefault("queue", [])
-    if lk.get("owner") == name:
+    _owner_ident = str(lk.get("owner_ident") or "")
+    if (lk.get("owner") == name
+            and (not _owner_ident or _owner_ident == _ident_now)):
         _others = [x for x in q0 if x != name]
         _cmds = int(lk.get("cmd_seq", 0) or 0)
         _fs = lk.get("fair_start") or lk.get("acquired_at")
@@ -6356,8 +6645,12 @@ def cmd_sw_request(name):
             save_state(state)
             lk = _sw_lock(state)
         else:
+            # 续期时刷新身份戳（同一执行体才允许长期续）
+            lk["owner_ident"] = _ident_now
+            save_state(state)
             return {"ok": True, "need_lock": True, "acquired": True, "room": name,
-                    "renewed": True, "cmd_seq": _cmds}
+                    "renewed": True, "cmd_seq": _cmds,
+                    "owner_ident": _ident_now}
     q = lk.setdefault("queue", [])
     if name not in q:
         q.append(name)
@@ -6398,6 +6691,8 @@ def cmd_sw_request(name):
         can_fast = ((not running) or (not lk.get("sw_by_room")))
     if can_fast:
         lk["owner"] = name
+        # == [A-55] 同时记录执行体身份，供"是否是我自己持有"判定 ==
+        lk["owner_ident"] = _lock_ident()
         lk["acquired_at"] = time.time()
         # 【Bug4修复】单命令级锁：记录本次命令编号，命令结束后即可释放。
         # 同一个房间的下一步命令会重新排队，但不影响其他房间公平性。
@@ -6927,6 +7222,97 @@ def cmd_check():
     return {"ok": False, "gate": "BLOCKED", "mode": mode, "error": err}
 
 
+# ══ 【F-01 修复 · 2026-10-31】未知 --flag 必须显式拒绝，绝不静默丢弃 ═══════
+# 实测事故（决定性）：
+#   python mode_gate.py room-end X --force --dry-run
+#   → --dry-run 被 CLI 静默过滤掉（只认 --force/-f，其余 -- 开头的参数丢弃）
+#   → 命令【真实执行了下线】并写入 reports/defense_bypass.json
+#     （exit=0, ok=true）。
+#   这是"预演变成真操作"，是最危险的一类静默语义篡改：调用方以为自己在
+#   预演，实际已经不可逆地下线了房间、释放了 SW 锁、还留了绕行痕迹。
+#
+# 修复分两层（两者都做，缺一不可）：
+#   ① 本函数：对每个命令的合法 --flag 做白名单校验，未知的一律拒绝，
+#      并在错误体里【列出该命令的合法参数】，让调用方一次就能改对；
+#   ② cmd_room_end：真正实现 dry_run —— 只做只读检查 + 打印将执行的动作，
+#      log_bypass / _finalize_room / _maybe_advance 全部包在 if not dry_run 里。
+_CMD_FLAGS = {
+    # 命令 → 该命令允许的 --flag（-x 短别名在 _flag_aliases 里归一化）
+    "room-end": ("--force", "--dry-run"),
+    "room-fail": ("--force",),
+    "archive-restore": ("--batch", "--part", "--force", "--dry-run"),
+    "archive-list": (),
+    "stale-artifacts": ("--epoch", "--quarantine", "--dry-run"),
+    "residue-check": ("--clean", "--force"),
+    "lock-doctor": ("--auto",),
+    "doctor": ("--sync", "--clean", "--migrate"),
+    "close-all": ("--quit",),
+    "room-board": ("--room", "--json"),
+    "whoami": ("--session-id",),
+    "sw-wait": ("--timeout",),
+}
+# 短别名 → 长名（校验前归一化，避免 "-f" 被当成未知参数）
+_FLAG_ALIASES = {"-f": "--force", "-n": "--dry-run", "-h": "--help",
+                 "-?": "--help"}
+
+
+def _flag_name(a):
+    """把参数归一化成"长名"形式（去掉 =值 部分，短别名展开）。"""
+    s = str(a or "")
+    if "=" in s:
+        s = s.split("=", 1)[0]
+    return _FLAG_ALIASES.get(s, s)
+
+
+def _reject_unknown_flags(cmd, args):
+    """【F-01 修复】校验该命令的参数里有没有不认识的 --flag。
+
+    为什么必须有（而不是"忽略就好"）：
+      忽略未知 flag 会让【预演变真操作】——调用方写了 --dry-run 却被丢弃，
+      于是它以为只是预演，实际已不可逆执行。这类缺陷不会报错、不会留异常，
+      只在事后发现"我明明只是试一下"。
+      同理，"--forse"（拼错）被丢弃 → 静默降级成"不带 --force 的严格模式"，
+      表现成"门禁莫名其妙拦截"，排查方向完全被误导。
+
+    Args:
+        cmd:  命令名（如 "room-end"）
+        args: sys.argv[1:]（含命令本身）
+    Returns:
+        None 表示通过；否则返回【拒绝响应体】（调用方直接 emit 并退出非 0）。
+    """
+    allowed = _CMD_FLAGS.get(str(cmd))
+    if allowed is None:
+        # 未登记命令不做白名单校验（避免误伤其它命令的历史写法）
+        return None
+    _known = set(allowed)
+    _bad = []
+    for _a in args[1:]:
+        _s = str(_a)
+        if not _s.startswith("-"):
+            continue
+        _nm = _flag_name(_s)
+        # 形如 "--batch B" 的取值参数：值本身不以 - 开头，不会被误判
+        if _nm not in _known:
+            _bad.append(_s)
+    if not _bad:
+        return None
+    return {
+        "ok": False,
+        "gate": "UNKNOWN_FLAG",
+        "command": cmd,
+        "unknown_flags": _bad,
+        "allowed_flags": list(allowed),
+        "error": ("【F-01】命令 %r 收到无法识别的参数：%s。"
+                  "本工具【绝不静默丢弃】未知参数 —— 因为那样会让"
+                  "『预演(如 --dry-run)』变成『真操作』。"
+                  % (cmd, "、".join(repr(x) for x in _bad))),
+        "legal_usage": ("python mode_gate.py %s %s"
+                        % (cmd, " ".join(allowed) if allowed
+                           else "（该命令不接受任何 -- 参数）")),
+        "message": "请修正参数后重新调用。合法参数已在上面的 allowed_flags 中列出。",
+    }
+
+
 def main():
     args = sys.argv[1:]
     # ── 【BUG-09 修复】--help / -h / help 走纯只读说明，零副作用 ──────────
@@ -6989,6 +7375,13 @@ def main():
               "modes": MODE_NAMES})
         sys.exit(1)
     cmd = args[0]
+    # ══ 【F-01 修复】未知 --flag 一律显式拒绝（不再静默丢弃）══════════════
+    # 放在【任何命令执行之前】：未知参数必须在产生任何副作用之前就失败。
+    # 这是"预演(如 --dry-run)被丢弃 → 变成真操作"的根治点。
+    _flag_reject = _reject_unknown_flags(cmd, args)
+    if _flag_reject is not None:
+        emit(_flag_reject)
+        sys.exit(2)
     if cmd == "declare":
         result = cmd_declare(args[1] if len(args) > 1 else "1")
     elif cmd == "room-start":
@@ -7030,10 +7423,16 @@ def main():
                 force=("--force" in args))
     elif cmd == "room-end":
         # 【Bug-25/27】支持 --force 强制释放 SW 锁（小屋忘记 close-all 时兜底）
-        _re_args = [a for a in args[1:] if not a.startswith("--")]
+        # ══ 【F-01 修复】--dry-run 必须被真正识别，绝不能被静默丢弃 ═══════
+        # 实测事故：room-end X --force --dry-run 里 --dry-run 被过滤掉，
+        #   于是"预演"变成了真实下线 + 写 defense_bypass.json。
+        #   现在：未知 flag 由 _reject_unknown_flags 显式拒绝（见 main 开头），
+        #   这里再把 --dry-run 解析出来并传下去，由 cmd_room_end 真正实现零副作用。
+        _re_args = [a for a in args[1:] if not a.startswith("-")]
         _re_force = ("--force" in args) or ("-f" in args)
+        _re_dry = ("--dry-run" in args) or ("-n" in args)
         result = cmd_room_end(_re_args[0] if _re_args else "小屋",
-                              force=_re_force)
+                              force=_re_force, dry_run=_re_dry)
     elif cmd in ("room-fail", "room-restart"):
         result = cmd_room_fail(args[1] if len(args) > 1 else "小屋")
     elif cmd in ("interrupt-agent", "interrupt_agent", "kill-agent", "subagent-kill"):
@@ -7060,8 +7459,48 @@ def main():
     elif cmd == "sw-request":
         result = cmd_sw_request(args[1] if len(args) > 1 else "unknown")
     elif cmd == "sw-wait":
-        result = cmd_sw_wait(args[1] if len(args) > 1 else "unknown",
-                             int(args[2]) if len(args) > 2 else 300)
+        # ── 【A-18 / KI-20 修复】兼容 --timeout N 写法 ────────────────────
+        # 原实现直接 int(args[2])，而 sw_bridge.py 的 sw_busy hint 明确教用户
+        #   写 "sw-wait <房间> --timeout 90" → int('--timeout') 必抛
+        #   ValueError: invalid literal for int() with base 10: '--timeout'
+        #   （实测 2026-11-01 加工头室 / 主传动齿轮凸轮室各触发一次）。
+        # 现在两种写法都接受：
+        #   sw-wait <房间> <秒>          （历史位置参数）
+        #   sw-wait <房间> --timeout <秒>（hint 教的写法）
+        _sw_name = args[1] if len(args) > 1 else "unknown"
+        _sw_timeout = 300
+        _rest = list(args[2:])
+        if "--timeout" in _rest:
+            _i = _rest.index("--timeout")
+            if _i + 1 < len(_rest):
+                try:
+                    _sw_timeout = int(_rest[_i + 1])
+                except (TypeError, ValueError):
+                    result = {"ok": False, "gate": "INVALID_TIMEOUT",
+                              "error": ("--timeout 必须是整数秒，收到 %r。"
+                                        "用法: sw-wait <房间> [秒] 或 "
+                                        "sw-wait <房间> --timeout <秒>"
+                                        % (_rest[_i + 1],))}
+                    _rest = None
+            else:
+                result = {"ok": False, "gate": "INVALID_TIMEOUT",
+                          "error": "--timeout 缺少秒数。用法: sw-wait <房间> --timeout <秒>"}
+                _rest = None
+        elif _rest:
+            # 兼容 = 形式与纯位置参数
+            _cand = _rest[0]
+            if str(_cand).startswith("--timeout="):
+                _cand = str(_cand).split("=", 1)[1]
+            try:
+                _sw_timeout = int(_cand)
+            except (TypeError, ValueError):
+                result = {"ok": False, "gate": "INVALID_TIMEOUT",
+                          "error": ("超时必须是整数秒，收到 %r。"
+                                    "用法: sw-wait <房间> [秒] 或 "
+                                    "sw-wait <房间> --timeout <秒>" % (_cand,))}
+                _rest = None
+        if _rest is not None:
+            result = cmd_sw_wait(_sw_name, _sw_timeout)
     elif cmd == "sw-release":
         result = cmd_sw_release(args[1] if len(args) > 1 else "unknown")
     elif cmd == "lock-doctor":
@@ -7108,9 +7547,19 @@ def main():
     elif cmd == "subagent-status":
         result = cmd_subagent_status()
     elif cmd == "room-report":
-        result = cmd_room_report(args[1] if len(args) > 1 else "unknown",
-                                 args[2] if len(args) > 2 else "unknown",
-                                 " ".join(args[3:]) if len(args) > 3 else "")
+        # == [A-75 修复] 先剥离 --flag，再把位置参数交给 cmd_room_report ====
+        # 原实现直接用 args[1]/args[2]，于是
+        #   room-report --room X --stage Y
+        # 会把 "--room" 当成【房间名】、把 "X" 当成【阶段名】，
+        # 在磁盘上生成 reports/<task>/--room.report.json（幽灵房间）。
+        # 实测（2026-11-01）：磁盘实存 reports/<task>/--room.report.json，
+        #   stage 字段写着真实房间名，room-board 里多出一个叫 --room 的房。
+        # 同模块的 room-stage 早已做了 flag 剥离，room-report 漏了。
+        _rr_pos = [a for a in args[1:] if not str(a).startswith("-")]
+        _rr_room = _rr_pos[0] if len(_rr_pos) > 0 else "unknown"
+        _rr_stage = _rr_pos[1] if len(_rr_pos) > 1 else "unknown"
+        _rr_detail = " ".join(_rr_pos[2:]) if len(_rr_pos) > 2 else ""
+        result = cmd_room_report(_rr_room, _rr_stage, _rr_detail)
     elif cmd == "room-stage":
         # 【Bug⑨】长任务（物理校核/疲劳/领域/看图）在房间上下文里推进阶段。
         # 用法（阶段可省略，省略即 validating）：
@@ -7307,6 +7756,19 @@ def main():
     elif cmd == "close-all":
         # 【Bug⑧】默认保活（只关文档、不退出 SW）；--quit 走完整退出流程
         result = cmd_close_all(quit=("--quit" in args))
+    elif cmd == "gate-integrity":
+        # == [A-20] 门禁判定逻辑完整性检查（给 CI / 人工核对用）=====
+        #   gate-integrity            查是否被改动
+        #   gate-integrity baseline   人工确认后重建基线
+        try:
+            import gate_integrity as _gi3
+            if len(args) > 1 and args[1] == "baseline":
+                result = _gi3.write_baseline(
+                    reason=(args[2] if len(args) > 2 else "mode_gate CLI"))
+            else:
+                result = _gi3.check_integrity()
+        except Exception as _e_gi3:
+            result = {"ok": False, "error": "gate_integrity 不可用: %r" % (_e_gi3,)}
     elif cmd == "sw-proc":
         result = cmd_sw_proc()
     elif cmd == "sw-status":
@@ -7318,13 +7780,20 @@ def main():
     else:
         result = {"ok": False, "error": "未知命令: " + cmd}
     emit(result)
-    # [门禁] 防线拦截/校验异常必须以非零退出码结束：否则自动化脚本
-    #   （pwsh $? / 子代理判定）会把"被拦"误读成"成功"，继续往下走。
+    # == [A-49 修复] ok=false 一律非零退出 ==================================
+    # 原实现只对 gate in {DEFENSE_REQUIRED, DEFENSE_ERROR} 这两个值 exit 1，
+    #   其余全部失败（未知命令 / 串行锁拒绝 / 参数错 / INVALID_TIMEOUT /
+    #   SUBAGENT_PLAN_REQUIRED / ROOM_NOT_REGISTERED 等）统统 exit 0。
+    #   与模块自己"被拦必须非零退出"的承诺相反，也让 $LASTEXITCODE 完全不可用：
+    #   实测 python mode_gate.py bogus_cmd 返回 ok:false 但退出码 0。
+    #   父代理据此把"被拒"读成"成功"，是误判的放大器。
+    # 现在：ok=false 即 exit 1；未知命令用 2 号退出码，与 3=SW忙 区分。
     try:
         if isinstance(result, dict) and result.get("ok") is False:
-            _g = str(result.get("gate") or "")
-            if _g in ("DEFENSE_REQUIRED", "DEFENSE_ERROR"):
-                sys.exit(1)
+            _err = str(result.get("error") or "")
+            if _err.startswith(u"未知命令"):
+                sys.exit(2)
+            sys.exit(1)
     except SystemExit:
         raise
     except Exception:

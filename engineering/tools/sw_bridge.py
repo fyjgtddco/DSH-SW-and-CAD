@@ -2278,10 +2278,46 @@ def _extract_output_paths(script_path):
         pat = _re.compile(
             "[\\\"']([A-Za-z]:[\\\\/][^\\\"'\\n]{2,240}?\\."
             "(?:" + _ext + "))[\\\"']")
+        # == [A-83 修复] 只把【写入类】调用里的路径当产物 ===================
+        # 原实现把脚本里【所有】形如 "X:\\xxx.SLDPRT" 的字符串字面量都当成
+        #   "预期产物"，无法区分读与写。实测后果（2026-11-01）：
+        #   只读探针脚本（open_part 已有的件 -> 读 bbox -> 打印）被判
+        #   "预期产物未生成" -> MISSING_ARTIFACT -> 整次 run 被阻断；
+        #   诊断脚本因此跑不起来，排障被迫绕开 sw_bridge 裸跑 python
+        #   （一绕开就失去归属校验/落盘核对/SW 锁）。
+        # 现在：按行判定，只有同一行或上下 2 行内出现【写入关键字】的
+        #   路径才算预期产物；若整份脚本完全不含写入关键字，退回全量，
+        #   避免误伤写法特殊的脚本。
+        _WRITE_KW = ("save", "Save", "save_as", "SaveAs", "Export", "export",
+                     "SaveBMP", "SavePNG", "create_drawing", "drawing(")
+        _had_write_kw = any(_k in src for _k in _WRITE_KW)
+        _line_starts = [0]
+        for _i, _ch in enumerate(src):
+            if _ch == "\n":
+                _line_starts.append(_i + 1)
+        _line_texts = src.splitlines()
+
+        def _line_no(_pos):
+            _lo, _hi = 0, len(_line_starts) - 1
+            while _lo < _hi:
+                _mid = (_lo + _hi + 1) // 2
+                if _line_starts[_mid] <= _pos:
+                    _lo = _mid
+                else:
+                    _hi = _mid - 1
+            return _lo
+
         for m in pat.finditer(src):
             p = m.group(1).replace("\\\\", os.sep).replace("/", os.sep)
-            if p not in paths:
-                paths.append(p)
+            if p in paths:
+                continue
+            # 始终按上下文判定：整份脚本没有任何写入动作 = 只读探针，
+            #   它的路径字面量是【输入】而不是产物，必须排除。
+            _ln = _line_no(m.start())
+            _ctx = "\n".join(_line_texts[max(0, _ln - 2):_ln + 3])
+            if not any(_k in _ctx for _k in _WRITE_KW):
+                continue
+            paths.append(p)
     except Exception:
         pass
     return paths
@@ -2425,8 +2461,62 @@ def _verify_run_artifacts(script_path, result):
             expected = [str(x) for x in declared]
         else:
             expected = _extract_output_paths(script_path)
+        # == [A-38 修复] 路径提取不到时，用【运行前后磁盘增量】兜底 ======
+        # 原实现：expected 为空就直接 return（checked=False），
+        #   于是下游"磁盘落盘核对 + 自动补登记 artifacts_registry"
+        #   整段跳过 —— 这是防线①空转三断点的第一个断点。
+        # 实测（2026-11-01）：小屋脚本用变量拼路径
+        #   out_dir = os.path.dirname(os.path.abspath(__file__))
+        #   m.save(os.path.join(out_dir, "DSH_xxx.sldprt"))
+        # 静态正则一个路径都抽不到 -> products 无校验、无登记 ->
+        #   defense_gate 的 _modeling_parts() 恒为空 -> part_count=0 ->
+        #   防线①"空过"（A-06/A-21 的上游成因）。
+        # 兜底：扫一遍常见产物目录，取【运行窗口内新增/更新的 .SLDPRT】。
+        #   只做"补登记 + 提示"，仍不据此判失败（宁可无校验，不可误判失败）。
+        _swept = []
         if not expected:
+            try:
+                _t_end = time.time()
+                _t_beg = float(result.get("_started_at") or (_t_end - 3600.0))
+                _scan_dirs = []
+                for _cand in (os.path.dirname(os.path.abspath(script_path)),
+                              os.getcwd()):
+                    for _sub in ("parts", "output", ""):
+                        _d = os.path.join(_cand, _sub) if _sub else _cand
+                        if os.path.isdir(_d):
+                            _scan_dirs.append(_d)
+                _seen = set()
+                for _d in _scan_dirs:
+                    try:
+                        for _fn in os.listdir(_d):
+                            if not _fn.lower().endswith(".sldprt"):
+                                continue
+                            if _fn.startswith("~$"):
+                                continue
+                            _fp = os.path.join(_d, _fn)
+                            if not os.path.isfile(_fp):
+                                continue
+                            _nm = os.path.normcase(os.path.abspath(_fp))
+                            if _nm in _seen:
+                                continue
+                            if os.path.getmtime(_fp) < _t_beg - 1.0:
+                                continue
+                            _seen.add(_nm)
+                            _swept.append(_fp)
+                    except Exception:
+                        continue
+            except Exception:
+                _swept = []
+        if not expected and not _swept:
             return out
+        if _swept and not expected:
+            out["swept_from_disk"] = _swept[:40]
+            out["swept_note"] = (
+                "脚本未声明产物路径（或路径是变量拼接，静态提取不到），"
+                "已按运行窗口内的磁盘新增件兜底识别 %d 件；"
+                "建议脚本显式写 __RESULT__ = {\"artifacts\": [...]} 以便精确核对。"
+                % len(_swept))
+            expected = _swept
         out["checked"] = True
         out["expected"] = expected
         for p in expected:
@@ -2763,9 +2853,27 @@ def cmd_run(sw, script_path, extra_args, room=None):
             except Exception:
                 _hb_thread = None
         try:
+            # == [A-08 / A-96 修复] 执行超时必须可配置，且超时要说清成因 ==
+            # 原实现把 600 秒写死（含 SW 锁排队时间）。实测（2026-11-01）：
+            #   多房间并发时排队吃掉整段时间，脚本被杀，报
+            #   "subprocess failed: timed out after 600 seconds"，
+            #   而 job 退出码仍是 0，极易被误判成功；一次 9 件全量建模 0 产出。
+            # 更糟的是没有覆盖开关 —— 模型只能裸跑 python 绕开 sw_bridge，
+            #   于是同时失去归属校验、落盘核对、SW 锁与心跳（A-08 的放大器）。
+            # 现在：DSH_SW_RUN_TIMEOUT_SEC（默认 600，最小 60，0/负 视为不限），
+            #   超时错误里明确区分"排队 vs 执行"，并给出可操作建议。
+            try:
+                _to_raw = str(os.environ.get("DSH_SW_RUN_TIMEOUT_SEC") or "").strip()
+                _timeout_sec = float(_to_raw) if _to_raw else 600.0
+            except Exception:
+                _timeout_sec = 600.0
+            if _timeout_sec <= 0:
+                _timeout_sec = None        # 显式不限时（长任务自担风险）
+            elif _timeout_sec < 60:
+                _timeout_sec = 60.0        # 下限保护
             proc = subprocess.run(
                 [sys.executable, "-X", "utf8", wrapper] + list(extra_args),
-                capture_output=True, text=True, timeout=600,
+                capture_output=True, text=True, timeout=_timeout_sec,
                 cwd=os.path.dirname(os.path.abspath(script_path)),
                 encoding='utf-8', errors='replace',
                 env=run_env,
@@ -2777,6 +2885,27 @@ def cmd_run(sw, script_path, extra_args, room=None):
             except Exception:
                 pass
     except Exception as e:
+        _emsg = str(e)
+        # == [A-08] 超时错误要可诊断：区分排队耗时与真实执行耗时 =======
+        if "timed out" in _emsg.lower() or "TimeoutExpired" in type(e).__name__:
+            _lock_info = None
+            try:
+                _lock_info = cmd_sw_status()
+            except Exception:
+                _lock_info = None
+            return {
+                "ok": False,
+                "gate": "RUN_TIMEOUT",
+                "defense_blocked": "RUN_TIMEOUT",
+                "error": ("脚本执行超时：%s。注意本超时【包含 SW 排队等待时间】，"
+                          "不一定是脚本本身慢。" % _emsg),
+                "sw_lock": _lock_info,
+                "hint": ("① 先看 sw_lock：若 owner 不是本房间，说明大部分时间在排队，"
+                         "应先用 mode_gate.py sw-wait <房间> --timeout 90 拿到锁再重发同一条命令；"
+                         "② 长任务可调大上限：$env:DSH_SW_RUN_TIMEOUT_SEC = 1800；"
+                         "③ 脚本支持分批（每批 2~3 件）时优先分批；"
+                         "④ 已落盘的零件会保留，重跑时脚本可跳过已完成件继续。")
+            }
         return {"ok": False, "error": f"subprocess failed: {e}"}
     finally:
         # ── 【Bug-39 修复】wrapper 现在在临时目录 → 连目录一起清理 ──────────
@@ -2813,6 +2942,77 @@ def cmd_run(sw, script_path, extra_args, room=None):
     #       stdout/stderr 保留进程级输出以便兜底排查。
     result["stdout"] = stdout[-4000:]
     result["stderr"] = stderr[-4000:]
+    # == [A-107 修复] 脚本失败后【必须清场】，否则整个 SW 会话被污染 ====
+    # 实测（2026-11-01）：某房间 cut 失败自动反向 + 脚本崩溃未退出草图态，
+    #   SW 应用级【草图上下文残留】；此后同一实例上所有新建零件的
+    #   extrude 全部静默失败（FeatureExtrusion3 返回 None + no_body +
+    #   GetBodies2=0），circle/rect/polyline 三种轮廓、EfficientRebuild
+    #   重试均无效 —— 并行兄弟房间的建模能力一起归零约 30 分钟，
+    #   只有重启 SLDWORKS 才能恢复。
+    # 原实现：wrapper 只捕获异常并回报，不做任何清理。
+    # 现在：失败时尽力清掉【本房间可能留下的】残留状态（退出草图态 +
+    #   清选择集 + 关掉未命名的半成品文档），并把清场结果如实回传。
+    #   注意：绝不杀进程、绝不动已命名文档（那是别的房间的成果）。
+    if isinstance(result, dict) and not result.get("ok"):
+        _cln = {"attempted": True, "actions": []}
+        try:
+            _sw2 = sw
+            _md = None
+            try:
+                _md = _sw2.ActiveDoc
+            except Exception:
+                _md = None
+            # ① 退出残留草图态
+            try:
+                if _md is not None:
+                    _skm = _md.SketchManager
+                    if _skm is not None and _skm.ActiveSketch is not None:
+                        _skm.InsertSketch(True)
+                        _cln["actions"].append("退出残留草图态")
+            except Exception as _e1:
+                _cln["actions"].append("退出草图态失败: %r" % (_e1,))
+            # ② 清选择集
+            try:
+                if _md is not None:
+                    _md.ClearSelection2(True)
+                    _cln["actions"].append("清空选择集")
+            except Exception:
+                pass
+            # ③ 关掉【未命名】半成品文档（有路径的一律保留）
+            _closed_un = []
+            for _ in range(20):
+                try:
+                    _ad = _sw2.ActiveDoc
+                except Exception:
+                    _ad = None
+                if _ad is None:
+                    break
+                try:
+                    _p = getattr(_ad, "GetPathName", None)
+                    _path = (_p() if callable(_p) else _p) or ""
+                except Exception:
+                    _path = ""
+                if str(_path).strip():
+                    break        # 已命名 → 别人的/已保存的，不动
+                try:
+                    _t = getattr(_ad, "GetTitle", None)
+                    _title = (_t() if callable(_t) else _t) or ""
+                    _ad.CloseDoc(_title)
+                    _closed_un.append(_title)
+                except Exception:
+                    break
+            if _closed_un:
+                _cln["actions"].append("关闭未命名半成品 %d 个: %s"
+                                       % (len(_closed_un),
+                                          ", ".join(str(x) for x in _closed_un[:5])))
+            _cln["ok"] = True
+        except Exception as _e_cln:
+            _cln["ok"] = False
+            _cln["error"] = repr(_e_cln)
+        result["session_cleanup"] = _cln
+        result.setdefault("warnings_list", []).append(
+            "脚本失败后已尽力清理 SW 会话残留（避免污染并行房间）。"
+            "若后续 extrude 仍异常，请 close-all --quit 后重来。")
     result.setdefault("exit_code", proc.returncode)
     # ── 【Bug-39 修复】回显"实际执行的脚本"，让调用方可核对未被串号 ──────
     # 台账建议③："加 --verify-script 参数，执行前打印待执行脚本的完整路径+hash"。
@@ -2851,6 +3051,49 @@ def cmd_run(sw, script_path, extra_args, room=None):
             # 脚本显式报告失败 → 整体判失败，绝不"静默成功"
             result["ok"] = False
             result.setdefault("error", _biz.get("error") or "脚本自报失败")
+        # == [A-29 修复] 逐件失败也要能顶到顶层 ok ======================
+        # 实测（2026-11-01）：某房间建模脚本 9 件【全部失败】，逐件都打印了
+        #   异常并按惯例 continue，最后没有写 __RESULT__.ok=False，
+        #   于是 sw_bridge 顶层仍返回 ok:true —— 父代理据此认为"这一波
+        #   跑完了"，实际 0 产出，白等约 4 小时（两任子代理连续踩）。
+        # 现在：脚本回传的逐件结果（results/items/parts 数组）若【全部】
+        #   失败，则顶层判失败；部分失败时 ok 保持 true 但必须显式列出
+        #   失败清单，供父代理与总理核对。
+        _items_a = None
+        for _k_a in ("results", "items", "parts", "built", "outputs"):
+            _v_a = _biz.get(_k_a)
+            if isinstance(_v_a, list) and _v_a:
+                _items_a = _v_a
+                break
+        if _items_a is not None:
+            _ok_a, _bad_a = 0, []
+            for _it_a in _items_a:
+                if isinstance(_it_a, dict):
+                    _it_ok = _it_a.get("ok", _it_a.get("success", True))
+                    _nm_a = (_it_a.get("name") or _it_a.get("part")
+                             or _it_a.get("file") or "?")
+                    if _it_ok is False:
+                        _bad_a.append(str(_nm_a))
+                    else:
+                        _ok_a += 1
+                else:
+                    _ok_a += 1
+            result["item_summary"] = {
+                "total": len(_items_a), "ok": _ok_a, "failed": len(_bad_a),
+                "failed_items": _bad_a[:40],
+            }
+            if _bad_a and _ok_a == 0:
+                result["ok"] = False
+                result["all_items_failed"] = True
+                result["error"] = (
+                    "【A-29】脚本回报的 %d 个零件【全部失败】（0 成功）：%s。"
+                    "这不是成功执行 —— 请按逐件错误逐条排查后重跑。"
+                    % (len(_items_a), ", ".join(_bad_a[:10])))
+            elif _bad_a:
+                result.setdefault("warnings_list", []).append(
+                    "【A-29】%d 件成功、%d 件失败：%s。"
+                    "失败件不会被自动补登记，请重做后再收房。"
+                    % (_ok_a, len(_bad_a), ", ".join(_bad_a[:10])))
     # ── 【C9 修复 + BUG-57/86 加固】产物校验 ────────────────────────────
     # 脚本声称成功、但文件没生成（或只是 0 字节 / 只是上一轮的旧文件）
     #   → 必须判失败。这是"脚本跑了、零件没变却返回 ok:true"的最后一道闸。
@@ -3279,13 +3522,22 @@ def _assembly_mate_gate(sw, asm_path, result=None, room=None):
                 "文档核心结论：装配定位必须走 IAssemblyDoc::CreateMate 配合；"
                 "坐标硬设（SetTransform2/SetXform/TranslateComponent）在 SW 上"
                 "全部不可用或必崩。\n"
-                "正确做法（文档 §6.1 六步）：\n"
-                "  ① m._pick_faces_of_component(comp) 取面（已包装 IFace2）\n"
-                "  ② asm.ClearSelection2(True)\n"
-                "  ③ f1.Select2(True, 1); f2.Select2(True, 1)\n"
-                "  ④ 确认 GetSelectedObjectCount2(-1) >= 2\n"
-                "  ⑤ m.create_mate(type, None, name=..., save=...)\n"
-                "  ⑥ m.verify_assembly_mates(expect_names=[...]) 验收\n"
+                # == [A-93 修复] 提示必须只教【真实存在】的 API =============
+                # 原提示教的三个函数在 swapi 里【根本不存在】（全库 grep 0 命中）：
+                #   _pick_faces_of_component / verify_assembly_mates / mate_count
+                # 这是"求救提示"——模型照着做仍然 AttributeError，等于把人带进死胡同。
+                # 实测存在且可用的（swapi.py 行号）：
+                #   create_mate :12603   add_component :11043
+                #   verify_component_position :11328   add_components_batch :11661
+                "正确做法（只用 swapi 里真实存在的方法）：\n"
+                "  ① asm.ClearSelection2(True)\n"
+                "  ② 选两个配合面：IFace2.Select2(True, 1)，面须用 mod.IFace2(face._oleobj_) 重包\n"
+                "  ③ 确认 asm.GetSelectedObjectCount2(-1) >= 2\n"
+                "  ④ m.create_mate(\"coincident\"|\"distance\", (e1, e2), distance_mm=...)：EntitiesToMate 传 VARIANT(VT_ARRAY|VT_DISPATCH, (e1, e2))，AddMate5 必须 15 参\n"
+                "  ⑤ 验收判据：CreateMate 非 None 且 GetFeatureCount(False) 递增（errStatus != 0 不算失败）\n"
+                "  ⑥ 复核：python sw_bridge.py asm-verify <装配体.sldasm>\n"
+                "注：mate_count() / verify_mate() / verify_assembly_mates() / "
+                "_pick_faces_of_component() 【均不存在】，不要调用。"
                 "确需放行：设 DSH_ASSEMBLY_MATE_BYPASS=1 或给 run 传 --force-mate"
                 "（会留痕）。" % (os.path.basename(str(asm_path)), len(_probe)))
             out["hint"] = ("可直接用：python sw_bridge.py asm-verify \"<装配体.sldasm>\" "
@@ -7085,7 +7337,12 @@ def main():
             print(json.dumps({"ok": False, "sw_busy": True,
                               "position": _lock.get("position"), "owner": _lock.get("owner"),
                               "error": _lock.get("error"),
-                              "hint": "SW 使用窗口排队中（FIFO 先到先用）。请执行 Start-Sleep -Seconds 90 后重试同一条命令（带 --room 房间名），队列位置已保留。"},
+                              "hint": ("SW 使用窗口排队中（FIFO 先到先用）。请用阻塞式等待把锁等回来："
+                                        "python mode_gate.py sw-wait <房间> --timeout 90"
+                                        "（等价写法 python mode_gate.py sw-wait <房间> 90；"
+                                        "或 wait-rooms <房间> --timeout 90），再重试同一条命令（带 --room 房间名），队列位置已保留。"
+                                        "禁止用 Start-Sleep + job_output wait:true 长阻塞轮询："
+                                        "静默数十秒会让用户以为 DSH 卡死（2026-10-31 事故根因）。")},
                              ensure_ascii=False, indent=2))
             # 【Bug2 修复】SW 忙（排队中）不是成功，用非零码退出，
             # 让调用方能识别"需要重试"而不是"已完成"。

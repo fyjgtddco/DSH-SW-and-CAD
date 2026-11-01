@@ -568,6 +568,37 @@ export class DefenseSigner {
         volume_inflation_x: _viNum,
         model_trustworthy: !(_viNum > 1.5),
         limitations: Array.isArray(_lim) ? _lim : [],
+        // == [A-68 修复] 物理凭据必须绑定【它实际校核的那件零件】======
+        // 原待签体只有 room + run_id + report_path，没有零件维度。
+        //   实测（2026-11-01）：某房"通过"的凭据 run_id 是另一个进程
+        //   06:37:29 写入的，part_path=null / material=null，而本房真正
+        //   要校核的是另一件 —— 等于"你过的是别人的成绩单"；同房 2 小时
+        //   内结论还能 2.39x → 2.82x → 1.45x，每次都恰好更好。
+        // 零件事实由【宿主自己读盘】确认（sha256 由宿主算，调用方无法伪造），
+        //   取不到就如实写 null，校验端会判"未绑定"而不是默认放行。
+        part_path: (() => {
+          try {
+            const _pp = String(_fea.part_path
+              || (_fea.real_geometry && _fea.real_geometry.part_path) || '').trim();
+            return _pp ? pathSync.resolve(_pp) : null;
+          } catch (e) { return null; }
+        })(),
+        part_name: (() => {
+          try {
+            const _pp = String(_fea.part_path
+              || (_fea.real_geometry && _fea.real_geometry.part_path) || '').trim();
+            return _pp ? pathSync.basename(_pp) : null;
+          } catch (e) { return null; }
+        })(),
+        // sha256 由宿主对【磁盘上的零件文件】现算 —— 这是不可伪造的绑定
+        part_sha256: (() => {
+          try {
+            const _pp = String(_fea.part_path
+              || (_fea.real_geometry && _fea.real_geometry.part_path) || '').trim();
+            if (!_pp || !fsSync.existsSync(_pp)) return null;
+            return fileSha256(_pp);
+          } catch (e) { return null; }
+        })(),
         source: 'physics_bridge',
       };
       return { ok: true, payload };
@@ -1124,8 +1155,21 @@ export class DefenseSigner {
             out.blockers.push(
               '【防线②物理】等效模型失真 ' + (_vx === null ? '超限' : _vx)
               + ' 倍（等效实心体积 / 真实体积），安全系数 ' + _sfTxt
-              + ' 不可作为强度合格依据 —— 须用真实几何（STEP 导入或 --part 绑定）'
-              + '重跑校核'
+              // == [A-27 修复] 只给【工具链里真实存在】的出路 ==============
+              // 原提示写"须用真实几何（STEP 导入或 --part 绑定）"，但
+              //   STEP 导入在整条工具链里【根本不存在】（全库 grep
+              //   ImportStep / LoadFile4 = 0 命中）。实测后果：某个会话为
+              //   找这条不存在的出路烧掉约 1/4 的步数，并直接诱发
+              //   "改门禁源码让判定变绿"（A-20）。
+              // 现在只给三条真实可执行的出路。
+              + ' 不可作为强度合格依据。真实可执行的出路（按优先级）：'
+              + '① physics-optimize --part <本房主承力零件.SLDPRT> 换一个'
+              + '等效失真 ≤1.5 的零件绑定（细长轴换承力板/座是常见做法）；'
+              + '② 安装 Gmsh+CalculiX 后走 L2 真几何（本机若无则报告 '
+              + 'three_d_fea=NOT_AVAILABLE，属工具限制不是设计缺陷）；'
+              + '③ 确需人工放行：room-end --force 或 DSH_DEFENSE_BYPASS=1'
+              + '（必留痕到 defense_bypass.json）。'
+              + '注意：工具链【没有 STEP 导入能力】，不要去找。'
               + (String(ph.model || '')
                  ? '（本次模型: ' + String(ph.model) + '）' : ''));
           }

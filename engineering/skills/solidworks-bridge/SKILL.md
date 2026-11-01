@@ -128,7 +128,10 @@ $env:DSH_ROOM = "结构件"; python "<包目录>\sw_bridge.py" run "script.py"
 ```
 
 - 并行模式下多个小屋同时跑：SW 调用自动检测进程并 FIFO 排队（谁先排队谁先用）
-- 若返回 sw_busy:true：执行 Start-Sleep -Seconds 90 后重试同一条命令（必须带 --room），队列位置已保留，禁止放弃
+- 若返回 sw_busy:true：用 `python mode_gate.py sw-wait <房间> --timeout 90` 原地阻塞等锁（或 `wait-rooms`），
+  再重试同一条命令（必须带 --room）；队列位置已保留，禁止放弃
+- 🚫禁止用 `Start-Sleep 90 + job_output wait:true` 长阻塞轮询：静默等待会让用户以为 DSH 卡死
+  （2026-10-31 事故，见 docs/DSH卡死事故分析_job_output阻塞.md）
 - 前一个小屋完全关闭 SW 进程后，队首小屋自动获得 SW 使用权
 - 串行模式 / 非模式2：锁自动跳过，零影响
 - 锁随小屋生命周期保持，由主对话的 room-end 统一释放并确保 SW 进程关闭

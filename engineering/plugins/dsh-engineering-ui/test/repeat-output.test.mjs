@@ -56,10 +56,19 @@ const source = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
 //   因此把它也内联成 data: URL，并改写 index.js 里的相对 import。
 const signSource = readFileSync(new URL('../lib/defense-sign.js', import.meta.url), 'utf8');
 const SIGN_URL = 'data:text/javascript;base64,' + Buffer.from(signSource).toString('base64');
+// == 测试缺口修复 ==
+// index.js 在 2026-10-31 新增了 `import { installJobWaitGuard } from
+// './job-wait-guard.js'`，但这里只 shim 了 defense-sign.js ——
+// data: URL 无法解析相对路径 → ERR_UNSUPPORTED_RESOLVE_REQUEST /
+// ERR_INVALID_URL → 整个测试文件加载失败（不是断言失败）。
+// compatibility.test.mjs 早已按同样方式补过 job-wait-guard，本文件漏了。
+const guardSource = readFileSync(new URL('../lib/job-wait-guard.js', import.meta.url), 'utf8');
+const GUARD_URL = 'data:text/javascript;base64,' + Buffer.from(guardSource).toString('base64');
 const rewritten = source
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + SHIM_LLM_URL + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + SHIM_REGISTRY_URL + "'")
-  .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'");
+  .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'")
+  .replace("from './job-wait-guard.js'", "from '" + GUARD_URL + "'");
 assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换成功');
 const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));
 

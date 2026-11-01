@@ -98,17 +98,18 @@
                 m.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "DSH_正方形.sldprt"))
                 ```
                 单位 mm。命名 DSH_+中文名，必须中文。计算用 Python 算两次交叉验证。
-                收尾 save() 即止不 close_and_exit；cleanup_temp_files() 清临时，只留成品。
+                收尾 save() 即止不 close_and_exit；【禁止调用 cleanup_temp_files()】（swapi 里【不存在】该方法，调用必 AttributeError；临时文件由 SW 会话自行管理）。
                 API：草图 begin_sketch/rect/circle/line/polyline/centerline/end_sketch；
                 特征 extrude/cut/revolve/fillet/chamfer/create_sphere；展示 bring_to_front/set_view_iso/screenshot；
-                保存 save；清理 cleanup_temp_files(exclude)。
+                保存 save；【无 cleanup_temp_files API】。要清残留文档用 sw_bridge.py close-all（不带 --quit 会保留进程）。
                 坑：圆角 FeatureFillet3(2,R,..) 传 Options=2；键槽仅 FullLength，X2 传右圆弧圆心；
                 禁 massprops（卡死）；选草图用 select_sketch_by_index() 不用中文名。
 
                 ## 装配（代码级强制）
                 定位只能靠配合(Mate)，坐标硬设全废。
                 可用 create_mate("distance"|"coincident",(a,b),distance_mm=)、create_lock_mate、select_face、
-                mate_count、verify_mate。类型：重合0 同心1 垂直2 平行3 距离5 角度6 锁定16。
+                add_component、verify_component_position。类型：重合0 同心1 垂直2 平行3 距离5 角度6 锁定16。
+                【不存在，禁止调用】mate_count()、verify_mate()、verify_assembly_mates()、_pick_faces_of_component()。
                 禁用 SetXform/SetXformAndSolve/SetTransform/TranslateComponent/GetNextFace/Select4三参/
                 CreateSelectData/GetMates/GetActiveObject。
                 姿势：面须 mod.IFace2(face._oleobj_) 重包；face.Select2(True,1) 两参；
@@ -187,9 +188,20 @@
                 波3(出图1个)：同上。回退：room-fail <源房间> → select 重做。
 
                 【SW窗口】建 subagent 前必 close-all 且确认无 SLDWORKS.EXE。sw_bridge 自动 FIFO 排队；
-                返回 sw_busy:true → Start-Sleep 90 后重试【同一命令】(带--room)，队列保留，禁放弃。
+                返回 sw_busy:true → 用【阻塞式等待】python mode_gate.py wait-rooms <房间> --timeout 90
+                （或 sw-wait <房间>），让 Python 原地等锁；队列保留，禁放弃。
                 小屋内写单脚本用 run 跑多步，禁逐步调。建模完必 close-all 释放锁(不必等 room-end)。
                 单房间最长持锁 4 小时(SW_MAX_HOLD，兜底防死锁)，超时锁自动让给队首（与心跳无关）。
+
+                🚫【长等待·铁律 2026-10-31 事故修复】禁止"Start-Sleep N 秒 + job_output wait:true"这种长阻塞轮询。
+                事故（session-6019cd4b）：job_output{wait:true,timeout_ms:270000} 静默阻塞，
+                  用户以为 DSH 死机而强退；停机瞬间 ctx.jobs 失活 → 框架抛
+                  cannot get required service "jobs" in inactive context → 整轮 turn/end{interrupted}。
+                正确做法（三条，任选其一，都不要再把整轮挂在等待上）：
+                  ① 阻塞交给 Python：mode_gate.py wait-rooms / sw-wait（进程内轮询，零 token、有进度语义）；
+                  ② 判定要不要继续等 → 读磁盘产物：room-board --json、room-report-read、mode2_plan.json；
+                  ③ 必须等后台 job 时：【单次 sleep ≤30s，wait:true 的 timeout_ms ≤30000】，宁可多轮短等。
+                宿主侧另有硬兜底：插件已把 job_output 的长等待切成 ≤45s 窗口，到点即返回"仍在运行"。
 
                 【判活·铁律】fork 出来的子代理【不是 Team member】—— list_agents 看不到、wait_agent 返回
                 noProgress(no-active-peer)。🚫绝不能用这两个判断 fork 的子代理死活（2026-10-29 实测：主对话因此
