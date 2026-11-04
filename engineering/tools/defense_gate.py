@@ -43,6 +43,7 @@ CLI
 import glob
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -1254,6 +1255,122 @@ def check_material_attestation(part_path):
     except Exception as _e_geo:
         # 几何校验自身异常 → 记为未评估，但绝不因此判合格
         out["geometry"] = {"evaluated": False, "error": repr(_e_geo)}
+    # ══ 【A-17 / A-74 修复 · 判定对象必须回读零件，而不是只看凭据自报】══════
+    # 原缺陷：check_material_attestation 的全部判据都建立在【凭据自报值】上
+    #   （attested_material / attested_density_kg_m3 / applied_name…）。
+    #   也就是说门禁在验证"凭据自己填的那张表"，而不是验证"零件里到底是什么"。
+    #   只要装材那一步写错、或凭据被某条容错路径"善意修正"过，
+    #   零件属性栏显示 AISI 1020、凭据写 Q235，防线照样 PASS。
+    #
+    # 现在补一道【独立证据】判据：
+    #   ① swapi.save() 在 SW 进程内把"SW 内部实际生效名 + 实测密度"写成旁挂
+    #      记录 <零件>.material.json.sw_internal.json（不参与验签，纯事实留痕）；
+    #   ② 这里回读它，与凭据自报的 attested_material 做归一化比对；
+    #   ③ 两者矛盾 → 判 model_trustworthy=false 并 BLOCK（凭据不可采信）；
+    #   ④ 旁挂缺失 → 不阻断，但显式标注 sw_internal_evaluated=false，
+    #      让下游知道"这条判据没跑"，而不是静默当作通过。
+    #
+    # 注意：旁挂记录【不参与签名】，因此它只作为"交叉核对的独立证人"——
+    #   单靠它可以发现矛盾，但不能单靠它给出通过结论（通过仍须凭据验签成功）。
+    try:
+        _swi = _read_sw_internal_sidecar(_real_part)
+        out["sw_internal_evaluated"] = bool(_swi)
+        out["model_trustworthy"] = True
+        if _swi:
+            _swi_name = str(_swi.get("sw_internal_material")
+                            or _swi.get("material") or "").strip()
+            _swi_dens = _swi.get("density_kg_m3")
+            out["sw_internal_material"] = _swi_name or None
+            try:
+                _swi_dens = float(_swi_dens) if _swi_dens is not None else None
+            except Exception:
+                _swi_dens = None
+            out["sw_internal_density_kg_m3"] = _swi_dens
+            # (a) 材质名：SW 内部实测 vs 凭据自报
+            #     ⚠️ 名称差异【单独不足以定罪】：SW 会把国标牌号存在本地化库名里
+            #     （Q235 可能回读成"普通碳钢"），这属于别名而非换料。
+            #     因此名称不一致先记 WARNING；只有【密度这个物理事实】也矛盾，
+            #     或 swapi 自己都判了 matches=false，才升级为硬阻断。
+            _name_mismatch = bool(_swi_name and _name
+                                  and not _material_names_equivalent(_swi_name, _name))
+            _dens_mismatch = False
+            if _swi_dens and _dens:
+                try:
+                    _rd = (abs(float(_swi_dens) - float(_dens))
+                           / max(float(_swi_dens), 1.0))
+                    out["sw_internal_density_deviation_pct"] = round(_rd * 100, 2)
+                    _dens_mismatch = _rd > 0.03
+                except Exception:
+                    _dens_mismatch = False
+            if _name_mismatch:
+                out["sw_internal_name_mismatch"] = True
+            # 名称不同时，用【双向材料身份查询】判定这是"库名别名"还是"真换料"：
+            #   · 双向身份命中 → 两个名字指向材料库里【同一组属性】，属别名（放行+告警）；
+            #   · 只命中一侧 / 都命中但属性不同 → 无法证明是同一材料，
+            #     按 fail-closed 视为"凭据不可采信"。
+            # 为什么不用 material_substitution_check：它要求两侧都有属性才比较，
+            #   SW 回读名（"普通碳钢"）通常不在材料库里 → needs_review 而非阻断，
+            #   于是"真换料"会被降级放过（本函数原设计是给"请求 vs 已生效"用的，
+            #   两者都在库里；这里一侧是 SW 内部的本地化名，口径不同）。
+            # 判"别名"还是"真换料"，要看【当初写进 SW 的名字】与【现在回读的名字】：
+            #   · 写入名（attested_material_name / applied_name）≠ 回读名
+            #     → SW 没有保留我们写的材质，这是"凭据与实物脱节"，硬阻断；
+            #   · 没有写入名（历史旁挂记录）→ 无法证明是换料，名称差异只告警；
+            #     但【密度】这个物理事实仍然独立硬判。
+            # 为什么不拿凭据的 requested_material 直接比：请求名本身可能是库中不存在的
+            #   别名（PETG 之类），那条替代路径已由 Bug-C 的密度/属性判据覆盖；
+            #   本条要回答的是"我们写进去的那次赋值到底生效了没有"。
+            # ── 只认【能证明的证据】，不猜语义 ──────────────────────────────
+            # 名称差异本身【不足以定罪】：SW 的中文材料库里 Q235 可能显示为
+            #   "普通碳钢"，而 Q235→AISI 1020 的密度/屈服完全相同 ——
+            #   在缺少权威别名表时，纯名字比较既会误杀别名，也会漏掉同参数换牌号。
+            #   所以这里只认两类【硬证据】：
+            #     ① 密度（物理事实，由 SW 质量属性算出，凭据改不掉）；
+            #     ② 旁挂记录里 swapi 自己给出的 sw_internal_matches_request=False
+            #        （那是写入方在 SW 进程内、掌握别名映射时下的判定，最权威）。
+            #   其余情况一律降级为【显式告警】：让不一致可见、可追溯，
+            #   但不拿"我猜它可能是别名"去放行，也不拿"名字不同"去误杀。
+            _swi_written = str(_swi.get("attested_material_name")
+                               or _swi.get("applied_name") or "").strip()
+            _declared = _swi.get("sw_internal_matches_request")
+            _sub_blocking = (_declared is False)
+            out["sw_internal_substitution"] = {
+                "written_to_sw": _swi_written or None,
+                "read_from_sw": _swi_name or None,
+                "swapi_declared_match": _declared,
+                "names_equivalent": (None if not _name_mismatch
+                                     else _material_names_equivalent(_swi_name, _name)),
+            }
+            if _dens_mismatch or _sub_blocking:
+                out["model_trustworthy"] = False
+                out["material_self_report_mismatch"] = True
+                _bits = []
+                if _name_mismatch:
+                    _bits.append("凭据自报材料 %r，而 SolidWorks 零件内部是 %r"
+                                 % (str(_name), _swi_name))
+                if _dens_mismatch:
+                    _bits.append("实测密度 %.0f kg/m³ 与凭据自报 %.0f kg/m³ 不符"
+                                 % (float(_swi_dens), float(_dens)))
+                out["reasons"].append(
+                    "【A-17】凭据自报值与零件实测事实矛盾（%s）。"
+                    "门禁不能只信凭据自报值，故该零件材料不可采信；"
+                    "请重新赋材并保存（凭据会随 swapi.save() 重写）。"
+                    % "；".join(_bits))
+            elif _name_mismatch:
+                # 名称不同但属性差异在容差内 → 判为 SW 的库名别名
+                out.setdefault("warnings", []).append(
+                    "【A-17】凭据自报材料 %r 与 SolidWorks 内部回读名 %r 不同，"
+                    "但实测密度一致（%.0f kg/m³）—— 判为库名别名，不作阻断；"
+                    "若图纸要求精确牌号，请核对材质库命名。"
+                    % (str(_name), _swi_name, float(_swi_dens or _dens or 0)))
+            # (b) 密度判据已并入上方 _dens_mismatch（物理事实优先于名字）
+        else:
+            out["sw_internal_note"] = (
+                "未找到 SW 内部材质旁挂记录（<零件>.material.json.sw_internal.json）—— "
+                "本条【未评估】零件的真实材质，不能据此认为材质已核对。")
+    except Exception as _e_swi:
+        out["sw_internal_evaluated"] = False
+        out["sw_internal_error"] = repr(_e_swi)
     # (6) 未赋材兜底警告：近似匹配按 WARNING 处理，不阻断
     if not out["reasons"]:
         out["ok"] = True
@@ -1261,6 +1378,89 @@ def check_material_attestation(part_path):
         if att.get("approximate_match"):
             out["reasons"].append("材料为近似匹配（库中无精确同名），建议核对")
     return out
+
+
+def _read_sw_internal_sidecar(part_path):
+    """读取 swapi 写下的【SW 内部真实材质】旁挂记录（A-17）。
+
+    路径约定与 swapi.sw_internal_record_path() 完全一致：
+        <零件>.SLDPRT → <零件>.SLDPRT.material.json.sw_internal.json
+    另兼容大小写不同的历史写法（同一目录按 casefold 找）。
+
+    纯读、无副作用；不存在/损坏一律返回 None（绝不抛异常、绝不写盘）。
+    """
+    if not part_path:
+        return None
+    _s = str(part_path)
+    _cands = [_s + ".material.json.sw_internal.json",
+              _s + ".sw_internal.json"]
+    for _p in _cands:
+        d = _read_json(_p)
+        if isinstance(d, dict) and d:
+            return d
+    # ── 大小写兜底：目录内按 casefold 匹配（Windows 上 .SLDPRT/.sldprt 混用） ──
+    try:
+        _d, _n = os.path.split(_s)
+        _want = (_n + ".material.json.sw_internal.json").casefold()
+        for _e in os.listdir(_d):
+            if _e.casefold() == _want:
+                d = _read_json(os.path.join(_d, _e))
+                if isinstance(d, dict) and d:
+                    return d
+    except Exception:
+        pass
+    return None
+
+
+# ── 【A-30 / A-17 共用】材质名归一化与等价判定 ───────────────────────────────
+# 必须与 swapi._material_names_match() 同口径，否则会出现"swapi 说一致、
+#   defense_gate 说不一致"的分裂（这正是 A-22/A-30 那类"两套口径"问题）。
+_MATERIAL_NAME_SEPS = ("|", "\\", ":", "：")
+
+
+def _material_name_variants(name):
+    """材质名 → 全部可比较写法（拆段/折叠空白/忽略大小写，去重）。
+
+    【不做同义词替换】：跨标准替代（Q235 vs AISI 1020）的候选集合无交集。
+    """
+    s = str(name or "").strip()
+    if not s:
+        return []
+    out = []
+
+    def _add(x):
+        x = " ".join(str(x or "").split())
+        if x:
+            k = x.casefold()
+            if k not in out:
+                out.append(k)
+
+    _add(s)
+    for _sep in _MATERIAL_NAME_SEPS:
+        if _sep in s:
+            _parts = [p.strip() for p in s.split(_sep)]
+            _parts = [p for p in _parts if p]
+            for _i in range(1, len(_parts)):
+                _add(_sep.join(_parts[_i:]))
+            for _p in _parts:
+                _add(_p)
+    for _sep in (" - ", " – ", " — "):
+        if _sep in s:
+            _add(s.split(_sep)[-1])
+    return out
+
+
+def _material_names_equivalent(a, b):
+    """两个材质名是否指同一种材料（候选集合有交集）。
+
+    只做拆段/空白/大小写归一化，【不做模糊匹配】—— 保证跨标准替代
+    不会被这条判据悄悄放行（它仍由 _detect / cross_standard 显式拦截）。
+    """
+    _av = _material_name_variants(a)
+    _bv = _material_name_variants(b)
+    if not _av or not _bv:
+        return False
+    return bool(set(_av) & set(_bv))
 
 
 def _material_geometry_check(att, part_path):
@@ -1314,14 +1514,53 @@ def _material_geometry_check(att, part_path):
             "（拉伸/切除全部静默失败时 SW2025 的典型产物），不能作为交付件。")
         return out
 
+    # ── 【A-97 修复·工况路径写死】必须按候选集合 + 任务隔离解析 ────────────
+    # 原缺陷：写死 STATE_DIR/load_cases/gate_load_case.json 一条路径。而写入侧
+    #   有两个变体：
+    #     · workflow_gate.py:1705 → out_dir = work_dir | BASE_DIR/load_cases
+    #       （按【任务工作目录】落盘，不再总是 tools/load_cases）；
+    #     · swapi._material_from_load_case() → 脚本目录/load_cases。
+    #   于是"工况写到了 A、防线去 B 找"：拿不到 design_domain，几何判据静默
+    #   降级为"未评估"，A-48 的尺寸/体积拦截形同不存在。
+    # 现在：按 ① state 目录 ② 脚本目录 ③ 工作目录 的顺序找同一份文件名，
+    #   【取第一个真实存在的】；并把实际用到的路径回显到 facts 里便于排障。
     _lc = None
+    _lc_used = None
     try:
-        _lc_path = os.path.join(STATE_DIR, "load_cases", "gate_load_case.json")
-        if os.path.isfile(_lc_path):
-            _lc = _read_json(_lc_path)
+        _lc_cands = []
+        for _base in (STATE_DIR, _BASE_DIR,
+                      os.environ.get("DSH_WORK_DIR"),
+                      os.environ.get("DSH_ENGINEERING_ROOT"),
+                      os.path.dirname(_BASE_DIR)):
+            if not _base:
+                continue
+            for _sub in (("load_cases",), ("tools", "load_cases")):
+                _p = os.path.join(_base, *(list(_sub) + ["gate_load_case.json"]))
+                if _p not in _lc_cands:
+                    _lc_cands.append(_p)
+        # 同目录下按任务的工况（若 workflow_gate 用了别的名字）
+        try:
+            for _d in (os.path.join(STATE_DIR, "load_cases"),
+                       os.path.join(_BASE_DIR, "load_cases")):
+                if os.path.isdir(_d):
+                    for _fn in os.listdir(_d):
+                        if _fn.lower().endswith(".json") and "load_case" in _fn.lower():
+                            _p = os.path.join(_d, _fn)
+                            if _p not in _lc_cands:
+                                _lc_cands.append(_p)
+        except Exception:
+            pass
+        for _p in _lc_cands:
+            if os.path.isfile(_p):
+                _lc = _read_json(_p)
+                if isinstance(_lc, dict):
+                    _lc_used = _p
+                    break
     except Exception:
         _lc = None
 
+    if _lc_used:
+        out["facts"]["load_case_file"] = _lc_used
     _dom = _lc.get("design_domain") if isinstance(_lc, dict) else None
     if isinstance(_dom, dict):
         try:
@@ -2487,11 +2726,55 @@ def check_domain_attestation(room):
         "violations": len(_v),
         "at": att.get("at"),
     }
-    if _v:
-        _ids = [str(x.get("rule_id")) for x in _v if isinstance(x, dict)]
+    # ══ 【A-94 修复】违规不能"只数条数"，必须读 message/severity ═══════════
+    # 原缺陷：只要 violations 数组非空就一律当成 CRITICAL，并且只回报 rule_id。
+    #   两个方向的错都在：
+    #     · 误拦：WARNING 级（甚至 INFO 级）的提示被当成 CRITICAL，房间永远下不了线，
+    #       最后只能 --force，防线②③ 形同虚设；
+    #     · 漏拦：凭据里 violations 条目的 severity 写错/缺失时，
+    #       判定完全不看内容，只要"数组空"就 PASS —— 而内容恰恰是唯一证据。
+    # 现在：逐条读 severity/level 与 message；按严重度分级计数：
+    #   · 任一条为 CRITICAL（或无法判定严重度）→ 阻断（对未知严重度 fail-closed）；
+    #   · 只有 WARNING/INFO → 不阻断，但把"具体是哪条、说了什么"回传，
+    #     并要求人工在报告里回应，而不是静默丢弃。
+    _crit, _warn, _info, _unknown = [], [], [], []
+    for _x in _v:
+        if not isinstance(_x, dict):
+            _unknown.append({"rule_id": None, "message": repr(_x)})
+            continue
+        _sev = str(_x.get("severity") or _x.get("level") or "").strip().upper()
+        _item = {"rule_id": _x.get("rule_id"),
+                 "severity": _sev or None,
+                 "message": str(_x.get("message") or _x.get("msg") or "").strip()[:300],
+                 "value": _x.get("value"), "limit": _x.get("limit")}
+        if _sev in ("CRITICAL", "ERROR", "FATAL", "BLOCK"):
+            _crit.append(_item)
+        elif _sev in ("WARNING", "WARN", "MAJOR"):
+            _warn.append(_item)
+        elif _sev in ("INFO", "NOTE", "MINOR", "HINT"):
+            _info.append(_item)
+        else:
+            # 严重度缺失/无法识别 → 不能当"小事"放过（fail-closed）
+            _unknown.append(_item)
+    out["violation_breakdown"] = {
+        "critical": len(_crit), "warning": len(_warn),
+        "info": len(_info), "unknown_severity": len(_unknown)}
+    if _warn or _info:
+        # 非阻断项照样如实回传内容（供报告与人工复核），绝不静默丢弃
+        out["non_blocking_violations"] = (_warn + _info)[:20]
+    if _unknown:
         out["reasons"].append(
-            "存在 %d 条 CRITICAL 领域违规: %s"
-            % (len(_v), ", ".join(_ids[:6]) or "见凭据"))
+            "存在 %d 条【无法判定严重度】的领域违规（缺少 severity/level 字段）—— "
+            "按 fail-closed 视为阻断项，请让 domain_validator 重新产出凭据。"
+            % len(_unknown))
+    if _crit:
+        _desc = "; ".join(
+            "%s%s" % (x.get("rule_id") or "?",
+                      (": " + x["message"]) if x.get("message") else "")
+            for x in _crit[:6])
+        out["reasons"].append(
+            "存在 %d 条 CRITICAL 领域违规: %s" % (len(_crit), _desc))
+    out["attestation"]["violations_by_severity"] = out["violation_breakdown"]
     if not out["reasons"]:
         out["ok"] = True
         out["level"] = "PASS"
@@ -2503,19 +2786,81 @@ def check_domain_attestation(room):
 # ══════════════════════════════════════════════════════════════════════
 
 def _registered_artifacts(room):
-    """读 artifacts_registry.json，取本房间登记的产物（含存在性）。"""
-    reg = _read_json(artifact_registry_file()) or {}
+    """读台账，取本房间登记的产物（含存在性）。
+
+    路径解析见下方【A-22/A-97】说明：按候选集合 + 多键名合并。
+    """
+    # ══ 【A-22 / A-97 修复 · 路径写死】台账同样必须按【候选集合】解析 ══════
+    # 原缺陷：只读 STATE_DIR 下的单一名（artifacts_registry.json）。而写入侧
+    #   有两套命名：按任务的 artifacts_registry.<task_id>.json（artifact_registry_file()）
+    #   与历史裸名 artifacts_registry.json；另有一份工作区副本。
+    #   于是"零件明明登记了"在本函数里读不到 → _modeling_parts() 返回空 →
+    #   材料防线拿到 0 个零件 → 空集合恒真（房间被当"没有零件要校验"）。
+    # 现在：按 ① 当前任务文件 ② 裸名 ③ 同目录其它 artifacts_registry*.json
+    #   （mtime 新→旧）顺序找，【合并同一房间的登记】并去重；全都没有时
+    #   显式标注 evaluated=false，绝不静默当成"没有零件"。
+    reg = {}
+    _reg_used = []
+    try:
+        _reg_cands = []
+        _primary = artifact_registry_file()
+        for _p in (_primary,
+                   os.path.join(STATE_DIR, "artifacts_registry.json")):
+            if _p and _p not in _reg_cands:
+                _reg_cands.append(_p)
+        try:
+            _hits = []
+            for _d in (STATE_DIR,):
+                if os.path.isdir(_d):
+                    for _fn in os.listdir(_d):
+                        if re.match(r"^artifacts_registry.*\.json$", _fn, re.I):
+                            _fp = os.path.join(_d, _fn)
+                            if _fp in _reg_cands:
+                                continue
+                            try:
+                                _hits.append((os.path.getmtime(_fp), _fp))
+                            except Exception:
+                                pass
+            for _m, _fp in sorted(_hits, reverse=True):
+                _reg_cands.append(_fp)
+        except Exception:
+            pass
+        for _p in _reg_cands:
+            _j = _read_json(_p)
+            if not isinstance(_j, dict):
+                continue
+            _reg_used.append(_p)
+            for _k, _val in _j.items():
+                if not isinstance(_val, list):
+                    continue
+                if isinstance(reg.get(_k), list):
+                    reg[_k] = reg[_k] + _val
+                else:
+                    reg[_k] = list(_val)
+    except Exception:
+        reg = {}
     rec = reg.get(str(room))
     if not isinstance(rec, list):
-        return []
+        # 键名兜底：词干化（中文房间名在部分写入侧被 _safe_room_stem 处理过）
+        _stem = _safe_room_stem(room)
+        if isinstance(reg.get(_stem), list):
+            rec = reg.get(_stem)
     out = []
+    if not isinstance(rec, list):
+        return out
+    _seen = set()
     for it in rec:
         if not isinstance(it, dict):
             continue
         p = it.get("path")
-        if p:
-            out.append({"path": p, "name": it.get("name"),
-                        "exists": os.path.exists(p)})
+        if not p:
+            continue
+        _key = os.path.normcase(os.path.abspath(str(p)))
+        if _key in _seen:
+            continue
+        _seen.add(_key)
+        out.append({"path": p, "name": it.get("name"),
+                    "exists": os.path.exists(p)})
     return out
 
 
@@ -2937,6 +3282,27 @@ def main():
         pass
     args = sys.argv[1:]
     cmd = args[0] if args else "status"
+    # ── 【A-09 修复·CLI 一致性】--help / -h / help 必须给用法，不能判"未知命令" ──
+    # 实测缺陷：mode_gate / workflow_gate 都已把 --help 加进白名单，唯独
+    #   defense_gate 走通用分支打印 {"error": "unknown command: --help"} 并以退出码 2
+    #   结束。AI 按提示探路时会把它读成"defense_gate 坏了/命令不存在"，进而
+    #   绕开门禁去改源码（A-20）。三处 CLI 必须同一套行为。
+    if str(cmd) in ("--help", "-h", "-?", "help", "--usage"):
+        _usage = (
+            "defense_gate.py — 工程模式三大防线统一强制实现\n"
+            "\n"
+            "用法:\n"
+            "  python defense_gate.py check-room <房间名> [--force]   # 只读判定某房间①②③\n"
+            "  python defense_gate.py check-task                      # 判定全任务\n"
+            "  python defense_gate.py status                          # 宿主签名/房间/类型/旁路状态\n"
+            "  python defense_gate.py --help                          # 本帮助\n"
+            "\n"
+            "输出: JSON（ok=true 退出码 0；ok=false 退出码 1；用法错误退出码 2）\n"
+            "绕行: 仅 --force 或 DSH_DEFENSE_BYPASS=1，且必定留痕到 "
+            "reports/<task>/defense_bypass.json（绝不静默）。\n")
+        print(json.dumps({"ok": True, "command": "help", "usage": _usage},
+                         ensure_ascii=False, indent=2))
+        sys.exit(0)
     if cmd == "check-room":
         # == [A-24 修复] --force / DSH_DEFENSE_BYPASS 必须被识别并留痕 ===
         # 原实现只取 args[1] 当房间名，【不解析任何 flag】：
@@ -3008,7 +3374,9 @@ def main():
         }, ensure_ascii=False, indent=2))
         return
     print(json.dumps({"ok": False, "error": "unknown command: %s" % cmd,
-                      "usage": "defense_gate.py check-room <room> | check-task | status"},
+                      "usage": "defense_gate.py check-room <room> [--force] | "
+                               "check-task | status | --help",
+                      "hint": "运行 python defense_gate.py --help 查看完整说明"},
                      ensure_ascii=False))
     sys.exit(2)
 

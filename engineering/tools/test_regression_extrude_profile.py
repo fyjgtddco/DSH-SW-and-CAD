@@ -515,8 +515,12 @@ def test_feature_select2_primary(swapi):
           str(r.get("method", "")).startswith("IFeature.Select2"), r.get("method"))
     check("★ IFeature.Select2 被真正调用过", len(sk.select2_calls) == 1,
           sk.select2_calls)
-    check("★ Select2 的 Mark 是轮廓标记 1（EXTRUDE_PROFILE_MARK）",
-          sk.select2_calls and sk.select2_calls[0][1] == 1, sk.select2_calls)
+    # ── 【S-08 真机修正】拉伸轮廓的 Mark 必须是 0，不是 1 ─────────────────
+    # 实测矩阵（SW2025 SP5.0）：Mark=0 → 拉伸成功；Mark=1/2 → 返回 None，
+    #   bodies 0。原断言锁死 ==1，等于把 bug 固化进测试。
+    # 现在断言"跟随类常量"且该常量必须为 0。
+    check("★ Select2 的 Mark 为 0（拉伸轮廓不使用标记过滤）",
+          sk.select2_calls and sk.select2_calls[0][1] == 0, sk.select2_calls)
     check("★ Select2 用 Append=False（先清再选，不叠加脏选择）",
           sk.select2_calls and sk.select2_calls[0][0] is False, sk.select2_calls)
     check("★ 首选成功时【不再】退化去调 SelectByID2",
@@ -568,9 +572,15 @@ def main():
               callable(getattr(swapi.SWModel, "_selection_count", None)))
         check("★ 新增方法：_mark_current_selection",
               callable(getattr(swapi.SWModel, "_mark_current_selection", None)))
-        check("★ 新增类常量：EXTRUDE_PROFILE_MARK",
-              getattr(swapi.SWModel, "EXTRUDE_PROFILE_MARK", None) == 1,
+        # ── 【S-08 真机修正】EXTRUDE_PROFILE_MARK 必须为 0 ────────────────
+        # 原断言是 ==1（沿用了 cut 的标记约定），而真机实测 Mark=1 会让
+        #   FeatureExtrusion3 静默返回 None —— 测试当时"通过"恰恰掩盖了缺陷。
+        check("★ 类常量 EXTRUDE_PROFILE_MARK == 0（拉伸不能用 mark 过滤）",
+              getattr(swapi.SWModel, "EXTRUDE_PROFILE_MARK", None) == 0,
               getattr(swapi.SWModel, "EXTRUDE_PROFILE_MARK", None))
+        check("★ cut 的标记单独保留为 CUT_PROFILE_MARK == 1",
+              getattr(swapi.SWModel, "CUT_PROFILE_MARK", None) == 1,
+              getattr(swapi.SWModel, "CUT_PROFILE_MARK", None))
 
         test_extrude_reselects_after_clear(swapi)
         test_empty_selection_raises(swapi)

@@ -1457,6 +1457,56 @@ def _gb_material_advice(name):
     return (_paths + _warn)
 
 
+# ── 【A-30 修复】SW 回读的三段式复合名分隔符 ────────────────────────────────
+# 实测：SW2025 的 GetMaterialPropertyName2 在"库/类别/材料名"三段式配置下回读为
+#   "SolidWorks Materials|钢|普通碳钢"（管道符作分隔，也可能是 "\\" 或 "/"）。
+# 旧实现一律取【最后一段】——对上面这条恰好正确；但对
+#   "SolidWorks Materials|普通碳钢|Q235"  这类"库名|材料名|规格后缀"的写法，
+#   取最后一段会得到 "Q235"，而请求名是 "普通碳钢"，逐字比对必判不一致。
+# 正确的做法不是猜"哪一段是名字"，而是【枚举所有候选段】，只要任一段与
+#   请求名归一化后相等，就认定是同一种材料（见 _material_name_variants /
+#   _material_names_match）。这样既保住"逐字比对、不做同义词替换"的不变量，
+#   又不会因为 SW 的拼接顺序不同而误判为"材料被替换"。
+_MATERIAL_NAME_SEPS = ("|", "\\", ":", "：")
+
+
+def _material_name_variants(name):
+    """把一个材质名拆成【全部可比较的候选写法】（顺序无关、去重、已归一化）。
+
+    例：
+      "SolidWorks Materials|普通碳钢"      → {"solidworks materials|普通碳钢", "普通碳钢"}
+      "SolidWorks Materials|钢|Q235"       → {..., "solidworks materials|钢|q235", "钢|q235", "q235"}
+    【不做同义词替换】，只做"拆段 + 折叠空白 + 忽略大小写"。
+    """
+    s = str(name or "").strip()
+    if not s:
+        return []
+    out = []
+    def _add(x):
+        x = " ".join(str(x or "").split())
+        if x:
+            k = x.casefold()
+            if k not in out:
+                out.append(k)
+    _add(s)
+    # 逐级剥掉"最左边一段"，把所有后缀都作为候选（顺序无关）
+    cur = s
+    for _sep in _MATERIAL_NAME_SEPS:
+        if _sep in cur:
+            _parts = [p.strip() for p in cur.split(_sep)]
+            _parts = [p for p in _parts if p]
+            # 所有后缀（"A|B|C" → "B|C", "C"）+ 所有单段（"A","B","C"）
+            for _i in range(1, len(_parts)):
+                _add(_sep.join(_parts[_i:]))
+            for _p in _parts:
+                _add(_p)
+    # 常见库名前缀（"SolidWorks Materials - xxx" 之类）
+    for sep in (" - ", " – ", " — "):
+        if sep in s:
+            _add(s.split(sep)[-1])
+    return out
+
+
 def _normalize_material_name(name):
     """【R9 修复】归一化材质名，供"读回校验/跨标准判定"逐字比对。
 
@@ -1470,19 +1520,23 @@ def _normalize_material_name(name):
     这里只做**无损归一化**（去库名前缀、折叠空白、忽略大小写），
     【绝不做同义词替换】—— 那是跨标准替代，必须显式判定（见
     _detect_cross_standard），不能藏在归一化里偷偷放过。
+
+    ── 【A-30 修复】不再"只取最后一段" ────────────────────────────────────
+    旧实现 `s.split("|")[-1]` 假设材料名恒在末段；三段式（库|类别|材料）或
+    "库|材料|规格" 的写法会让它取错段，导致【已正确赋材】被判成不一致。
+    现在取"最长的那一段"只作为【显示用】归一化（排序稳定），真正的判定走
+    _material_names_match() 的候选集合比对。
     """
-    s = str(name or "").strip()
-    if not s:
+    _vs = _material_name_variants(name)
+    if not _vs:
         return ""
-    # 去掉 "库名|材料名" 前缀（SW 常这样回读）
-    if "|" in s:
-        s = s.split("|")[-1]
-    # 去掉常见库名前缀（"SolidWorks Materials - xxx" 之类）
-    for sep in (" - ", " – ", " — "):
-        if sep in s:
-            s = s.split(sep)[-1]
-    s = " ".join(s.split())          # 折叠连续空白
-    return s.casefold()
+    # 显示口径：优先取"不含任何分隔符的那个完整段"里最短的一个
+    #   （"普通碳钢" 优于 "solidworks materials|普通碳钢"），仅为可读性，
+    #    判定不依赖它。
+    _bare = [v for v in _vs if not any(_s in v for _s in _MATERIAL_NAME_SEPS)]
+    # 不再保留 return 之后的旧实现 —— 那是归一化的死代码，
+    #   留着会让后来者以为"这里还会再拆一次库名前缀"。
+    return (_bare[0] if _bare else _vs[-1])
 
 
 def _material_names_match(actual, requested):
@@ -1498,11 +1552,19 @@ def _material_names_match(actual, requested):
       跨标准替代必须走 _detect_cross_standard 显式标记并由上层拒绝，
       不能在这里被悄悄吸收。
     """
-    _a = _normalize_material_name(actual)
-    _r = _normalize_material_name(requested)
-    if not _a or not _r:
+    # ── 【A-30 修复】按【候选集合】求交集，而不是比"各自最后一段" ──────────
+    # 旧实现：两侧各取 split("|")[-1] 再逐字比较。三段式 / 前后段顺序不同的
+    #   复合名（"SolidWorks Materials|普通碳钢|Q235" vs "普通碳钢"）会取到不同段，
+    #   于是【真实一致】的材料被判成不一致 → sw_internal_matches_request=false
+    #   假阳性 → 防线①对已正确赋材的零件反复报"材料被替换"。
+    # 现在：两侧各展开成"全部可能写法"的集合，【只要有任一写法相同】即为同一材料。
+    #   仍然不做同义词替换、不做 startswith/包含匹配 —— 跨标准替代依旧不会
+    #   在这里被悄悄吸收（Q235 与 AISI 1020 的候选集合没有任何交集）。
+    _av = _material_name_variants(actual)
+    _rv = _material_name_variants(requested)
+    if not _av or not _rv:
         return False
-    return _a == _r
+    return bool(set(_av) & set(_rv))
 
 
 def _read_back_material(model):
@@ -2287,7 +2349,10 @@ def sw_internal_record_path(part_path):
 
 
 def read_sw_internal_record(part_path):
-    """读取旁挂的"SW 内部材质"事实；不存在/损坏返回 None（绝不抛异常）。"""
+    """读取旁挂的"SW 内部材质"事实；不存在/损坏返回 None（绝不抛异常）。
+
+    ★ 纯读函数、无副作用 —— defense_gate 会在【每次校验】时调用它（A-17）。
+    """
     if not part_path:
         return None
     _s = str(part_path)
@@ -6376,11 +6441,16 @@ class SWModel:
                 _sw_internal = None
         _req_n = str(nm).strip()
         _int_n = str(_sw_internal or "").strip()
-        # 名字比对：忽略大小写与空白；SW 常把"库名|材料名"或带前缀形式回读
-        _matches = bool(_int_n) and (
-            _int_n.casefold() == _req_n.casefold()
-            or _int_n.casefold().endswith("|" + _req_n.casefold())
-            or _int_n.casefold().split("|")[-1].strip() == _req_n.casefold())
+        # ── 【S-14 / A-30 修复·第二处实例】名字比对必须走统一归一化 ──────────
+        # 原实现自带一套 endswith / split 比对：
+        #   _material_names_match() 是【两套口径】。实测缺陷（真实运行 T04c C4）：
+        #     set_custom_material("PETG") 落地后 SW 回读
+        #       "DSH_PETG|PETG|9001"  → split("|")[-1] = "9001" ≠ "petg"
+        #     于是 sw_internal_matches_request=false，而本函数仍然返回 ok:true。
+        #   这正是 S-15「假 ok」：凭据自报成功、底层不一致。
+        # 现在统一用 _material_names_match()（候选集合比对），
+        #   并且【ok 不再无条件为 true】—— 见下方 result 的 ok 计算。
+        _matches = bool(_int_n) and _material_names_match(_int_n, _req_n)
         _dens_ok = True
         if _d is not None and _sw_density:
             try:
@@ -6389,7 +6459,12 @@ class SWModel:
             except Exception:
                 _dens_ok = True
         result = {
-            "ok": True,
+            # ── 【S-15 修复·假 ok】底层不一致时不得返回 ok:true ─────────────
+            # 实测缺陷：返回 ok:true 的同时 sw_internal_matches_request=false，
+            #   调用方（以及凭据签发链）只看 ok 就当成"材料已施加成功"。
+            # 现在：写进 SW 的名字回读不一致 → ok=False，并给出可执行出路；
+            #   只有"确实生效"才算成功。密度也参与判定（>5% 视为没写进去）。
+            "ok": bool(_matches and _dens_ok) if _int_n else False,
             "requested_material": _req_n,      # 【Bug①】用户请求的材质（凭据口径）
             "sw_internal_material": _sw_internal,   # 【Bug①】SW 零件内部真实材质
             "sw_internal_density_kg_m3": _sw_density,
@@ -6812,7 +6887,7 @@ class SWModel:
                 pass
         return self
 
-    def screenshot(self, path=None, for_vision=False):
+    def screenshot(self, path=None, for_vision=False, tag=None, for_part=None):
         """对 SolidWorks 视图截图保存为 PNG。
 
         ── 【C04 修复 · 2026-10-29 真机实测】默认走 SaveBMP，不依赖前台窗口 ──
@@ -6832,15 +6907,43 @@ class SWModel:
         Args:
             path: 截图保存路径，默认保存到工具目录
             for_vision: 是否用于 Vision 识别，是则保存到 DSH-Check 目录便于前端读取
+            tag: 【A-91 修复】文件名标签（如零件名 / 房间名），用于区分多次截图
+            for_part: 【A-91 修复】被拍零件的路径或名字；未给 tag 时用它推导标签
+
+        ── 【A-91 修复 · 截图不可归因】──────────────────────────────────────
+        原缺陷：默认文件名写死（纯名字，无任何前缀），一次任务里多次截图互相覆盖。
+          · 一次任务里多次截图【互相覆盖】，只剩最后一张；
+          · 交付验收时无法回答"这张图拍的是哪个零件/哪个房间/第几次"；
+          · 多小屋并行（模式 D）时，两个房间的截图会把对方覆盖掉，
+            总装复核拿到的可能是别的房间的证据 —— 属证据链断裂。
+        现在：默认文件名 = <标签>_<时间戳>_<毫秒>_<pid>.png（标签取 tag / for_part /
+          当前活动文档名，取不到才退回 live）。显式传 path 时【完全不变】，
+          保持对所有既有调用点的向后兼容。
         """
         if path is None:
+            # 【A-91】默认文件名必须【可归因且不互相覆盖】
+            _tag = str(tag or "").strip()
+            if not _tag and for_part:
+                _tag = os.path.splitext(os.path.basename(str(for_part)))[0]
+            if not _tag:
+                try:
+                    _t = getattr(self, "model", None)
+                    _nm = _t.GetTitle() if _t is not None else None
+                    if _nm:
+                        _tag = os.path.splitext(os.path.basename(str(_nm)))[0]
+                except Exception:
+                    _tag = ""
+            _tag = "".join(c for c in _tag if c.isalnum() or c in "_- .")
+            _tag = _tag.strip().replace(" ", "_")[:60] or "unnamed"
+            import time as _ts
+            _name = "%s_%s_%03d_%d.png" % (
+                _tag, _ts.strftime("%Y%m%d-%H%M%S"),
+                int((_ts.time() % 1) * 1000), os.getpid())
             if for_vision:
                 # 供 DSH 前端识图插件读取（【连接自检修复】不再硬编码作者桌面）
-                path = os.path.join(vision_shot_dir(),
-                                    "solidworks_vision_screenshot.png")
+                path = os.path.join(vision_shot_dir(), _name)
             else:
-                path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "solidworks_live.png")
+                path = os.path.join(os.path.dirname(os.path.abspath(__file__)), _name)
 
         # ══ 首选：SaveBMP 后台渲染（C04）══════════════════════════════════
         _shot = self._screenshot_via_savebmp(path)
@@ -8152,7 +8255,34 @@ class SWModel:
             self.model.ViewZoomtofit2()
         except Exception:
             pass
-        self.skm.InsertSketch(True)
+        # ── 【A-107 修复·公开 exit_sketch】提交失败必须【当场】暴露 ─────────
+        # 原缺陷：InsertSketch(True) 的返回值/异常被完全忽略，草图是否真正
+        #   提交进特征树无人校验。后果：草图没提交成功时，后面的 extrude/cut
+        #   会以"找不到轮廓"返回 None，而错误信息指向拉伸/切除，
+        #   排查方向从一开始就是错的（实测踩过多次）。
+        # 现在：记下返回值，提交后【复核 ActiveSketch 是否已退出】，
+        #   失败写入 self.warnings 并抛给调用方（end_sketch 是显式动作，
+        #   不允许"看起来成功"）。同时提供公开别名 exit_sketch() 供脚本使用，
+        #   不再需要脚本自己去摸 InsertSketch。
+        _commit_rc = None
+        _commit_exc = None
+        try:
+            _commit_rc = self.skm.InsertSketch(True)
+        except Exception as _e_commit:
+            _commit_exc = _e_commit
+        _still_active = None
+        try:
+            _still_active = self.skm.ActiveSketch is not None
+        except Exception:
+            _still_active = None
+        self._end_sketch_commit = {"rc": _commit_rc,
+                                   "exception": repr(_commit_exc) if _commit_exc else None,
+                                   "still_active": _still_active}
+        if _commit_exc is not None or _still_active is True:
+            self._warn(
+                "end_sketch 提交未确认成功（rc=%r, 仍处于草图态=%r, 异常=%r）——"
+                " 后续 extrude/cut 很可能报\"找不到轮廓\"，请先排查草图是否闭合"
+                % (_commit_rc, _still_active, _commit_exc))
         # 【Bug T2 修复】活动草图名保留 —— end_sketch 只是把轮廓"提交"，
         # 草图本身仍是 cut 的合法轮廓来源（cut 会按名 EditSketch 进去取段）。
         # 只有 cut/extrude 真正消费轮廓后才会清空它（_mark_sketch_consumed）。
@@ -8164,6 +8294,16 @@ class SWModel:
         # 仅把 sketch_open_count 语义保持为"本零件累计开过的草图数"，
         # 供 cut 的上下文重置判定与诊断输出使用。
         return self
+
+    def exit_sketch(self, merge=True):
+        """【A-107】公开的"退出草图"入口 —— end_sketch 的别名。
+
+        历史问题：工具链文档与脚本里到处是 end_sketch，但没有任何
+        "明确退出草图"的公开 API，脚本只能自己去摸 skm.InsertSketch，
+        一旦 SW 版本差异就会静默失败。这里给出唯一合法入口，
+        语义与 end_sketch 完全一致（含提交校验与告警）。
+        """
+        return self.end_sketch(merge=merge)
 
     def _ensure_sketch_active(self):
         """确保当前草图已激活。
@@ -8469,9 +8609,23 @@ class SWModel:
     #   · IFeatureManager.FeatureExtrusion3 为 23 参（L22598；vtable L82748），
     #       第 20 位 UseAutoSelect 传 True 时 SW 会【忽略选择集】自己找轮廓。
     #
-    # 标记位（沿用仓库既有约定）：1 = 轮廓/草图（与 cut 的选择标记一致）。
-
-    EXTRUDE_PROFILE_MARK = 1
+    # ── 【S-08 根因修复 · 2026-11-04 真机实测】Mark 不能随便给 ─────────────
+    # 原值 1（沿用"cut 的轮廓标记"约定），但【拉伸轮廓的 Mark 必须是 0】。
+    # 实测矩阵（SW2025 SP5.0，同一零件同一草图）：
+    #     Mark=0 → FeatureExtrusion3 成功，bodies 0→1
+    #     Mark=1 → 返回 None，bodies 0      ← 旧值，正是"extrude 全灭"的元凶
+    #     Mark=2 → 返回 None，bodies 0
+    #     Mark=4 → 成功，bodies 0→1（未文档化，不作依赖）
+    # 也就是说：SelectByID2 返回 True、选择集计数为 1，但 SW 内部仍按
+    #   "带 mark 的选择"去解析轮廓 —— mark 1/2 的组合不被 FeatureExtrusion3
+    #   接受，于是静默返回 None。原实现据此判"选择集非空 → 应该能拉伸"，
+    #   外层再把它归因为 no_body，整条建模主链路 100% 失败。
+    # 修复：拉伸轮廓一律用 Mark=0（不参与标记过滤），这与官方宏录制出来的
+    #   调用完全一致。_mark_current_selection 仍然保留（诊断用），
+    #   但【不再】把它当成功判据。
+    EXTRUDE_PROFILE_MARK = 0
+    # cut 的轮廓标记与拉伸不同，单独保留（cut 走的是"选段"链路）。
+    CUT_PROFILE_MARK = 1
 
     def _selection_count(self, mark=-1):
         """读当前选择集数量；读不到返回 -1（调用方必须按"未知"处理）。"""
@@ -11012,6 +11166,174 @@ class SWModel:
         self._visual_step("chamfer")
         return feat
 
+    def _make_offset_plane(self, base_plane="Front Plane", offset_mm=0.0):
+        """【S-06】在基准面上插入一个【偏移基准面】，返回 {ok, name, error}。
+
+        用途：让"离面"的几何（如球心 z）由【真实特征】表达，而不是依赖
+        实体平移 —— 实测 IModelDocExtension 上并没有 InsertMoveCopyBody2，
+        那条路走不通。偏移基准面是 SW 的原生特征，随零件保存、可审计。
+
+        实现：IFeatureManager::InsertRefPlane(First, FirstDist, Second,
+        SecondDist, Third, ThirdDist) —— 6 参版本实测可用；
+        第 1 个约束取 8 = swRefPlaneReferenceConstraint_Distance（类型库常量）。
+        """
+        out = {"ok": False, "name": None, "error": None, "offset_mm": None}
+        try:
+            off = float(offset_mm)
+        except Exception:
+            out["error"] = "offset_mm 非法"
+            return out
+        out["offset_mm"] = off
+        try:
+            if not self.select_plane(base_plane):
+                out["error"] = "基准面 %r 选不中，无法建偏移面" % (base_plane,)
+                return out
+        except Exception as e:
+            out["error"] = "选择基准面异常: %r" % (e,)
+            return out
+        _CONSTRAINT_DISTANCE = 8
+        try:
+            feat = self.fm.InsertRefPlane(_CONSTRAINT_DISTANCE, off * MM,
+                                          0, 0, 0, 0)
+        except Exception as e:
+            out["error"] = "InsertRefPlane 异常: %r" % (e,)
+            return out
+        if feat is None:
+            out["error"] = "InsertRefPlane 返回 None（该偏移量可能不被接受）"
+            return out
+        try:
+            out["name"] = str(feat.Name)
+        except Exception:
+            out["name"] = None
+        # ── 【S-06】把特征对象一并带回 ────────────────────────────────────
+        # 动态基准面的名字（"基准面1"/"Plane1"）不进入 begin_sketch 的别名表，
+        #   按名选必然失败（实测）。调用方应直接用【对象】选中它再开草图。
+        out["feature"] = feat
+        try:
+            self.model.ClearSelection2(True)
+        except Exception:
+            pass
+        out["ok"] = True
+        return out
+
+    def begin_sketch_on_feature(self, feat, label="<基准面特征>"):
+        """【S-06】在【任意基准面特征】上开草图（不依赖名字）。
+
+        为什么需要：_make_offset_plane 生成的"基准面1"不在 select_plane 的
+        别名表里，按名调用 begin_sketch 必失败。这里用 IFeature.Select2 直接
+        选中对象，再 InsertSketch —— 与 begin_sketch 的主路径语义一致，
+        但不走任何"猜名字"的环节。
+
+        Returns: self
+        """
+        if feat is None:
+            raise RuntimeError("begin_sketch_on_feature: feat 为 None")
+        try:
+            self.model.ClearSelection2(True)
+        except Exception:
+            pass
+        _ok = False
+        for _args in ((False, 0), (False, 1)):
+            try:
+                if feat.Select2(*_args):
+                    _ok = True
+                    break
+            except Exception:
+                continue
+        if not _ok:
+            try:
+                feat.Select2(False)
+                _ok = True
+            except Exception:
+                _ok = False
+        if not _ok:
+            raise RuntimeError("begin_sketch_on_feature: 无法选中特征 %r" % (label,))
+        self.skm.InsertSketch(True)
+        if self.skm.ActiveSketch is None:
+            raise RuntimeError("begin_sketch_on_feature: InsertSketch 后草图未激活")
+        try:
+            self._finalize_new_sketch(label)
+        except Exception:
+            pass
+        return self
+
+    def _translate_solid(self, dx_mm=0.0, dy_mm=0.0, dz_mm=0.0, copy=False):
+        """把当前零件里的【全部实体】整体平移 (dx, dy, dz)（单位 mm）。
+
+        ── 【A-33】为什么需要它 ────────────────────────────────────────────
+        create_sphere() 的半圆弧只能画在基准面（草图为 2D），球心必然落在
+        该基准面内；要让 cz 真正生效，只能在特征建好后【平移实体】。
+        草图里没有任何变量能表达"离面偏移"，这是几何约束，不是实现疏忽。
+
+        ── 实现口径 ──────────────────────────────────────────────────────
+        走 IModelDocExtension.InsertMoveCopyBody2（SW 2009+）：
+            InsertMoveCopyBody2(Body, X, Y, Z, RotX, RotY, RotZ,
+                                RotCenterX, RotCenterY, RotCenterZ,
+                                Copy, NumCopies)
+        · 平移量与旋转中心全部是【米】（SW 内部单位），这里按 mm 入参换算；
+        · Copy=False 表示就地移动（不复制实体）。
+
+        Returns: {ok: bool, moved_mm: [dx,dy,dz], bodies: n, error?: str}
+        失败【绝不静默】—— 调用方拿 ok=False 必须告警，避免"以为搬过去了"。
+        """
+        out = {"ok": False, "moved_mm": [float(dx_mm), float(dy_mm), float(dz_mm)],
+               "bodies": 0, "error": None}
+        try:
+            dx = float(dx_mm) * MM
+            dy = float(dy_mm) * MM
+            dz = float(dz_mm) * MM
+        except Exception as e:
+            out["error"] = "平移量非法: %r" % (e,)
+            return out
+        try:
+            bodies = []
+            try:
+                _b = _com_get(self.model, "GetBodies2", 0, True)
+                if _b:
+                    bodies = list(_b)
+            except Exception:
+                bodies = []
+            if not bodies:
+                # 退回体枚举：GetBodies2 在个别版本/无实体时抛异常
+                try:
+                    _pb = _com_get(self.model, "GetPartBox")
+                    if not _pb:
+                        out["error"] = "零件内没有实体，无法平移"
+                        return out
+                except Exception:
+                    pass
+                out["error"] = ("无法枚举实体（GetBodies2 返回空）——"
+                                "请确认零件已重建且有实体特征")
+                return out
+            out["bodies"] = len(bodies)
+            _ext = _com_get(self.model, "Extension")
+            _n_ok = 0
+            _last_err = None
+            for _bd in bodies:
+                try:
+                    r = _com_get(_ext, "InsertMoveCopyBody2", _bd,
+                                 dx, dy, dz, 0.0, 0.0, 0.0,
+                                 0.0, 0.0, 0.0, bool(copy), 0)
+                    if r is not False:
+                        _n_ok += 1
+                except Exception as e:
+                    _last_err = e
+                    break
+            if _n_ok:
+                try:
+                    self.rebuild()
+                except Exception:
+                    pass
+                out["ok"] = True
+                out["moved_bodies"] = _n_ok
+                return out
+            out["error"] = ("InsertMoveCopyBody2 失败: %r" % (_last_err,)
+                            if _last_err else "InsertMoveCopyBody2 返回 False")
+            return out
+        except Exception as e:
+            out["error"] = repr(e)
+            return out
+
     def create_sphere(self, cx=0, cy=0, cz=0, radius=10):
         """方法6：半圆弧旋转法创建球体。
 
@@ -11030,7 +11352,44 @@ class SWModel:
         r_m = radius * MM  # mm → m
         ox, oy, oz = cx * MM, cy * MM, cz * MM
 
-        self.begin_sketch("Front Plane")
+        # ── 【A-33 修复·算了不用】球心 z 必须真正生效 ──────────────────────
+        # 原缺陷：oz 算出来之后【从未传给任何建模逻辑】—— 半圆弧画在 Front Plane
+        #   上（草图平面 z=0），旋转出来的球体恒在 z=0，cz 参数被静默丢弃。
+        #   症状："create_sphere(0,0,50,10)" 建出的球在原点高度，装配时靠配合
+        #   硬拉过去；更糟的是 bbox/体积指纹仍然正常，没人发现球偏了。
+        # 现在：先把球建在 z=0，再用【实体平移】把球心搬到 (0,0,cz)。
+        #   平移量按"草图平面就是 z=0"计算，因此只需要 cz 一个分量。
+
+        # ── 【S-06 修复·真机实测】必须真的先开草图 ────────────────────────
+        # 上一版在插入 A-33 说明时把 self.begin_sketch("Front Plane") 这一行
+        #   误删了，于是所有 CreateLine 都画在【不存在的活动草图】上 →
+        #   草图其实没建出来 → revolve 报"未找到可用的草图"，
+        #   而错误信息指向旋转特征，排查方向完全错（实测踩到）。
+        #   这里恢复，并在画线前【断言草图真的激活了】，避免再次静默。
+        #
+        # ── 【S-06 二次修复】cz 改为【画在偏移基准面上】，不再依赖实体平移 ──
+        # 实测：IModelDocExtension 上【没有 InsertMoveCopyBody2】（真机确证
+        #   AttributeError），所以"建完再平移"这一版根本没生效，球仍恒在 z=0。
+        # 现在：cz≠0 时先插入【偏移基准面】（InsertRefPlane 距离约束），
+        #   球直接画在该面上 —— 球心 z 由几何本身决定，无需后置平移。
+        _plane_feat = None
+        if abs(float(cz)) > 1e-9:
+            _rp = self._make_offset_plane("Front Plane", float(cz))
+            if _rp.get("ok"):
+                _plane_feat = _rp.get("feature")
+            else:
+                self._warn(
+                    "create_sphere: 无法创建偏移基准面（z=%.3fmm）：%s —— "
+                    "球将建在 z=0，请勿按已定位处理"
+                    % (float(cz), _rp.get("error")))
+        if _plane_feat is not None:
+            self.begin_sketch_on_feature(_plane_feat, label="offset plane @ z=%.1f" % cz)
+        else:
+            self.begin_sketch("Front Plane")
+        if self.skm.ActiveSketch is None:
+            raise RuntimeError(
+                "create_sphere: begin_sketch(Front Plane) 后草图未激活 —— "
+                "无法继续画轮廓（r=%s, cz=%s）。" % (radius, cz))
         n = 32  # 弧线分段数
         for i in range(n):
             a1 = -math.pi/2 + (math.pi * i / n)
@@ -11061,14 +11420,31 @@ class SWModel:
         # 【Bug1 加固】原实现是 try/except: pass —— 静默吞掉重建异常，
         # 若重建真的失败，调用方误以为球体已就绪，后续特征会连锁报错且无从定位。
         # 现在把异常记录到 self.warnings 并打印告警（不抛出，保持建模流程可继续）。
+        # ── 【噪告警修复】本绑定下 EditRebuild3 是【属性】（bool），不是方法 ──
+        # 原实现只要 callable 判定失败就 _warn，于是每次建球都刷一条
+        #   "EditRebuild3 不可调用（type=bool）" —— 实测三轮下来淹没其它真告警。
+        # 正确做法：走已有的 self.rebuild()（它内部已兼容方法/属性两种形态），
+        #   真失败才出声。
         try:
-            rb = getattr(self.model, "EditRebuild3", None)
-            if callable(rb):
-                rb()
-            elif rb is not None:
-                self._warn("create_sphere: EditRebuild3 不可调用（type=%s）" % type(rb).__name__)
+            self.rebuild()
+        except Exception as _e_rb:
+            self._warn("create_sphere: 重建失败 -> %r（特征已创建，建议调用方复核）" % (_e_rb,))
         except Exception as _e:
             self._warn("create_sphere: 重建失败 -> %r（特征已创建，建议调用方复核）" % (_e,))
+
+        # 【S-06】cz 已在建模时由偏移基准面保证，此处不再平移。
+        #   保留一次实测校验：球心与请求值不符就告警（不让错误几何静默出厂）。
+        if abs(float(cz)) > 1e-9:
+            try:
+                _bb = self.model.GetPartBox(True)
+                if _bb:
+                    _zc = (float(_bb[2]) + float(_bb[5])) / 2.0 / MM
+                    if abs(_zc - float(cz)) > max(0.5, abs(float(cz)) * 0.02):
+                        self._warn(
+                            "create_sphere: 球心实测 z=%.3fmm，与请求 %.3fmm 不符 —— "
+                            "请复核偏移基准面是否生效" % (_zc, float(cz)))
+            except Exception:
+                pass
         return feat
 
     # ---------- 【Bug2】装配体：添加组件 ----------
@@ -14401,42 +14777,116 @@ class SWModel:
 
 # ==================== 通用：按名称选草图（跨语言） ====================
 
+def _first_feature(model):
+    """取特征树的第一个特征（IModelDoc2::FirstFeature，**方法**）。
+
+    ── 【S-08 根因修复 · 2026-11-04 真机实测】────────────────────────────
+    原 select_sketch_by_index 写的是 `fm.FirstFeature`（FeatureManager 上），
+    而 IFeatureManager 上【根本没有 FirstFeature】—— 实测抛
+        com_error(-2147352573, "找不到成员")
+    该异常被 `except Exception: return 0` 吞掉，于是**永远返回 0**，
+    选区/轮廓判定全线失效。正确成员是 IModelDoc2::FirstFeature()（方法）。
+
+    同时注意：FirstFeature 在不同绑定下可能是方法也可能是属性，这里两种都试。
+    """
+    if model is None:
+        return None
+    for _owner in (model, getattr(model, "Extension", None)):
+        if _owner is None:
+            continue
+        try:
+            _v = getattr(_owner, "FirstFeature", None)
+        except Exception:
+            _v = None
+        if _v is None:
+            continue
+        try:
+            return _v() if callable(_v) else _v
+        except Exception:
+            continue
+    return None
+
+
+def _iter_sketch_feature_names(model, limit=200):
+    """遍历特征树，返回 [(序号, 特征名, 类型名)]（只含可拉伸草图特征）。
+
+    ── 【S-08 根因修复】这是"按索引选草图"唯一可靠的来源 ─────────────────
+    实测（本机 SW2025 SP5.0）：
+      · FirstFeature 必须走 IModelDoc2::FirstFeature()；
+      · 草图特征的类型名在中文版下是 "ProfileFeature"（被消费）/ "Sketch"；
+      · GetNextFeature 同样是**方法**。
+    原实现三个环节全用属性访问 → 一次都没走通，且异常被吞。
+    """
+    out = []
+    feat = _first_feature(model)
+    guard = 0
+    while feat is not None and guard < limit:
+        guard += 1
+        _tn = ""
+        try:
+            _tn = str(_feature_type_name(feat) or "")
+        except Exception:
+            _tn = ""
+        if (_tn in _SKETCH_TYPE_MARKERS
+                and _tn not in _SKETCH_TYPE_EXCLUDE
+                and _tn != "OriginProfileFeature"):
+            try:
+                out.append((len(out) + 1, str(_get_feature_name(feat)), _tn))
+            except Exception:
+                pass
+        try:
+            _nx = getattr(feat, "GetNextFeature", None)
+            feat = _nx() if callable(_nx) else _nx
+        except Exception:
+            break
+    return out
+
+
+def _get_feature_name(feat):
+    """取特征名（Name 在部分绑定下是属性，个别版本暴露成方法）。"""
+    try:
+        v = feat.Name
+        return v() if callable(v) else v
+    except Exception:
+        return ""
+
+
 def select_sketch_by_index(sw, model, index):
     """按序号选中第 N 个草图（跨语言：不依赖"草图1/2"中文名）。
 
     返回选中的草图数量；失败返回 0。
+
+    ── 【S-08 根因修复】原实现三个 COM 成员全按【属性】读，全是错的：
+       ① `model.FeatureManager.FirstFeature` —— IFeatureManager 上不存在；
+       ② `feat.GetTypeName2` / `feat.Name` —— 是方法/属性混用；
+       ③ `feat.GetNextFeature` —— 是方法。
+    三个都失败又被 `except Exception: pass` 静默吞掉 → 恒返回 0。
+    现在改走 _iter_sketch_feature_names()（同一套已实测的遍历逻辑），
+    并且【按真实特征名】调用 SelectByID2 —— 实测只有原名能选中，
+    把 "草图2" 换成 "Sketch2" 反而返回 None。
     """
     try:
-        # 遍历特征树找第 index 个草图特征
-        fm = model.FeatureManager
-        feat = None
         try:
-            feat = fm.FirstFeature
+            _i = int(index)
         except Exception:
             return 0
-        count = 0
-        while feat is not None and count < 50:
-            try:
-                t = feat.GetTypeName2
-                if 'Sketch' in str(t):
-                    count += 1
-                    if count == index:
-                        name = feat.Name
-                        model.ClearSelection2(True)
-                        ext = model.Extension
-                        empty = win32com.client.VARIANT(pythoncom.VT_DISPATCH, None)
-                        sel = ext.SelectByID2(name, "SKETCH", 0, 0, 0,
-                                              False, 0, empty, 0)
-                        return 1 if sel else 0
-            except Exception:
-                pass
-            try:
-                feat = feat.GetNextFeature
-            except Exception:
+        names = _iter_sketch_feature_names(model)
+        if not names:
+            return 0
+        hit = None
+        for n, name, _tn in names:
+            if n == _i:
+                hit = name
                 break
+        if hit is None:
+            return 0
+        model.ClearSelection2(True)
+        ext = model.Extension
+        empty = win32com.client.VARIANT(pythoncom.VT_DISPATCH, None)
+        sel = ext.SelectByID2(hit, "SKETCH", 0, 0, 0, False, 0, empty, 0)
+        return 1 if sel else 0
     except Exception:
-        pass
-    return 0
+        return 0
 
 
 def select_sketch_by_name(sw, model, name):

@@ -1398,16 +1398,103 @@ export class DefenseSigner {
   checkRoomMaterials(room) {
     const out = { part_count: 0, blockers: [], warnings: [] };
     try {
-      const regPath = pathSync.join(this.toolsDir, 'artifacts_registry.json');
-      if (!fsSync.existsSync(regPath)) return out;
-      let reg = null;
+      // ── 【A-22 修复·路径/身份分裂】台账必须按【候选集合】+【多键名】解析 ──
+      // 原缺陷有三层，任何一层都会让"登记了零件"被看漏：
+      //   ① 只认 this.toolsDir/artifacts_registry.json 这一条【裸名】路径，
+      //      而 Python 侧 artifact_registry_file() 现在写的是
+      //      artifacts_registry.<task_id>.json（按任务隔离），
+      //      另有 workspaces/ 下的工作区副本 → 台账"明明写了却读不到"；
+      //   ② 键名只认 reg[room]，而写入侧同时存在房间名与 _safe_room_stem 词干
+      //      两种写法（中文房间名会被词干化成不同字符串）；
+      //   ③ 读不到就 return，part_count=0 —— 对下游是"空集合恒真"
+      //      （房间被当成"没有零件要校验"，材料防线等于跳过）。
+      // 现在：枚举候选路径与候选键；【一个都没找到】时显式记 warning 并标注
+      //   evaluated=false，让调用方知道"没校验过"，而不是静默当成通过。
+      const regCands = [];
+      const _pushReg = (p) => {
+        try {
+          if (!p) return;
+          const ap = pathSync.resolve(p);
+          if (fsSync.existsSync(ap) && regCands.indexOf(ap) < 0) regCands.push(ap);
+        } catch (e) {}
+      };
+      // ① 宿主自己那份 toolsDir（传统裸名台账）
+      _pushReg(pathSync.join(this.toolsDir, 'artifacts_registry.json'));
+      // ② 按任务隔离的台账（artifacts_registry.<task_id>.json），任务 id 取
+      //    workflow_state.json 的 task_id —— 与 defense_gate._current_task_id() 同源。
       try {
-        reg = JSON.parse(fsSync.readFileSync(regPath, 'utf8'));
-      } catch (e) {
+        const _wf = JSON.parse(fsSync.readFileSync(
+          pathSync.join(this.toolsDir, 'workflow_state.json'), 'utf8'));
+        const _tid = _wf && _wf.task_id;
+        if (_tid) {
+          _pushReg(pathSync.join(this.toolsDir, 'artifacts_registry.' + String(_tid) + '.json'));
+        }
+      } catch (e) {}
+      // ③ 同一目录里任何 artifacts_registry*.json（按 mtime 新→旧，最后兜底）
+      try {
+        const _hits = [];
+        for (const _fn of fsSync.readdirSync(this.toolsDir)) {
+          if (!/^artifacts_registry.*\.json$/i.test(_fn)) continue;
+          const _fp = pathSync.join(this.toolsDir, _fn);
+          let _m = 0;
+          try { _m = fsSync.statSync(_fp).mtimeMs; } catch (e) { _m = 0; }
+          _hits.push({ p: _fp, m: _m });
+        }
+        _hits.sort((a, b) => b.m - a.m);
+        for (const _h of _hits) _pushReg(_h.p);
+      } catch (e) {}
+      // ④ 工作区副本（.defense/workspace.txt 由 Python 侧声明）
+      try {
+        const _wsDecl = pathSync.join(this.dir, 'workspace.txt');
+        if (fsSync.existsSync(_wsDecl)) {
+          const _wsRoot = String(fsSync.readFileSync(_wsDecl, 'utf8') || '').trim();
+          if (_wsRoot) {
+            _pushReg(pathSync.join(_wsRoot, 'tools', 'artifacts_registry.json'));
+            try {
+              for (const _fn of fsSync.readdirSync(pathSync.join(_wsRoot, 'tools'))) {
+                if (/^artifacts_registry.*\.json$/i.test(_fn)) {
+                  _pushReg(pathSync.join(_wsRoot, 'tools', _fn));
+                }
+              }
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
+      if (!regCands.length) {
+        // 没台账 = 【没校验过】，不是"通过"。显式标注，避免空集合恒真。
+        out.evaluated = false;
+        out.warnings.push('【防线①材料】未找到 artifacts_registry*.json，本房间材料防线【未评估】'
+          + '（parts=0 不等于通过）');
         return out;
       }
-      const list = reg && reg[room];
-      if (!Array.isArray(list)) return out;
+      let reg = null;
+      let regUsed = null;
+      for (const _rp of regCands) {
+        try {
+          const _r = JSON.parse(fsSync.readFileSync(_rp, 'utf8'));
+          if (_r && typeof _r === 'object') {
+            // 优先选"确实含本房间键"的那份
+            if (Array.isArray(_r[room]) || (_r.rooms && Array.isArray(_r.rooms[room]))) {
+              reg = _r; regUsed = _rp; break;
+            }
+            if (!reg) { reg = _r; regUsed = _rp; }
+          }
+        } catch (e) {}
+      }
+      out.registry_file = regUsed;
+      if (!reg) return out;
+      // ── 键名多写法：房间原名 / 词干化名 / rooms 子表 ────────────────
+      const _stem = String(room || '').replace(/[^\p{L}\p{N} _-]/gu, '').trim();
+      const list = Array.isArray(reg[room]) ? reg[room]
+        : (Array.isArray(reg[_stem]) ? reg[_stem]
+        : (reg.rooms && Array.isArray(reg.rooms[room]) ? reg.rooms[room] : null));
+      if (!Array.isArray(list)) {
+        out.evaluated = false;
+        out.warnings.push('【防线①材料】台账 ' + pathSync.basename(String(regUsed || ''))
+          + ' 中【没有房间 ' + room + ' 的零件登记】—— 材料防线未评估（parts=0 不等于通过）');
+        return out;
+      }
+      out.evaluated = true;
       for (const it of list) {
         if (!it || typeof it !== 'object') continue;
         const part = String(it.path || '');

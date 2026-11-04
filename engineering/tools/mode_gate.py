@@ -176,9 +176,26 @@ try:
     STATE_DIR = _store_mod.state_dir()
     # 状态目录可能不等于脚本目录：把两者都加进 sys.path，
     #   保证 import mode_gate / defense_gate / choice_contract 都能找到。
-    for _d in (STATE_DIR, _BASE_DIR):
-        if _d and os.path.isdir(_d) and _d not in sys.path:
-            sys.path.insert(0, _d)
+    # ── 【A-22 同类修复·双副本遮蔽】脚本目录必须优先于状态目录 ──────────
+    # 原实现按 (STATE_DIR, _BASE_DIR) 顺序插入，且"已在 sys.path 就跳过"：
+    #   而 _BASE_DIR（脚本所在目录）通常已被 Python 启动时放进 sys.path[0]，
+    #   于是它【不会被提升到最前】，最终 STATE_DIR（安装副本）排在前面 ——
+    #   从工作区跑 mode_gate 时，内部 import defense_gate / gate_integrity
+    #   命中的是【安装副本里的旧文件】，出现"门禁新、防线旧"的两套口径，
+    #   本次审计实测：工作区 gate_integrity 有 protect_gate_files，
+    #   而 import 到的是安装副本（11-01 的旧版），属性直接 AttributeError。
+    # 正确语义：谁在执行我的代码，就以谁的目录为准（_BASE_DIR 优先）；
+    #   STATE_DIR 只用于读写状态文件，必须排在后面。
+    # 与 workflow_gate.py 顶部的同类修复保持完全一致。
+    if _BASE_DIR in sys.path:
+        try:
+            sys.path.remove(_BASE_DIR)
+        except ValueError:
+            pass
+    if _BASE_DIR and os.path.isdir(_BASE_DIR):
+        sys.path.insert(0, _BASE_DIR)
+    if STATE_DIR and os.path.isdir(STATE_DIR):
+        sys.path.insert(1, STATE_DIR)
 except Exception:
     STATE_DIR = _BASE_DIR
 
@@ -620,7 +637,7 @@ def cmd_room_heartbeat_check(name):
         return {"ok": False, "room": name, "error": str(e)}
 
 
-def cmd_subagent_assign(room, subagent_id):
+def cmd_subagent_assign(room, subagent_id, force=False):
     """记录负责当前房间的 subagent_id（主对话在创建小屋时调用）。
 
     ── 【FL-07 修复】必须先校验【房间存在且已 room-start】──────────────────
@@ -656,10 +673,45 @@ def cmd_subagent_assign(room, subagent_id):
             "hint": ("若房间名拼错，请核对当前任务的房间表（见 select 返回的 rooms）；"
                      "已登记房间：%s" % ("、".join(_known) if _known else "（无）")),
         }
+    # ── 【A-106 修复·覆盖无冲突检测】同一房间被【另一个 subagent id】改写时必须出声 ──
+    # 实测缺陷：原实现无条件 subs[room] = {...} 直接覆盖。后果：
+    #   · 主对话重复 fork 出第二个小屋、或误把别的房间的 id 填进来时，
+    #     旧小屋【当场失去房间归属】，但它自己不知道，继续往这个房间里写产物；
+    #   · 台账 / 心跳 / 报告归属全部指向新 id，旧小屋的产出变成"无主产物"；
+    #   · 事后 recover 无法判断"到底谁在跑这个房间"，只能靠人肉回忆。
+    # 现在：已绑定且 id 不同 → 【拒绝覆盖】，返回 CONFLICT 并列出双方 id；
+    #   确实要改绑必须显式 --force（留痕到 state.subagent_rebind_log）。
     subs = state.setdefault("subagents", {})
+    _exist = subs.get(_room)
+    _exist_id = (_exist or {}).get("id") if isinstance(_exist, dict) else None
+    if _exist_id and str(_exist_id) != _sid:
+        if not _force:
+            return {
+                "ok": False,
+                "room": _room,
+                "gate": "SUBAGENT_BINDING_CONFLICT",
+                "existing_subagent_id": str(_exist_id),
+                "incoming_subagent_id": _sid,
+                "error": ("房间 %r 已绑定 subagent %s，本次要绑 %s —— 拒绝覆盖。"
+                          % (_room, _exist_id, _sid)),
+                "hint": ("① 若旧小屋确实已废弃/误绑，先确认它已停机，再用 --force 改绑；"
+                         "② 若这是同一小屋换了个 id（重连/重启），也走 --force；"
+                         "③ 若两个小屋都在跑同一房间 —— 那是编排错误，必须先 mode_gate.py room-end 或 reset 掉一个，绝不能靠覆盖来抢房间。"),
+            }
+        # 显式 --force：允许改绑，但必须留痕（绝不静默）
+        _log = state.setdefault("subagent_rebind_log", [])
+        if isinstance(_log, list):
+            _log.append({"room": _room, "from": str(_exist_id), "to": _sid,
+                         "at": time.time(), "by": "subagent-assign --force"})
+            if len(_log) > 200:
+                del _log[:-200]
     subs[_room] = {"id": _sid, "assigned_at": time.time()}
+    if _exist_id and str(_exist_id) != _sid:
+        subs[_room]["rebound_from"] = str(_exist_id)
+        subs[_room]["rebound_at"] = time.time()
     save_state(state)
     return {"ok": True, "room": _room, "subagent_id": _sid,
+            "rebound": bool(_exist_id and str(_exist_id) != _sid),
             "note": "已绑定并持久化（room-status 的 subagent 字段可见）"}
 
 
@@ -6320,6 +6372,77 @@ def _visual_gate_for_room(name):
     }
 
 
+def _room_part_files(room):
+    """本房间已登记且【真实存在】的零件/图纸路径列表（A-52 冻结用）。
+
+    判定口径与 room-end 的其余检查保持一致：只认 artifacts_registry 里
+    显式登记到本房间的条目，绝不去目录里"猜"同名文件。
+    """
+    out = []
+    try:
+        for it in _registered_artifacts(room):
+            if not it.get("exists"):
+                continue
+            _p = str(it.get("path") or "")
+            if _p:
+                out.append(_p)
+    except Exception:
+        return []
+    return out
+
+
+def _freeze_room_artifacts(room):
+    """【A-52 修复】把房间产物冻成【只读 + 内容指纹】，防止收尾后被悄悄改。
+
+    ── 原缺陷 ────────────────────────────────────────────────────────────
+    room-end（含 --force）只是把 mode_state 里 active 置 False，产物仍在
+    可写状态：收尾之后任何脚本/子代理都能继续改同一个 .SLDPRT，
+    而报告、凭据、台账早已定格 —— 于是"交付时的零件"与"校核过的零件"
+    可以不是同一个文件，且事后完全看不出来。
+
+    ── 现在 ──────────────────────────────────────────────────────────────
+    · 为每个已登记且存在的产物记 sha256 + size + mtime；
+    · 尝试把文件置为只读（Windows 去掉写权限位，POSIX 去掉 w 位），
+      失败不算错（可能被 SW 独占或权限不足），但必须如实记录；
+    · 结论落到 mode_state.rooms.<房间>.frozen，后续 room-status / 审计可查。
+
+    注意：只冻结【本房间登记的产物】，绝不递归目录、绝不动别人的文件。
+    """
+    import hashlib as _hl
+    rec = {"at": time.time(), "files": [], "readonly_ok": 0,
+           "readonly_failed": [], "error": None}
+    try:
+        for _p in _room_part_files(room):
+            item = {"path": _p, "size": None, "sha256": None,
+                    "readonly": False}
+            try:
+                item["size"] = os.path.getsize(_p)
+                _h = _hl.sha256()
+                with open(_p, "rb") as _f:
+                    for _ch in iter(lambda: _f.read(1 << 20), b""):
+                        _h.update(_ch)
+                item["sha256"] = _h.hexdigest()
+            except Exception as e:
+                item["error"] = repr(e)
+            try:
+                if not os.access(_p, os.W_OK):
+                    item["readonly"] = True
+                else:
+                    _mode = os.stat(_p).st_mode
+                    os.chmod(_p, _mode & ~0o222)
+                    item["readonly"] = not os.access(_p, os.W_OK)
+            except Exception as e:
+                item["readonly_error"] = repr(e)
+            if item["readonly"]:
+                rec["readonly_ok"] += 1
+            else:
+                rec["readonly_failed"].append(os.path.basename(_p))
+            rec["files"].append(item)
+    except Exception as e:
+        rec["error"] = repr(e)
+    return rec
+
+
 def cmd_room_end(name, force=False, dry_run=False):
     """【三大防线】room-end 是"房间下线"这个不可逆动作 —— 就在这里强制执行三道防线。
 
@@ -6336,7 +6459,39 @@ def cmd_room_end(name, force=False, dry_run=False):
     #   · 但【绝不】写任何文件：不 log_bypass、不 _finalize_room、不 _maybe_advance。
     # 旧实现根本没有 dry_run 参数 —— 传进来的 --dry-run 在 CLI 层就被丢弃，
     #   于是"预演"变成了真实下线（还写了 defense_bypass.json）。见 _CMD_FLAGS。
+    # ══ 【A-85 修复】modeling 阶段禁止被 "--force 收尾" 静默吞掉 ═══════════
+    # 原缺陷：房间只要 active 就能 --force 下线，【不看处在哪个阶段】。
+    #   实测后果：小屋还在建模（建模脚本正在跑、零件只落盘了一半），
+    #   主对话为了"推进流程"直接 room-end --force，房间被标成结束，
+    #   半成品零件进入下游、又一次"零件反复消失"。
+    # 现在：若本房间【最近一次上报的阶段不是成品阶段】，--force 必须先拿到
+    #   显式确认（DSH_ROOM_END_FORCE_MODELING=1），否则拒绝并说明原因。
+    #   非 --force 的正常收尾不受影响（那本来就要过三道防线）。
     if force and not dry_run:
+        try:
+            _st0 = load_state()
+            _rm0 = (_st0.get("rooms") or {}).get(str(name)) or {}
+            _stage0 = str(_rm0.get("stage") or _rm0.get("last_stage") or "").strip()
+            _modeling_stages = ("modeling", "modelling", "building",
+                                "sw_modeling", "建模")
+            _in_modeling = _stage0.lower() in _modeling_stages
+            _acked = (os.environ.get("DSH_ROOM_END_FORCE_MODELING") or ""
+                      ).strip() in ("1", "true", "yes")
+            if _in_modeling and not _acked:
+                return {
+                    "ok": False,
+                    "room": str(name),
+                    "gate": "FORCE_ROOM_END_WHILE_MODELING",
+                    "stage": _stage0,
+                    "error": ("房间 [%s] 当前阶段是 %r（仍在建模），拒绝用 --force 直接收尾。" % (name, _stage0)),
+                    "hint": ("① 先让小屋里跑完建模并 room-report，再正常 room-end；"
+                             "② 若建模确实已中止、零件不可信，应走 room-fail 回退重做，"
+                             "而不是 --force 把它当成完成；"
+                             "③ 确认要坚持强制收尾（会留痕），设环境变量 "
+                             "DSH_ROOM_END_FORCE_MODELING=1 后重试。"),
+                }
+        except Exception:
+            pass
         # [审计] --force 也是绕行，必须留痕（原实现直接跳过、零审计）。
         # 【F-01】dry_run 时【不留痕】—— 预演不该在审计里留下"真的绕过过"的记录。
         try:
@@ -6523,6 +6678,20 @@ def cmd_room_end(name, force=False, dry_run=False):
         _integrity = {"ok": None, "note": "完整性自检不可用: %r" % (_e_gi,)}
     was_owner, killed, waited, _reason = _finalize_room(name, failed=False,
                                                         force=force)
+    # ══ 【A-52 修复】下线即冻结产物：记指纹 + 置只读 ══════════════════════
+    # 原缺陷：room-end 只改状态标志，产物仍可写 —— 收尾后再被人改动，
+    #   报告/凭据/台账却仍指向"当初那一次校核"，且无从发现。
+    # 现在：把本房间已登记的产物逐个记 sha256 并尽量置只读，结论写进
+    #   mode_state.rooms.<房间>.frozen（失败只留痕，不阻断下线）。
+    try:
+        _frz = _freeze_room_artifacts(name)
+        _st2 = load_state()
+        _r2 = (_st2.get("rooms") or {}).get(str(name))
+        if isinstance(_r2, dict):
+            _r2["frozen"] = _frz
+            save_state(_st2)
+    except Exception as _e_frz:
+        _frz = {"error": repr(_e_frz)}
     # ── 【Bug#6 修复】房间收尾后自动推进门禁到 finished（若无活动房间）──
     #   这是"活干完了守卫却不让结束"的直接修复：不再依赖再调一次 select。
     _adv = _maybe_advance_workflow_finished(reason="room-end:%s" % name)
@@ -6539,6 +6708,17 @@ def cmd_room_end(name, force=False, dry_run=False):
     _out = {"ok": True, "room": name, "sw_lock_released": was_owner,
             "sw_killed": killed, "sw_lock_release_reason": _reason,
             "message": msg}
+    # 【A-52】冻结结论如实回传（只读失败也要让调用方看到）
+    if isinstance(_frz, dict):
+        _out["artifacts_frozen"] = {
+            "files": len(_frz.get("files") or []),
+            "readonly_ok": _frz.get("readonly_ok"),
+            "readonly_failed": _frz.get("readonly_failed") or [],
+        }
+        if _frz.get("readonly_failed"):
+            _out["frozen_warning"] = (
+                "以下产物未能置为只读（可能仍被 SolidWorks 独占或权限不足）："
+                + "、".join(_frz.get("readonly_failed") or []))
     if not was_owner:
         _out["hint"] = ("若该房间确实已停、需要立刻让出 SW 给下一个房间，"
                         "用: python mode_gate.py room-end \"%s\" --force"
@@ -7510,7 +7690,9 @@ def main():
     elif cmd == "room-heartbeat-check":
         result = cmd_room_heartbeat_check(args[1] if len(args) > 1 else "unknown")
     elif cmd == "subagent-assign":
-        result = cmd_subagent_assign(args[1] if len(args) > 1 else "", args[2] if len(args) > 2 else "")
+        result = cmd_subagent_assign(args[1] if len(args) > 1 else "",
+                                     args[2] if len(args) > 2 else "",
+                                     force=("--force" in args[3:]))
     elif cmd == "subagent-free":
         result = cmd_subagent_free(args[1] if len(args) > 1 else "unknown")
     elif cmd in ("room-board", "board"):

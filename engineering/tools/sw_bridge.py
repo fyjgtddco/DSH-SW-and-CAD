@@ -2795,12 +2795,34 @@ def cmd_run(sw, script_path, extra_args, room=None):
             "# 【BUG-57 配套】回显脚本实际看到的 __name__，便于核对 __main__ 分支\n"
             "#   到底成不成立（这是本次静默空跑的根因，必须可见）。\n"
             "_ns_name = _ns.get('__name__')\n"
+            # ── 【A-107 修复】记录脚本跑完后 SW 里还开着什么（失败清场线索）──
+            # 原缺陷：脚本中途抛异常时，它此前打开的文档【全部留在 SW 里】，
+            #   调用方只看到一条 traceback，没有任何"该清哪些"的线索 ——
+            #   只能人工 close-all，而那会误关别的房间正在用的文档。
+            # 这里【只观测、不强杀】：把结束时的文档列表如实回传，
+            #   由父进程组装 cleanup_hint，脚本作者/小屋自行决定清哪些。
+            "_ns_docs, _ns_parts = [], []\n"
+            "try:\n"
+            "    _enum = sw.GetDocuments()\n"
+            "    for _d in (list(_enum) if _enum else []):\n"
+            "        try:\n"
+            "            _pth = str(_d.GetPathName() or '')\n"
+            "            _ttl = str(_d.GetTitle() or '')\n"
+            "            _ns_docs.append({'path': _pth, 'title': _ttl})\n"
+            "            if _pth.lower().endswith('.sldprt'):\n"
+            "                _ns_parts.append(_pth)\n"
+            "        except Exception:\n"
+            "            continue\n"
+            "except Exception:\n"
+            "    pass\n"
             # 【BUG-A 修复】同上：普通字符串用单花括号
             "print(json.dumps({'ok': _ok, 'error': _err,\n"
             "                  'script_stdout': _cap_out.getvalue()[-8000:],\n"
             "                  'script_stderr': _cap_err.getvalue()[-8000:],\n"
             "                  'script_name': _ns_name,\n"
-            "                  'script_result': _biz}, ensure_ascii=False))\n"
+            "                  'script_result': _biz,\n"
+            "                  'open_docs': _ns_docs,\n"
+            "                  'open_part_docs': _ns_parts}, ensure_ascii=False))\n"
         )
     try:
         # Bug 1 修复: 设置 PYTHONIOENCODING 绕过 Windows GBK 终端编码问题
@@ -3118,6 +3140,25 @@ def cmd_run(sw, script_path, extra_args, room=None):
     #      即使脚本没报错也必须显式标记（fail-closed，不静默）；
     #   ② 脚本一行输出都没有、也没声明 __RESULT__、预期产物又全都没出现
     #      → 高度疑似空跑，同样显式标记。
+    # ── 【A-107 修复】失败时给出【可执行的清场线索】───────────────────────
+    # wrapper 现在回传 open_docs / open_part_docs（本次运行结束时 SW 里
+    #   还开着的文档）。脚本失败时把这些如实列给调用方，避免"只能 close-all
+    #   然后误关别的房间文档"这一老问题。依然【不自动强杀】：
+    #   关谁的文档必须由知道上下文的一方决定。
+    try:
+        _od = result.get("open_docs") or []
+        if _od:
+            result["open_docs_after_run"] = _od
+            if not result.get("ok"):
+                _op = result.get("open_part_docs") or []
+                result["cleanup_hint"] = (
+                    "脚本失败后 SW 里仍有 %d 个文档打开（其中零件 %d 个）。"
+                    "确认这些不是其他房间正在用的文档后，逐个关闭："
+                    "python sw_bridge.py close <标题或路径>；"
+                    "若确认全部属于本次失败运行，可用 python sw_bridge.py close-all。"
+                    % (len(_od), len(_op)))
+    except Exception:
+        pass
     _sn = result.get("script_name")
     if _sn is not None and _sn != "__main__":
         result["ok"] = False
@@ -4393,15 +4434,81 @@ def cmd_drawing(sw, part_path, output_path=None):
         result.setdefault("warnings_list", []).append(
             "SaveAs3 抛异常但产物已生成: %s" % result["save_error"])
 
+    # ── 【A-90 修复·文档泄漏】成功/失败都必须把本函数自己开的图纸文档关掉 ────
+    # 原缺陷：final_doc 只在【失败】分支被关闭；成功分支直接 return，
+    #   于是每出一张图就有一个 .SLDDRW 留在 SW 里。多零件任务下 SW 文档
+    #   列表持续膨胀 → 内存上涨、后续 AddComponent/打开零件变慢，
+    #   "关闭所有文档"也关不干净（其中混着别人正在用的零件）。
+    # 注意：只关【本函数自己新建的那张图】(final_doc)，绝不碰调用方已打开的
+    #   零件文档；关闭失败只记 warning，不能把已成功的出图判成失败。
+    _shot_res = None
     try:
+        # 截图要在关档【之前】做（关掉后就没有画面了）
         m = swapi.from_active(sw)
-        shot = m.screenshot()
-        if shot.get("ok"):
-            result["screenshot_path"] = shot["path"]
+        _tag = None
+        try:
+            _tag = os.path.splitext(os.path.basename(str(part_abs)))[0] + "_drawing"
+        except Exception:
+            _tag = "drawing"
+        _shot_res = m.screenshot(tag=_tag)
+        if _shot_res.get("ok"):
+            result["screenshot_path"] = _shot_res.get("path")
     except Exception:
-        pass
+        _shot_res = None
+    finally:
+        result["drawing_doc_closed"] = _close_drawing_doc(sw, final_doc, result)
 
     return result
+
+
+def _close_drawing_doc(sw, doc, result=None):
+    """关闭本函数创建的图纸文档（A-90），并如实记录成败。
+
+    设计要点：
+      · 只对【本函数新建的】doc 生效，绝不遍历全部文档（那会关掉调用方的零件）；
+      · 关闭前若文档已被外部关掉（文档计数里找不到），按"已关闭"处理；
+      · 关闭失败【不改变】出图结论，只在 result["warnings_list"] 留痕。
+    Returns: bool（True=确认已关闭）
+    """
+    if doc is None:
+        return True
+    def _warn(msg):
+        try:
+            if isinstance(result, dict):
+                result.setdefault("warnings_list", []).append(msg)
+        except Exception:
+            pass
+    try:
+        _title = ""
+        try:
+            _title = str(doc.GetTitle() or "")
+        except Exception:
+            _title = ""
+        # 先确认它还是"打开着的文档"，避免对已关闭对象重复 CloseDoc
+        _still_open = False
+        try:
+            _en = sw.GetDocuments()
+            _list = list(_en) if _en else []
+            for _d in _list:
+                try:
+                    if _d is doc or (str(_d.GetPathName() or "") == str(doc.GetPathName() or "")):
+                        _still_open = True
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            _still_open = True   # 枚举不了就按"还开着"处理，尝试关闭
+        if not _still_open:
+            return True
+        try:
+            sw.CloseDoc(_title)
+        except Exception as e:
+            _warn("图纸文档关闭失败（%s）: %r" % (_title or "?", e))
+            return False
+        return True
+    except Exception as e:
+        _warn("图纸文档关闭异常: %r" % (e,))
+        return False
 
 
 # ══ 【BUG-观察-17 修复】自动标注 API 的【权威归属】与【参数个数】 ══════════
@@ -5801,6 +5908,26 @@ class _SwDocManager(object):
         except Exception as e:
             return False, "CloseAllDocuments 调用异常: %r" % (e,)
 
+    def close_one(self, title, silent=True):
+        """【S-18 修复】关闭【单个】文档（按标题），返回 True/False。
+
+        ── 为什么需要它（真机实测）──────────────────────────────────────
+        SW 里有【未保存】文档时，CloseAllDocuments(0) 会被"是否保存"的模态
+          对话框卡住：实测 45 个未保存零件，3 轮只从 45 关到 44（纹丝不动）。
+        而 IModelDoc2::CloseDoc(标题) 逐文档关闭一次就 44→0，且不弹框。
+        这是 close-all 能真正清场的唯一可靠路径。
+
+        参数 silent 仅为语义说明（CloseDoc 本身不弹保存框，未保存内容直接丢弃）；
+        保留该参数是为了将来若需"先保存再关"时有扩展位。
+        """
+        if not title:
+            return False
+        try:
+            self.sw.CloseDoc(str(title))
+            return True
+        except Exception:
+            return False
+
     def doc_titles(self, limit=20):
         """尽力枚举仍打开文档的标题（拿不到就返回空列表，绝不抛异常）。"""
         titles = []
@@ -5914,6 +6041,31 @@ def close_documents_until_zero(doc_mgr, max_rounds=3, close_fn=None):
                 _cok, _cerr = doc_mgr.close_all()
         except Exception as e:
             _cok, _cerr = False, "close_all 抛异常: %r" % (e,)
+        # ══ 【S-18 / S-21 修复 · 2026-11-04 真机实测】════════════════════════
+        # 实测：SW 里堆了 45 个【未保存】零件时，CloseAllDocuments(0) 只关掉 1 个，
+        #   之后每轮都停在 44 个纹丝不动（3 轮 44→44→44）。原因：未保存文档会
+        #   触发 SW 的"是否保存"模态对话框，CloseAllDocuments 被它阻塞。
+        #   而【逐文档 CloseDoc(标题)】一次就把 44 个全部关掉（44→0，实测）。
+        # 因此循环体改为：CloseAllDocuments 一把梭 → 若仍有残留，
+        #   【逐个 CloseDoc 强关】。这不需要用户去 SW 里点对话框。
+        try:
+            _left = doc_mgr.count()
+        except Exception:
+            _left = None
+        if _left:
+            _killed = 0
+            try:
+                for _t in (doc_mgr.doc_titles(limit=500) or []):
+                    try:
+                        doc_mgr.close_one(_t)
+                        _killed += 1
+                    except Exception:
+                        pass
+            except Exception as _e_one:
+                _r["close_one_error"] = repr(_e_one)
+            if _killed:
+                _r["close_one_killed"] = _killed
+                _cok, _cerr = True, None
         _r["close_ok"] = bool(_cok)
         if _cerr:
             _r["close_error"] = _cerr

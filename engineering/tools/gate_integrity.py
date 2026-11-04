@@ -250,6 +250,104 @@ def assert_clean(where="", room=""):
     return False, r
 
 
+def protect_gate_files(scope="all", dry_run=False):
+    """【A-20 修复】把判定本体置为【只读】—— 让"裁判被被告改写"变贵。
+
+    ── 原缺陷（本次审计再次确认）──────────────────────────────────────────
+    本模块此前只能"事后发现被改"（留痕），改文件本身仍然是一次 chmod/覆盖
+    就完成的事。同目录同账户，API 能力上没有任何阻力 —— 实测一次任务里
+    7 个代理改了 33 次判定源码，其中一次直接把 CRITICAL 改成 PASS。
+
+    ── 现在做的（是"提高成本"，不是"绝对防止"，如实说明）──────────────
+    · 对 PROTECTED 里的文件清掉写位（Windows 只读属性 / POSIX 去 w）；
+    · 改完立刻复核：os.access(path, W_OK) 必须为 False 才算成功；
+    · 失败项如实列出（被占用/权限不足/文件系统不支持），绝不假装成功。
+
+    这不是安全边界：有权限的进程依然能 chmod 回来。它的价值在于 ——
+      "改判定逻辑"从此变成一个【明显、可留痕、需要两步】的动作，
+      而不是 AI 顺手 edit 一下就能把红灯改绿。
+
+    解除保护（人工审阅完改动、重建基线后）：protect_gate_files(scope="none")
+    """
+    out = {"ok": True, "protected": [], "failed": [], "already": [],
+           "scope": str(scope), "dry_run": bool(dry_run)}
+    if str(scope) in ("none", "off", "0", "false"):
+        for rel in PROTECTED:
+            p = os.path.join(_HERE, rel)
+            if not os.path.isfile(p):
+                continue
+            if dry_run:
+                out["protected"].append(rel)
+                continue
+            try:
+                mode = os.stat(p).st_mode
+                os.chmod(p, mode | 0o200)
+                out["protected"].append(rel)
+            except Exception as e:
+                out["failed"].append({"file": rel, "error": repr(e)})
+        out["ok"] = not out["failed"]
+        out["note"] = "已解除只读保护（恢复可写）"
+        return out
+    for rel in PROTECTED:
+        p = os.path.join(_HERE, rel)
+        if not os.path.isfile(p):
+            continue
+        try:
+            if not os.access(p, os.W_OK):
+                out["already"].append(rel)
+                continue
+            if dry_run:
+                out["protected"].append(rel)
+                continue
+            mode = os.stat(p).st_mode
+            os.chmod(p, mode & ~0o222)
+            if os.access(p, os.W_OK):
+                out["failed"].append({"file": rel,
+                                      "error": "chmod 后仍可写（文件系统/属性不生效）"})
+            else:
+                out["protected"].append(rel)
+        except Exception as e:
+            out["failed"].append({"file": rel, "error": repr(e)})
+    out["ok"] = not out["failed"]
+    if out["failed"]:
+        out["note"] = ("部分文件无法置为只读（多半被进程占用或权限不足）——"
+                       "这部分仍是可改的，改动只能靠基线比对发现。")
+    return out
+
+
+def register_objection(room, reason, evidence=None, by=""):
+    """【A-20 补】合法的"异议通道"：对门禁结论不服时，走登记而不是改源码。
+
+    问题：审计发现 AI 遇到门禁挡住时会去改判定源码（因为那是唯一"出路"）。
+    现在给一条正规通道 —— 把"我认为这条结论不成立，理由与证据如下"
+    记进 .defense/objections.jsonl，并【明确告诉调用方】：
+      · 登记异议不会改变本次判定（门禁结论仍然生效，防线不因此放宽）；
+      · 它会成为人工复核的输入，由人决定是改设计、改规则，还是改代码。
+    这样"有不同意见"与"私自改裁判"就分开了。
+    """
+    rec = {
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ts": time.time(),
+        "room": str(room or ""),
+        "reason": str(reason or "").strip()[:2000],
+        "evidence": evidence if isinstance(evidence, (list, dict)) else None,
+        "by": str(by or ""),
+    }
+    if not rec["reason"]:
+        return {"ok": False, "error": "异议必须写理由（reason 不能为空）"}
+    try:
+        _d = os.path.join(_state_dir(), ".defense")
+        os.makedirs(_d, exist_ok=True)
+        _p = os.path.join(_d, "objections.jsonl")
+        with io.open(_p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        return {"ok": True, "path": _p,
+                "note": ("异议已登记。注意：本次门禁结论【不因此改变】，"
+                         "登记只用于人工复核；不要为此去改判定源码（那会被基线比对抓到）。")}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "check"
@@ -261,6 +359,25 @@ def main(argv=None):
     if cmd == "explain":
         print(__doc__)
         return 0
+    if cmd == "protect":
+        # 【A-20】protect / unprotect —— 判定本体的 OS 写保护
+        scope = "all"
+        _args = [a for a in argv[1:] if not a.startswith("-")]
+        if _args:
+            scope = _args[0]
+        if "--off" in argv or "unprotect" in argv:
+            scope = "none"
+        res = protect_gate_files(scope=scope, dry_run=("--dry-run" in argv))
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res.get("ok") else 1
+    if cmd == "objection":
+        # 【A-20】objection 登记：<room> <reason>
+        _pos = [a for a in argv[1:] if not a.startswith("-")]
+        _room = _pos[0] if _pos else ""
+        _reason = _pos[1] if len(_pos) > 1 else ""
+        res = register_objection(_room, _reason, by="cli")
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res.get("ok") else 1
     r = check_integrity()
     if "--json" in argv:
         print(json.dumps(r, ensure_ascii=False, indent=2))

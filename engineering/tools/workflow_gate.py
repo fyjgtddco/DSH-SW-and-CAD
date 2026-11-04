@@ -5960,7 +5960,8 @@ def _main_body():
         #   但本环境并未注册这些 DSH 工具，照文档调用必然失败。
         #   现于帮助里给出可直接复制的命令行形式，并显式说明这一点。
         _me = os.path.basename(os.path.abspath(__file__))
-        print(json.dumps({"ok": False,
+        print(json.dumps({"ok": True,
+                          "command": "help",
                           "entry_point": "命令行脚本（本环境没有 workflow-gate-* 这些 DSH 工具）",
                           "error": "用法: python %s "
                                    "{init|provide_context|select|confirm-assembly|"
@@ -6004,7 +6005,12 @@ def _main_body():
                                    "select 的并行策略以 workflow_state.json（本轮 select "
                                    "当场写入）为权威，并与 mode_state.json 自动对齐。")},
                          ensure_ascii=False, indent=2))
-        sys.exit(1)
+        # ── 【A-09 修复·CLI 契约统一】--help 是"成功请求帮助"，退出码必须为 0 ─
+        # 实测不一致：defense_gate / mode_gate 的 --help 都是 0，唯独本脚本给 1。
+        #   AI 按提示探路时会把 exit=1 读成"命令失败/脚本坏了"，转而手改状态文件
+        #   或改门禁源码（正是 A-20 那条"裁判被被告改写"的入口）。
+        # 现在三道门禁统一：帮助=0，用法错误=2，业务失败=1。
+        sys.exit(0)
     cmd = sys.argv[1].lower()
     if cmd == "init":
         print(json.dumps(cmd_init(sys.argv[2]) if len(sys.argv) > 2 else {"ok":False,"error":"need task"}, ensure_ascii=False, indent=2))
@@ -6097,7 +6103,9 @@ def _main_body():
         print(json.dumps({"ok": False, "error": "未知命令: " + cmd,
                           "hint": "运行 `python workflow_gate.py --help` 查看全部命令"},
                          ensure_ascii=False))
-        sys.exit(1)
+        # ── 【A-09 修复】用法错误统一退出码 2（与 defense_gate / mode_gate 一致）──
+        # 原为 1，与"业务失败"混同：调用方无法区分"命令写错了"和"门禁真的拒绝"。
+        sys.exit(2)
 
 
 if __name__ == "__main__":
