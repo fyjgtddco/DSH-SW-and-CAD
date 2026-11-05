@@ -66,6 +66,11 @@ function Should-Skip([string]$Name) {
     if ($RuntimeNames -contains $Name) { return $true }
     if ($Name -like '*.bak*') { return $true }
     if ($Name -like '*.pyc') { return $true }
+    # PID files are live process state, not code. Copying the source workspace's
+    # stale pid over the install copy makes sw_monitor look dead (or point at an
+    # unrelated process). Seen twice on 2026-11-05: it overwrote a live 37012
+    # with an old 27656, so it is excluded here rather than restored by hand.
+    if ($Name -like '*.pid') { return $true }
     if ($Name -like '~$*') { return $true }
     # Deliverable/artefact binaries are NOT code: skip them so the install copy
     # stays lean and syncs fast. They are reproduced by modelling, not shipped.

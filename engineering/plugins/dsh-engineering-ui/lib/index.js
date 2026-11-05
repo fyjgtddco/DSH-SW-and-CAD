@@ -115,10 +115,22 @@ const GUARD_PRESET = 'engineering';
 //     {"code":"QUOTA_EXCEEDED","message":"...可用账号均在限流中，
 //       最近一个将于 ... 解禁"}
 //   六个建模子代理 + 主对话全部因此停摆，一个零件都没产出。
-//   DSH 自带的 dsh-llm-retry 只做「同 provider 重试」，不换模型；
-//   dsh-agent-loop 暴露了两个 waterfall，正好够用：
-//     · ctx.on('agent/request')       → 每轮请求前决定用哪个 provider/model
-//     · ctx.on('agent/request-error') → 失败后返回 {kind:'retry'} 可让本轮重试
+//   DSH 自带的 dsh-llm-retry 只做「同 provider 重试」，不换模型。
+//
+// ── 【2026-11-05 · DSH 0.2.2 适配】换模型改走 agent.model.select() ─────
+// 0.2.2 把「同一步内换模型重试」这条路封死了：dsh-agent-loop 在提示词组装
+//   前就 this.model.current() 捕获本步路由，并在 prepareRequest 里强校验
+//     agent/request proposed "p/m" after step preparation fixed "p/m";
+//     use agent.model.select() before step preparation
+//   → 旧实现（在 agent/request 里返回 {provider, model}）现在会【直接抛错】，
+//     把"能接替"变成"更早地 turn/end error"。
+// 现在两条通道并存，按宿主能力自动选：
+//   · 0.2.2+（agent.model.select 存在）：
+//       agent/request-error → 隔离该 provider + select(下一个候选)
+//       → 本步仍以该错误结束，【下一次尝试】直接落到新路由（新的一步 / 下一轮 /
+//         新建的子代理都会用新路由）。select 语义就是这样：只对"下一个还没
+//         开始准备的步骤"生效，本步连重试都改不动。
+//   · 0.2.1 及以前：保留原来的 agent/request 覆盖 + {kind:'retry'} 老路径。
 //
 // ── 关键约束（踩过的坑，别改回去）────────────────────────────────────
 // 1. 【最重要】绝不无条件覆盖模型选择 —— v2 曾把请求每轮改成"链首候选"，
@@ -170,6 +182,17 @@ function normalizeModelChain(raw) {
   try {
     if (!raw || typeof raw !== 'object') return out;
     out.enabled = raw.enabled === true;
+    // ── 自动续跑（0.2.2 起）───────────────────────────────────────────────
+    // select() 只对"下一个尚未开始准备的步骤"生效，本轮必定以该错误结束；
+    // autoResume（默认 true）打开时，插件在失败后自己补一条「继续」把这一轮
+    // 接上，用户不需要手动重发。autoResumeMax 是同一轮用户输入内的续跑上限。
+    out.autoResume = raw.autoResume !== false;
+    const _max = Number(raw.autoResumeMax);
+    out.autoResumeMax = Number.isFinite(_max) && _max > 0 ? Math.min(10, Math.floor(_max)) : 3;
+    const _delay = Number(raw.autoResumeDelayMs);
+    out.autoResumeDelayMs = Number.isFinite(_delay) && _delay >= 0
+      ? Math.min(60000, Math.floor(_delay))
+      : 1200;
     const list = Array.isArray(raw.models) ? raw.models : [];
     const seen = new Set();
     for (const m of list) {
@@ -1203,6 +1226,8 @@ export function apply(ctx) {
         switched: false, prevKey: null,
         /** 本轮内每个模型失败了几次（key=provider\0model）→ 用于"反复失败就换" */
         failCounts: new Map(),
+        /** 自动续跑：本轮用户输入已续了几次 / 待触发的定时器（跨 turn 保留，见 maybeAutoResume） */
+        resumeCount: 0, resumeTimer: null,
       };
       modelChainState.set(agent.id, st);
     }
@@ -1267,7 +1292,206 @@ export function apply(ctx) {
     }
   }
 
-  // ── ① 每轮请求前：只有【本轮已经接替过】才覆盖请求配置 ────────────────
+  // ── ⓪ 0.2.2 通道：agent.model.select() + provider 级隔离 ──────────────
+  // 见文件顶部【2026-11-05 · DSH 0.2.2 适配】。下面这组函数只在宿主提供
+  // agent.model.select 时被用到；老宿主（0.2.1 及以前）走下面的 agent/request。
+  function supportsModelSelect(agent) {
+    try {
+      const m = agent && agent.model;
+      return !!m && typeof m.select === 'function' && typeof m.current === 'function';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * 把该 agent 的路由改成链里的某个候选。
+   * ⚠️ select() 语义：完整赋值（省略 reasoningEffort = 用适配器默认值，
+   *    不继承旧强度）；对"下一个尚未开始准备的步骤"生效，本步改不动。
+   * @returns 是否成功写入（失败一律静默，绝不影响主流程）
+   */
+  function selectModelRoute(agent, cand) {
+    try {
+      if (!agent || !cand) return false;
+      const m = agent.model;
+      if (!m || typeof m.select !== 'function') return false;
+      const sel = { provider: cand.provider, model: cand.model };
+      if (cand.reasoningEffort !== undefined) sel.reasoningEffort = cand.reasoningEffort;
+      m.select(sel);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * provider 级隔离（额度/限流是按账号算的，同一家的候选大概率一起挂）。
+   *
+   * ── 和 st.tried 的区别 ───────────────────────────────────────────────
+   *   st.tried  按【本轮】记，turn 变了就清空（旧行为保持不变）；
+   *   隔离表按【provider】记，跨轮生效，TTL 过期自动失效。
+   * 为什么需要跨轮：0.2.2 里 select() 只对下一个步骤生效，本轮必然以失败
+   * 结束；没有跨轮记忆的话，用户重发一句又会先撞同一个限流 provider。
+   */
+  const PROVIDER_QUARANTINE_MS = 10 * 60 * 1000;
+  const providerQuarantine = new Map();     // provider -> 到期时间戳
+
+  function quarantineProvider(provider) {
+    try {
+      const p = String(provider || '');
+      if (p) providerQuarantine.set(p, Date.now() + PROVIDER_QUARANTINE_MS);
+    } catch (e) {}
+  }
+
+  function isProviderQuarantined(provider) {
+    try {
+      const p = String(provider || '');
+      if (!p) return false;
+      const until = providerQuarantine.get(p);
+      if (until === undefined) return false;
+      if (Date.now() >= until) { providerQuarantine.delete(p); return false; }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 用户手动改选 / 成功换到新家后，解除该 provider 的隔离。 */
+  function releaseQuarantine(provider) {
+    try {
+      const p = String(provider || '');
+      if (p) providerQuarantine.delete(p);
+    } catch (e) {}
+  }
+
+  /** 在链里挑第一个"本轮没试过、且 provider 没被隔离"的候选。 */
+  function firstHealthyCandidate(entries, tried, excludeKey) {
+    for (const e of (entries || [])) {
+      const key = modelKey(e.provider, e.model);
+      if (excludeKey && key === excludeKey) continue;
+      if (tried && tried.has(key)) continue;
+      if (isProviderQuarantined(e.provider)) continue;
+      return e;
+    }
+    return null;
+  }
+
+  /**
+   * 【0.2.2 自动续跑】换模型之后，自动把这一轮接上，不需要用户手动重发。
+   *
+   * ── 为什么非要多发一条消息 ─────────────────────────────────────────────
+   * 0.2.2 的 turn 一旦因模型错误结束，就只能靠 agent.followup() 唤醒驱动器
+   * 才会再开一轮；宿主没有"静默续跑"的接口（inject() 不唤醒）。
+   * 这条消息的 source 是 plugin:dsh-engineering-ui —— 和收尾守卫那几条同源，
+   * 不是用户发的，前端会当成插件消息。
+   *
+   * ── 三重保险（别删）────────────────────────────────────────────────────
+   *   · autoResume=false 可整体关闭（model_chain.json）；
+   *   · 同一轮用户输入最多续 autoResumeMax 次（默认 3），防止整条链都挂时无限重试；
+   *   · 用户真的手动发新消息时立刻清零（见 agent/pre-step 监听器）。
+   *
+   * ── 为什么必须延迟 ─────────────────────────────────────────────────────
+   * 调用的这一刻驱动器还在 running（本 step 还没收尾），此时 followup 只会把
+   * 消息塞进 inbox 而不唤醒（wakeDriver 在 running 且未 abort 时会丢弃唤醒）。
+   * 等 turn/end 落盘后再发，才是"空闲时投递 → 立刻开新轮"。
+   */
+  function maybeAutoResume(agent, st, payload, cand) {
+    try {
+      const cfg = readModelChainConfig();
+      if (cfg.autoResume === false) return false;
+      if (!agent || typeof agent.followup !== 'function') return false;
+      const max = Number.isFinite(cfg.autoResumeMax) ? cfg.autoResumeMax : 3;
+      if ((st.resumeCount || 0) >= max) {
+        try {
+          console.warn('[dsh-engineering-ui] 自动续跑已达上限（' + max + ' 次），交还用户');
+        } catch (e) {}
+        return false;
+      }
+      if (st.resumeTimer) {
+        try { clearTimeout(st.resumeTimer); } catch (e) {}
+        st.resumeTimer = null;
+      }
+      const delay = Number.isFinite(cfg.autoResumeDelayMs) ? cfg.autoResumeDelayMs : 1200;
+      const code = String((payload && payload.failure && payload.failure.code) || '错误');
+      const text = '（模型自动接替：上一个模型返回 ' + code
+        + '，已切到 ' + cand.provider + '/' + cand.model
+        + '。请从上次中断处继续；已经完成的步骤、已经成功的工具调用不要重做。）';
+      st.resumeCount = (st.resumeCount || 0) + 1;
+      st.resumeTimer = setTimeout(() => {
+        st.resumeTimer = null;
+        try {
+          agent.followup(createUserMessage({
+            content: [{ type: 'text', text }],
+            source: { kind: 'plugin:dsh-engineering-ui' },
+          }));
+        } catch (e) {
+          try {
+            console.warn('[dsh-engineering-ui] 自动续跑失败：'
+              + String((e && e.message) || e));
+          } catch (_e) {}
+        }
+      }, delay);
+      // 不让这个定时器把进程吊住（宿主退出时不必等它）
+      try { if (typeof st.resumeTimer.unref === 'function') st.resumeTimer.unref(); } catch (e) {}
+      try {
+        console.warn('[dsh-engineering-ui] 自动续跑已排程（' + delay + 'ms，第 '
+          + st.resumeCount + '/' + max + ' 次）');
+      } catch (e) {}
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ── ⓪' 用户手动改选 → 交还控制权（0.2.2 下 request 监听器不再跑，挪到这里）──
+  // 热路径注意：先看内存态，没接替过的 agent 直接放行（不读盘、不算预设）。
+  disposers.push(ctx.on('agent/pre-step', async (payload, next) => {
+    try {
+      const agent = payload && payload.agent;
+      const sel = payload && payload.modelSelection;
+      const st = agent && agent.id ? modelChainState.get(agent.id) : null;
+      if (st) {
+        // 用户真的发了一条新消息（非插件来源）→ 自动续跑计数清零，
+        // 下一次失败又能续满 autoResumeMax 次。
+        try {
+          for (const m of (Array.isArray(payload.messages) ? payload.messages : [])) {
+            const kind = m && m.source && m.source.kind;
+            if (typeof kind === 'string' && kind.indexOf('plugin:dsh-engineering-ui') !== 0) {
+              st.resumeCount = 0;
+              break;
+            }
+          }
+        } catch (e) {}
+        if (st.resumeTimer) {
+          // 用户主动发消息了 → 撤销还没触发的自动续跑，别插在人家的话后面
+          try { clearTimeout(st.resumeTimer); } catch (e) {}
+          st.resumeTimer = null;
+        }
+      }
+      if (st && st.key && sel && sel.provider) {
+        const key = modelKey(sel.provider, sel.model);
+        // 既不是我们钉住的候选、也不是切换前用户在用的那个 → 用户真的改了选
+        if (key !== st.key && key !== st.prevKey) {
+          st.switched = false;
+          st.key = null;
+          st.prevKey = null;
+          st.tried = new Set();
+          releaseQuarantine(sel.provider);
+          try {
+            console.warn('[dsh-engineering-ui] 检测到手动选型变更（'
+              + sel.provider + '/' + sel.model + '），已放弃接替、交还用户选择');
+          } catch (e) {}
+        }
+      }
+    } catch (e) {}
+    return next();
+  }));
+
+  // ── ① 老宿主专用（0.2.1 及以前）：本轮已接替过才覆盖请求配置 ──────────
+  //
+  // ⚠️ 0.2.2 起本监听器【直接放行】：那时改 provider/model 会抛
+  //    "agent/request proposed ... ; use agent.model.select() before step preparation"。
+  //    判断方式就是 supportsModelSelect(agent)，见文件顶部适配说明。
   //
   // ══ 【2026-10-30 重大修正】绝不能再无条件覆盖用户的选择 ══════════════
   // 原实现（v2）每轮都把请求强制改成"链首候选"，导致两个严重问题：
@@ -1290,6 +1514,8 @@ export function apply(ctx) {
     try {
       const agent = payload && payload.agent;
       if (!agent || !agent.id) return resolved;
+      // 【0.2.2】换模型只能走 agent.model.select()；这里一个字都不能改。
+      if (supportsModelSelect(agent)) return resolved;
       if (!modelChainApplies(agent)) return resolved;
 
       const st = modelChainStateOf(agent, payload.turn);
@@ -1415,7 +1641,15 @@ export function apply(ctx) {
       //   · tried 集合保证同一轮不重复试；
       //   · 已试过的（含刚失败的）自动跳过 → 不会死循环；
       //   · 全部试完 → 明确返回"耗尽"，交还宿主。
-      let nxt = nextModelCandidate(cfg.entries, st.tried);
+      // ── 【2026-11-05 · 0.2.2】优先挑"没被隔离的家" ─────────────────────
+      // 同批 fork 出来的子代理会读到同一份隔离表：一个撞了额度，后面的
+      // 直接跳过这个 provider，不必每个都先撞一堵墙再切。
+      let nxt = firstHealthyCandidate(cfg.entries, st.tried, null);
+      if (!nxt) {
+        // 整条链都被隔离 / 都试过了 → 退一步只按"本轮试没试过"挑，
+        // 宁可去试一个被隔离的家，也不空转。
+        nxt = nextModelCandidate(cfg.entries, st.tried);
+      }
       if (!nxt) {
         // 链已试完 → 交回默认（明确失败，绝不空转）
         try {
@@ -1424,11 +1658,28 @@ export function apply(ctx) {
         } catch (e) {}
         return next();
       }
-      // 记下【切换前用户实际在用的模型】——下一轮 agent/request 会用它
-      // 区分"这是我们自己切走的" 还是 "用户又手动改了选型"。
+      // 记下【切换前用户实际在用的模型】——老宿主靠它区分
+      // "这是我们自己切走的" 还是 "用户又手动改了选型"；0.2.2 下由
+      // agent/pre-step 监听器做同样的事。
       st.prevKey = _curKey;
       st.key = modelKey(nxt.provider, nxt.model);
-      st.switched = true;             // ← 关键：只有这个标记置位，下一轮才会覆盖请求
+      st.switched = true;             // ← 老宿主：只有这个标记置位，下一轮才会覆盖请求
+      // 额度/限流是按账号算的：把这个 provider 整体隔离一会儿
+      quarantineProvider(payload.provider);
+      if (supportsModelSelect(agent)) {
+        // ── 0.2.2 通道 ────────────────────────────────────────────────
+        const ok = selectModelRoute(agent, nxt);
+        try {
+          console.warn('[dsh-engineering-ui] 模型接替（select）：' + payload.provider
+            + ' 错误 ' + code + ' → ' + nxt.provider + '/' + nxt.model
+            + (ok ? '，下一次尝试生效' : '（select 写入失败，交还宿主）'));
+        } catch (e) {}
+        // 失败后自己续一轮，不用用户手动重发（可用 autoResume:false 关掉）
+        maybeAutoResume(agent, st, payload, nxt);
+        // ⚠️ 绝不返回 {kind:'retry'}：重试会复用本步已捕获的旧路由，
+        //    只会再撞一次同样的错、白烧一次请求。交回下游收尾。
+        return next();
+      }
       try {
         console.warn('[dsh-engineering-ui] 模型接替：' + payload.provider
           + ' 错误 ' + code + ' → 切到 ' + nxt.provider + '/' + nxt.model);
@@ -4694,11 +4945,23 @@ export function apply(ctx) {
         return send(res, 200, { ok: false, error: '无法定位工程模式 tools 目录，模型链未保存' });
       }
       try {
-        fs.writeFileSync(p, JSON.stringify({
+        // ── 不要整份覆盖 ──────────────────────────────────────────────────
+        // 设置页只认识 enabled/models；同一个文件里还可能有用户手写的
+        // autoResume / autoResumeMax / autoResumeDelayMs（0.2.2 自动续跑）。
+        // 整份重写会把这些键吃掉 → 先读旧值再合并。
+        const prevCfg = readJsonSafe(p) || {};
+        const nextCfg = {
+          ...prevCfg,
           enabled: cfg.enabled,
           models: cfg.entries,
           updated_at: new Date().toISOString(),
-        }, null, 2), 'utf8');
+        };
+        if (payload && payload.autoResume !== undefined) nextCfg.autoResume = cfg.autoResume;
+        if (payload && payload.autoResumeMax !== undefined) nextCfg.autoResumeMax = cfg.autoResumeMax;
+        if (payload && payload.autoResumeDelayMs !== undefined) {
+          nextCfg.autoResumeDelayMs = cfg.autoResumeDelayMs;
+        }
+        fs.writeFileSync(p, JSON.stringify(nextCfg, null, 2), 'utf8');
         modelChainCache = null;          // 立刻失效，下一轮请求就用新配置
         modelChainState.clear();         // 链变了，旧进度作废
         return send(res, 200, { ok: true, enabled: cfg.enabled, models: cfg.entries, file: p });

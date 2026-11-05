@@ -318,8 +318,17 @@
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
 
+    # ⛔ 已停用（2026-11-05）：0.2.2-rc.1 起 @deepseek-ai/dsh-tool-subagent-control 的
+    #    package.json exports 只剩 "."，**不再导出 "./list-agents" 子路径**；
+    #    list_agents 工具已并入该包主入口，由上面 tool-subagent-control 那一行统一注册。
+    #    若本行恢复启用，loader 的 import() 会失败：
+    #      agent-preset/invalid: tool-subagent-list-agents
+    #        (@deepseek-ai/dsh-tool-subagent-control/list-agents): never started
+    #    → 整个 engineering preset 挂载失败 → 新建会话/选模型全部报错。
+    #    ⛔ 禁止改成 disabled: false，也禁止删掉 disabled 字段。
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+      disabled: true
 
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'

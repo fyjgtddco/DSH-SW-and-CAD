@@ -81,6 +81,47 @@ DSH 平台禁止子代理直接向用户提问（`userQuestions.ask()` 校验 `a
    "官方占用右列"的判据 —— 官方该快照**跨全部会话 + localStorage 持久化**，
    只要历史上开过任何 tab 就永远非空 → **永久让位** → 面板"该出没出"。
 
+### 7. 模型自动接替（0.2.2 起改走 `agent.model.select`）
+
+工程模式会话里按 `model_chain.json` 的顺序兜底：当前模型额度耗尽 / 限流 /
+反复失败，就换下一个候选。**两条通道按宿主能力自动选**：
+
+| 宿主 | 机制 | 生效时机 |
+|---|---|---|
+| 0.2.2+（有 `agent.model.select`） | `agent/request-error` → 隔离该 provider + `select(下一个候选)` | **下一次尝试**（下一步 / 下一轮 / 新建子代理） |
+| 0.2.1 及以前 | `agent/request` 改 `{provider, model}` + 返回 `{kind:'retry'}` | 同一步内立刻换 |
+
+为什么要分两条：0.2.2 在提示词组装前就钉死本步路由，`agent/request` 再改
+`provider/model/reasoningEffort` 会直接抛
+`agent/request proposed "p/m" after step preparation fixed "p/m"; use agent.model.select() before step preparation`
+—— 也就是说"同一步内换模型重试"被官方封死了，硬来只会让本该接替的一轮
+提前 `turn/end error`。所以 0.2.2 下：
+
+- 本步仍以该错误结束（无法避免），**但路由已经换好**；
+- **插件会自己补一条「继续」把这一轮接上**（见下「自动续跑」），不需要手动重发；
+- 被判定失效的 provider 会被隔离 10 分钟，同批 fork 出来的子代理会跳过它；
+- 用户手动改选模型 → 立即交还控制权并解除隔离（`agent/pre-step` 里判定）。
+
+#### 自动续跑（autoResume）
+
+0.2.2 的 turn 一旦因模型错误结束，只能靠 `agent.followup()` 唤醒驱动器再开一轮
+（`inject()` 不唤醒，宿主没有"静默续跑"接口）。所以失败后插件会延迟约 1.2 秒
+（等 `turn/end` 落盘、驱动器回 idle）自己发一条来源为 `plugin:dsh-engineering-ui`
+的消息：
+
+> （模型自动接替：上一个模型返回 QUOTA_EXCEEDED，已切到 xxx/yyy。请从上次中断处继续；已经完成的步骤、已经成功的工具调用不要重做。）
+
+在 `tools/model_chain.json` 里可以调：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `autoResume` | `true` | 关掉就退回"失败后等手动重发" |
+| `autoResumeMax` | `3` | 同一轮用户输入内最多自动续几次（防整条链都挂时无限重试） |
+| `autoResumeDelayMs` | `1200` | 延迟多久再续（太短会在驱动器还 running 时投递，不唤醒） |
+
+用户手动发新消息时续跑计数立刻清零，未触发的续跑定时器也会撤销；
+设置页保存模型链是**合并写入**，手写的这三个键不会被覆盖。
+
 ## HTTP 接口（13 条，与 Harness Web 同源）
 
 只读（GET）：
