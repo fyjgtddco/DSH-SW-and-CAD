@@ -54,9 +54,18 @@ RUNTIME_NAMES = {
     'platform_agents.json', 'part_registry.json', 'custom_materials.json',
     # 插件/AI 写入的现场文件（不属于代码）
     'persona.json', 'sw_guard.log', 'sw_guard.pid', 'sw_monitor.pid',
+    # -- [Webots 接入] 与 sync-to-dsh.ps1 同步扩充的运行时数据 --
+    #   仿真现场（状态投影 / 作业账本 / 实例锁）绝不跟着代码走：
+    #   覆盖 = 丢正在跑的作业与证据；跨机同步更是毫无意义。
+    'webots_state.json', 'webots_jobs.sqlite3', 'webots_jobs.sqlite3-wal',
+    'webots_jobs.sqlite3-shm', 'webots_instance.lock',
 }
 RUNTIME_DIRS = {'reports', 'heartbeats', 'load_cases', 'physics_runs',
-                'mode_logs', '.defense', '__pycache__', 'output'}
+                'mode_logs', '.defense', '__pycache__', 'output',
+                # webots_runs/<run_id>/ 是报告与证据落点（model_manifest /
+                #   conversion_report / experiment_report / logs / evidence），
+                #   属于运行现场，不是代码。
+                'webots_runs'}
 BIN_EXT = ('.sldprt', '.sldasm', '.slddrw', '.dwg', '.dxf', '.step', '.stp',
            '.igs', '.stl', '.pdf', '.png', '.jpg', '.jpeg', '.zip', '.7z')
 

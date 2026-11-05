@@ -1,0 +1,1 @@
+<!DOCTYPE robot [<!ENTITY fixture "box">]><robot name="dtd"><link name="box"/></robot>

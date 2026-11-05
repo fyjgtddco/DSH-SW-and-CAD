@@ -56,13 +56,17 @@ const rewritten = readFileSync(join(__dirname, '..', 'lib', 'index.js'), 'utf8')
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + url(SHIM_LLM) + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + url(SHIM_REGISTRY) + "'")
   .replace("from './defense-sign.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'defense-sign.js'), 'utf8')) + "'")
-  .replace("from './job-wait-guard.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'job-wait-guard.js'), 'utf8')) + "'");
+  .replace("from './job-wait-guard.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'job-wait-guard.js'), 'utf8')) + "'")
+  // 【Webots 接入】webots.js 也是相对 import；data: URL 解析不了相对路径。
+  .replace("from './webots.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'webots.js'), 'utf8')) + "'");
 
 const { apply } = await import(url(rewritten));
 
 function harness() {
   const hooks = new Map();
   const ctx = {
+    // 【Webots 接入】index.js 已声明 inject 含 'tools' 并调用 ctx.tools.guard。
+    tools: { guard() { return () => {}; } },
     on(name, fn) {
       const list = hooks.get(name) || [];
       list.push(fn);

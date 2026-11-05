@@ -548,14 +548,15 @@ DSH-SW-and-CAD-main/
 │   ├── preset.yml                # 显示元数据
 │   ├── agent.cordis.yml          # 历史清单（运行时不加载，仅对照）
 │   ├── README.md                 # 架构与门禁细节（更技术向）
-│   ├── skills/                   # 7 个技能
+│   ├── skills/                   # 8 个技能
 │   │   ├── mode-selection/       # 强制入口：模式选择 + 门禁流程
 │   │   ├── assembly-orchestration/ # 多屋编排
 │   │   ├── cad-workflow/         # AutoCAD 工作流
 │   │   ├── sw-design/            # SW 设计 + GB/T 制图
 │   │   ├── solidworks-bridge/    # SW 桥接
 │   │   ├── sw-to-cad/            # SW -> CAD
-│   │   └── physics-in-loop/      # 物理在环
+│   │   ├── physics-in-loop/      # 物理在环
+│   │   └── webots-simulation/    # Webots 仿真（可选，见 docs/webots-mcp）
 │   ├── tools/                    # ★ Python 工具链
 │   │   ├── workflow_gate.py      # 门禁大脑
 │   │   ├── mode_gate.py          # 房间状态机 + SW 锁 + room-board
@@ -565,18 +566,21 @@ DSH-SW-and-CAD-main/
 │   │   ├── swapi.py              # 高层建模 API
 │   │   ├── part_registry.py      # 零件台账 + 一致性校验
 │   │   ├── visual_check.py       # 看图闭环
+│   │   ├── webots_env.py         # ★ Webots 仿真可用性自检（只读）
+│   │   ├── webots_mcp/           # ★ Webots MCP server / 转换 / 证据（可选）
 │   │   ├── physics/              # 物理子系统（FEA / 疲劳 / 规则库）
 │   │   ├── physics/rules/        # GB/T 规则包
 │   │   ├── load_cases/           # 载荷工况（gate_load_case.json）
 │   │   ├── reports/              # 防线凭据 + 房间报告
-│   │   └── test_regression_*.py  # 30 个回归测试
+│   │   └── test_regression_*.py  # 31 个回归测试
 │   └── plugins/dsh-engineering-ui/  # UI 插件
 │       ├── lib/index.js          # Host 半（HTTP 路由 / 提问桥接 / 防线签名）
 │       ├── lib/client.js         # 浏览器半（三栏工作区）
 │       ├── lib/defense-sign.js   # HMAC 凭据签名
 │       ├── lib/job-wait-guard.js # ★ job_output 长等待守卫（防"卡死"，见下）
 │       ├── preset-engineering.patch.yml  # ★ 运行时真正加载的人设
-│       └── test/                 # 13 个插件测试
+│       ├── lib/webots.js         # ★ Webots 只读宿主门（归属校验 + 4 条路由）
+│       └── test/                 # 15 个插件测试
 ├── profiles/                     # 宿主层 patch 模板
 └── third-party-patched/          # 打过补丁的第三方插件
 ```
@@ -585,6 +589,71 @@ DSH-SW-and-CAD-main/
 > 很多看起来"多余"的代码，是为了防止某个已经踩过两次的坑复发。
 
 ---
+
+## 🤖 Webots 仿真（可选，默认关闭）
+
+> 接入的是官方交付补丁 `f04ac75a`（86 文件：`engineering/tools/webots_mcp/` 的 MCP server、
+> 转换器、证据读取器 + 12 份契约文档 + 测试）。**它是外围承载，不是物理核心** ——
+> 原生 SW 导出、关节推断、自动回写与真实物理判定仍未实现，状态里会明写
+> `core_ready=false` / `CALIBRATION_REQUIRED`。
+
+### 它挂在主流程的哪个位置
+
+**不是第四种模式**。仿真发生在模型已经存在之后：
+
+```
+Mode 1/2/3 判定 → 门禁 → 建模 → 三大防线 → 出图
+                                     ↘ （可选）Webots 仿真 → 报告/证据 → 只读回看
+```
+
+它**消费** `select` 建立的 task/room 身份，所以必须在 `select` 之后、`room-end` 之前跑；
+房间收尾后没有合法身份，只读接口会返回 `CONTEXT_UNAVAILABLE`。
+
+### 三个入口
+
+| 入口 | 用法 |
+|---|---|
+| **自检（先跑这个）** | `python "<根>\tools\webots_env.py" --json` → 看 `sim_available` / `blocking` |
+| **桥接命令** | `sw_bridge.py sim-status` / `sim-env` / `sim-list` / `sim-report`（**不连 SW、不取 SW 锁**） |
+| **MCP 工具** | `mcp__webots__sim_status` / `sim_launch` / `sim_job` / `sim_report` / `sim_evidence` …（需 `DSH_WEBOTS_ENABLE=1`） |
+
+宿主侧新开了 4 条**只读** GET 路由（`webots-context` / `-report` / `-evidence` / `-attribute`），
+走的是和 conn-state 同一套 `guardRoute`（loopback + Origin 校验 + 限流）。
+
+> ⚠️ 设置页「连接区」里那块「▶ Webots 仿真报告与证据（只读）」**已按用户要求移除**（2026-11-05）。
+> 组件（`EngWebotsPanel` / `EngWebotsSnapshot` / `EngWebotsReport`）仍保留并导出，
+> 供子代理工作区或后续版本复用；要接回设置页只需恢复一行 `h(EngWebotsPanel, {})`。
+
+### 启用（缺一即视为未启用，不是"坏了"）
+
+```powershell
+$env:DSH_WEBOTS_ENABLE     = '1'
+$env:DSH_WEBOTS_PYTHON     = '<绝对路径>\python.exe'    # 已装 webots_mcp/requirements.txt
+$env:DSH_WEBOTS_INPUT_ROOT = '<已存在的只读输入根>'
+$env:DSH_STATE_DIR         = '<已存在的绝对 state 目录>'
+$env:DSH_ENGINEERING_ROOT  = '<工程模式根>\engineering'
+$env:WEBOTS_HOME           = 'D:\Webots'
+# 可选：$env:DSH_WEBOTS_RUNTIME_CONFIG = '<绝对路径>\runtime.json'
+```
+
+依赖安装（一次性）：
+
+```powershell
+python -m venv $env:USERPROFILE\.dsh\engineering-webots\venv
+& $env:USERPROFILE\.dsh\engineering-webots\venv\Scripts\python.exe -m pip install -r engineering\tools\webots_mcp\requirements.txt
+```
+
+### 边界（**必须保留在报告里**）
+
+| 能做 | 不能做 |
+|---|---|
+| 离线把零件捕获转成 URDF + PROTO（urdf2webots 2025.0.0） | 原生 SW→URDF 的坐标/惯量标定（A01） |
+| 读已存报告与日志证据（字节分页 + SHA-256） | 自动关节推断（A02） |
+| 归属校验 / 代际 / 操作幂等 | 自动根因回写 SW（A03/A04） |
+| `sim_status` 等只读查询 | 真实物理 PASS 判定（恒 `physical_validation=not_run`） |
+
+`fake` / `fixture` / `synthetic` / 静态校验 / 空接触 **都不等于物理 PASS**；
+`OUTCOME_UNKNOWN` **禁止重发动作**。详见 [engineering/docs/webots-mcp/](engineering/docs/webots-mcp/)。
 
 ## 🩹 防"卡死"：`job_output` 长等待守卫
 

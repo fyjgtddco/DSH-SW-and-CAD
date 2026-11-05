@@ -7196,6 +7196,12 @@ def main():
                 "ac-status": "AutoCAD 连接状态（只读，不需要 SW/房间锁）",
                 "ac-export [out.dxf]": "导出当前 AutoCAD 图纸为 DXF",
                 "cad-validate-live": "验证当前 AutoCAD 活动文档",
+                # ──【Webots 仿真接入】纯仿真入口：不连 SW、不取 SW 锁 ──────────
+                "sim-status": "Webots 仿真可用性自检（只读环境与路径，零副作用）",
+                "sim-env": "同上，单行机器可读 JSON（AI 直接解析 blocking）",
+                "sim-list": "列出 state 目录下已有的仿真 run（只读目录名）",
+                "sim-report --task-id .. --room-id .. --run-id .. --report-type ..":
+                    "读已存仿真报告（转发 webots_mcp.host；归属校验在宿主路由层）",
                 "physics-status": "FEA 求解器后端状态",
                 "physics-validate-case <case.json>": "校验载荷工况",
                 "physics-optimize <case.json>": "自动迭代优化",
@@ -7379,7 +7385,14 @@ def main():
                    # 它只读 swapi 的进程内状态 + 类型库/gen_py 路径。列入 _LOCAL_CMDS
                    # 后 main() 会把 sw 置为 None（不 get_sw）—— 这正是关键：
                    # "想看看能不能早期绑定"绝不能把 SolidWorks 拉起来。
-                   "early-status"}
+                   "early-status",
+                   # ──【Webots 仿真接入】sim-* 是纯仿真入口 ─────────────────
+                   # 它不打开 SW、不申请 SW FIFO 锁、不写 SW 产物：
+                   #   · 身份（task/room）仍由 workflow_state/mode_state 校验
+                   #     （在 webots_mcp 与插件侧），本命令只是进程入口；
+                   #   · 加进 _LOCAL_CMDS ⇒ main() 把 sw 置 None，不会因为
+                   #     "想跑个仿真"反而把 SolidWorks 拉起来占住独占窗口。
+                   "sim-status", "sim-env", "sim-report", "sim-list"}
     _NO_SW_CMDS = _PURE_COMPUTE_CMDS | _CAD_ONLY_CMDS | _LOCAL_CMDS
     # ── 【观察点 10 修复】只读诊断类：需要连 SW，但不该强制 --room ─────────
     # ⚠️ 必须与 _READONLY_CMDS【分开】—— 后者会被 `_NO_SW_CMDS = _READONLY_CMDS`
@@ -8054,6 +8067,77 @@ def main():
                 result = _pb.cmd_validate_domain(_dom, room=(_room_from_strip or _detect_gate_room(args) or os.environ.get("DSH_ROOM") or ""))
                 if isinstance(result, dict):
                     result["room_stage_push"] = _stage_out
+        elif cmd == "sim-status":
+            # ──【Webots 仿真接入】只读可用性自检（不启动 Webots / MCP / SW）──
+            #   webots_env.probe() 只读环境变量与路径存在性，零副作用。
+            try:
+                import webots_env as _we
+                out = _we.probe()
+            except Exception as _e:  # 缺模块也要给出结构化失败，不能抛栈
+                out = {"ok": False, "error_code": "SIM_ENV_UNAVAILABLE",
+                       "error": str(_e)}
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+            return 0
+        elif cmd == "sim-env":
+            # 与 sim-status 同源，但只输出机器可读的单行 JSON（AI 直接解析）
+            try:
+                import webots_env as _we
+                out = _we.probe()
+            except Exception as _e:
+                out = {"ok": False, "error_code": "SIM_ENV_UNAVAILABLE",
+                       "error": str(_e)}
+            print(json.dumps(out, ensure_ascii=False))
+            return 0
+        elif cmd == "sim-report":
+            # ──【Webots 仿真接入】读已存报告：转发 webots_mcp.host ──────────
+            #   args: --task-id <id> --room-id <id> --run-id <id>
+            #         --report-type model_manifest|conversion_report|experiment_report
+            #   本命令【不校验归属】（CLI 无 live agent 语义）—— 归属校验在
+            #   宿主路由层（lib/webots.js）完成；这里只做「有身份就查」。
+            _sim_args = {"kind": "report"}
+            for _i, _a in enumerate(args):
+                if _a == "--task-id" and _i + 1 < len(args):
+                    _sim_args["task_id"] = args[_i + 1]
+                elif _a == "--room-id" and _i + 1 < len(args):
+                    _sim_args["room_id"] = args[_i + 1]
+                elif _a == "--run-id" and _i + 1 < len(args):
+                    _sim_args["run_id"] = args[_i + 1]
+                elif _a == "--report-type" and _i + 1 < len(args):
+                    _sim_args["report_type"] = args[_i + 1]
+            _missing = [k for k in ("task_id", "room_id", "run_id", "report_type")
+                        if k not in _sim_args]
+            if _missing:
+                print(json.dumps({"ok": False, "error_code": "INVALID_ARGUMENT",
+                                  "missing": _missing}, ensure_ascii=False))
+                return 2
+            try:
+                import webots_mcp.host as _wh
+                out = _wh.main([
+                    "report",
+                    "--task-id", _sim_args["task_id"],
+                    "--room-id", _sim_args["room_id"],
+                    "--run-id", _sim_args["run_id"],
+                    "--report-type", _sim_args["report_type"],
+                ])
+            except Exception as _e:
+                out = {"ok": False, "error_code": "READER_UNAVAILABLE",
+                       "error": str(_e)}
+            if isinstance(out, dict):
+                print(json.dumps(out, ensure_ascii=False, indent=2))
+            return 0 if (isinstance(out, dict) and out.get("ok")) else 1
+        elif cmd == "sim-list":
+            # 列出当前 state 目录下的 run（只读目录名，不解析报告）
+            try:
+                import _store as _st
+                _base = os.path.join(_st.state_dir(), "webots_runs")
+                _runs = sorted(os.listdir(_base)) if os.path.isdir(_base) else []
+                out = {"ok": True, "state_dir": _st.state_dir(), "runs": _runs,
+                       "count": len(_runs)}
+            except Exception as _e:
+                out = {"ok": False, "error_code": "STATE_UNAVAILABLE",
+                       "error": str(_e)}
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+            return 0
         elif cmd == "physics-list-domains":
             if not _HAS_PHYSICS:
                 result = {"ok": False, "error": "physics_bridge.py 未找到"}

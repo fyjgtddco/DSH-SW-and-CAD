@@ -36,6 +36,11 @@ provider: filesystem
 | Single part, simple geometry | **Mode 1: Basic Part Building** | Single-thread direct modeling |
 | Multi-part assembly, mechanism, transmission | **Mode 2: Complex Assembly** | Multi-room subagent collaboration |
 | User sent image/screenshot | **Mode 3: Image Analysis** | Single-thread recognition rebuild |
+| 用户要**仿真 / 运动学 / 碰撞 / 传感器 / 机器人跑起来**（不要求新图纸） | **附加动作，不是新模式** | 见下方「Webots 仿真分支」 |
+
+> 🟦 **仿真不是第四种模式**：它挂在已有模式的输出端。先照旧判定 1/2/3 并走完该走的门禁，
+> 再按下面的「Webots 仿真分支」把**已交付的模型**送进仿真。**绝不允许**因为"要仿真"
+> 就跳过建模/出图，也绝不允许用仿真结果反过来替代三大防线。
 
 ## Step 2: Output Mode Declaration
 
@@ -501,6 +506,67 @@ wave3 = 工程图输出（等 wave2 room-end）
 
 **严禁一次性创建多个 subagent（串行模式）！** 串行锁会拒绝第二个 room-start。
 - 🚫【铁律】所有小屋创建完毕前，主对话禁止调用 sw_bridge.py 做任何建模操作！
+
+## 🟦 Webots 仿真分支（Mode 1/2/3 的附加产物，不改变原门禁）
+
+> **一句话**：仿真只在**模型已经存在**之后发生；它消费 `select` 建立的 task/room 身份，
+> 自己**不建房间、不改 workflow_state.json、不申请 SW 写锁**。
+
+### 什么时候走这一支
+
+用户明确说要「仿真 / 跑起来 / 看运动 / 查干涉 / 传感器数据 / 机器人行为」时。
+只是要强度、疲劳、FEA、出图 —— **不走这里**，走 physics-in-loop。
+
+### 硬约束（代码级，不是提示词）
+
+| 约束 | 由谁保证 |
+|---|---|
+| 归属必须由**当前 live 的工程 agent + 唯一活跃房间**推导 | `lib/webots.js` 的 `resolveWebotsContext()`，不符即 `CONTEXT_UNAVAILABLE` |
+| room_id = `room-` + 房间名 UTF-8 的**完整 SHA-256** | 同上；ASCII 与中文走同一映射，禁止给 ASCII 名称开直通域 |
+| 每次调用必须带**真实** `task_id` / `room_id` | `ctx.tools.guard` 拦截 `mcp__webots__*`，自报值对不上直接拒 |
+| 未配置 runtime 时一律 `not_started` / `core_ready=false` | 状态投影取保守值，**不许**把"装好了"说成 READY |
+
+### 执行顺序
+
+1. **先有 run**：`sim_status` 只读；真正要跑先 `sim_launch`（需要 pinned runtime）。
+2. **未知结果不许重发**：返回 `OUTCOME_UNKNOWN` / 超时 / 断连时，保留
+   operation_id / job_id / run_id / session_generation，用原身份查 `sim_job`，**禁止重发动作**。
+3. **读证据而不是猜**：`sim_report`（model_manifest / conversion_report / experiment_report）
+   与 `sim_evidence`（UTF-8 字节分页；翻页要带上一页的 `sha256` 作 `expected_sha256`）。
+4. **归因只列候选**：`sim_attribute` 只读；`fake` / `fixture` / `synthetic` /
+   静态校验 / 空接触 **都不等于物理 PASS**。
+5. **回写 SW 要单独授权**：本版未实现原生回写（`authorized_native_repair` 在
+   `blocked_native` 里），只能报告缺口，**不许**自行改质量/摩擦/重力去凑通过。
+
+### 启用条件（缺一即视为未启用，不是"坏了"）
+
+```powershell
+$env:DSH_WEBOTS_ENABLE     = '1'                       # 唯一开关，不是 1 就整行禁用
+$env:DSH_WEBOTS_PYTHON     = '<绝对路径>\python.exe'   # 已装 engineering/tools/webots_mcp/requirements.txt
+$env:DSH_WEBOTS_INPUT_ROOT = '<已存在的只读输入根>'
+$env:DSH_STATE_DIR         = '<已存在的绝对 state 目录>' # Node 与 Python 必须解析到同一目录
+$env:DSH_ENGINEERING_ROOT  = '<工程模式根>\engineering'
+$env:WEBOTS_HOME           = '<Webots 安装根>'          # 例：D:\Webots
+# 可选：$env:DSH_WEBOTS_RUNTIME_CONFIG = '<绝对路径>\runtime.json'
+```
+
+**先跑自检**（只读，不启动任何东西）：
+
+```powershell
+python "<工程模式根>\tools\webots_env.py"        # 人类可读
+python "<工程模式根>\tools\webots_env.py" --json # AI 读 blocking 字段
+```
+
+任一缺失 → MCP 行被 `disabled`，或进程起不来但 `failOnStartupError:false` 让预设照常加载。
+**这时正确行为是如实报告"仿真不可用"，不是伪造结果。**
+
+### 报告里必须保留的四件事
+
+`provenance`（fixture / static-derived / real-sw-export / real-webots）、
+`core_ready`、`execution_state`、`stale` + `snapshot_at`。
+把这四项抹掉、只说"仿真通过"，等同于交付虚假证据。
+
+---
 
 ## ⚠️ 关键规则
 

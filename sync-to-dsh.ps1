@@ -53,10 +53,12 @@ $RuntimeNames = @(
     # settings.json 记的是【这台电脑】的交付目录 / SW-CAD-Python 路径，
     # 带着机器指纹。同步到别的电脑毫无意义（会被指纹判为外来而忽略），
     # 还可能误导排障，因此按运行时数据处理。
-    'settings.json'
+    'settings.json',
+    'webots_state.json', 'webots_jobs.sqlite3', 'webots_jobs.sqlite3-wal',
+    'webots_jobs.sqlite3-shm', 'webots_instance.lock'
 )
 $RuntimeDirs = @('reports', 'heartbeats', 'load_cases', 'physics_runs',
-                 'mode_logs', '.defense', '__pycache__', 'output')
+                 'mode_logs', '.defense', '__pycache__', 'output', 'webots_runs')
 
 function Say($m, $c = 'Gray') { Write-Host $m -ForegroundColor $c }
 

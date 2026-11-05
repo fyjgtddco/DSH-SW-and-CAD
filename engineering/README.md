@@ -47,6 +47,47 @@ cd <preset目录>
 
 ---
 
+## Webots 仿真接入（2026-11-05，可选 / 默认关闭）
+
+外部交付补丁 `f04ac75a` 已并入本仓库，改为**挂在工程模式主流程上**而不是独立跑。
+
+### 改动落点（六处）
+
+| 文件 | 改了什么 |
+|---|---|
+| `engineering/tools/webots_mcp/` | 新增（80 项之一）：MCP server、转换器、证据读取、物理门、修复试验 |
+| `engineering/docs/webots-mcp/` | 新增 14 份契约文档（原文照收，作证据口径） |
+| `engineering/skills/webots-simulation/` | 新增技能，并在末尾补「与主流程的接口」 |
+| `engineering/tools/webots_env.py` | 新增：可用性自检（只读，零副作用） |
+| `lib/index.js` + `lib/webots.js` | 装配只读宿主门：4 条 GET 路由 + `ctx.tools.guard` 归属校验 |
+| `preset-engineering.patch.yml` | 新增 `mcp-webots` 行（默认 `disabled`）+ persona 的「## 仿真」段 |
+| `sync-to-dsh.ps1` / `verify_sync.py` | 新增运行现场排除项（`webots_state.json` / 作业账本 / 锁 / `webots_runs/`） |
+
+### 与既有契约的接口
+
+1. **身份**：`resolveWebotsContext()` 从 `workflow_state.json.task_id` +
+   `mode_state.json` 里唯一 `active` 且 `subagents[房间].id == agent.id` 的房间推导；
+   `room_id = "room-" + sha256(房间名 UTF-8)`。模型自报一律不采信。
+2. **SW 锁**：仿真链**不**调 `sw_bridge` 的建模命令，因此不进 `mode_gate` 的 FIFO；
+   新增的 `sim-*` 命令归入 `_LOCAL_CMDS`（`_NO_SW_CMDS`），实测不会把 SW 拉起来。
+3. **防线**：仿真**不能**替代材料/物理/领域三大防线凭据；`room-end` 的校验逻辑未改。
+4. **状态目录**：沿用 `_store.state_dir()`，不另造一套；`webots_state.json` 等按运行时数据排除同步。
+
+### 已验证 / 未验证（2026-11-05 本机实测）
+
+- ✅ 离线管线：`publish-part → convert-part → host report` 跑通，产出 URDF + PROTO + 两份报告
+- ✅ `webots_env.py` 32 项断言、插件 15 个 `.mjs`（含 webots-host / webots-preset）全绿
+- ✅ 插件路由 33 条（原 29 + 4 条 Webots 只读）
+- ❌ 真实 DSH 装配下的 MCP 启动、真实 Webots 作业、原生 SW→URDF、物理 PASS —— **均未验证**
+- ✅ Python 侧 101 项全绿（含 `test_a04_transport`；原先 Windows 上
+  `WinError 32` 的临时目录清理失败已修：`Transport.close()` 现在等
+  `writer.wait_closed()`，测试夹具也改成可重试清理）
+
+> 完整验收门槛（G1–G5）见 `engineering/docs/webots-mcp/a04-runtime.md` 与接入手册。
+> **不要**把"装好了"当成"仿真通过"。
+
+---
+
 ## 权限模式（重要）
 
 ### 默认权限 = Full access（不要被锁住）

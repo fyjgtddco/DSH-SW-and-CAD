@@ -1,0 +1,889 @@
+{
+  "schema_version": "webots-mcp-input-fixtures/v1",
+  "notes": "Every source and CAD identity is synthetic. Accepted means local fixture checks only; no SW export, conversion, or physics PASS.",
+  "cases": [
+    {
+      "fixture_id": "asymmetric_box",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "valid/asymmetric_box.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": null,
+        "summary": {
+          "links": [
+            "box"
+          ],
+          "joint_types": [],
+          "mesh_count": 1
+        }
+      }
+    },
+    {
+      "fixture_id": "box_metadata_m",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "analytic_box",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "synthetic-source-local",
+          "dimensions": [
+            0.1,
+            0.05,
+            0.02
+          ]
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": null,
+        "summary": {
+          "kind": "analytic_box",
+          "units": "m",
+          "dimensions": [
+            0.1,
+            0.05,
+            0.02
+          ]
+        }
+      }
+    },
+    {
+      "fixture_id": "box_metadata_mm",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "analytic_box",
+          "units": {
+            "length": "mm",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "synthetic-source-local",
+          "dimensions": [
+            100,
+            50,
+            20
+          ]
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": null,
+        "summary": {
+          "kind": "analytic_box",
+          "units": "mm",
+          "dimensions": [
+            100,
+            50,
+            20
+          ]
+        }
+      }
+    },
+    {
+      "fixture_id": "repeated_instances",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "valid/repeated_instances.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box_1"
+          },
+          {
+            "id": "box-2",
+            "instance_path": "FixtureAssembly/Box-2",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box_2"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": null,
+        "summary": {
+          "links": [
+            "base",
+            "box_1",
+            "box_2"
+          ],
+          "joint_types": [
+            "fixed",
+            "fixed"
+          ],
+          "mesh_count": 0
+        }
+      }
+    },
+    {
+      "fixture_id": "single_revolute",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "valid/single_revolute.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "moving-1",
+            "instance_path": "FixtureAssembly/Moving-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "moving"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": null,
+        "summary": {
+          "links": [
+            "base",
+            "moving"
+          ],
+          "joint_types": [
+            "revolute"
+          ],
+          "mesh_count": 0
+        }
+      }
+    },
+    {
+      "fixture_id": "single_prismatic",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "valid/single_prismatic.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "moving-1",
+            "instance_path": "FixtureAssembly/Moving-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "moving"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": null,
+        "summary": {
+          "links": [
+            "base",
+            "moving"
+          ],
+          "joint_types": [
+            "prismatic"
+          ],
+          "mesh_count": 0
+        }
+      }
+    },
+    {
+      "fixture_id": "bad_xml",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/bad_xml.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "INVALID_XML",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "missing_mesh",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/missing_mesh.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "MESH_NOT_FOUND",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "duplicate_link",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/duplicate_link.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "DUPLICATE_LINK_ID",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "duplicate_joint",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/duplicate_joint.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "DUPLICATE_JOINT_ID",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "negative_mass",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/negative_mass.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "INVALID_MASS",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "zero_mass",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/zero_mass.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "INVALID_MASS",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "nonfinite_mass",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/nonfinite_mass.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "NONFINITE_NUMBER",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "invalid_inertia",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/invalid_inertia.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "INVALID_INERTIA_DIAGONAL",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "nonfinite_mesh_scale",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/nonfinite_mesh_scale.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "NONFINITE_NUMBER",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "dtd",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/dtd.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "UNSAFE_XML",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "outside_mesh",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/outside_mesh.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "PATH_OUTSIDE_FIXTURES",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "remote_mesh",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/remote_mesh.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "REMOTE_MESH",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "missing_joint_limit",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "invalid/missing_joint_limit.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "MISSING_JOINT_LIMIT",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "missing_units",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "valid/asymmetric_box.urdf",
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "MISSING_UNITS",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "missing_frame",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "valid/asymmetric_box.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          }
+        },
+        "components": [
+          {
+            "id": "box-1",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "MISSING_COORDINATE_FRAME",
+        "summary": null
+      }
+    },
+    {
+      "fixture_id": "duplicate_component_id",
+      "input": {
+        "provenance": {
+          "kind": "synthetic",
+          "real_sw_export": false,
+          "real_webots_run": false
+        },
+        "source": {
+          "kind": "urdf",
+          "path": "valid/repeated_instances.urdf",
+          "units": {
+            "length": "m",
+            "mass": "kg",
+            "angle": "rad",
+            "time": "s",
+            "inertia": "kg*m^2"
+          },
+          "coordinate_frame": "urdf-link-local"
+        },
+        "components": [
+          {
+            "id": "duplicate",
+            "instance_path": "FixtureAssembly/Box-1",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box_1"
+          },
+          {
+            "id": "duplicate",
+            "instance_path": "FixtureAssembly/Box-2",
+            "source_file": "synthetic/Box.SLDPRT",
+            "configuration": "FixtureDefault",
+            "persistent_reference": null,
+            "identity_status": "synthetic",
+            "urdf_link": "box_2"
+          }
+        ]
+      },
+      "expected": {
+        "error_code": "DUPLICATE_COMPONENT_ID",
+        "summary": null
+      }
+    }
+  ]
+}

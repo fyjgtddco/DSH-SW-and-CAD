@@ -4579,7 +4579,7 @@ window.__ModuleLoader__.load({
         title: props.title || it.text
       },
         h('span', { className: 'eng-chip-dot' }),
-        it.text);
+        props.label || it.text);
     }
 
     /** 【连接区】SW / CAD 连接状态的共享读取（模块级，供 UI 多处复用）。
@@ -4592,6 +4592,119 @@ window.__ModuleLoader__.load({
      *     <tools>/connection_state.json   （由 conn_state.py 维护）
      *   本函数只【读】该文件（经宿主 /conn-state 端点），零副作用。
      */
+    function EngWebotsSnapshot(props) {
+      var s = props.snapshot;
+      if (!s) return h('p', null, '仿真未执行 / 状态 unknown；安装与进程检测不能证明仿真就绪。');
+      return h('div', { role: 'status' },
+        h('p', null, '来源：', String(s.provenance || 'unknown'), '；核心：',
+          s.core_ready === true ? '宿主报告可用（仍需核验握手与身份）' : '未实现 / 未确认',
+          '；执行：', String(s.execution_state || 'unknown'), '；作业原始状态：', String(s.job_state || 'UNKNOWN')),
+        h('p', null, '快照：', String(s.snapshot_at || 'unknown'), '；stale：', s.stale === false ? 'false' : 'true / unknown'),
+        h('p', null, 'unsupported：', s.unsupported === undefined ? 'unknown' : JSON.stringify(s.unsupported)),
+        s.execution_state === 'unknown' ? h('p', { role: 'alert' }, '结果 unknown：动作可能已经执行，禁止盲重发。') : null);
+    }
+
+    function EngWebotsReport(props) {
+      var report = props.report;
+      if (!report) return h('p', null, '尚无已读取报告（未执行 / unknown）。');
+      var evidence = Array.isArray(report.evidence) ? report.evidence : [];
+      var last = Math.max(0, Math.ceil(evidence.length / 20) - 1);
+      var page = Math.min(last, Math.max(0, props.page || 0));
+      var origin = typeof report.provenance === 'object' ? report.provenance.kind : report.provenance;
+      var preStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '260px', overflow: 'auto' };
+      return h('div', { 'aria-label': 'Webots报告' },
+        h('p', null, String(report.report_type), ' · ', String(report.run_id), ' · 来源 ', String(origin || 'unknown'),
+          ' · 支持状态 ', String(report.status || 'unknown')),
+        h('p', null, '源版本：', String(report.source_revision || 'unknown'), '；生成时间：', String(report.created_at || 'unknown')),
+        h('p', null, '支持状态与原始判定不等于物理验收通过；fake / synthetic / fixture 仅为夹具证据。'),
+        h('p', null, '缺失信息：', JSON.stringify(report.missing_information || [])),
+        h('details', null, h('summary', null, '候选零件与证据等级（不代表根因）、原始报告数据'),
+          h('pre', { style: preStyle }, JSON.stringify(report.data, null, 2))),
+        h('p', null, '证据 ', evidence.length ? (page * 20 + 1) + '–' + Math.min((page + 1) * 20, evidence.length) : '0', ' / ', evidence.length),
+        evidence.slice(page * 20, (page + 1) * 20).map(function (item, index) {
+          return h('pre', { key: page * 20 + index, 'data-webots-evidence': true, style: preStyle }, JSON.stringify(item, null, 2));
+        }),
+        h('button', { type: 'button', disabled: page === 0, onClick: function () { props.onPage(page - 1); } }, '上一页证据'),
+        h('button', { type: 'button', disabled: page === last, onClick: function () { props.onPage(page + 1); } }, '下一页证据'));
+    }
+
+    function currentWebotsSession() {
+      var sessions = engService('sessions');
+      var list = sessions && sessions.list;
+      var snapshot = list && typeof list.getSnapshot === 'function' ? list.getSnapshot() : null;
+      var rows = snapshot && snapshot.byId || {};
+      var ids = Object.keys(rows).filter(function (id) {
+        return rows[id] && rows[id].retainedBy && rows[id].retainedBy.mainView > 0;
+      });
+      return ids.length === 1 ? ids[0] : '';
+    }
+
+    function EngWebotsPanel(props) {
+      var sessionId = props.sessionId || currentWebotsSession();
+      var pair = useState({ sessionId: '', context: null, run: '', type: 'experiment_report', report: null,
+        page: 0, log: null, busy: false, error: null });
+      var s = pair[0], set = pair[1];
+      var request = useRef(0);
+      var tick = useState(0), rerender = tick[1];
+      function patch(values) { set(function (prev) { return Object.assign({}, prev, values); }); }
+      useEffect(function () {
+        var service = engService('sessions');
+        var list = service && service.list;
+        return list && typeof list.subscribe === 'function' ? list.subscribe(function () { rerender(function (n) { return n + 1; }); }) : undefined;
+      }, []);
+      useEffect(function () {
+        request.current++;
+        patch({ sessionId: sessionId, context: null, report: null, log: null, page: 0, error: null, busy: false });
+        return function () { request.current++; };
+      }, [sessionId]);
+      var owned = s.sessionId === sessionId && s.context;
+      async function read(kind, next) {
+        var token = ++request.current;
+        var query = 'sessionId=' + encodeURIComponent(sessionId);
+        if (kind !== 'context') query += '&run_id=' + encodeURIComponent(s.run);
+        if (kind === 'report') query += '&report_type=' + encodeURIComponent(s.type);
+        if (kind === 'evidence') {
+          query += '&offset=' + (next && s.log ? s.log.next_offset : 0) + '&limit=16384';
+          if (next && s.log) query += '&expected_sha256=' + encodeURIComponent(s.log.sha256);
+        }
+        patch({ busy: true, error: null });
+        try {
+          var response = await fetch('/dsh-engineering-ui/webots-' + kind + '?' + query);
+          var result = await response.json();
+          if (token !== request.current) return;
+          if (!response.ok || !result || result.ok !== true) throw new Error(
+            String(result && result.error_code || 'READ_FAILED') + ': ' + String(result && (result.error || result.hint) || '读取失败'));
+          if (kind === 'context') patch({ sessionId: sessionId, context: result, report: null, log: null, page: 0 });
+          else if (kind === 'report') patch({ report: result.data, page: 0 });
+          else patch({ log: result.data });
+        } catch (error) {
+          if (token !== request.current) return;
+          patch({ error: String(error.message || error) + '；日志或证据变更时请从头读取。', report: null, log: null,
+            context: kind === 'context' || response && response.status === 403 || result && result.error_code === 'CONTEXT_UNAVAILABLE' ? null : s.context });
+        } finally { if (token === request.current) patch({ busy: false }); }
+      }
+      return h('details', { className: 'eng-conn-log' },
+        h('summary', null, 'Webots 仿真报告与证据（只读）'),
+        h('p', null, '当前会话：', sessionId || 'unknown', '；须在绑定活跃房间的工程会话中读取。'),
+        h('button', { type: 'button', disabled: !sessionId || s.busy, onClick: function () { return read('context'); } }, '读取仿真上下文'),
+        h(EngWebotsSnapshot, { snapshot: owned || null }),
+        owned ? h('p', null, '任务：', owned.task_id, '；房间：', owned.room_label || owned.room_id) : h('p', null, '未授权 / 未读取上下文；不会按输入猜测任务或房间。'),
+        h('label', null, '运行ID ', h('input', { 'aria-label': '运行ID', value: s.run, maxLength: 96,
+          onChange: function (event) { request.current++; patch({ run: event.target.value, report: null, log: null, page: 0, busy: false, error: null }); } })),
+        h('label', null, '报告类型 ', h('select', { 'aria-label': '报告类型', value: s.type,
+          onChange: function (event) { request.current++; patch({ type: event.target.value, report: null, page: 0, busy: false, error: null }); } },
+          ['model_manifest', 'conversion_report', 'experiment_report'].map(function (type) { return h('option', { key: type, value: type }, type); }))),
+        h('button', { type: 'button', disabled: !owned || !s.run || s.busy, onClick: function () { return read('report'); } }, '读取报告'),
+        s.error ? h('p', { role: 'alert' }, s.error) : null,
+        h(EngWebotsReport, { report: owned ? s.report : null, page: s.page, onPage: function (page) { patch({ page: page }); } }),
+        h('p', null, 'worker 日志（UTF-8 字节分页，每页最多 16 KiB）'),
+        h('button', { type: 'button', disabled: !owned || !s.run || s.busy, onClick: function () { return read('evidence', false); } }, '从头读取日志'),
+        h('button', { type: 'button', disabled: !owned || !s.log || s.log.eof || s.busy, onClick: function () { return read('evidence', true); } }, '下一页日志'),
+        owned && s.log ? h('div', null,
+          h('p', { style: { overflowWrap: 'anywhere' } }, s.log.offset, '–', s.log.next_offset, ' / ', s.log.size_bytes, ' bytes；SHA-256 ', s.log.sha256),
+          h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: '260px', overflow: 'auto' } }, s.log.text)) : null);
+    }
+
     function fetchConnState(cb) {
       try {
         fetch('/dsh-engineering-ui/conn-state')
@@ -4759,8 +4872,10 @@ window.__ModuleLoader__.load({
         // ── 【NX → Webots 改造】Webots 也没有 COM，措辞必须如实 ──────────
         //   connected 的语义是"进程在跑 或 安装可验证"，不是"COM 会话已建立"；
         //   若沿用 SW/CAD 的"COM 未连上"文案会误导用户以为连接失败。
-        if (reqTarget === 'webots' && !connected) {
-          if (running === true) {
+        if (reqTarget === 'webots') {
+          if (connected) {
+            n = '安装/进程可用；仿真未确认（需真实控制器握手与机器人身份）';
+          } else if (running === true) {
             n = 'Webots 进程在运行（无 COM 接口，外部控制走 webots-controller）';
           } else if (entry && entry.checked_at) {
             n = '未检测到 Webots 进程或安装（检测于 ' + entry.checked_at + '）';
@@ -4841,6 +4956,7 @@ window.__ModuleLoader__.load({
             S.note ? h('div', { className: 'eng-row-hint' }, S.note) : null),
           h(EngStatusChip, {
             state: (busy || busyLaunch) ? 'busy' : ((S.data && S.data.state) || 'idle'),
+            label: reqTarget === 'webots' && !busy && !busyLaunch && S.data && S.data.state === 'on' ? '安装/进程可用' : undefined,
             title: (S.data && S.data.title) || '连接状态（读取 connection_state.json）',
           }),
           h('button', {
@@ -4914,7 +5030,7 @@ window.__ModuleLoader__.load({
                   patch({
                     phase: 'idle',
                     logText: txt,
-                    note: '启动成功' + (r.connected ? '，已连接' : '（进程已就绪）')
+                    note: reqTarget === 'webots' ? '启动请求完成；仿真未确认' : '启动成功' + (r.connected ? '，已连接' : '（进程已就绪）')
                   });
                   if (r.state) apply(r.state); else refresh();
                 } else {
@@ -5665,6 +5781,12 @@ window.__ModuleLoader__.load({
             //     （TCP 控制器协议），后续 MCP 会话就接在这一层之上。
             h(EngConnRow, { target: 'abaqus', label: 'Abaqus连接' }),
             h(EngConnRow, { target: 'webots', label: 'Webots连接' }),
+            // ── 【按用户要求移除】这里原先挂的是 h(EngWebotsPanel, {})，
+            //   即设置页「连接区」下方那行「▶ Webots 仿真报告与证据（只读）」。
+            //   用户明确要求删掉这个入口（2026-11-05）。
+            //   ⚠️ 只删入口，不删组件：EngWebotsPanel / EngWebotsSnapshot /
+            //      EngWebotsReport 仍在下方定义并已导出，测试与将来的
+            //      子代理工作区可以直接复用；接回设置页只需恢复这一行。
             h(EngRow, { label: '子栏目选项设置3' })),
 
           // ── 主栏目 2.5：模型自动接替（用户需求 2026-10-30）──────────────
@@ -8494,6 +8616,9 @@ window.__ModuleLoader__.load({
     exports.EngGroup = EngGroup;
     exports.EngRow = EngRow;
     exports.EngConnRow = EngConnRow;
+    exports.EngWebotsSnapshot = EngWebotsSnapshot;
+    exports.EngWebotsReport = EngWebotsReport;
+    exports.EngWebotsPanel = EngWebotsPanel;
     // 【工程环境检查】栏目（设置页「连接区」上方）
     exports.EngEnvPanel = EngEnvPanel;
     exports.EngStatusChip = EngStatusChip;

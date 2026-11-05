@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "units": {"length": "m", "mass": "kg", "angle": "rad", "time": "s", "motor_velocity": "rad/s or m/s; bind by motor type"},
+    "scene_kinds": ["ground"],
+    "initial_state": {"model_pose": null, "joint_positions": null, "velocities": null, "seed": 0, "source": "must be bound from verified model; never teleported to fake motion"},
+    "collision_coverage": {"terrain": "generated visible primitive reused as boundingObject", "model": "unknown", "self_collision": "unknown", "contact_material_pair": null},
+    "budget": {"max_steps": 128, "batch_steps": 8, "time_step_ms": 32, "wall_time_s": 60, "max_instances": 1, "max_trials": 1, "working_set_bytes": null, "private_bytes": null, "cpu_percent_one_core": null, "gpu_percent": null, "log_bytes": 1048576, "max_screenshots": 3, "rendering": "off except requested snapshots", "batch_yield_s": 0.02},
+    "cancel_conditions": ["wall/step/evidence budget exhausted", "user cancel requested", "worker disconnected or outcome unknown: stop dispatch, never blindly replay", "nonfinite observation or source/model hash drift", "measured host resource limit exceeded once calibrated"],
+    "judgement": {"status": "unknown", "pass_thresholds": null, "failure_thresholds": null, "owner": "A04 physical validity; A01/A02 model calibration", "policy": "Process exit, empty contacts, generated geometry and completed steps alone never imply physical PASS."},
+    "missing_information": ["model_identity_and_pose", "verified_model_collision_and_inertia", "device_names_types_limits_and_feedback", "contact_material_pair_and_friction", "physical_acceptance_thresholds", "host_resource_limits_from_measurement", "real_worker_core"]
+  },
+  "recipes": {
+    "static_preflight": {
+      "level": "L0",
+      "goal": "Before launch, inspect file references, source units/frame, declared model complexity and conversion limitations.",
+      "applies_to": ["URDF plus local meshes and source manifest; no Webots needed"],
+      "actions": ["read-only static inspection; current production validator integration pending"],
+      "observations": ["missing files", "declared units/frame", "hashes", "mesh/collision counts and unknowns"],
+      "budget": {"max_steps": 0, "wall_time_s": 10, "max_screenshots": 0}
+    },
+    "conversion_calibration": {
+      "level": "L1",
+      "goal": "Compare asymmetric dimensions and instance/pose/mass provenance before larger experiments.",
+      "applies_to": ["A01/A02 calibrated asymmetric rigid-body model; synthetic fixture alone does not qualify"],
+      "actions": ["inspect world/model identity and measured fields; no invented transform"],
+      "observations": ["world/model identity", "source dimension versus observed field units", "component map ambiguity"],
+      "budget": {"max_steps": 8, "wall_time_s": 30}
+    },
+    "drop_or_rest": {
+      "level": "L2",
+      "goal": "Capture bounded free fall or rest of a verified rigid body above a known ground plane.",
+      "applies_to": ["single verified dynamic body with known boundingObject and physical attributes"],
+      "actions": ["no motor drive; advance bounded simulation from explicitly bound pose"],
+      "observations": ["simulation time", "body pose/velocity", "contacts and terrain identity", "start/event/end snapshot"],
+      "budget": {"max_steps": 64}
+    },
+    "joint_contact_probe": {
+      "level": "L3",
+      "goal": "Sample an explicitly bound single motor/sensor and related contact region within verified limits.",
+      "applies_to": ["verified single revolute/prismatic joint and real motor/sensor device pair"],
+      "actions": ["bind motor device/type/velocity/target/effort from verified model; no default motion", "read paired position sensor each batch; restore/stop policy must be bound before dispatch"],
+      "observations": ["actual motor commands with units", "position sensor feedback", "expected and unexpected candidate contact pairs"]
+    },
+    "terrain_traverse": {
+      "level": "L4",
+      "goal": "Collect traversal evidence on parameterized ground, stairs, slope or box obstacle.",
+      "applies_to": ["mobile robot with calibrated collision/drive; terrain dimensions must suit robot class"],
+      "scene_kinds": ["ground", "stairs", "slope", "obstacle"],
+      "actions": ["bind actual drive devices, direction, velocity and stop policy; no pose edits", "advance bounded batches and record actual sensors/contacts"],
+      "observations": ["base pose/velocity", "drive sensor feedback", "terrain contact candidates", "simulation progress", "start/event/end snapshot"]
+    },
+    "paired_step_comparison": {
+      "level": "L5",
+      "goal": "Prepare a two-trial comparison with identical model/scene/initial state/action hashes at 32ms then 16ms; evaluation belongs to A04.",
+      "applies_to": ["previously calibrated small scene and resource budget; one sequential instance"],
+      "scene_kinds": ["ground", "stairs", "slope", "obstacle"],
+      "actions": ["prepare separate sequential worlds at time_step_ms=32 and 16; plan uses 64 and 128 steps respectively for equal 2.048s duration; no automatic run or reset", "preserve seed/source/initial-state/actions and compare actual observations, not only exit codes"],
+      "observations": ["both trial hashes", "same-time physical metrics", "host samples with measurement window", "missing or nonconvergent metrics"],
+      "budget": {"max_steps": 64, "max_trials": 2},
+      "missing_information": ["both_real_trial_observations", "A04_convergence_metrics_and_thresholds"]
+    }
+  }
+}

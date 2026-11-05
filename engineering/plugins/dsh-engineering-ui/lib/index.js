@@ -45,6 +45,9 @@ import { DefenseSigner } from './defense-sign.js';
 //   宿主层少了任何一个包都会让整块 import 求值失败 → 插件不装配 → 修复白做，
 //   所以这里只引本插件自己的文件。
 import { installJobWaitGuard } from './job-wait-guard.js';
+// 【Webots 仿真 · 只读宿主门】配置阶段接入；MCP 行默认禁用，见 preset-engineering.patch.yml。
+//   只做「上下文归属校验 + 报告/证据只读路由」，不启动 Webots、不碰 SolidWorks。
+import { installWebots } from './webots.js';
 
 // 纯本地兜底：最后一次 agent-preset/selected，否则 header.agentPreset。
 function resolvePresetFallback(header, events) {
@@ -90,7 +93,10 @@ export const name = 'dsh-engineering-ui';
 // 连带收尾守卫与三大防线一起失效 —— 代价远大于收益。
 // 因此 llm 走 ctx.get('llm') 惰性读取（与 client 半读 sidebarRight 同一做法），
 // 缺失时 /suggest 返回 ok:false，聊天主体功能不受影响。
-export const inject = ['webServer', 'subagents', 'sessionPersistence', 'sessions', 'agents', 'userQuestions'];
+// webots.js 用 ctx.tools.guard 守卫 mcp__webots__* 的执行归属 → 必须声明 tools。
+//   注：整块装配已对 ctx.tools 缺失/无 guard 做优雅降级（见 installWebots 返回的守卫），
+//   因此旧宿主/测试桩没有 tools 也不会让插件装配失败。
+export const inject = ['webServer', 'subagents', 'sessionPersistence', 'sessions', 'agents', 'userQuestions', 'tools'];
 const PREFIX = '/dsh-engineering-ui';
 const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 // ── 【Bug3 修复】房间名必须接受【中文】─────────────────────────────────
@@ -3846,6 +3852,24 @@ export function apply(ctx) {
       return send(res, 200, runSettings(['set', key, value]));
     }
   })));
+
+  // ── 【Webots 仿真 · 只读接入】连接区「Webots连接」旁边那块报告/证据面板 ──────
+  // 与 conn-state / conn-probe 同一套 guardRoute（loopback + Origin/Referer + 限流），
+  //   不新造鉴权；四条 GET 路由：webots-context / -report / -evidence / -attribute。
+  // ⚠️ 这里【只增加只读入口】，不启动 Webots、不申请 SW FIFO 锁、不改门禁状态。
+  //   归属（task_id / room_id）逐请求由 workflow_state.json + mode_state.json 推导，
+  //   绝不采信模型或前端的自报值；拿不到唯一活跃房间绑定就 403 CONTEXT_UNAVAILABLE。
+  disposers.push(installWebots(ctx, {
+    env: process.env,
+    findToolsDir,
+    presetOf: syncPresetOf,
+    guardRoute,
+    send,
+    queryOf: (req) => {
+      const u = new URL(String((req && req.url) || '/'), 'http://127.0.0.1');
+      return u.searchParams;
+    },
+  }));
 
   // GET：只读状态（零副作用）—— 设置页打开时轮询用
   disposers.push(ctx.webServer.register(guardRoute({

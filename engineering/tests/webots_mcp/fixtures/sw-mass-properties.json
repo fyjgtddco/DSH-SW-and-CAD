@@ -1,0 +1,207 @@
+{
+  "schema_version": "webots-mcp-mass-array-goldens/v1",
+  "goldens": [
+    {
+      "source_method": "IModelDocExtension.GetMassProperties2",
+      "source_url": "https://help.solidworks.com/2024/english/api/sldworksapi/solidworks.interop.sldworks~solidworks.interop.sldworks.imodeldocextension~getmassproperties2.html",
+      "retrieved": "2026-10-29",
+      "kind": "method-contract-sentinels",
+      "real_sw_export": false,
+      "sw_version": null,
+      "arguments": {
+        "Accuracy": 1,
+        "UseSelected": false,
+        "Status": "capture-required"
+      },
+      "coordinate_frame": "model-default-frame",
+      "units": {
+        "length": "m",
+        "mass": "kg",
+        "angle": "rad",
+        "time": "s",
+        "inertia": "kg*m^2"
+      },
+      "array_fields": [
+        "CenterOfMassX",
+        "CenterOfMassY",
+        "CenterOfMassZ",
+        "Volume",
+        "Area",
+        "Mass",
+        "MomXX",
+        "MomYY",
+        "MomZZ",
+        "MomXY",
+        "MomZX",
+        "MomYZ"
+      ],
+      "raw": [
+        0.011,
+        -0.023,
+        0.037,
+        0.0001,
+        0.016,
+        0.2,
+        4.833333333333333e-05,
+        0.00017333333333333334,
+        0.00020833333333333335,
+        1e-06,
+        2e-06,
+        3e-06
+      ],
+      "expected_readout": {
+        "CenterOfMassX": 0.011,
+        "CenterOfMassY": -0.023,
+        "CenterOfMassZ": 0.037,
+        "Volume": 0.0001,
+        "Area": 0.016,
+        "Mass": 0.2,
+        "MomXX": 4.833333333333333e-05,
+        "MomYY": 0.00017333333333333334,
+        "MomZZ": 0.00020833333333333335,
+        "MomXY": 1e-06,
+        "MomZX": 2e-06,
+        "MomYZ": 3e-06
+      },
+      "note": "Synthetic unique slot sentinels; nonzero cross terms distinguish slots. Not an actual SW capture or a transformed physical tensor. MomZX is retained verbatim; no sign or frame conversion."
+    },
+    {
+      "source_method": "IBody2.GetMassProperties",
+      "source_url": "https://help.solidworks.com/2024/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IBody2~GetMassProperties.html",
+      "retrieved": "2026-10-29",
+      "kind": "method-contract-sentinels",
+      "real_sw_export": false,
+      "sw_version": null,
+      "arguments": {
+        "Density_kg_m3": 2000,
+        "body_kind": "solid"
+      },
+      "coordinate_frame": "body-creation-frame",
+      "units": {
+        "length": "m",
+        "mass": "kg",
+        "angle": "rad",
+        "time": "s",
+        "inertia": "kg*m^2"
+      },
+      "array_fields": [
+        "CenterOfMassX",
+        "CenterOfMassY",
+        "CenterOfMassZ",
+        "Volume",
+        "Area",
+        "Mass",
+        "MomXX",
+        "MomYY",
+        "MomZZ",
+        "MomXY",
+        "MomZX",
+        "MomYZ"
+      ],
+      "raw": [
+        0.011,
+        -0.023,
+        0.037,
+        0.0001,
+        0.016,
+        0.2,
+        4.833333333333333e-05,
+        0.00017333333333333334,
+        0.00020833333333333335,
+        1e-06,
+        2e-06,
+        3e-06
+      ],
+      "expected_readout": {
+        "CenterOfMassX": 0.011,
+        "CenterOfMassY": -0.023,
+        "CenterOfMassZ": 0.037,
+        "Volume": 0.0001,
+        "Area": 0.016,
+        "Mass": 0.2,
+        "MomXX": 4.833333333333333e-05,
+        "MomYY": 0.00017333333333333334,
+        "MomZZ": 0.00020833333333333335,
+        "MomXY": 1e-06,
+        "MomZX": 2e-06,
+        "MomYZ": 3e-06
+      },
+      "note": "Synthetic unique slot sentinels; nonzero cross terms distinguish slots. Not an actual SW capture or a transformed physical tensor. MomZX is retained verbatim; no sign or frame conversion."
+    },
+    {
+      "source_method": "IModelDocExtension.GetMassProperties",
+      "source_url": "https://help.solidworks.com/2024/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IModelDocExtension~GetMassProperties.html?format=P&value=",
+      "retrieved": "2026-10-29",
+      "kind": "method-contract-sentinels",
+      "real_sw_export": false,
+      "sw_version": null,
+      "arguments": {
+        "Accuracy": 1,
+        "Status": "capture-required"
+      },
+      "coordinate_frame": "model-default-frame",
+      "units": {
+        "length": "m",
+        "mass": "kg",
+        "angle": "rad",
+        "time": "s",
+        "inertia": "kg*m^2"
+      },
+      "array_fields": [
+        "CenterOfMassX",
+        "CenterOfMassY",
+        "CenterOfMassZ",
+        "Volume",
+        "Area",
+        "Mass",
+        "MomXX",
+        "MomYY",
+        "MomZZ",
+        "MomXY",
+        "MomZX",
+        "MomYZ",
+        "Accuracy"
+      ],
+      "raw": [
+        0.011,
+        -0.023,
+        0.037,
+        0.0001,
+        0.016,
+        0.2,
+        4.833333333333333e-05,
+        0.00017333333333333334,
+        0.00020833333333333335,
+        1e-06,
+        2e-06,
+        3e-06,
+        1
+      ],
+      "expected_readout": {
+        "CenterOfMassX": 0.011,
+        "CenterOfMassY": -0.023,
+        "CenterOfMassZ": 0.037,
+        "Volume": 0.0001,
+        "Area": 0.016,
+        "Mass": 0.2,
+        "MomXX": 4.833333333333333e-05,
+        "MomYY": 0.00017333333333333334,
+        "MomZZ": 0.00020833333333333335,
+        "MomXY": 1e-06,
+        "MomZX": 2e-06,
+        "MomYZ": 3e-06,
+        "Accuracy": 1
+      },
+      "note": "Synthetic unique slot sentinels; nonzero cross terms distinguish slots. Not an actual SW capture or a transformed physical tensor. MomZX is retained verbatim; no sign or frame conversion."
+    }
+  ],
+  "unverified_methods": [
+    {
+      "source_method": "IModelDoc2.GetMassProperties",
+      "source_url": "https://help.solidworks.com/2021/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IModelDoc2~GetMassProperties.html",
+      "known_signature": "GetMassProperties()",
+      "array_fields": null,
+      "reason": "Official page confirms obsolete no-argument method but does not publish array layout. Do not infer it from IModelDocExtension."
+    }
+  ]
+}

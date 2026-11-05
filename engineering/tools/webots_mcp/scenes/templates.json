@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "webots_version": "R2025a",
+  "coordinate_system": "ENU",
+  "units": {"length": "m", "angle": "rad", "time": "s"},
+  "common": {
+    "time_step_ms": [32, 1, 64],
+    "seed": [0, 0, 2147483647],
+    "length_m": [4.0, 0.01, 100.0],
+    "width_m": [2.0, 0.01, 100.0],
+    "thickness_m": [0.1, 0.001, 1.0]
+  },
+  "templates": {
+    "ground": {},
+    "stairs": {
+      "count": [3, 1, 32],
+      "rise_m": [0.05, 0.001, 1.0],
+      "tread_m": [0.2, 0.001, 10.0],
+      "feature_width_m": [1.0, 0.001, 100.0],
+      "start_x_m": [0.5, -50.0, 50.0]
+    },
+    "slope": {
+      "run_m": [1.0, 0.001, 10.0],
+      "rise_m": [0.3, 0.001, 10.0],
+      "feature_width_m": [1.0, 0.001, 100.0],
+      "start_x_m": [0.5, -50.0, 50.0]
+    },
+    "obstacle": {
+      "x_m": [0.8, -50.0, 50.0],
+      "y_m": [0.0, -50.0, 50.0],
+      "length_obstacle_m": [0.2, 0.001, 10.0],
+      "width_obstacle_m": [0.5, 0.001, 100.0],
+      "height_m": [0.15, 0.001, 10.0]
+    }
+  }
+}

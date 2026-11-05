@@ -64,11 +64,15 @@ const SIGN_URL = 'data:text/javascript;base64,' + Buffer.from(signSource).toStri
 // compatibility.test.mjs 早已按同样方式补过 job-wait-guard，本文件漏了。
 const guardSource = readFileSync(new URL('../lib/job-wait-guard.js', import.meta.url), 'utf8');
 const GUARD_URL = 'data:text/javascript;base64,' + Buffer.from(guardSource).toString('base64');
+// 【Webots 接入】webots.js 同样是相对 import，data: URL 解析不了 → 一并内联。
+const webotsSource = readFileSync(new URL('../lib/webots.js', import.meta.url), 'utf8');
+const WEBOTS_URL = 'data:text/javascript;base64,' + Buffer.from(webotsSource).toString('base64');
 const rewritten = source
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + SHIM_LLM_URL + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + SHIM_REGISTRY_URL + "'")
   .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'")
-  .replace("from './job-wait-guard.js'", "from '" + GUARD_URL + "'");
+  .replace("from './job-wait-guard.js'", "from '" + GUARD_URL + "'")
+  .replace("from './webots.js'", "from '" + WEBOTS_URL + "'");
 assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换成功');
 const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));
 
@@ -82,6 +86,8 @@ function harness(rootAgents) {
   const hooks = new Map();          // name -> [fn, ...]
   const roots = Array.isArray(rootAgents) ? rootAgents : [];
   const ctx = {
+    // 【Webots 接入】index.js 的 inject 里已加 'tools'，apply() 会调 ctx.tools.guard。
+    tools: { guard() { return () => {}; } },
     on(name, fn) {
       const list = hooks.get(name) || [];
       list.push(fn);

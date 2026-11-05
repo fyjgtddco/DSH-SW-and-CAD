@@ -137,6 +137,22 @@
                 python sw_bridge.py drawing <零件>|dwg <零件>|show。流程 run→drawing→dwg→show 截图验收。
                 DWG 可 AutoCAD 编辑；工程图含三视图(前/俯/右)+等轴测。
 
+
+                ## 仿真（Webots，可选；缺配置=不可用≠通过）
+                只在模型已存在后接入，是 Mode 1/2/3 的附加产物，不改门禁、不建房间、不取 SW 写锁。
+                工具 mcp__webots__*（serverName=webots）：sim_status/launch/step/scene/screenshot/contacts/
+                job/cancel/report/evidence/attribute/devices/motor/sensor/convert。缺工具=未启用，禁伪造结果。
+                归属由宿主推导（live 工程 agent + workflow_state.task_id + mode_state 唯一活跃房间），
+                每次调用带真实 task_id 与 room_id=room-+房间名SHA256；自报/串房/过期一律 CONTEXT_UNAVAILABLE。
+                状态看 provenance/core_ready/execution_state/stale/snapshot_at 五项；连接区绿灯只证明装了或进程在跑。
+                fake/fixture/synthetic/静态校验/空接触都不算物理 PASS；static-derived 只能说"近似"。
+                OUTCOME_UNKNOWN/超时/断连→保留 operation_id+job_id+run_id+generation，用原身份查 sim_job，禁重发。
+                翻证据必须带上一页 sha256 作 expected_sha256，换快照就回 offset 0，禁拼接两段。
+                原生 SW 回写未实现（blocked_native 含 authorized_native_repair）→只报缺口，禁改质量/摩擦/重力凑通过。
+                启用：DSH_WEBOTS_ENABLE=1 + DSH_WEBOTS_PYTHON + DSH_WEBOTS_INPUT_ROOT + DSH_STATE_DIR
+                + DSH_ENGINEERING_ROOT + WEBOTS_HOME（可选 DSH_WEBOTS_RUNTIME_CONFIG）。缺一即不可用，如实上报。
+                自检：python "<根>\tools\webots_env.py" --json → 看 sim_available / blocking。
+
                 ## 排版（强制，出界=不合格）
                 画布归一 1.0×1.0，原点左下，各纸型同比例。安全区 (0.05,0.05)-(0.95,0.95) 唯一合法；
                 标题栏 (0.80,0.90)-(1.00,1.00) 禁区。主视(0.30,0.72) 俯视(0.30,0.28) 右视(0.75,0.72) 等轴(0.75,0.28)。
@@ -484,6 +500,37 @@
               # 现改为 true：串行(E)模式由主对话自行只标一个（流程约定），
               # 并行(D)模式则可如实标注多个进行中。
               allowParallelInProgress: true
+
+          # ── Webots 仿真 MCP（默认禁用，仅显式开启时装配）────────────────────────────
+          # 本地 stdio 桥：python -B -m webots_mcp.server，命名空间 webots（工具名 mcp__webots__*）。
+          #
+          # 为什么默认禁用：整条链需要同时具备「隔离的 state 目录 + 装好冻结依赖的
+          #   Python + 只读输入根 + 已校准的运行配置」，缺一项就只会得到
+          #   CALIBRATION_REQUIRED / RUNTIME_NOT_READY。开着反而让每个会话多一个
+          #   必然失败的启动项，所以用 DSH_WEBOTS_ENABLE=1 显式选择加入。
+          #
+          # ⚠️ 任务/房间身份【绝不】写进 preset env：每次调用由宿主从
+          #   workflow_state.json + mode_state.json 推导并校验（lib/webots.js）。
+          # ⚠️ failOnStartupError: false —— MCP 起不来只让 sim_* 工具缺失，
+          #   不能让整个工程预设挂载失败（与"permission 不能进 preset"同级的红线）。
+          # ⚠️ stdio 的 stdout 只留给 JSON-RPC；业务日志必须走 stderr/文件。
+          - id: mcp-webots
+            name: '@deepseek-ai/dsh-mcp-client'
+            disabled: !!js process.env.DSH_WEBOTS_ENABLE !== '1'
+            config:
+              transport: stdio
+              serverName: webots
+              command: !!js process.env.DSH_WEBOTS_PYTHON || ''
+              args: !!js "['-B','-m','webots_mcp.server','--input-root',process.env.DSH_WEBOTS_INPUT_ROOT || '',...(process.env.DSH_WEBOTS_RUNTIME_CONFIG ? ['--runtime-config',process.env.DSH_WEBOTS_RUNTIME_CONFIG] : [])]"
+              cwd: !!js (process.env.DSH_ENGINEERING_ROOT || '') + '/tools'
+              env:
+                DSH_HOME: !!js process.env.DSH_HOME || ''
+                DSH_STATE_DIR: !!js process.env.DSH_STATE_DIR || ''
+                DSH_ENGINEERING_ROOT: !!js process.env.DSH_ENGINEERING_ROOT || ''
+                WEBOTS_HOME: !!js process.env.WEBOTS_HOME || ''
+                PYTHONIOENCODING: utf-8
+                PYTHONUTF8: '1'
+              failOnStartupError: false
 
           # ── 网络搜索 ────────────────────────────────────────────────────────────────
           # 用于查询技术标准、标准件参数、材料数据等

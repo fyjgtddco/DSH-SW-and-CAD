@@ -57,12 +57,16 @@ const SIGN_URL = 'data:text/javascript;base64,' + Buffer.from(signSource).toStri
 // 【卡死修复】job-wait-guard.js 也必须内联（data: URL 加载无法解析相对路径）
 const guardSource = readFileSync(new URL('../lib/job-wait-guard.js', import.meta.url), 'utf8');
 const GUARD_URL = 'data:text/javascript;base64,' + Buffer.from(guardSource).toString('base64');
+// 【Webots 接入】webots.js 同样是相对 import，data: URL 解析不了 → 一并内联。
+const webotsSource = readFileSync(new URL('../lib/webots.js', import.meta.url), 'utf8');
+const WEBOTS_URL = 'data:text/javascript;base64,' + Buffer.from(webotsSource).toString('base64');
 
 const rewritten = source
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + LLM_URL + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + REG_URL + "'")
   .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'")
-  .replace("from './job-wait-guard.js'", "from '" + GUARD_URL + "'");
+  .replace("from './job-wait-guard.js'", "from '" + GUARD_URL + "'")
+  .replace("from './webots.js'", "from '" + WEBOTS_URL + "'");
 assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换成功');
 
 const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));
@@ -86,6 +90,9 @@ function harness(handles = {}) {
   const hooks = new Map();          // name -> [fn, ...]
   const root = { id: 'root' };
   const ctx = {
+    // 【Webots 接入】index.js 已声明 inject=['...','tools'] 并调用 ctx.tools.guard。
+    //   这里有守卫的话，mcp__webots__* 的归属校验才会生效；测试不需要它生效。
+    tools: { guard() { return () => {}; } },
     on(name, fn) {
       const list = hooks.get(name) || [];
       list.push(fn);
@@ -134,7 +141,7 @@ function harness(handles = {}) {
   return { ctx, root, routes, hooks, asks, dispose, request };
 }
 
-test('全部 27 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
+test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
   const h = harness();
   try {
     // 9 条基础/提问/通知路由
@@ -163,7 +170,9 @@ test('全部 27 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
     // 旧断言写死 27 且清单里没有这两条 —— 代码早就是 29 条，
     //   于是这条断言长期失败，而它恰恰是"路由注册完整性"的唯一守门人。
     //   断言数量与清单必须同时维护：加路由时两处一起改。
-    assert.equal(h.routes.size, 29, '路由数量应为 29（含 env-check/env-prompt/settings + model-catalog/model-chain）');
+    // ── 【Webots 接入】再 +4 → 29 + 4 = 33 ──────────────────────────────
+    //   /webots-context / -report / -evidence / -attribute（全部只读 GET）
+    assert.equal(h.routes.size, 33, '路由数量应为 33（含 4 条 Webots 只读路由）');
     // ── 清单必须与 lib/index.js 的 ctx.webServer.register 一一对应 ──────
     // 漏写一条 → 路由存在但没被这条断言保护；多写一条 → 直接失败。
     for (const p of [
@@ -185,6 +194,8 @@ test('全部 27 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/chat-mode',
       '/dsh-engineering-ui/model-catalog', '/dsh-engineering-ui/model-chain',
       '/dsh-engineering-ui/persona',
+      '/dsh-engineering-ui/webots-context', '/dsh-engineering-ui/webots-report',
+      '/dsh-engineering-ui/webots-evidence', '/dsh-engineering-ui/webots-attribute',
     ]) {
       assert.ok(h.routes.has(p), 'missing route ' + p);
     }
@@ -207,6 +218,8 @@ test('全部 27 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/chat-mode',
       '/dsh-engineering-ui/model-catalog', '/dsh-engineering-ui/model-chain',
       '/dsh-engineering-ui/persona',
+      '/dsh-engineering-ui/webots-context', '/dsh-engineering-ui/webots-report',
+      '/dsh-engineering-ui/webots-evidence', '/dsh-engineering-ui/webots-attribute',
     ]).size, h.routes.size, '路由清单与注册数必须一致（清单有重复或漏项）');
     assert.equal(h.hooks.has('agent/turn-stopping'), true);
   } finally { h.dispose(); }

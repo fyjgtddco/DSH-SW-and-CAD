@@ -1,0 +1,1 @@
+<robot name="duplicate"><link name="box"/><link name="box"/></robot>
