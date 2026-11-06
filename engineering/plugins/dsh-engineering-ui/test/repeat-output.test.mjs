@@ -67,12 +67,16 @@ const GUARD_URL = 'data:text/javascript;base64,' + Buffer.from(guardSource).toSt
 // 【Webots 接入】webots.js 同样是相对 import，data: URL 解析不了 → 一并内联。
 const webotsSource = readFileSync(new URL('../lib/webots.js', import.meta.url), 'utf8');
 const WEBOTS_URL = 'data:text/javascript;base64,' + Buffer.from(webotsSource).toString('base64');
+// 【内存守卫】mem-guard.js 同样是相对 import，一并内联。
+const memGuardSource = readFileSync(new URL('../lib/mem-guard.js', import.meta.url), 'utf8');
+const MEMGUARD_URL = 'data:text/javascript;base64,' + Buffer.from(memGuardSource).toString('base64');
 const rewritten = source
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + SHIM_LLM_URL + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + SHIM_REGISTRY_URL + "'")
   .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'")
   .replace("from './job-wait-guard.js'", "from '" + GUARD_URL + "'")
-  .replace("from './webots.js'", "from '" + WEBOTS_URL + "'");
+  .replace("from './webots.js'", "from '" + WEBOTS_URL + "'")
+  .replace("from './mem-guard.js'", "from '" + MEMGUARD_URL + "'");
 assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换成功');
 const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));
 

@@ -431,6 +431,23 @@ check('★ 设置分区含子项行与右箭头',
 check('★ 「美化工程模式」下第 1 行为开关行（eng-row sw）',
   settingsHtml.includes('eng-row sw'));
 
+// ── 【2026-11-06 结构调整】用户要求原文：
+//   「"内存与并发"和"模型自动接替"统一放在"设计过程优化"的子目录下面」。
+//   ⇒ 这两个名字不再出现在顶层主栏目里，而是作为「设计过程优化」下的子项行
+//     （默认收起，点开就地展开 embedded 版式）。
+check('★ 「设计过程优化」下含「模型自动接替」子项行',
+  settingsHtml.includes('模型自动接替'));
+check('★ 「设计过程优化」下含「内存与并发」子项行',
+  settingsHtml.includes('内存与并发'));
+check('★ 子项行默认收起（未点开时不渲染明细）',
+  !settingsHtml.includes('立刻回收内存') && !settingsHtml.includes('备用模型（按顺序兜底）'),
+  '未展开时不应该出现面板明细（只应有子项行本身）');
+check('★ EngGroup 支持 embedded（不再画第二层卡片标题）',
+  src.includes('eng-grp-embedded') && src.includes('props.embedded === true'));
+check('★ 两个面板都接受 embedded 开关',
+  src.includes('h(EngModelChainPanel, { embedded: true })') &&
+  src.includes('h(EngMemGuardPanel, { embedded: true })'));
+
 // ── 【需求1】工程模式「模式说明 / 如何使用」弹窗 ──────────────────────────
 //   宿主 @deepseek-ai/dsh-client-ui-agent-preset 的说明弹窗是硬编码白名单
 //   （guides Map 只含 standard/ptc/minimal/cordis，且只对"内置"分组生效），

@@ -48,6 +48,13 @@ import { installJobWaitGuard } from './job-wait-guard.js';
 // 【Webots 仿真 · 只读宿主门】配置阶段接入；MCP 行默认禁用，见 preset-engineering.patch.yml。
 //   只做「上下文归属校验 + 报告/证据只读路由」，不启动 Webots、不碰 SolidWorks。
 import { installWebots } from './webots.js';
+// 【内存守卫】子代理并发闸门 + 工作集回收（详见 lib/mem-guard.js 顶部说明）。
+//   ⚠️ 这些符号必须显式 import：插件是 ESM，没有 require，缺一个就是
+//   "createReclaimer is not defined" —— 而且是在 apply() 跑到一半才炸，
+//   表现为整个工程模式装配失败。
+//   ⚠️ 必须写成【单行 import】：多处测试用 /^import .*$/gm 剥掉 import 头，
+//      多行写法会留下残缺的收尾行，导致 vm 里 SyntaxError。
+import { memGuardEnabled, maxActiveSubagents, reclaimThresholdPct, reclaimIntervalMs, evaluateConcurrency, memorySnapshot, createReclaimer, setMemGuardOverrides, memGuardOverrides } from './mem-guard.js';
 
 // 纯本地兜底：最后一次 agent-preset/selected，否则 header.agentPreset。
 function resolvePresetFallback(header, events) {
@@ -88,11 +95,11 @@ export const name = 'dsh-engineering-ui';
 // cordis 的依赖注入要求服务名必须列在 inject 里，否则 ctx.userQuestions 为
 // undefined，/ask 会直接失败（"userQuestions 服务不可用"）。
 //
-// 【独立聊天页 · 刻意不 inject llm】推荐追问只影响聊天页的"锦上添花"，
+// 【刻意不 inject llm】一次性辅助调用（划词详情 /side-chat）只是增强项，
 // 而 inject 是【硬依赖】：服务缺失会让本插件整体 PENDING、永不 apply，
 // 连带收尾守卫与三大防线一起失效 —— 代价远大于收益。
 // 因此 llm 走 ctx.get('llm') 惰性读取（与 client 半读 sidebarRight 同一做法），
-// 缺失时 /suggest 返回 ok:false，聊天主体功能不受影响。
+// 缺失时 /side-chat 返回 ok:false，主体功能不受影响。
 // webots.js 用 ctx.tools.guard 守卫 mcp__webots__* 的执行归属 → 必须声明 tools。
 //   注：整块装配已对 ctx.tools 缺失/无 guard 做优雅降级（见 installWebots 返回的守卫），
 //   因此旧宿主/测试桩没有 tools 也不会让插件装配失败。
@@ -255,9 +262,8 @@ const RAW_DROP = new Set(['assistant/chunk', 'step/start', 'step/end', 'request/
 //   任何以同用户身份运行的本地进程都能直接调用，后果最重的三条：
 //     · POST /persona      —— 写入内容会进入【每个】工程模式会话的 system prompt
 //                             （持久化提示词注入）；
-//     · POST /chat-mode    —— 可剥夺任意运行中会话的全部工具；
 //     · POST /conn-launch  —— 让宿主 spawn 本地可执行文件。
-//   另有 /suggest、/side-chat 可无限流调用 LLM（资源滥用），
+//   另有 /side-chat 可无限流调用 LLM（资源滥用），
 //   /defense/verify-gate 不消费 nonce 可作免费验签预言机。
 //
 // 能做与不能做（如实说明，不假装做到了密码学隔离）：
@@ -331,11 +337,9 @@ const SENSITIVE_ROUTES = new Set([
   //   属高副作用（可让宿主后续按任意路径启动进程）→ 与 /persona 同级加固。
   //   只读的 GET（自检、读设置）不在此列，避免设置页一打开就 403。
   PREFIX + '/settings',
-  PREFIX + '/chat-mode',
   PREFIX + '/conn-launch',
   PREFIX + '/conn-diagnose',
   PREFIX + '/defense/sign',
-  PREFIX + '/suggest',
   PREFIX + '/side-chat',
 ]);
 
@@ -398,7 +402,7 @@ function guardRoute(route) {
         return send(res, g.status, { ok: false, error: g.error, path: route.path });
       }
       // ── 【P0 修复】全路由限流 ────────────────────────────────────────
-      // 原先只有 4 条 /defense/* 走 rateLimited，而 /suggest、/side-chat
+// 原先只有 4 条 /defense/* 走 rateLimited，而 /side-chat
       //   会触发真实 LLM 调用、/conn-launch 会 spawn 本地进程，却完全无限流
       //   → 任何本地进程可反复触发（资源滥用 / 可用性 DoS）。
       //   这里在守卫层统一加桶，按路径分桶；rateLimited 定义在文件后段，
@@ -1234,6 +1238,20 @@ export function apply(ctx) {
         failCounts: new Map(),
         /** 自动续跑：本轮用户输入已续了几次 / 待触发的定时器（跨 turn 保留，见 maybeAutoResume） */
         resumeCount: 0, resumeTimer: null,
+        /**
+         * 待生效的候选 key（provider\0model）。
+         *
+         * ── 为什么需要它（子代理"死了就是死了"的第二个根因）──────────────
+         * agent/model/selection 事件是【本步 preStep 之后】才追加的；
+         * 而子代理的 failureAt 会在 agent/error 时置位，让激活在
+         * "inbox 为空 + 没有 owned children" 时直接判定 ready →
+         * 会话被 dispose，select() 写进去的 pending 选择【再也没机会被读到】。
+         * 主对话因为下一轮一定还会跑，所以它看起来正常 —— 这正是
+         * "主对话能换、子代理不换"的差异来源。
+         * 现在失败时把目标记在这里，并在下一次 pre-step 之前【再写一次】，
+         * 保证只要该 agent 还有任何一步要跑，就一定落到新路由上。
+         */
+        pendingKey: null,
       };
       modelChainState.set(agent.id, st);
     }
@@ -1489,6 +1507,27 @@ export function apply(ctx) {
           } catch (e) {}
         }
       }
+      // ── 【子代理不换模型 · 兜底重放】─────────────────────────────────
+      // 见 modelChainState.pendingKey 的注释：select() 写入的 model/selection
+      // 是本步 preStep 之后才落盘的，下一次 preStep 读到的 selection 仍可能是
+      // 旧的。这里在【进入装配前】再补一次 select —— 它只追加一条事件，
+      // 幂等（同一条目不会重复追加），但能保证下一步一定用新路由。
+      try {
+        if (st && st.pendingKey && agent && agent.model && typeof agent.model.select === 'function') {
+          const cfg = readModelChainConfig();
+          const want = cfg.entries.find((e) => modelKey(e.provider, e.model) === st.pendingKey);
+          const curKey = sel && sel.provider ? modelKey(sel.provider, sel.model) : '';
+          if (want && curKey !== st.pendingKey) {
+            selectModelRoute(agent, want);
+            try {
+              console.warn('[dsh-engineering-ui] 子代理接替兜底：pre-step 重新写回 '
+                + want.provider + '/' + want.model);
+            } catch (e) {}
+          } else if (want) {
+            st.pendingKey = null;      // 已经生效 → 清掉待办
+          }
+        }
+      } catch (e) {}
     } catch (e) {}
     return next();
   }));
@@ -1672,6 +1711,9 @@ export function apply(ctx) {
       st.switched = true;             // ← 老宿主：只有这个标记置位，下一轮才会覆盖请求
       // 额度/限流是按账号算的：把这个 provider 整体隔离一会儿
       quarantineProvider(payload.provider);
+      // 记录"待生效"的候选：即使本步之后会话被判定 ready 并 dispose，
+      // 只要它还有任何一次 pre-step，就会在装配前被重新写回（见 pendingKey 注释）。
+      st.pendingKey = modelKey(nxt.provider, nxt.model);
       if (supportsModelSelect(agent)) {
         // ── 0.2.2 通道 ────────────────────────────────────────────────
         const ok = selectModelRoute(agent, nxt);
@@ -4131,34 +4173,6 @@ export function apply(ctx) {
     }
   })));
 
-  // ══ 【独立聊天页】推荐追问生成（POST /suggest）═════════════════════════
-  // 用户需求（对照 ChatGPT 的"相关追问"）：模型每次生成结果后，给出几条
-  //   顺着当前话题往下走的推荐问题。
-  //
-  // 设计（与官方 session-title-llm 的辅助调用同一套做法，见
-  //   packages/session/session-title-llm/src/index.ts）：
-  //   · 一次【一次性】辅助请求：system 给死规则，messages 只带最近若干轮文本；
-  //   · 用 BlockAssembler 把流收成文本，再解析成一问一行的数组；
-  //   · 【不落库】：这是一次纯 UI 建议生成，不写会话事件、不进模型上下文，
-  //     因此不会污染工程模式的会话日志与守卫判定。
-  //     （官方 session-title-llm 会 append 一条 log-only 请求事件；这里更保守，
-  //      连该事件也不写 —— 因为它不是会话语义的一部分。）
-  //   · 失败一律返回 ok:false，前端静默忽略 —— 推荐追问是可选增强，
-  //     绝不能因为模型/网络问题影响聊天本身。
-  //
-  // 模型路由：优先用请求里显式给的 provider/model（前端可从会话头部读），
-  //   否则回退到 process.env 配置，再否则放弃生成。
-  const SUGGEST_SYSTEM = [
-    'You generate follow-up question suggestions for a user in a chat with an engineering AI assistant.',
-    'Read the recent conversation and propose exactly 3 short follow-up questions THE USER might ask next.',
-    'Rules:',
-    '- Write in the SAME language as the conversation (Chinese conversation -> Chinese questions).',
-    '- Each suggestion must be a question or imperative the user would say, NOT the assistant.',
-    '- Keep each under 24 characters (CJK) or 12 words (English). No numbering, no quotes, no trailing punctuation.',
-    '- Base them on the actual topic just discussed; make them concrete, never generic like "tell me more".',
-    '- Output exactly 3 lines, one suggestion per line, nothing else.',
-  ].join('\n');
-
   /**
    * 把一次 LLM 流收成纯文本。
    *
@@ -4258,107 +4272,7 @@ export function apply(ctx) {
     return text;
   }
 
-  /** 解析模型输出为最多 3 条建议（容错：去序号/引号/空行）。 */
-  function parseSuggestions(text) {
-    return String(text || '')
-      .split(/\r?\n/)
-      .map((s) => s.trim()
-        .replace(/^[-*•]\s*/, '')            // 去掉项目符号
-        .replace(/^\d+[.)、]\s*/, '')        // 去掉 "1. " / "1、"
-        .replace(/^["'“”「『]+|["'“”」』]+$/g, '')  // 去掉包裹引号
-        .trim())
-      .filter((s) => s && s.length <= 120)
-      .slice(0, 3);
-  }
 
-  disposers.push(ctx.webServer.register(guardRoute({
-    kind: 'exact',
-    path: PREFIX + '/suggest',
-    handler: async (req, res) => {
-      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
-      let payload;
-      try { payload = JSON.parse(await readBody(req)); } catch {
-        return send(res, 400, { ok: false, error: 'bad json' });
-      }
-      const turns = Array.isArray(payload && payload.turns) ? payload.turns : [];
-      if (!turns.length) return send(res, 200, { ok: false, error: 'no turns' });
-
-      // llm 走 ctx.get：未装配时静默降级，绝不影响其他功能（见 inject 注释）
-      let llm = null;
-      try { llm = ctx.get ? ctx.get('llm') : ctx.llm; } catch (e) { llm = null; }
-      if (!llm || typeof llm.stream !== 'function') {
-        return send(res, 200, { ok: false, error: 'llm 服务不可用（已跳过推荐追问）' });
-      }
-
-      const provider = String((payload && payload.provider) || process.env.DSH_SUGGEST_PROVIDER || '').trim();
-      const model = String((payload && payload.model) || process.env.DSH_SUGGEST_MODEL || '').trim();
-      if (!provider || !model) {
-        return send(res, 200, {
-          ok: false,
-          error: '缺少模型路由（provider/model）：请由前端传入或设置 DSH_SUGGEST_PROVIDER / DSH_SUGGEST_MODEL',
-        });
-      }
-
-      // 只取最近 6 条，压成纯文本；过长截断，避免把整段代码塞进辅助请求
-      const transcript = turns.slice(-6).map((t) => {
-        const who = String((t && t.role) || 'user') === 'assistant' ? 'Assistant' : 'User';
-        const text = String((t && t.text) || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
-        return who + ': ' + text;
-      }).filter((s) => s.length > 8).join('\n');
-      if (!transcript) return send(res, 200, { ok: false, error: 'no usable transcript' });
-
-      try {
-        const text = await collectLlmText(llm, {
-          provider,
-          model,
-          system: SUGGEST_SYSTEM,
-          // ── 【必须用 RequestUserInput，不能用 durable Message】────────────
-          // 官方契约（dsh-llm/src/types.ts:486-495）：RequestUserInput 显式
-          //   禁止 id/source，语义是"仅供本次请求、不落库"。
-          // 这正是本场景 —— auto-review 的 classifyRisk 就是这么做的
-          //   （packages/experimental/auto-review/src/index.ts:617-638），
-          //   注释明写该 prompt 永不进入 Session log。
-          // 若改用 createUserMessage(source:{kind:'plugin:...'}) 反而更糟：
-          //   durable 消息要求 source.kind 已在 MessageSourceMap 里声明，
-          //   本插件没有做 declaration merge，会被判为未知来源。
-          messages: [{
-            role: 'user',
-            content: [{ type: 'text', text: 'Recent conversation:\n' + transcript }],
-          }],
-          maxTokens: 8192,
-          // ── 【Bug 修复】maxTokens 从 256 提到 8192（用户要求"改大一点"）──
-          // 实测（直接 POST /suggest）返回：
-          //   {"ok":false,"error":"模型返回异常（max-tokens）"}
-          // 根因：本模型带推理（reasoningEffort=high），**推理 token 也计入
-          //   maxTokens**。256 在推理阶段就耗尽，正文一个字都出不来 →
-          //   判为 max-tokens 失败 → 前端静默拿空数组
-          //   → 表现就是"推荐追问一直不出现"。
-          // 8192：推理再长也够用；这只是【上限】，模型写满 3 行短建议就停，
-          //   不会因为上限高而多消耗 token（不设下限、按实际输出计费）。
-          // ⚠️ 仍不传 purpose：它是【闭集】'compaction' | 'session-title'
-          //   （types.ts:552），不是可合并扩展的 map。传自定义值非法；
-          //   传那两个字面量则语义错误（会改变适配器行为，如关闭思考）。
-          //   一次性辅助调用正确做法就是省略它。
-        });
-        const items = parseSuggestions(text);
-        if (!items.length) {
-          // 模型有输出但解析不出 3 行 → 把原始输出截断带上，便于排查
-          return send(res, 200, {
-            ok: false,
-            error: 'empty suggestions',
-            raw: String(text || '').slice(0, 400),
-          });
-        }
-        return send(res, 200, { ok: true, items, provider, model });
-      } catch (error) {
-        // 推荐追问是可选增强（前端静默忽略），但错误必须能查到原因：
-        //   历史上正是因为完全静默，max-tokens 这类问题藏了很久。
-        const msg = String((error && error.message) || error);
-        try { console.warn('[dsh-engineering-ui] /suggest 失败:', msg); } catch (e) {}
-        return send(res, 200, { ok: false, error: msg });
-      }
-    }
-  })));
 
   // ══ 【划词详情】侧边分析对话（POST /side-chat）══════════════════════════
   // 用户需求（对照三张截图）：
@@ -4370,10 +4284,10 @@ export function apply(ctx) {
   //   · 【无状态】：历史由前端持有并每次整包回传。宿主不写任何文件、
   //     不落会话日志 —— 这样它既不污染工程模式的会话与守卫判定，
   //     也让"别人 clone 下来即用"成立（无需任何持久化目录假设）。
-  //   · 【一次性辅助调用】：与 /suggest 同一套做法（不落库、不建 Agent）。
+  //   · 【一次性辅助调用】：RequestUserInput 不落库、不建 Agent。
   //     用同一个模型路由（前端把当前会话的 provider/model 传进来）。
   //   · 失败一律 ok:false，前端显示错误 —— 这是用户主动发起的操作，
-  //     不能像 /suggest 那样静默。
+  //     因此失败必须显式回报给用户。
   const SIDE_CHAT_SYSTEM = [
     'You are a focused engineering analysis assistant shown in a side panel.',
     'The user selected a passage from an AI agent conversation and wants deeper analysis of it.',
@@ -4500,7 +4414,7 @@ export function apply(ctx) {
           provider,
           model,
           system: SIDE_CHAT_SYSTEM,
-          // RequestUserInput：一次性、不落库（同 /suggest 的理由）
+          // RequestUserInput：一次性、不落库
           messages: [{
             role: 'user',
             content: [{ type: 'text', text: parts.join('\n\n') }],
@@ -4526,180 +4440,6 @@ export function apply(ctx) {
     }
   })));
 
-  // ══ 【纯聊天开关】同一个会话内切换「聊天 / 工作」════════════════════════
-  // 用户要求：在【工程模式里面直接选择聊天】就能纯聊天，不要另开一个预设。
-  //
-  // ── 为什么之前失败、现在为什么能成 ────────────────────────────────────
-  // 之前只想"换个显示"，模型照样挂满工具 → 照样调 skill。
-  // 要让同一个 Agent 真的没有工具，必须同时做两件事（都已核对官方契约）：
-  //
-  //   ① 摘掉工具：ctx.tools.restrict({ deny: [...] })
-  //      （dsh-tools/src/index.ts:1097-1123）
-  //      · 必须在【作用域上下文】调用（agent.ctx），全局调用会 throw；
-  //      · deny 的每个名字都必须是【已知的全局工具名】，否则 throw
-  //        —— 所以这里必须先 tools.schemas(agent) 现场取名字，
-  //        绝不硬编码（不同预设挂的工具不同，硬编码必崩）；
-  //      · 返回 disposer，注销即恢复，天然支持来回切。
-  //
-  //   ② 换掉系统提示词：systemPrompt.section({ complete: true })
-  //      （dsh-system-prompt/src/index.ts:69-75、629-632）
-  //      · complete 的 section 会把整个系统提示词替换成它自己：
-  //          sections: completeSection === undefined ? transformed.sections : [completeSection]
-  //      · 这样那套 700 行 CAD 人设（"必须先调用 mode-selection skill"）
-  //        就不再进入请求 —— 模型不会以为自己该去调工具。
-  //      · 两件事同时做才算"真正不是 Agent"。
-  //
-  // 状态：每个 agent 一份，存在内存（Map）。会话重开回到"工作"模式，
-  //   这是刻意的保守默认 —— 绝不静默改变用户原本的 Agent 行为。
-  const CHAT_MODE_SECTION = 'dsh-engineering-ui:chat-mode';
-  const chatModeAgents = new Map();   // agentId -> { restrict, section }
-  const chatModeState = new Map();    // agentId -> boolean（当前是否聊天模式）
-
-  /** 聊天模式的完整系统提示词：一段干净的对话人设，且不声称有工具。 */
-  function chatModePrompt() {
-    return [
-      '你是一个友好的对话助手。',
-      '',
-      '现在是【纯聊天】模式：你没有任何可调用的工具，只能与用户进行自然语言交流。',
-      '',
-      '规则：',
-      '1. 直接回答用户的问题，用清晰、自然的中文（或用户所用的语言）。',
-      '2. 不要声称要执行命令、读写文件或运行程序，也不要输出假装是工具调用或执行结果的文本。',
-      '3. 如果用户要求做需要工具才能完成的事（读取文件、执行命令、操作 SolidWorks 等），',
-      '   直接说明当前处于纯聊天模式、你无法执行，并建议他切回「工作」模式；',
-      '   然后仍然尽力用语言帮他分析或解答。',
-      '4. 需要用户做选择时，可以正常提问并给出选项，等用户回答。',
-    ].join('\n');
-  }
-
-  /** 进入聊天模式：摘掉该 agent 的全部工具 + 替换系统提示词。 */
-  function enterChatMode(agent) {
-    if (!agent || !agent.ctx) throw new Error('agent 不可用');
-    // 幂等：已在聊天模式就不重复挂
-    if (chatModeAgents.has(agent.id)) return;
-    const handles = {};
-
-    // ① 取当前【实际可见】的工具名，逐个 deny。
-    //    ⚠️ 必须现场取：restrict() 对未知名字会 throw（tools/src/index.ts:1114-1118），
-    //    而工具集合取决于预设，硬编码名字在别的部署上必崩。
-    let names = [];
-    try {
-      const schemas = (typeof ctx.tools.schemas === 'function')
-        ? (ctx.tools.schemas(agent) || []) : [];
-      names = schemas.map((s) => s && s.name).filter((n) => typeof n === 'string' && n);
-    } catch (e) {
-      names = [];
-    }
-
-    // 逐个尝试 restrict。官方契约（tools/tests/scoped.spec.ts:184-195）：
-    //   · 命名 scope 自己的注册会 throw unknown global tool；
-    //   · 空过滤会 throw no-op。
-    // 因此这里逐个名字单独 try：能被 restrict 的记账，不能被 restrict 的
-    //   跳过（它们由下面的 guard 兜底拦执行）。
-    // 之所以不整体传一个大数组：一个"未知"名字会让整批失败（全都不生效）。
-    const lifters = [];
-    for (const n of names) {
-      try {
-        lifters.push(agent.ctx.tools.restrict({ deny: [n] }));
-      } catch (e) {
-        // 该名字不可 restrict（scope 自身注册 / 未继承）→ 交给 guard 兜底
-      }
-    }
-    if (lifters.length) {
-      handles.restrict = () => { for (const l of lifters) { try { l(); } catch (e) {} } };
-    }
-
-    // ② 【执行兜底】guard 拒绝一切工具调用。
-    //    为什么还需要它：restrict 只影响"模型看到的工具列表"，若某个工具名
-    //    不可 restrict（见上），模型仍可能看到它并尝试调用。guard 是同步的
-    //    最终否决权（tools/src/index.ts:1126-1136），保证聊天模式下
-    //    【任何】工具都无法真正执行 —— 这是"真正不是 Agent"的硬保证。
-    try {
-      handles.guard = agent.ctx.tools.guard((exec) => {
-        // 聊天模式下拒绝一切工具执行
-        const reason = '当前处于【纯聊天】模式，没有可用的工具。'
-          + '请直接用语言回答；如需执行操作，请切回「工作」模式。';
-        return reason;
-      });
-    } catch (e) { /* guard 不可用时不阻断（restrict 已尽力） */ }
-
-    // ③ 用 complete section 独占系统提示词
-    handles.section = agent.ctx.systemPrompt.section({
-      name: CHAT_MODE_SECTION,
-      // order 任意（complete section 最终会独占），给身份说明的位置即可
-      order: agent.ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
-      text: chatModePrompt(),
-      complete: true,
-    });
-    chatModeAgents.set(agent.id, handles);
-  }
-
-  /** 退出聊天模式：恢复工具与系统提示词。 */
-  function exitChatMode(agent) {
-    const h = chatModeAgents.get(agent.id);
-    if (!h) return;
-    chatModeAgents.delete(agent.id);
-    try { if (h.guard) h.guard(); } catch (e) {}
-    try { if (h.restrict) h.restrict(); } catch (e) {}
-    try { if (h.section) h.section(); } catch (e) {}
-  }
-
-  disposers.push(ctx.webServer.register(guardRoute({
-    kind: 'exact',
-    path: PREFIX + '/chat-mode',
-    handler: async (req, res) => {
-      const q = queryOf(req);
-      // GET：查询某会话当前是否聊天模式
-      if (req.method === 'GET') {
-        const sid = (q.get('sessionId') || '').trim();
-        if (!ID_RE.test(sid)) return send(res, 400, { ok: false, error: 'bad sessionId' });
-        return send(res, 200, { ok: true, sessionId: sid, chatMode: chatModeState.get(sid) === true });
-      }
-      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'GET or POST only' });
-      let payload;
-      try { payload = JSON.parse(await readBody(req)); } catch {
-        return send(res, 400, { ok: false, error: 'bad json' });
-      }
-      const sid = String((payload && payload.sessionId) || '').trim();
-      const on = !!(payload && payload.on);
-      if (!ID_RE.test(sid)) return send(res, 400, { ok: false, error: 'bad sessionId' });
-
-      const agents = ctx.agents;
-      if (!agents || typeof agents.get !== 'function') {
-        return send(res, 200, { ok: false, error: 'agents 服务不可用' });
-      }
-      const agent = agents.get(sid);
-      if (agent === undefined || agent === null) {
-        return send(res, 200, {
-          ok: false,
-          error: '会话不在运行中：请保持该对话为当前对话后再切换（聊天模式是运行期状态）',
-        });
-      }
-      try {
-        if (on) enterChatMode(agent); else exitChatMode(agent);
-        chatModeState.set(sid, on);
-        // 报告切换后【实际可见】的工具数量，便于前端确认真的摘干净了
-        let left = -1;
-        try {
-          const sc = (typeof ctx.tools.schemas === 'function') ? (ctx.tools.schemas(agent) || []) : [];
-          left = sc.length;
-        } catch (e) { left = -1; }
-        return send(res, 200, { ok: true, sessionId: sid, chatMode: on, tools_left: left });
-      } catch (error) {
-        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
-      }
-    }
-  })));
-
-  // agent 释放时清掉聊天模式状态，避免 Map 泄漏
-  disposers.push(ctx.on('agent/disposed', (payload) => {
-    try {
-      const a = payload && payload.agent;
-      if (!a || !a.id) return;
-      chatModeAgents.delete(a.id);
-      chatModeState.delete(a.id);
-    } catch (e) {}
-  }));
 
   // ══ 【工程人设】设置页可填写的自定义提示词（GET/POST /persona）══════════
   // 用户需求：「当使用者使用工程模式的时候，在一开始会当作提示词发给模型」，
@@ -5506,6 +5246,370 @@ export function apply(ctx) {
     // 守卫装配失败绝不能影响插件本身（它是兜底，不是主功能）
     try { console.warn('[dsh-engineering-ui] job-wait-guard install failed', e); } catch (e2) {}
   }
+
+  // ══ 【内存守卫】子代理并发闸门 + 工作集回收 ═══════════════════════════════
+  // 用户需求（原文）：
+  //   「在多子代理并行中，会出现一堆子代理都在猛猛开的情况，导致出现"给测试者
+  //     的电脑内存给干爆了"，这样子改，只能最多三个子代理开启，然后要避免内存
+  //     干爆的情况，你看看可不可以搞一下啥类似的只清理系统运行内存但是不影响
+  //     流程的正常使用的」。
+  //
+  // ── 闸门放在哪、为什么是这里 ────────────────────────────────────────────
+  // 官方 subagents 服务有进程级名额（activation pool，默认 8），超限时抛
+  //   ACTIVATION_LIMIT_REACHED。问题是：
+  //   ① 默认 8 对 SolidWorks 场景太大，八个屋同时建模必然把内存打爆；
+  //   ② 那个错误发生在 fork【之后】，主对话已经消耗了一轮，还不好读。
+  // 本插件在 tools/pre-execute（官方包装点，dsh-tools pipeline.js:387）先拦一刀：
+  //   · 只拦 subagent / subagent_fork 两个工具；
+  //   · 只对【工程模式】作用域生效（其他预设零影响）；
+  //   · 名额按 root 会话统计（含孙代，见 mem-guard.countOccupiedChildren 的注释）；
+  //   · 超限直接返回可读的工具错误，模型拿到的是"先等一个屋收尾"的明确指引，
+  //     而不是宿主那句冷冰冰的 ACTIVATION_LIMIT_REACHED。
+  // 拦截是【软闸门】：它不改宿主配置，关掉 DSH_ENG_MEM_GUARD=0 就恢复原样。
+
+  /** 工程模式作用域判定（比 modelChainApplies 更宽：不要求链里有模型）。 */
+  function isEngineeringScope(agent) {
+    try {
+      if (!agent) return false;
+      if (isGuardSession(agent)) return true;
+      const h = agent && agent.session && agent.session.header;
+      if (h && String(h.agentPreset || '') === GUARD_PRESET) return true;
+      if (agent && String(agent.agentPreset || '') === GUARD_PRESET) return true;
+      // 子代理：有父会话即视为继承父作用域（父级是不是工程模式由 fork 决定）
+      const pid = parentSessionId(agent);
+      if (pid) {
+        const cached = presetCache.get(String(pid));
+        if (cached === GUARD_PRESET) return true;
+        if (cached && isKnownPreset(cached) && cached !== GUARD_PRESET) return false;
+        return true;   // 父级未知 → 保守按工程模式处理（同 modelChainApplies 的口径）
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 找到 root 会话 id（并发名额挂在 root 的 pool 上）。 */
+  function rootSessionIdOf(agent) {
+    try {
+      let cur = agent;
+      let guard = 0;
+      while (cur && guard < 32) {
+        guard += 1;
+        const pid = parentSessionId(cur);
+        if (!pid) return String((cur && (cur.sessionId || cur.id)) || '');
+        let parent = null;
+        try { parent = ctx.agents && typeof ctx.agents.get === 'function' ? ctx.agents.get(String(pid)) : null; } catch (e) { parent = null; }
+        if (!parent) return String(pid);
+        cur = parent;
+      }
+      return String((cur && (cur.sessionId || cur.id)) || '');
+    } catch (e) {
+      return String((agent && (agent.sessionId || agent.id)) || '');
+    }
+  }
+
+  /** 构造"并发超限"的工具错误结果（与 job-wait-guard 同一形状）。 */
+  function subagentLimitResult(gate) {
+    const msg = 'SUBAGENT_LIMIT_REACHED: ' + gate.message;
+    return {
+      content: [{ type: 'text', text: 'Error: ' + gate.message }],
+      isError: true,
+      error: {
+        message: msg,
+        info: { name: 'SubagentLimitError', code: 'SUBAGENT_LIMIT_REACHED', active: gate.active, max: gate.max },
+      },
+    };
+  }
+
+  /**
+   * 装配并发闸门。返回 disposer。
+   * @param hostCtx 插件上下文（需可监听 'tools/pre-execute'）
+   */
+  function installSubagentConcurrencyGate(hostCtx) {
+    if (!memGuardEnabled() || !hostCtx || typeof hostCtx.on !== 'function') return () => {};
+    // ── 为什么【不只拦 subagent_fork】────────────────────────────────────
+    // 用户报告「子代理死了不换模型」时我们发现：spawn 出来的子代理没有
+    // fork 那一批的历史，出问题往往就是靠 subagent(spawn) 重开。
+    // 两种委派都要过闸门，否则把 fork 拦住、走 spawn 绕过去，等于没拦。
+    const listener = async (exec, next) => {
+      // ── 只处理两个委派工具，其余原样放行 ────────────────────────────────
+      let name = '';
+      try { name = String((exec && exec.name) || ''); } catch (e) { name = ''; }
+      if (name !== 'subagent' && name !== 'subagent_fork') return next();
+      try {
+        const agent = exec && exec.agent;
+        if (!agent || !isEngineeringScope(agent)) return next();
+        const rootId = rootSessionIdOf(agent);
+        if (!rootId) return next();
+        let rows = [];
+        try {
+          rows = await hostCtx.subagents.listDescendants(String(rootId));
+        } catch (e) {
+          // 读不到名册（旧宿主 / 服务缺失）→ 宁可放行，也不能因为闸门把流程锁死
+          return next();
+        }
+        const gate = evaluateConcurrency(rows, rootId, agent.id, maxActiveSubagents());
+        if (gate.allowed) {
+          // 记下"这一批还在跑" —— 回收不在 fork 时做，而是等【整批收工】后做，
+          // 见 pollBatches()。用户要求原文：
+          //   「这个清理内存是每三个子代理都干完了，然后主对话自己清理的」。
+          trackBatch(rootId);
+          return next();
+        }
+        try {
+          console.warn('[dsh-engineering-ui] ' + gate.message.split('\n')[0]);
+        } catch (e) {}
+        return subagentLimitResult(gate);
+      } catch (e) {
+        return next();
+      }
+    };
+    return hostCtx.on('tools/pre-execute', listener);
+  }
+
+  /**
+   * 节流回收器（阈值 + 间隔都在 mem-guard.js 里，写错配置不会把功能关死）。
+   * ⚠️ 必须【防御性构造】：有些部署/测试会用正则剥掉 import 头再求值，
+   *    此时 createReclaimer 未定义 —— 直接调用会在 apply() 里抛 ReferenceError，
+   *    让整个工程模式装配失败。这里退化成"永不回收"的空实现。
+   */
+  let maybeReclaim = function () { return { ok: false, skipped: 'unavailable' }; };
+  try { maybeReclaim = createReclaimer(); } catch (e) { /* 保持空实现 */ }
+
+  /** 非阻塞地排一次回收（绝不让 PowerShell 卡住 agent loop）。 */
+  function scheduleReclaim(force) {
+    try {
+      const t = setTimeout(() => {
+        try { maybeReclaim({ force: !!force }); } catch (e) {}
+      }, 1200);
+      if (t && typeof t.unref === 'function') t.unref();
+    } catch (e) {}
+  }
+
+  // ══ 【回收时机】只在"这一批子代理全部收工"后回收一次 ═══════════════════
+  // 用户要求（原文）：「这个清理内存是每三个子代理都干完了，然后主对话自己清理的」。
+  // 旧实现是在【每次 fork 放行】和【每轮 turn-stopping】各回收一次 —— 那是
+  //   "开着的时候天天刷工作集"，既没必要（刚分配的内存马上又要用），
+  //   也会把主对话自己的热页刷掉，反而拖慢。
+  // 现在改成：fork 时只登记 root，之后由 pollBatches() 轮询名册；
+  //   当该 root 名下【没有活跃子代理】时，才做一次回收，并注销登记。
+  // 轮询很轻（只是读投影），间隔 15s，且 unref 不吊住进程。
+  const BATCH_POLL_MS = 15000;
+  const BATCH_MAX_WAIT_MS = 4 * 60 * 60 * 1000;   // 4h 兜底（与 SW_MAX_HOLD 同量级）
+  /** rootId -> { since: number }；表示"这个 root 有一批子代理在跑，收工后要回收"。 */
+  const batchRoots = new Map();
+  let batchTimer = null;
+
+  /** 登记一个批次（幂等）。 */
+  function trackBatch(rootId) {
+    try {
+      const id = String(rootId || '');
+      if (!id) return;
+      if (!batchRoots.has(id)) batchRoots.set(id, { since: Date.now() });
+      startBatchWatcher();
+    } catch (e) {}
+  }
+
+  /** 启动批次轮询（只启一次）。 */
+  function startBatchWatcher() {
+    try {
+      if (batchTimer) return;
+      batchTimer = setInterval(() => { pollBatches(); }, BATCH_POLL_MS);
+      if (batchTimer && typeof batchTimer.unref === 'function') batchTimer.unref();
+    } catch (e) {}
+  }
+
+  /** 停掉轮询（没有待观察批次时）。 */
+  function stopBatchWatcher() {
+    try {
+      if (!batchTimer) return;
+      clearInterval(batchTimer);
+      batchTimer = null;
+    } catch (e) { batchTimer = null; }
+  }
+
+  /**
+   * 轮询所有待观察批次：名下活跃子代理归零 → 回收一次内存并注销。
+   * 任何异常都只影响本次轮询，绝不冒泡。
+   */
+  async function pollBatches() {
+    if (!batchRoots.size) { stopBatchWatcher(); return; }
+    const now = Date.now();
+    for (const [rootId, info] of Array.from(batchRoots.entries())) {
+      try {
+        let active = 0;
+        let known = false;
+        try {
+          const rows = await ctx.subagents.listDescendants(String(rootId));
+          known = true;
+          active = countOccupiedChildren(rows, String(rootId)).ids.length;
+        } catch (e) {
+          // 名册读不到（root 已销毁 / 服务缺失）→ 当作"这批没了"，直接收尾
+          known = false;
+        }
+        const timedOut = (now - (info.since || now)) > BATCH_MAX_WAIT_MS;
+        if (active === 0 || !known || timedOut) {
+          batchRoots.delete(rootId);
+          // 整批（≤3 个）收工 → 主对话这一侧回收一次
+          scheduleReclaim(false);
+          try {
+            console.warn('[dsh-engineering-ui] 子代理批次收工（root=' + rootId
+              + (timedOut ? '，超时兜底' : '') + '），已排程一次内存回收');
+          } catch (e) {}
+        }
+      } catch (e) { /* 单批失败不影响其他批 */ }
+    }
+    if (!batchRoots.size) stopBatchWatcher();
+  }
+
+  /** 该 root 名下当前活跃子代理数（失败返回 -1，供状态接口展示）。 */
+  async function activeChildCount(rootId) {
+    try {
+      const rows = await ctx.subagents.listDescendants(String(rootId));
+      return countOccupiedChildren(rows, String(rootId)).ids.length;
+    } catch (e) {
+      return -1;
+    }
+  }
+
+  try {
+    disposers.push(installSubagentConcurrencyGate(ctx));
+  } catch (e) {
+    try { console.warn('[dsh-engineering-ui] subagent concurrency gate install failed', e); } catch (e2) {}
+  }
+
+  // ⚠️ 不再挂 turn-stopping 回收：那是"每轮都刷"，与用户要求的
+  //   "整批子代理干完之后清理"相反。回收时机统一由 pollBatches() 管；
+  //   另外保留设置页的「立刻回收内存」按钮作手动兜底。
+  // 插件卸载时停掉轮询。
+  disposers.push(function () { stopBatchWatcher(); batchRoots.clear(); });
+
+  // ══ 【内存守卫】状态 / 手动回收接口 ═══════════════════════════════════
+  // GET  /dsh-engineering-ui/mem-guard        → 只读快照（含上限与阈值）
+  // POST /dsh-engineering-ui/mem-guard        → 立刻回收一次（可带 force:true）
+  // POST 带 max_subagents 等字段               → 写 tools/mem_guard.json 并立刻生效
+
+  /** mem-guard 配置文件路径（与 model_chain.json 同一个 tools 目录）。 */
+  function memGuardConfigPath() {
+    try {
+      const dir = findToolsDir();
+      if (!dir) return null;
+      return path.join(dir, 'mem_guard.json');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 读 mem_guard.json（找不到/读坏 → 空对象，即全用默认值）。 */
+  function readMemGuardSettings() {
+    try {
+      const p = memGuardConfigPath();
+      if (!p) return {};
+      const j = readJsonSafe(p);
+      if (!j || typeof j !== 'object') return {};
+      const out = {};
+      const num = (v, min, max) => {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return undefined;
+        const x = Math.floor(n);
+        return (x >= min && x <= max) ? x : undefined;
+      };
+      const a = num(j.max_subagents, 1, 12); if (a !== undefined) out.max_subagents = a;
+      const b = num(j.reclaim_threshold_pct, 50, 99); if (b !== undefined) out.reclaim_threshold_pct = b;
+      const c = num(j.reclaim_interval_ms, 5000, 3600000); if (c !== undefined) out.reclaim_interval_ms = c;
+      return out;
+    } catch (e) {
+      return {};
+    }
+  }
+
+  /** 写 mem_guard.json（原子写失败也不抛，返回 null 表示没存成）。 */
+  function writeMemGuardSettings(next) {
+    try {
+      const p = memGuardConfigPath();
+      if (!p) return null;
+      const clean = {};
+      const num = (v, min, max) => {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return undefined;
+        const x = Math.floor(n);
+        return (x >= min && x <= max) ? x : undefined;
+      };
+      const a = num(next && next.max_subagents, 1, 12); if (a !== undefined) clean.max_subagents = a;
+      const b = num(next && next.reclaim_threshold_pct, 50, 99); if (b !== undefined) clean.reclaim_threshold_pct = b;
+      const c = num(next && next.reclaim_interval_ms, 5000, 3600000); if (c !== undefined) clean.reclaim_interval_ms = c;
+      clean.updated_at = new Date().toISOString();
+      fs.writeFileSync(p, JSON.stringify(clean, null, 2), 'utf8');
+      return clean;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // 装配时把磁盘配置注入运行期覆盖（文件不存在 = 全用默认值，不写盘）。
+  try { setMemGuardOverrides(readMemGuardSettings()); } catch (e) {}
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/mem-guard',
+    handler: async (req, res) => {
+      try {
+        const method = String((req && req.method) || 'GET').toUpperCase();
+        if (method === 'GET') {
+          const snap = memorySnapshot();
+          // 待观察批次（rootId + 起始时间）—— 面板据此显示"这批还没收工"。
+          const pending = Array.from(batchRoots.entries()).map(([id, info]) => ({
+            root_session_id: id,
+            since: new Date((info && info.since) || Date.now()).toISOString(),
+          }));
+          return send(res, 200, {
+            ok: true,
+            enabled: memGuardEnabled(),
+            max_subagents: maxActiveSubagents(),
+            reclaim_threshold_pct: reclaimThresholdPct(),
+            reclaim_interval_ms: reclaimIntervalMs(),
+            // 【回收时机】只在"这一批子代理全部收工"后回收一次（用户要求原文：
+            //   「每三个子代理都干完了，然后主对话自己清理的」）。
+            reclaim_on: 'batch-complete',
+            batch_poll_interval_ms: BATCH_POLL_MS,
+            pending_batches: pending,
+            memory: snap,
+          });
+        }
+        if (method !== 'POST') return send(res, 405, { ok: false, error: 'GET or POST only' });
+        let payload = {};
+        try { payload = JSON.parse(await readBody(req)) || {}; } catch (e) { payload = {}; }
+        // ── 设置写入：允许把 max_subagents / threshold / interval 落到
+        //    tools/mem_guard.json，并【当场】更新运行期覆盖（设置页改完立刻生效）。
+        if (payload && (payload.max_subagents !== undefined
+            || payload.reclaim_threshold_pct !== undefined
+            || payload.reclaim_interval_ms !== undefined)) {
+          const next = { ...memGuardOverrides() };
+          if (payload.max_subagents !== undefined) next.max_subagents = payload.max_subagents;
+          if (payload.reclaim_threshold_pct !== undefined) next.reclaim_threshold_pct = payload.reclaim_threshold_pct;
+          if (payload.reclaim_interval_ms !== undefined) next.reclaim_interval_ms = payload.reclaim_interval_ms;
+          const saved = writeMemGuardSettings(next);
+          setMemGuardOverrides(saved || next);
+          return send(res, 200, {
+            ok: true,
+            max_subagents: maxActiveSubagents(),
+            reclaim_threshold_pct: reclaimThresholdPct(),
+            reclaim_interval_ms: reclaimIntervalMs(),
+            config: saved || next,
+          });
+        }
+        const r = maybeReclaim({ force: payload && payload.force === true });
+        return send(res, 200, {
+          ok: !!(r && r.ok),
+          max_subagents: maxActiveSubagents(),
+          result: r,
+        });
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  })));
+
 
   return () => {
     // 卸载前把待写记录落盘（尽力而为；失败也绝不能抛）

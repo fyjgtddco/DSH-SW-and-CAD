@@ -58,7 +58,8 @@ const rewritten = readFileSync(join(__dirname, '..', 'lib', 'index.js'), 'utf8')
   .replace("from './defense-sign.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'defense-sign.js'), 'utf8')) + "'")
   .replace("from './job-wait-guard.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'job-wait-guard.js'), 'utf8')) + "'")
   // 【Webots 接入】webots.js 也是相对 import；data: URL 解析不了相对路径。
-  .replace("from './webots.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'webots.js'), 'utf8')) + "'");
+  .replace("from './webots.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'webots.js'), 'utf8')) + "'")
+  .replace("from './mem-guard.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'mem-guard.js'), 'utf8')) + "'");
 
 const { apply } = await import(url(rewritten));
 

@@ -60,13 +60,17 @@ const GUARD_URL = 'data:text/javascript;base64,' + Buffer.from(guardSource).toSt
 // 【Webots 接入】webots.js 同样是相对 import，data: URL 解析不了 → 一并内联。
 const webotsSource = readFileSync(new URL('../lib/webots.js', import.meta.url), 'utf8');
 const WEBOTS_URL = 'data:text/javascript;base64,' + Buffer.from(webotsSource).toString('base64');
+// 【内存守卫】mem-guard.js 同样是相对 import，一并内联。
+const memGuardSource = readFileSync(new URL('../lib/mem-guard.js', import.meta.url), 'utf8');
+const MEMGUARD_URL = 'data:text/javascript;base64,' + Buffer.from(memGuardSource).toString('base64');
 
 const rewritten = source
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + LLM_URL + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + REG_URL + "'")
   .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'")
   .replace("from './job-wait-guard.js'", "from '" + GUARD_URL + "'")
-  .replace("from './webots.js'", "from '" + WEBOTS_URL + "'");
+  .replace("from './webots.js'", "from '" + WEBOTS_URL + "'")
+  .replace("from './mem-guard.js'", "from '" + MEMGUARD_URL + "'");
 assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换成功');
 
 const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));
@@ -141,7 +145,7 @@ function harness(handles = {}) {
   return { ctx, root, routes, hooks, asks, dispose, request };
 }
 
-test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
+test('全部 32 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
   const h = harness();
   try {
     // 9 条基础/提问/通知路由
@@ -151,28 +155,26 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
     //     ※ 第 5 条是【10 分钟自动刷新】新增的纯进程端点：
     //       用户要求"只做检测就行"，它【绝不发 COM】，因此必须与
     //       conn-probe 分开（后者可能把 SW 拉起来）。
-    //   + 1 条【独立聊天页】推荐追问路由（/suggest）
     //   + 1 条【划词详情】侧边分析路由（/side-chat）
     //   + 1 条【工程人设】读写路由（/persona）
-    //   + 1 条【聊天模式】同会话能力切换路由（/chat-mode）
-    //   + 1 条【第4项·SW 健康看护】ctx.jobs 版路由（/sw-guard-job）= 24
+    //   + 1 条【第4项·SW 健康看护】ctx.jobs 版路由（/sw-guard-job）= 22
     // 注：/defense/verify-gate 是宿主侧"不消费 nonce"的只读验签入口
     //   （门禁 verify-gate 用），原先漏计，已补入清单。
-    // ── 【工程环境检查（用户需求 3）】新增 3 条 → 24 + 3 = 27 ────────────
+    // ── 【工程环境检查（用户需求 3）】新增 3 条 → 22 + 3 = 25 ────────────
     //   /env-check  —— 跑一次 tools/env_check.py probe（只读，不装东西）
     //   /env-prompt —— 生成可发给新对话的修复提示词
     //   /settings   —— 本机设置（交付目录 / 各软件路径）读写
     // 判定逻辑全部在 Python 侧，JS 只做 HTTP 转接，保证"设置页看到的"
     //   与"Agent 跑出来的"是同一套结论。
-    // ── 【模型自动接替】新增 2 条 → 27 + 2 = 29 ────────────────────────
+    // ── 【模型自动接替】新增 2 条 → 25 + 2 = 27 ────────────────────────
     //   /model-catalog —— 收集各 provider 的可用模型目录（只读，给设置页用）
     //   /model-chain   —— 读写"备用模型链"配置（GET 读 / POST 存）
     // 旧断言写死 27 且清单里没有这两条 —— 代码早就是 29 条，
     //   于是这条断言长期失败，而它恰恰是"路由注册完整性"的唯一守门人。
     //   断言数量与清单必须同时维护：加路由时两处一起改。
-    // ── 【Webots 接入】再 +4 → 29 + 4 = 33 ──────────────────────────────
+    // ── 【Webots 接入】+4 → 【内存守卫】+1(mem-guard) = 32 ──────────────────────────────
     //   /webots-context / -report / -evidence / -attribute（全部只读 GET）
-    assert.equal(h.routes.size, 33, '路由数量应为 33（含 4 条 Webots 只读路由）');
+    assert.equal(h.routes.size, 32, '路由数量应为 32（含 4 条 Webots 只读路由）');
     // ── 清单必须与 lib/index.js 的 ctx.webServer.register 一一对应 ──────
     // 漏写一条 → 路由存在但没被这条断言保护；多写一条 → 直接失败。
     for (const p of [
@@ -190,10 +192,10 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/conn-launch', '/dsh-engineering-ui/conn-diagnose',
       '/dsh-engineering-ui/env-check', '/dsh-engineering-ui/env-prompt',
       '/dsh-engineering-ui/settings',
-      '/dsh-engineering-ui/suggest', '/dsh-engineering-ui/side-chat',
-      '/dsh-engineering-ui/chat-mode',
+      '/dsh-engineering-ui/side-chat',
       '/dsh-engineering-ui/model-catalog', '/dsh-engineering-ui/model-chain',
       '/dsh-engineering-ui/persona',
+      '/dsh-engineering-ui/mem-guard',
       '/dsh-engineering-ui/webots-context', '/dsh-engineering-ui/webots-report',
       '/dsh-engineering-ui/webots-evidence', '/dsh-engineering-ui/webots-attribute',
     ]) {
@@ -214,10 +216,10 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/conn-launch', '/dsh-engineering-ui/conn-diagnose',
       '/dsh-engineering-ui/env-check', '/dsh-engineering-ui/env-prompt',
       '/dsh-engineering-ui/settings',
-      '/dsh-engineering-ui/suggest', '/dsh-engineering-ui/side-chat',
-      '/dsh-engineering-ui/chat-mode',
+      '/dsh-engineering-ui/side-chat',
       '/dsh-engineering-ui/model-catalog', '/dsh-engineering-ui/model-chain',
       '/dsh-engineering-ui/persona',
+      '/dsh-engineering-ui/mem-guard',
       '/dsh-engineering-ui/webots-context', '/dsh-engineering-ui/webots-report',
       '/dsh-engineering-ui/webots-evidence', '/dsh-engineering-ui/webots-attribute',
     ]).size, h.routes.size, '路由清单与注册数必须一致（清单有重复或漏项）');

@@ -203,6 +203,17 @@
                 波2(总装验证1个)：波1全部建模房间 room-end → close-all → select → room-start → fork → assign → room-end。
                 波3(出图1个)：同上。回退：room-fail <源房间> → select 重做。
 
+                🔴【并发硬上限=3】同一时刻最多 3 个子代理占名额（宿主按 root 统一计数，
+                  含已跑完但仍驻留的小屋）。插件在 tools/pre-execute 里做了代码级闸门：
+                  第 4 个 subagent / subagent_fork 会直接返回 SUBAGENT_LIMIT_REACHED。
+                  所以：
+                  · 编制超过 3 个建模房间时，波1 必须**分批**（每批 ≤3），本批全部 room-end 后再开下一批；
+                  · 每个房间 room-end 前先 interrupt_agent 收尾，名额才会真正释放；
+                  · 收到 SUBAGENT_LIMIT_REACHED 不要重试同一个调用 —— 先 room-board 看谁还没收工。
+                  上限可用 DSH_ENG_MAX_SUBAGENTS 调整（默认 3），闸门可用 DSH_ENG_MEM_GUARD=0 关闭。
+                💾【内存】内存占用超 85% 时插件会调 EmptyWorkingSet 回收工作集（不杀进程、不中断流程）；
+                  同时会按需调低并行度。若看到 MEM_RECLAIM 相关日志，不必中断任务。
+
                 【SW窗口】建 subagent 前必 close-all 且确认无 SLDWORKS.EXE。sw_bridge 自动 FIFO 排队；
                 返回 sw_busy:true → 用【阻塞式等待】python mode_gate.py wait-rooms <房间> --timeout 90
                 （或 sw-wait <房间>），让 Python 原地等锁；队列保留，禁放弃。

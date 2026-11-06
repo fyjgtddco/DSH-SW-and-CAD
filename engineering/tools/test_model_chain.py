@@ -80,7 +80,9 @@ eq("reasoningEffort 透传", n1.entries[1], {provider:"p3", model:"m3", reasonin
 
 const many = normalizeModelChain({enabled:true, models:
   Array.from({length:20}, (_,i)=>({provider:"p"+i, model:"m"+i}))});
-eq("上限 10 个（用户要求）", many.entries.length, 10);
+// 【2026-10-30 改版】用户要求「不限制他们应该加多少个」→ 上限已从 10 提到 100
+// （只作防爆内存的极端上限）。旧断言写死 10，代码改了它没跟着改，长期假失败。
+eq("极端上限 100 个（数量不限制，只防爆内存）", many.entries.length, 20);
 
 // --- nextModelCandidate ---
 const entries = [{provider:"a",model:"1"},{provider:"b",model:"2"},{provider:"c",model:"3"}];
@@ -122,7 +124,6 @@ sec("B. 接线（waterfall 必须挂对）")
 ck("注册了 agent/request waterfall", "ctx.on('agent/request'" in SRC)
 ck("注册了 agent/request-error waterfall", "ctx.on('agent/request-error'" in SRC)
 ck("有按 turn 重置的 tried 集合", "st.tried = new Set()" in SRC)
-ck("每轮都钉住候选（不是只切一次）", "st.key = modelKey(cur.provider, cur.model)" in SRC)
 ck("切模型后返回 {kind:'retry'}", re.search(r"kind:\s*'retry'", SRC) is not None)
 ck("错误码白名单含 QUOTA", "'QUOTA'" in SRC and "MODEL_CHAIN_SWITCH_CODES" in SRC)
 ck("含 RATE_LIMIT 与 CONTEXT_WINDOW_EXCEEDED",
@@ -135,7 +136,12 @@ ck("只对工程模式生效（复用 isGuardSession）",
 ck("agent/disposed 清理状态", "ctx.on('agent/disposed'" in SRC)
 ck("有 /model-chain 路由（供设置页读写）", "PREFIX + '/model-chain'" in SRC)
 ck("保存后让缓存失效", "modelChainCache = null" in SRC)
-ck("10 个槽位上限", "out.entries.length >= 10" in SRC)
+# ⚠️ 旧断言找的是 "st.key = modelKey(cur.provider, cur.model)" —— 那段实现已在
+# 2026-10-30 改成「永远从链首取第一个本轮没试过的」（见 index.js 的最终定案注释）。
+# 现在钉住的写法是 st.key = modelKey(nxt.provider, nxt.model)。
+ck("每轮都钉住候选（不是只切一次）", "st.key = modelKey(nxt.provider, nxt.model)" in SRC)
+ck("待生效候选会被 pre-step 重新写回（子代理不换模型修复）",
+   "st.pendingKey" in SRC and "selectModelRoute(agent, want)" in SRC)
 
 # ── 3. 配置项不能误入敏感路由（它不产生副作用，但也别漏保护）───────
 sec("C. 与既有结构不冲突")

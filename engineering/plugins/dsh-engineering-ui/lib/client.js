@@ -71,9 +71,9 @@ window.__ModuleLoader__.load({
           return out;
         }
         case 'user/message': {
-          // ── 【独立聊天页】用户气泡 ──────────────────────────────────────
+          // ── 用户气泡 ─────────────────────────────────────────────────
           // 原实现没有这个分支，因此右侧面板只显示助手侧内容。
-          // 纯聊天面必须成对显示「用户问 / 助手答」，故补上。
+          // 子代理工作区必须成对显示「用户问 / 助手答」，故补上。
           // 事件形状：'user/message' 的 data 就是一个 UserMessage
           //   （dsh-session/src/types.ts:309），正文在 data.message.content[]
           //   —— 与 assistant/message 同构，故解析方式一致。
@@ -694,6 +694,14 @@ window.__ModuleLoader__.load({
       '.eng-row-hint{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;line-height:1.65;margin-top:3px}',
       // 右箭头：灰色、不换行、不参与拉伸
       '.eng-row-chev{color:#c0c4cc;flex:none;font-size:16px;line-height:1;transform:translateY(-1px)}',
+      // ── 【子目录内联展开】embedded 版式 ────────────────────────────────
+      // 用户要求：「"内存与并发"和"模型自动接替"统一放在"设计过程优化"的
+      //   子目录下面」。
+      // 这两个面板原来各自是一个主栏目（大标题 + 独立卡片）。收进子目录后，
+      //   如果继续画卡片壳就会出现"卡片套卡片 + 两层标题"，所以 EngGroup 在
+      //   embedded 模式下只输出内容；这里给展开区加一条左内缩 + 细分隔线，
+      //   让它看起来确实是"这一行的子级"，而不是又一个平级栏目。
+      '.eng-grp-embedded{border-top:1px solid var(--dsw-alias-border-l1,#f0f2f5);padding:2px 14px 12px 22px}',
       // ── 【模型自动接替】10 槽位表格（默认收起，展开后显示）────────────
       // 目标：紧凑。10 行必须能在一屏内看完，所以行高与字号都压到最小可用值。
       '.eng-mc-table{border-top:1px solid var(--dsw-alias-border-l1,#e5e7eb);margin-top:6px;padding-top:6px}',
@@ -1031,191 +1039,6 @@ window.__ModuleLoader__.load({
         'max-width:100%;box-sizing:border-box;overflow-wrap:break-word;word-break:break-word' +
       '}' +
 
-      // ══ 【独立聊天页】纯聊天面样式 ══════════════════════════════════════
-      // 设计原则（对齐官方观感，见 packages/client/AGENTS.md 的样式规则）：
-      //   · 只用 --dsw-alias-* 语义 token，不写死颜色 → 自动跟随亮/暗主题；
-      //   · 内容宽度复用官方变量 --dsh-chat-content-width，让气泡与官方
-      //     对话区同宽对齐，切换视图时不会"跳宽度"；
-      //   · 不覆盖任何官方类名：本视图自带 eng-chat-* 前缀，零外溢。
-      '.eng-chat{' +
-        'box-sizing:border-box;display:flex;flex-direction:column;' +
-        'gap:10px;height:100%;min-height:0;overflow-y:auto;' +
-        'padding:18px calc(var(--dsh-composer-side-clearance, 24px) + 16px) 8px;' +
-        'scroll-behavior:smooth' +
-      '}' +
-      // 气泡行：用户靠右、助手靠左（网页端聊天的基本观感）
-      '.eng-chat-row{display:flex;width:100%;max-width:var(--dsh-chat-content-width,760px);margin:0 auto}' +
-      '.eng-chat-row.me{justify-content:flex-end}' +
-      '.eng-chat-row.bot{justify-content:flex-start}' +
-      '.eng-chat-bubble{' +
-        'border-radius:12px;box-sizing:border-box;font-size:14px;' +
-        'line-height:calc(24px + var(--dsh-content-font-delta, 0px));' +
-        'max-width:80%;overflow-wrap:anywhere;padding:9px 13px;white-space:pre-wrap;' +
-        'word-break:break-word' +
-      '}' +
-      '.eng-chat-row.me .eng-chat-bubble{' +
-        'background:var(--dsw-alias-state-business-tertiary, #eef2ff);' +
-        'color:var(--dsw-alias-label-primary)' +
-      '}' +
-      '.eng-chat-row.bot .eng-chat-bubble{' +
-        'background:var(--dsw-alias-bg-layer-2, #f8fafc);' +
-        'border:1px solid var(--dsw-alias-border-l2, #e2e8f0);' +
-        'color:var(--dsw-alias-label-primary)' +
-      '}' +
-      '.eng-chat-typing{' +
-        'color:var(--dsw-alias-label-tertiary, #8b95a3);font-size:13px;' +
-        'margin:2px auto;max-width:var(--dsh-chat-content-width,760px);width:100%' +
-      '}' +
-      '.eng-chat-err{' +
-        'background:var(--dsw-alias-state-error-tertiary, #fef2f2);border-radius:10px;' +
-        'color:var(--dsw-alias-state-error-primary, #991b1b);font-size:13px;' +
-        'margin:8px auto;max-width:var(--dsh-chat-content-width,760px);padding:10px 12px;width:100%' +
-      '}' +
-      // ── 推荐追问（对照用户图二：助手消息下方一列「↳ 问题」）──────────
-      '.eng-chat-sug{' +
-        'display:flex;flex-direction:column;gap:2px;' +
-        'margin:2px auto 4px;max-width:var(--dsh-chat-content-width,760px);width:100%' +
-      '}' +
-      '.eng-chat-sug-item{' +
-        'align-items:center;background:transparent;border:0;border-radius:8px;' +
-        'color:var(--dsw-alias-label-secondary, #475569);cursor:pointer;' +
-        'display:flex;font-family:inherit;font-size:13.5px;gap:9px;' +
-        'padding:8px 10px;text-align:left;width:100%' +
-      '}' +
-      '.eng-chat-sug-item:hover{' +
-        'background:var(--dsw-alias-interactive-bg-hover, rgba(15,23,42,.05));' +
-        'color:var(--dsw-alias-label-primary)' +
-      '}' +
-      '.eng-chat-sug-ico{color:var(--dsw-alias-label-tertiary,#94a3b8);flex:none}' +
-      '.eng-chat-sug-more{' +
-        'align-self:flex-start;background:transparent;border:0;border-radius:7px;' +
-        'color:var(--dsw-alias-label-tertiary,#8b95a3);cursor:pointer;' +
-        'font-family:inherit;font-size:12px;margin-left:27px;padding:4px 8px' +
-      '}' +
-      '.eng-chat-sug-more:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.05))}' +
-      // 说明：起步建议（eng-chat-starter）的样式统一在下方
-      //   【视图切换器 + 起步建议】区块里定义，此处不再重复。',
-
-      // ══ 【视图切换器 + 起步建议】布局 ══════════════════════════════════
-      // 两个落点（对应用户给的截图里的红框 / 蓝框）：
-      //   · 红框 = 输入框【上方】 → conversation.input.dock
-      //   · 蓝框 = 输入框【下方】 → 起步建议卡片
-      //
-      // 官方插槽会被 ui-renderer 包成 <div data-slot="<key>"
-      //   style="display:contents">（ui-renderer/src/client/scoped-slots.tsx
-      //   :1081-1091）。display:contents 让这层壳不占布局，因此我可以直接用
-      //   [data-slot=...] 选择器给【我的内容】定位，而不会影响官方其它住户。
-      //   ⚠️ 只针对我自己的 .eng-vs / .eng-chat-starter 设置样式，
-      //      绝不给插槽壳或官方元素写样式（避免污染官方布局）。
-      //
-      // 切换器：居中、胶囊形、两段（对照用户图一的 segmented control）。
-      '.eng-vs{' +
-        'align-items:center;background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.06));' +
-        'border-radius:999px;box-sizing:border-box;display:flex;gap:2px;' +
-        'margin:0 auto 2px;padding:3px;width:fit-content' +
-      '}' +
-      '.eng-vs-item{' +
-        'background:transparent;border:0;border-radius:999px;color:var(--dsw-alias-label-secondary,#475569);' +
-        'cursor:pointer;font-family:inherit;font-size:13px;font-weight:500;' +
-        'line-height:1;padding:7px 18px;transition:background .15s,color .15s' +
-      '}' +
-      '.eng-vs-item:hover{color:var(--dsw-alias-label-primary)}' +
-      '.eng-vs-item.on{' +
-        'background:var(--dsw-alias-bg-layer-1,#fff);' +
-        'box-shadow:0 1px 3px rgba(15,23,42,.12);' +
-        'color:var(--dsw-alias-label-primary)' +
-      '}' +
-      '.eng-vs-item.busy{opacity:.6;cursor:default}' +
-      // 切换失败提示：不静默失败，用户必须看得见原因
-      '.eng-vs-err{' +
-        'color:var(--dsw-alias-state-error-primary,#b91c1c);font-size:12px;' +
-        'line-height:1.6;margin:2px auto 0;max-width:var(--dsh-composer-card-max-width,760px);' +
-        'padding:0 4px;width:100%' +
-      '}' +
-      // 起步建议卡片：位于输入框【下方】，宽度与输入卡对齐
-      //   （复用官方变量 --dsh-composer-card-max-width，让它与输入框同宽）。
-      '.eng-chat-starter{' +
-        'box-sizing:border-box;display:flex;flex-direction:column;gap:6px;' +
-        'margin:10px auto 0;max-width:var(--dsh-composer-card-max-width,760px);' +
-        'padding:0 var(--dsh-composer-side-clearance,0);width:100%' +
-      '}' +
-      '.eng-chat-starter-list{display:flex;flex-direction:column;gap:5px}' +
-      '.eng-chat-starter-item{' +
-        'align-items:center;background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.03));' +
-        'border:1px solid var(--dsw-alias-border-l2,transparent);border-radius:10px;' +
-        'color:var(--dsw-alias-label-secondary,#334155);cursor:pointer;' +
-        'display:flex;font-family:inherit;font-size:13.5px;gap:9px;' +
-        'padding:10px 13px;text-align:left;width:100%' +
-      '}' +
-      '.eng-chat-starter-item:hover{' +
-        'border-color:var(--dsw-alias-state-business-primary,#2563eb);' +
-        'color:var(--dsw-alias-label-primary)' +
-      '}' +
-      '.eng-chat-starter-ico{flex:none;font-size:14px}' +
-      // ── 推荐追问（图二）：一轮结束后显示，点一下填进输入框 ──────────────
-      // 视觉对齐截图：左侧「↳」箭头 + 灰字，整行可点，无边框。
-      '.eng-sugg{' +
-        'display:flex;flex-direction:column;gap:1px;' +
-        'margin:2px auto 4px;max-width:var(--dsh-composer-card-max-width,760px);' +
-        'padding:0 var(--dsh-composer-side-clearance,0);width:100%' +
-      '}' +
-      '.eng-sugg-item{' +
-        'align-items:center;background:transparent;border:0;border-radius:8px;' +
-        'color:var(--dsw-alias-label-secondary,#475569);cursor:pointer;' +
-        'display:flex;font-family:inherit;font-size:13.5px;gap:9px;' +
-        'padding:8px 10px;text-align:left;width:100%' +
-      '}' +
-      '.eng-sugg-item:hover{' +
-        'background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.05));' +
-        'color:var(--dsw-alias-label-primary)' +
-      '}' +
-      '.eng-sugg-ico{color:var(--dsw-alias-label-tertiary,#94a3b8);flex:none}' +
-      // ── 【一键发送给Agent建模】操作行按钮 ────────────────────────────
-      // 与官方那排图标按钮并排，所以尺寸克制、样式贴近同排控件；
-      //   但用文字而非纯图标 —— 用户要求它必须看得见。
-      '.eng-msg-act-wrap{align-items:center;display:inline-flex;gap:6px}' +
-      '.eng-msg-act{' +
-        'background:transparent;border:1px solid var(--dsw-alias-border-l2,#d0d5dd);' +
-        'border-radius:6px;color:var(--dsw-alias-label-secondary,#475569);' +
-        'cursor:pointer;font-family:inherit;font-size:11.5px;line-height:1;' +
-        'padding:4px 8px;white-space:nowrap' +
-      '}' +
-      '.eng-msg-act:hover:not(:disabled){' +
-        'background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.05));' +
-        'border-color:var(--dsw-alias-state-business-primary,#2563eb);' +
-        'color:var(--dsw-alias-state-business-primary,#2563eb)' +
-      '}' +
-      '.eng-msg-act:disabled{color:var(--dsw-alias-label-tertiary,#94a3b8);cursor:default}' +
-      '.eng-msg-act.done{' +
-        'border-color:var(--dsw-alias-state-success-primary,#16a34a);' +
-        'color:var(--dsw-alias-state-success-primary,#16a34a)' +
-      '}' +
-      '.eng-msg-act-err{color:var(--dsw-alias-state-error-primary,#dc2626);font-size:11px}' +
-      // 深色模式下的切换器底色
-      '@media(prefers-color-scheme:dark){' +
-        '.eng-vs{background:rgba(255,255,255,.08)}' +
-        '.eng-vs-item.on{background:rgba(255,255,255,.16);box-shadow:none}' +
-      '}',
-
-      // ── 【关键】把切换器排到输入框上方、起步建议排到下方 ──────────────
-      // 官方结构：.composerStack 里依次是 [HeroShell] [workspaceRow]
-      //   [data-slot="conversation.input.dock"] [data-slot="…composer.bar"]。
-      //
-      // ⚠️ 选择器必须用【后代】而非 `>` 直接子级：
-      //   我的元素在 DOM 上嵌套了两层 display:contents 包装
-      //   （slot 壳 + .eng-dock-host），`>` 按 DOM 树匹配、会落空；
-      //   而后代选择器搭配 order 是安全的 —— order 只对 flex 子项生效，
-      //   非 flex 子项会忽略它，不会误伤官方其它元素。
-      //     .eng-vs            → order 0（输入框上方 = 用户红框）
-      //     [data-slot="…composer.bar"] → order 2（输入框本体，DOM 直接子级）
-      //     .eng-chat-starter  → order 3（输入框下方 = 用户蓝框）
-      // :has() 限定「只有本插件在场时才重排」，插件不出现时官方顺序完全不变。
-      '.composerStack:has(.eng-dock-host){display:flex;flex-direction:column}' +
-      '.composerStack .eng-vs{order:0}' +
-      '.composerStack .eng-vs-err{order:1}' +
-      '.composerStack > [data-slot="conversation.composer.bar"]{order:2}' +
-      '.composerStack .eng-sugg{order:3}' +
-      '.composerStack .eng-chat-starter{order:4}',
 
       // ══ 【划词详情】浮层按钮 + 右下角分析面板 ══════════════════════════
       // 全部使用 eng-sel-* / eng-side-* 前缀，不触碰任何官方类名。
@@ -4538,8 +4361,16 @@ window.__ModuleLoader__.load({
               : engRenderMd(ENG_GUIDE.explanation, 'ex'))));
     }
 
-    /** 一个主栏目：大标题 + 卡片容器。 */
+    /** 一个主栏目：大标题 + 卡片容器。
+     *
+     * props.embedded=true 时【不画大标题、不画卡片壳】，只把 children 原样
+     *   返回 —— 供「设计过程优化」里的子栏目（模型自动接替 / 内存与并发）
+     *   复用同一套内部版式，又不会出现"卡片套卡片 + 重复标题"。
+     */
     function EngGroup(props) {
+      if (props && props.embedded) {
+        return h('div', { className: 'eng-grp-embedded' }, props.children);
+      }
       return h('div', { className: 'eng-grp' },
         h('div', { className: 'eng-grp-title' }, props.title),
         h('div', { className: 'eng-grp-card' }, props.children));
@@ -5346,6 +5177,141 @@ window.__ModuleLoader__.load({
     }
 
 
+
+    /* ══════════════════════════════════════════════════════════════════
+     * 【内存守卫】设置面板（并发上限 + 手动回收）
+     * ══════════════════════════════════════════════════════════════════
+     * 用户需求（原文）：
+     *   「在多子代理并行中，会出现一堆子代理都在猛猛开的情况，导致出现"给
+     *     测试者的电脑内存给干爆了"，这样子改，只能最多三个子代理开启，然后
+     *     要避免内存干爆的情况，你看看可不可以搞一下啥类似的只清理系统运行
+     *     内存但是不影响流程的正常使用的」。
+     *
+     * 这里只暴露两件事：
+     *   · 并发上限（默认 3）：写 tools/mem_guard.json，宿主【当场】更新运行期
+     *     覆盖，不必重启；范围 1..12（再大就等于没有闸门）。
+     *   · 「立刻回收一次」：调 POST /mem-guard，走 EmptyWorkingSet ——
+     *     只把工作集里的干净页换出，不杀进程、不中断任何屋子。
+     * 阈值与间隔仍由 DSH_ENG_MEM_RECLAIM_PCT / _MS 控制，面板只读展示。
+     */
+    function EngMemGuardPanel(props) {
+      var useState = React.useState;
+      var useEffect = React.useEffect;
+      // embedded（挂在「设计过程优化」子目录里）→ 默认展开明细，见上条注释。
+      var st = useState({ open: !!props && props.embedded === true, loading: false, saving: false, err: null, saved: null, data: null, limit: 3 });
+      var S = st[0];
+      function patch(o) {
+        st[1](function (p) {
+          var n = {};
+          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+          for (var k2 in o) if (Object.prototype.hasOwnProperty.call(o, k2)) n[k2] = o[k2];
+          return n;
+        });
+      }
+      var load = function () {
+        patch({ loading: true, err: null });
+        fetch('/dsh-engineering-ui/mem-guard')
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok) patch({ loading: false, data: j, limit: j.max_subagents });
+            else patch({ loading: false, err: String((j && j.error) || '读取失败') });
+          })
+          .catch(function (e) { patch({ loading: false, err: String((e && e.message) || e) }); });
+      };
+      useEffect(function () { if (S.open && !S.data) load(); }, [S.open]);
+      var save = function (next) {
+        if (S.saving) return;
+        patch({ saving: true, err: null, saved: null, limit: next });
+        fetch('/dsh-engineering-ui/mem-guard', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ max_subagents: next }),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok) patch({ saving: false, saved: '已保存（立刻生效）', limit: j.max_subagents });
+            else patch({ saving: false, err: String((j && j.error) || '保存失败') });
+          })
+          .catch(function (e) { patch({ saving: false, err: String((e && e.message) || e) }); });
+      };
+      var reclaim = function () {
+        patch({ loading: true, err: null, saved: null });
+        fetch('/dsh-engineering-ui/mem-guard', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ force: true }),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            var res = (j && j.result) || {};
+            var what = res && res.skipped ? ('已跳过：' + res.skipped)
+              : (res && res.ok ? ('回收完成：处理 ' + (res.reclaimed || 0) + ' 个进程')
+                : ('回收失败：' + String((res && res.error) || (j && j.error) || '未知')));
+            patch({ loading: false, saved: what });
+            load();
+          })
+          .catch(function (e) { patch({ loading: false, err: String((e && e.message) || e) }); });
+      };
+      var mem = (S.data && S.data.memory) || null;
+      var memText = (mem && mem.ok && typeof mem.load === 'number')
+        ? (mem.load + '%（可用 ' + mem.free_mb + ' MB / 共 ' + mem.total_mb + ' MB）')
+        : '读取中…';
+      // ── 回收时机（用户要求原文）────────────────────────────────────────
+      // 「这个清理内存是每三个子代理都干完了，然后主对话自己清理的」
+      //   ⇒ 宿主侧只在【整批收工】后回收一次；这里如实显示"这批还在跑"，
+      //     避免用户以为"刚 fork 就该清一次"。
+      var batches = (S.data && Array.isArray(S.data.pending_batches)) ? S.data.pending_batches : [];
+      var timing = batches.length
+        ? ('当前有 ' + batches.length + ' 批子代理在跑；整批收工后自动回收一次')
+        : '当前没有待观察批次；整批收工后自动回收一次';
+      var head = h('div', { className: 'eng-row sw' },
+        h('div', { className: 'eng-row-txt' },
+          h('div', { className: 'eng-row-label' }, '并行子代理上限'),
+          h('div', { className: 'eng-row-hint' },
+            '当前上限 ' + S.limit + ' 个（默认 3）。同时开太多会把内存打爆；'
+            + '超限的 subagent / subagent_fork 会被直接拒绝，并提示先等一个屋收工。'
+            + ' 内存回收在【整批子代理都收工后】自动做一次（只回收工作集，不杀进程）。')),
+        h('div', { className: 'eng-mc-ft' },
+          h('button', {
+            className: 'eng-conn-btn tiny', type: 'button',
+            title: '内存占用超阈值时只调用 EmptyWorkingSet 回收工作集，不杀进程',
+            onClick: function () { if (!S.loading) reclaim(); },
+          }, S.loading ? '处理中…' : '立刻回收内存'),
+          // embedded（挂在子目录里）时不再给「展开/收起」——
+          //   外层子项行已经负责开合，这里再来一个按钮会让人以为有两层折叠。
+          (props && props.embedded) ? null : h('button', {
+            className: 'eng-conn-btn tiny', type: 'button',
+            onClick: function () { patch({ open: !S.open }); },
+          }, S.open ? '收起' : '展开')));
+      var body = S.open ? h('div', null,
+        h('div', { className: 'eng-mc-table' },
+          h('div', { className: 'eng-mc-head' },
+            h('span', { className: 'eng-mc-idx' }, '#'),
+            h('span', { className: 'eng-mc-cell' }, '设定'),
+            h('span', { className: 'eng-mc-cell' }, '说明')),
+          h('div', { className: 'eng-mc-row' },
+            h('span', { className: 'eng-mc-idx' }, '1'),
+            h('span', { className: 'eng-mc-cell' }, '最多同时'),
+            h('span', { className: 'eng-mc-cell' },
+              h('select', {
+                className: 'eng-mc-select',
+                value: String(S.limit),
+                disabled: S.saving,
+                onChange: function (ev) { save(Number(ev.target.value) || 3); },
+              }, [1, 2, 3, 4, 5, 6, 8, 10, 12].map(function (n) {
+                return h('option', { key: 'n' + n, value: String(n) }, n + ' 个');
+              }))))),
+        h('div', { className: 'eng-mc-ft' },
+          h('span', { className: 'eng-row-hint' }, '内存：' + memText),
+          h('span', { className: 'eng-row-hint' },
+            '回收阈值 ' + ((S.data && S.data.reclaim_threshold_pct) || '-') + '% · '
+            + '最小间隔 ' + Math.round(((S.data && S.data.reclaim_interval_ms) || 0) / 1000) + 's'),
+          h('span', { className: 'eng-row-hint' }, timing),
+          S.saved ? h('span', { className: 'eng-mc-ok' }, '\u2713 ' + S.saved) : null,
+          S.err ? h('span', { className: 'eng-mc-err' }, S.err) : null)) : null;
+      return h(EngGroup, { title: '内存与并发', embedded: props && props.embedded }, head, body);
+    }
+
     /* ══════════════════════════════════════════════════════════════════
      * 【模型自动接替】设置面板
      * ══════════════════════════════════════════════════════════════════
@@ -5363,10 +5329,14 @@ window.__ModuleLoader__.load({
      *   · 目录里没有的模型仍可切「手填」兜底；
      *   · 下拉的值是真实 provider/model，显示的是友好名。
      */
-    function EngModelChainPanel() {
+    function EngModelChainPanel(props) {
       var useState = React.useState;
       var st = useState({
-        loaded: false, enabled: false, models: [], open: false, saved: '', error: '',
+        // ── 【2026-11-06 结构调整】embedded 模式下默认【展开】 ───────────────
+        //   原来它自己是一个主栏目，"默认收起 + 点摘要行展开"是为了省版面；
+        //   现在它挂在「设计过程优化」的子目录里，用户点开子项才挂载这个组件，
+        //   再让它默认收起就成了"点两次才看得到内容"（实测体验很差）。
+        loaded: false, enabled: false, models: [], open: !!props && props.embedded === true, saved: '', error: '',
         cat: null, catLoading: true, catError: '',
         manual: {},
         hostDefault: null, headMatches: true
@@ -5665,8 +5635,12 @@ window.__ModuleLoader__.load({
       // 用户要求：「把那个选项『额度不足自动换模型』给去掉」。
       // 语义改为：只要列表里填了模型，就按顺序兜底；没填就用默认（用户自己选的）。
       // 因此不再需要一个显式开关 —— 空列表天然等于"关闭"。
-      return h(EngGroup, { title: '模型自动接替' },
-        h('div', {
+      var embedded = !!(props && props.embedded);
+      return h(EngGroup, { title: '模型自动接替', embedded: embedded },
+        // embedded 时外层「设计过程优化」的子项行已经负责开合，
+        //   这里不再画第二个折叠头（否则会出现"两层折叠"）。
+        embedded ? h('div', { className: 'eng-row-hint' },
+          '额度/限流耗尽时按下列顺序换下一个模型：' + summary) : h('div', {
           className: 'eng-row clickable',
           role: 'button',
           tabIndex: 0,
@@ -5675,10 +5649,10 @@ window.__ModuleLoader__.load({
         },
           h('div', { className: 'eng-row-txt' },
             h('div', { className: 'eng-row-label' },
-              (S.open ? '\u25be ' : '\u25b8 ') + '备用模型（按顺序兜底）'),
+              (S.open ? '▾ ' : '▸ ') + '备用模型（按顺序兜底）'),
             h('div', { className: 'eng-row-hint' }, summary)),
           h('span', { className: 'eng-row-chev' },
-            filled.length ? String(filled.length) : '\u203a')),
+            filled.length ? String(filled.length) : '›')),
 
         // ── 【2026-10-30】"实际在用哪个模型"提示 ─────────────────────────
         // 用户反馈"模型显示没跟上"：UI 只显示链，不显示宿主当前真实使用
@@ -5742,9 +5716,17 @@ window.__ModuleLoader__.load({
       var close = props && props.close;
       var settings = useEngSettings();
       var useOwn = settings.useOwnSubagentPane;
-      var standalone = settings.useStandaloneChat;
       var explainOn = settings.enableSelectionExplain;
       var countdownOn = settings.enableOptionCountdown !== false;
+      // ── 子目录展开态（用户要求：模型自动接替 / 内存与并发 收进「设计过程优化」）
+      //   ⚠️ React hooks 规则：必须【无条件】调用，且放在任何 return 之前。
+      //   默认收起 —— 设置页一屏能看全 3 个开关 + 2 个子项，点开才展开细节。
+      var oc = React.useState(false);
+      var openModelChain = oc[0];
+      var setOpenModelChain = oc[1];
+      var om = React.useState(false);
+      var openMemGuard = om[0];
+      var setOpenMemGuard = om[1];
       return h('div', { className: 'eng-settings', 'data-eng-section': 'engineering' },
         h('div', { className: 'eng-settings-hd' },
           h('span', { className: 'eng-settings-ico' }, '🛠️'),
@@ -5789,14 +5771,17 @@ window.__ModuleLoader__.load({
             //      子代理工作区可以直接复用；接回设置页只需恢复这一行。
             h(EngRow, { label: '子栏目选项设置3' })),
 
-          // ── 主栏目 2.5：模型自动接替（用户需求 2026-10-30）──────────────
-          // 「第一个模型额度不够嘎了，第二个立马接上，可以直接指定10个模型，
-          //   一般是收起来那个表」。默认收起，点摘要行展开 10 行槽位。
-          h(EngModelChainPanel, {}),
           // ── 主栏目2：设计过程优化（用户指定名称）───────────────────────
           // 首行「右键引用调出AI解释」= 划词/右键「问问AI」功能的开关与控制。
           //   用户强调「这个功能是必须要有效的」，因此它是一个【真开关】：
           //   关闭后 SelectionDetailLayer 不再挂载，绝不出现"按钮在但没反应"。
+          //
+          // ── 【2026-11-06 结构调整】用户要求（原文）：
+          //   「"内存与并发"和"模型自动接替"统一放在"设计过程优化"的子目录下面」。
+          //   因此这两块不再是独立主栏目，改为用 EngRow（带箭头、可点的子项行）
+          //   挂在本栏目里；点开后就地展开（embedded 模式：不再画第二层卡片标题）。
+          //   这样设置页从上到下就是：连接区 → 设计过程优化（3 个开关 + 2 个子项）
+          //   → 美化工程模式 → 工程人设，层级与用户的口述一致。
           h(EngGroup, { title: '设计过程优化' },
             h('div', { className: 'eng-row sw' },
               h('div', { className: 'eng-row-txt' },
@@ -5829,7 +5814,25 @@ window.__ModuleLoader__.load({
                   setEngSetting('enableOptionCountdown', next);
                 }
               })),
-            h(EngRow, { label: '子栏目选项设置3' })),
+            // ── 子目录 1：模型自动接替（原来是一个独立主栏目）───────────────
+            //   点这一行就地展开/收起；箭头方向由 openModelChain 控制。
+            h(EngRow, {
+              label: (openModelChain ? '\u25be ' : '\u203a ') + '模型自动接替',
+              hint: '额度/限流耗尽时按列表顺序换下一个模型（含子代理）。',
+              onClick: function () { setOpenModelChain(!openModelChain); }
+            }),
+            openModelChain
+              ? h(EngModelChainPanel, { embedded: true })
+              : null,
+            // ── 子目录 2：内存与并发（并发上限 + 只回收工作集）──────────────
+            h(EngRow, {
+              label: (openMemGuard ? '\u25be ' : '\u203a ') + '内存与并发',
+              hint: '并行子代理上限（默认 3）+ 只回收工作集、不杀进程。',
+              onClick: function () { setOpenMemGuard(!openMemGuard); }
+            }),
+            openMemGuard
+              ? h(EngMemGuardPanel, { embedded: true })
+              : null),
 
           // ── 主栏目3：美化工程模式（第 1 行 = 子代理显示页开关）────────
           h(EngGroup, { title: '美化工程模式' },
@@ -5846,21 +5849,6 @@ window.__ModuleLoader__.load({
                 label: '使用工程模式自带的子代理显示页',
                 onChange: function (next) {
                   setEngSetting('useOwnSubagentPane', next);
-                }
-              })),
-            h('div', { className: 'eng-row sw' },
-              h('div', { className: 'eng-row-txt' },
-                h('div', { className: 'eng-row-label' },
-                  '是否开启单独的聊天而非 Agent'),
-                h('div', { className: 'eng-row-hint' }, standalone
-                  ? '顶部多一个「聊天」视图（只对话，不显示工具调用）。'
-                  : '已关闭：不提供独立聊天视图。')),
-              h(EngSwitch, {
-                bare: true,
-                checked: standalone,
-                label: '是否开启单独的聊天而非 Agent',
-                onChange: function (next) {
-                  setEngSetting('useStandaloneChat', next);
                 }
               })),
             h(EngRow, { label: '子栏目选项设置3' })),
@@ -5992,18 +5980,11 @@ window.__ModuleLoader__.load({
         }));
       } catch (e) { /* 写入失败不影响本次会话 */ }
     }
-    // ── 【独立聊天页】useStandaloneChat ────────────────────────────────────
-    // 用户需求：「美化工程模式」里的「是否开启单独的聊天而非 Agent」。
-    //   开 → 工程模式下提供「聊天 / 工作」切换器；
-    //   关 → 完全不注册该入口，界面交回 DSH 官方。
-    // 默认 true：与用户明确要的行为一致（否则功能默认不可见）。
-    //
     // enableSelectionExplain：「设计过程优化」→「右键引用调出AI解释」。
     //   开 → 选中文字时浮现「问问AI」并可用右下角面板分析；
     //   关 → SelectionDetailLayer 完全不挂载（零监听、零 DOM）。
     var _engSettings = {
       useOwnSubagentPane: true,
-      useStandaloneChat: true,
       enableSelectionExplain: true,
       // ── 【新增·设置页「设计过程优化」→「是否启用选项倒计时」】───────────────
       // 开 → 官方提问卡片与子代理提问卡都挂倒计时（默认项超时自动选中）；
@@ -6196,7 +6177,7 @@ window.__ModuleLoader__.load({
     /** 组装交给工作会话的首轮任务文本（面板按钮与操作行按钮共用格式）。 */
     function engComposeWorkPrompt(parts) {
       var lines = [];
-      lines.push('以下内容来自「纯聊天」模式的分析，请在工作模式下继续推进。');
+      lines.push('以下内容来自「问问AI」侧边面板的分析，请在工程模式下继续推进。');
       lines.push('');
       if (parts.source) {
         lines.push('【引用的原文】');
@@ -6369,9 +6350,6 @@ window.__ModuleLoader__.load({
           if (typeof j.useOwnSubagentPane === 'boolean') {
             _engSettings.useOwnSubagentPane = j.useOwnSubagentPane;
           }
-          if (typeof j.useStandaloneChat === 'boolean') {
-            _engSettings.useStandaloneChat = j.useStandaloneChat;
-          }
           if (typeof j.enableSelectionExplain === 'boolean') {
             _engSettings.enableSelectionExplain = j.enableSelectionExplain;
           }
@@ -6421,7 +6399,6 @@ window.__ModuleLoader__.load({
       var st = useState(function () {
         return {
           useOwnSubagentPane: _engSettings.useOwnSubagentPane,
-          useStandaloneChat: _engSettings.useStandaloneChat,
           enableSelectionExplain: _engSettings.enableSelectionExplain,
           enableOptionCountdown: _engSettings.enableOptionCountdown,
         };
@@ -6430,7 +6407,6 @@ window.__ModuleLoader__.load({
         return subscribeEngSettings(function () {
           st[1]({
             useOwnSubagentPane: _engSettings.useOwnSubagentPane,
-            useStandaloneChat: _engSettings.useStandaloneChat,
             enableSelectionExplain: _engSettings.enableSelectionExplain,
             enableOptionCountdown: _engSettings.enableOptionCountdown,
           });
@@ -6439,407 +6415,9 @@ window.__ModuleLoader__.load({
       return st[0];
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // 【聊天 / 工作】同会话切换器
-    // ══════════════════════════════════════════════════════════════════════
-    // 用户要求：在【工程模式里面直接选聊天】就能纯聊天，不要另开预设、不要新建会话。
-    //
-    // 之前为什么失败：只换显示，模型照样挂满工具 → 照样调 skill。
-    // 现在由 Host 的 /chat-mode 做【真正的能力切换】（见 lib/index.js）：
-    //   · tools.restrict({deny:[现场取到的全部工具名]}) → 模型看不到任何工具
-    //   · systemPrompt.section({complete:true}) → 整套 CAD 人设被替换成对话人设
-    // 两者同时生效，同一个 Agent 才真的"不是 Agent"。
-    // 会话不变 → 历史、模型、输入框全部沿用。
-    var ENG_PRESET_ID = 'engineering';
 
     /** 读某个会话挂在会话列表行上的 preset（会话列表是唯一权威来源）。 */
-    function presetOfSession(listSource, sessionId) {
-      try {
-        var snap = listSource && listSource.getSnapshot ? listSource.getSnapshot() : null;
-        var row = snap && snap.byId ? snap.byId[sessionId] : null;
-        if (!row) return null;
-        if (row.projectionValues && typeof row.projectionValues.agentPreset === 'string') {
-          return row.projectionValues.agentPreset;
-        }
-        return typeof row.agentPreset === 'string' ? row.agentPreset : null;
-      } catch (e) { return null; }
-    }
 
-    /**
-     * 「聊天 / 工作」切换器 + 聊天会话的起步建议。
-     *
-     * ── 落点（对应用户截图里的红框 / 蓝框）──────────────────────────────
-     * 官方结构（ui-conversation/src/client/skeleton/ConversationContent.tsx:163-170）：
-     *   <div class="composerStack">
-     *     {hero && <HeroShell/>}                          大标题
-     *     {hero && heroWorkspaceRow}                      工作区 chip + 预设
-     *     {renderSlot('conversation.input.dock', zone)}   ← 输入框【上方】= 红框
-     *     {inputBar}                                      ← 输入框本体
-     *   </div>
-     * ui-renderer 把每个插槽包成 <div data-slot="..." style="display:contents">
-     *   （scoped-slots.tsx:1081-1091）。display:contents 不生成盒子，
-     *   所以我的元素成为 .composerStack 的 flex 子项，用 CSS order 排序：
-     *     .eng-vs           order 0  → 输入框上方（红框）
-     *     [composer.bar]    order 2  → 输入框本体（官方）
-     *     .eng-chat-starter order 3  → 输入框下方（蓝框）
-     * 只改排列顺序，不改官方任何视觉属性。
-     */
-    function EngInputDock(props) {
-      var sessionId = props.sessionId;
-      var useSession = props.useSession;
-      var useSessions = props.useSessions;
-      var listSource = props.engListSource;
-
-      // ══ 【React hooks 规则】所有 hook 必须在任何 return 之前调用 ═══════
-      // 曾经的严重 bug：非工程模式只调 3 个 hook 就 return null，工程模式
-      //   调 4 个（多的那个 useEffect 在 early return 之后）。
-      //   React 检测到同一次挂载内 hook 数量变化会抛错，slot entry 随即
-      //   【abdicate 永久失效】—— 表现为"切到标准模式再切回工程模式，
-      //   工作/聊天切换器和推荐都不见了"。
-      // 修法：先把所有 hook 无条件调完，再做门禁判断与渲染分支。
-      var blank = useSession ? useSession(function (s) { return !!(s && s.blank); }) : false;
-      var running = useSession ? useSession(function (s) { return !!(s && s.running); }) : false;
-      // 预设（响应式订阅；会话列表是权威来源）
-      // ⚠️ 这个 useSessions 也【必须无条件调用】—— 不能写
-      //   `sessionId ? useSessions(...) : null`，否则 sessionId 从无到有时
-      //   hook 数量变化，同样触发 React 报错导致 entry 永久失效。
-      //   选择器内部对 sessionId 为空做保护即可。
-      var livePreset = (typeof useSessions === 'function')
-        ? useSessions(function (s) {
-            if (!sessionId) return null;
-            var row = s && s.byId ? s.byId[sessionId] : null;
-            return row ? ((row.projectionValues && row.projectionValues.agentPreset) || row.agentPreset || null) : null;
-          })
-        : null;
-      var preset = (livePreset === undefined || livePreset === null)
-        ? presetOfSession(listSource, sessionId) : livePreset;
-
-      // chat: 当前是否聊天模式；busy: 切换中；err: 失败原因
-      // sugg*: 推荐追问（图二）
-      var st = useState({
-        chat: false, busy: false, err: null,
-        sugg: [], suggBusy: false, suggFor: '',
-      });
-      var isChat = st[0].chat;
-      // 记录上一轮的 running，用于检测"一轮刚结束"
-      var prevRunningRef = useRef(false);
-
-      // ── 推荐追问【持久化】────────────────────────────────────────────
-      // 用户要求：「不管做啥，关了又开了也好，咋做都能像文字一样，一直不消失」。
-      // 之前只放在 useState 里，于是：
-      //   · 刷新页面 → 组件重挂 → 推荐没了
-      //   · 换皮肤 → 客户端模块重新加载 → 组件重挂 → 推荐没了
-      //   · 动设置开关 → 同样的重挂路径 → 推荐没了
-      // 现在按会话存进 localStorage，挂载时恢复。
-      //   与工程模式其它设置同一套做法（官方 shortcuts/store 也这么持久化）。
-      var SUGG_KEY = 'dsh-engineering-ui/sugg/v1';
-      var loadSugg = function (sid) {
-        try {
-          if (typeof localStorage === 'undefined' || !sid) return null;
-          var raw = localStorage.getItem(SUGG_KEY);
-          if (!raw) return null;
-          var all = JSON.parse(raw);
-          var one = all && all[sid];
-          if (!one || !Array.isArray(one.items) || !one.items.length) return null;
-          return { items: one.items.map(String), forSeq: String(one.forSeq || '') };
-        } catch (e) { return null; }
-      };
-      var saveSugg = function (sid, items, forSeq) {
-        try {
-          if (typeof localStorage === 'undefined' || !sid) return;
-          var raw = localStorage.getItem(SUGG_KEY);
-          var all = raw ? JSON.parse(raw) : {};
-          if (!all || typeof all !== 'object') all = {};
-          if (items && items.length) all[sid] = { items: items.map(String), forSeq: String(forSeq || ''), at: Date.now() };
-          else delete all[sid];
-          // 只保留最近 40 个会话，避免无限增长
-          var keys = Object.keys(all);
-          if (keys.length > 40) {
-            keys.sort(function (a, b) { return (all[b].at || 0) - (all[a].at || 0); });
-            for (var i = 40; i < keys.length; i++) delete all[keys[i]];
-          }
-          localStorage.setItem(SUGG_KEY, JSON.stringify(all));
-        } catch (e) { /* 写不了就只在内存里 */ }
-      };
-
-      // 挂载/切会话时：立刻恢复上次的推荐（刷新、换皮肤、动设置都能活下来）
-      useEffect(function () {
-        if (!sessionId) return;
-        var saved = loadSugg(sessionId);
-        st[1](function (p) {
-          var n = {};
-          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-          if (saved) { n.sugg = saved.items; n.suggFor = saved.forSeq; }
-          return n;
-        });
-      }, [sessionId]);
-
-      // ① 进会话/切会话时向 Host 查询聊天模式（运行期状态，前端不缓存）
-      useEffect(function () {
-        if (!sessionId) return;
-        var alive = true;
-        fetch('/dsh-engineering-ui/chat-mode?sessionId=' + encodeURIComponent(sessionId))
-          .then(function (r) { return r.json(); })
-          .then(function (j) {
-            if (!alive || !j || !j.ok) return;
-            st[1](function (p) {
-              if (p.busy || p.chat === !!j.chatMode) return p;
-              var n = {};
-              for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-              n.chat = !!j.chatMode;
-              return n;
-            });
-          })
-          .catch(function () { /* 查询失败保持现状 */ });
-        return function () { alive = false; };
-      }, [sessionId]);
-
-      // ② 一轮对话【刚结束】时拉推荐追问（图二）
-      // 触发条件：running 由 true → false，且处于聊天模式。
-      //   用"结束"而不是"每次渲染"：避免请求风暴，也避免在流式输出中途打扰。
-      useEffect(function () {
-        var was = prevRunningRef.current;
-        prevRunningRef.current = running;
-        if (!sessionId) return;
-
-        // ── 新一轮【开始】时立刻收起上一轮的推荐 ──────────────────────────
-        // 用户指出：「发送消息之后，模型开始思考的时候它不会自己消失」。
-        //   上一轮的推荐是"接着上一轮往下聊"的建议，新一轮已经开始，
-        //   它们就是过期内容，必须马上下线（否则误导用户以为还能点）。
-        // 内存与本地缓存【一起清】：只清内存的话，此刻刷新页面又会从
-        //   localStorage 里把过期推荐读回来。
-        if (running) {
-          if (was !== true) saveSugg(sessionId, [], '');
-          st[1](function (p) {
-            if (!p.sugg.length) return p;
-            var n = {};
-            for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-            n.sugg = [];
-            return n;
-          });
-          return;
-        }
-
-        if (!(was && !running)) return;          // 只在 true→false 的瞬间触发
-        if (!isChat) return;                     // 只在纯聊天模式下给推荐
-        var alive = true;
-        st[1](function (p) {
-          var n = {};
-          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-          n.suggBusy = true;
-          return n;
-        });
-        // 从会话日志取最近几轮文本，交给宿主生成推荐
-        fetch('/dsh-engineering-ui/log?sessionId=' + encodeURIComponent(sessionId) + '&limit=60')
-          .then(function (r) { return r.json(); })
-          .then(function (j) {
-            if (!alive || !j || j.ok !== true) return null;
-            var turns = [];
-            var evs = j.events || [];
-            for (var i = 0; i < evs.length; i++) {
-              var arr = toDisplayEvents(evs[i]);
-              for (var k = 0; k < arr.length; k++) {
-                var d = arr[k];
-                if (!d) continue;
-                if (d.kind === 'message' || d.kind === 'text') {
-                  turns.push({ role: 'assistant', text: String(d.text || '') });
-                } else if (d.kind === 'user-message') {
-                  turns.push({ role: 'user', text: String(d.text || '') });
-                }
-              }
-            }
-            if (!turns.length) return null;
-            var route = (j.route && j.route.provider && j.route.model) ? j.route : null;
-            return fetch('/dsh-engineering-ui/suggest', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({
-                turns: turns.slice(-8),
-                provider: route ? route.provider : null,
-                model: route ? route.model : null,
-              }),
-            }).then(function (r2) { return r2.json(); }).then(function (j2) {
-              return { j2: j2, marker: String(evs.length) };
-            });
-          })
-          .then(function (res) {
-            if (!alive) return;
-            st[1](function (p) {
-              var n = {};
-              for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-              n.suggBusy = false;
-              if (res && res.j2 && res.j2.ok && res.j2.items && res.j2.items.length) {
-                n.sugg = res.j2.items;
-                n.suggFor = res.marker;
-                // 持久化：刷新/换皮肤/动设置后仍能恢复
-                saveSugg(sessionId, res.j2.items, res.marker);
-              } else if (!loadSugg(sessionId)) {
-                // 本次没生成出来，且本地也没有旧值 → 保持空
-                n.sugg = [];
-              }
-              // 若本地有旧值：保留它，不要因为一次失败就清空用户看到的东西
-              return n;
-            });
-          })
-          .catch(function () {
-            if (!alive) return;
-            st[1](function (p) {
-              var n = {};
-              for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-              n.suggBusy = false;
-              return n;
-            });
-          });
-        return function () { alive = false; };
-      }, [running, sessionId, isChat]);
-
-      // ══ 所有 hooks 已调用完毕，下面才允许做门禁与渲染分支 ═══════════════
-      var inEngineering = (preset === ENG_PRESET_ID);
-      if (!inEngineering) return null;
-      if (!_engSettings.useStandaloneChat) return null;
-
-      // ── 显示位置（用户明确要求）──────────────────────────────────────
-      // 用户指出：在【已有对话内容】的会话里，这个切换器悬在正文与输入框
-      //   之间很碍眼，要求删掉；但【新建对话】时它必须还在
-      //   （那是用户选择「工作 / 聊天」的唯一入口）。
-      //
-      // 因此只在两种情况下渲染：
-      //   ① blank        —— 空会话（新建对话的欢迎屏）。用户截图要保留的就是这里。
-      //   ② isChat       —— 已处于聊天模式。
-      //      ⚠️ 这一条是必要的安全出口，不是"其他地方的残留"：
-      //         纯聊天模式下模型没有任何工具，若把切换器一并藏掉，
-      //         用户发出第一条消息后就【再也无法切回工作模式】，
-      //         只能新建会话重来 —— 那会是一个真正的死锁。
-      //   其余情况（工作模式 + 已有内容）→ return null，正文与输入框之间
-      //   不再有任何本插件元素，正是用户要的"删掉"。
-      if (!blank && !isChat) return null;
-
-      /** 把一段文字填进官方输入框（推荐追问、起步建议共用）。 */
-      var fillDraft = function (txt) {
-        try {
-          var ia = props.inputActions;    // session 作用域标准 prop
-          if (ia && typeof ia.setDraft === 'function') { ia.setDraft(txt); return true; }
-        } catch (e) { /* 落到 DOM 兜底 */ }
-        try {
-          var el = document.querySelector('[data-conversation-region="composer"] [contenteditable="true"]');
-          if (el) { el.focus(); document.execCommand('insertText', false, txt); return true; }
-        } catch (e2) { /* 无输入框则放弃 */ }
-        return false;
-      };
-
-      var switchTo = function (chat) {
-        if (st[0].busy) return;
-        st[1](function (p) {
-          var n = {};
-          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-          n.chat = chat; n.busy = true; n.err = null;
-          return n;
-        });
-        // ══ 【核心】同一个会话内切换 —— 不新建会话、不换预设 ══════════════
-        // 由 Host 端的 /chat-mode 完成真正的能力切换（见 lib/index.js）：
-        //   · tools.restrict({deny:[...现场取的全部工具名]}) → 模型看不到任何工具
-        //   · systemPrompt.section({complete:true}) → 那套 CAD 工程人设被整体替换
-        //   · 再加一道 guard 兜底：聊天模式下任何工具都无法执行
-        // 会话本身不变 → 历史、模型、输入框全部沿用。
-        fetch('/dsh-engineering-ui/chat-mode', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId: sessionId, on: !!chat }),
-        })
-          .then(function (r) { return r.json(); })
-          .then(function (j) {
-            st[1](function (p) {
-              var n = {};
-              for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-              if (j && j.ok) {
-                n.chat = !!j.chatMode; n.busy = false; n.err = null;
-                if (!j.chatMode) n.sugg = [];     // 回工作模式就清掉推荐
-              } else {
-                n.chat = !chat; n.busy = false;
-                n.err = String((j && j.error) || '切换失败');
-              }
-              return n;
-            });
-          })
-          .catch(function (e) {
-            st[1](function (p) {
-              var n = {};
-              for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-              n.chat = !chat; n.busy = false;
-              n.err = '切换失败：' + String((e && e.message) || e);
-              return n;
-            });
-          });
-      };
-
-      var busy = !!st[0].busy;
-      var seg = function (on, label, chat) {
-        return h('button', {
-          key: label,
-          type: 'button',
-          className: 'eng-vs-item' + (on ? ' on' : '') + (busy ? ' busy' : ''),
-          'aria-pressed': on ? 'true' : 'false',
-          disabled: busy,
-          onClick: function () { if (!busy) switchTo(chat); }
-        }, label);
-      };
-      // ── 「工作 / 聊天」切换器：【只在空会话（新建对话）显示】──────────
-      // 用户要求：「帮我画红框的那个给删了，就在那里删了，其他地方不要删」
-      //   + 「在正常用户选择模式新建对话的时候…这个切换器一定不能丢了」。
-      // 合起来 = 对话进行中不显示，新建对话时必须显示。
-      //   这也与 DSH 自身的预设选择器一致（预设同样只在空会话选）。
-      // 非空会话仍会走到下面渲染【推荐追问】——那是聊天模式的产物，
-      //   不能因为隐藏切换器而一起消失，所以这里是 vs=null 而不是 return null。
-      var vs = blank
-        ? h('div', { className: 'eng-vs', role: 'group', 'aria-label': '聊天 / 工作' },
-            seg(!isChat, '工作', false),
-            seg(isChat, busy ? '聊天…' : '聊天', true))
-        : null;
-      // 失败必须看得见，否则用户只看到"点了没反应"
-      var errLine = st[0].err
-        ? h('div', { className: 'eng-vs-err' }, String(st[0].err)) : null;
-
-      // ── 推荐追问（图二）：一轮对话刚结束后显示，点一下填进输入框 ────────
-      var sugg = null;
-      if (isChat && !busy && st[0].sugg.length) {
-        sugg = h('div', { className: 'eng-sugg' },
-          st[0].sugg.map(function (q, i) {
-            return h('button', {
-              key: 'sg' + i,
-              className: 'eng-sugg-item',
-              type: 'button',
-              title: '填入输入框',
-              onClick: function () { fillDraft(String(q)); },
-            }, h('span', { className: 'eng-sugg-ico' }, '↳'), String(q));
-          }));
-      }
-
-      // 起步建议：只在【聊天模式 + 空会话】显示，位于输入框下方（蓝框）
-      var starter = null;
-      if (isChat && blank) {
-        starter = h('div', { className: 'eng-chat-starter' },
-          h('div', { className: 'eng-chat-starter-list' },
-            chatStarterItems().map(function (txt, i) {
-              return h('button', {
-                key: 'st' + i,
-                className: 'eng-chat-starter-item',
-                type: 'button',
-                onClick: function () { fillDraft(txt); },
-              }, h('span', { className: 'eng-chat-starter-ico' }, '💬'), txt);
-            })));
-      }
-      // display:contents → 子块成为 .composerStack 的独立 flex 项
-      return h('div', { className: 'eng-dock-host', style: { display: 'contents' } }, vs, errLine, sugg, starter);
-    }
-
-    /** 聊天模式的起步建议（不诱导模型调工具）。 */
-    function chatStarterItems() {
-      return [
-        '帮我梳理一下这个设计方案的思路',
-        '解释一下悬臂梁的受力原理',
-        '我有个零件的想法，帮我分析可行性'
-      ];
-    }
 
     // ══════════════════════════════════════════════════════════════════════
     // 【划词详情】SelectionDetailLayer —— 三张截图对应的功能
@@ -7951,57 +7529,6 @@ window.__ModuleLoader__.load({
         tabDisposers.length = 0;
       });
 
-      // ══ 【聊天 / 工作】切换器注册 ═══════════════════════════════════════
-      // 架构（重要）：
-      //   · 「聊天」= 同一个会话内**【真正的能力切换】**，由 Host 的 /chat-mode
-      //     完成（tools.restrict 摘工具 + systemPrompt complete 换人设）。
-      //     不新建会话、不换预设 —— 历史、模型、输入框全部沿用。
-      //   · client 端只负责【入口按钮】，并把点击转成一次 /chat-mode 请求。
-      //   · 注册一次常驻；组件内部按"当前会话是否工程模式"决定渲不渲染
-      //     （非工程 → return null，零 DOM、零副作用）。
-      //
-      // ⚠️【必须用独立的 dockDisposers，不能复用上面那个 disposers】
-      //   上面 subscribeEngSettings 的回调会遍历 disposers 全部 dispose()
-      //   然后只重装 tab 接管。若把切换器的 disposer 也放进那个数组，
-      //   用户每动一次设置开关（含"是否开启单独的聊天"）切换器就被销毁一次
-      //   且永不重建 —— 表现正是"关了又开之后，除非重启 DSH，UI 再也不出来"。
-      var dockDisposers = [];
-      try {
-        var sessionsSvc = ctx.sessions;
-        var listSrc = sessionsSvc && sessionsSvc.list;
-        // ── 【输入区】注册「聊天/工作」切换器 + 起步建议 ──────────────────
-        // 用 slots.inject 等待 official 声明出现（conversation.input.dock
-        //   由 ui-conversation 声明），声明消失时自动注销。
-        try {
-          var disposeDock = ctx.slots.inject('conversation.input.dock', function () {
-            return ctx.slots.register({
-              name: 'conversation.input.dock',
-              id: 'dsh-engineering-ui/view-switch',
-              order: 0,
-              inject: function (sessionId) {
-                // 组件只需要一个"当前会话 preset"的判据源（决定显不显示）。
-                // 能力切换本身走 HTTP /chat-mode，不需要其他服务。
-                return { engListSource: listSrc, engSessionId: sessionId };
-              },
-            }, EngInputDock);
-          });
-          // 常驻：交给插件生命周期统一回收（dockDisposers 不被设置回调清空）。
-          if (typeof disposeDock === 'function') dockDisposers.push(disposeDock);
-        } catch (e) { console.error('[dsh-engineering-ui] input dock registration', e); }
-        // 插件卸载时回收
-        disposers.push(function () {
-          for (var i = dockDisposers.length - 1; i >= 0; i--) {
-            try { dockDisposers[i](); } catch (e) {}
-          }
-          dockDisposers.length = 0;
-        });
-
-        if (!(listSrc && typeof listSrc.getSnapshot === 'function')) {
-          // 拿不到会话列表服务（旧版/异常）→ 切换器仍会渲染，但判据取不到
-          //   preset，组件会 return null（功能静默缺失，不报错、不影响其他功能）。
-          console.warn('[dsh-engineering-ui] sessions.list 不可用，聊天切换器将不显示');
-        }
-      } catch (e) { console.error('[dsh-engineering-ui] chat switch registration', e); }
 
       // ══ 【第5项】进入工程模式时的强制设置提醒弹窗 ═══════════════════════
       // 注册一个 command contribution（走官方弹窗外壳，不自绘 UI）。
@@ -8092,7 +7619,7 @@ window.__ModuleLoader__.load({
      *
      * 改用会话身份的原因是它更贴合用户原话：
      *   「这个触发点是和切换工程模式时出现的『聊天』和『工作』这两个特殊UI的
-     *     变量是一样的」—— EngInputDock 用的正是 `preset === ENG_PRESET_ID`，
+     *     变量是一样的」—— 与会话行的 agentPreset 同一口径，
      *   而 preset 来自会话行的 agentPreset（见 L4197-4205），不是 _engContextActive。
      *
      * 取值方式与官方 /permission 一致（projections.faceOf(...).getSnapshot()，
@@ -8117,12 +7644,12 @@ window.__ModuleLoader__.load({
             } catch (e) { /* 该键不存在 → 试下一个 */ }
           }
         }
-        // ② 退回会话行（EngInputDock 的取法：projectionValues.agentPreset）
+        // ② 退回会话行（会话行的取法：projectionValues.agentPreset）
         if (session.sessionId) {
           var pv = session.projectionValues;
           if (pv && pv.agentPreset === ENG_PRESET_ID) return true;
           if (session.agentPreset === ENG_PRESET_ID) return true;
-          // ③ 再退回会话列表（权威来源，与 presetOfSession 同源）
+          // ③ 再退回会话列表（权威来源）
           var listSrc = engService('sessions');
           var row = _engSessionRow(listSrc && listSrc.list, session.sessionId);
           var p = row
@@ -8138,7 +7665,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** 从会话列表快照里取某会话行（与 EngInputDock 的 presetOfSession 同口径）。 */
+    /** 从会话列表快照里取某会话行（与会话行 agentPreset 同口径）。 */
     function _engSessionRow(listSvc, sessionId) {
       try {
         if (!listSvc || !sessionId) return null;

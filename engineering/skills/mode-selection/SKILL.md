@@ -477,8 +477,12 @@ wave3 = 工程图输出（等 wave2 room-end）
 **wave1 执行顺序（不可打乱）：**
 1. **先**对每个房间 `python "<根>\tools\mode_gate.py" room-start <房间名>`
    （登记，**BEFORE** 创建 subagent；未 room-start 的房间 `subagent-assign` 会报 `ROOM_NOT_REGISTERED`）
-2. **再**在同一条回复里**一次性 `subagent_fork` 全部房间**（含总理子代理）——
-   ⚠️ 严禁只开一个、严禁分多条回复慢慢开：**波内房间必须同时启动**
+2. **再**在同一条回复里**一次性 `subagent_fork` 该批全部房间**（含总理子代理）——
+   ⚠️ 严禁只开一个、严禁分多条回复慢慢开：**同批房间必须同时启动**。
+   ⚠️ **每批最多 3 个**（含总理子代理）：宿主对同一 root 的子代理有名额上限，
+      插件在 `tools/pre-execute` 做了硬闸门，第 4 个会直接返回
+      `SUBAGENT_LIMIT_REACHED`。编制超过 3 个房间就**分批**：本批全部
+      `room-end`（名额释放）后再开下一批，不要原样重试被拒的那次调用。
 3. **每个 fork 之后立刻**用返回的 id 绑定（漏了就永远 `unbound`）：
    ```powershell
    python "<根>\tools\mode_gate.py" subagent-assign <房间名> <subagent_fork 返回的 id>
