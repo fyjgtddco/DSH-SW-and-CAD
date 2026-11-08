@@ -4090,6 +4090,46 @@ def read_origin_record(part_path):
     return None
 
 
+def _reject_failed_part(target, out, stage="save"):
+    """【2026-11-07】保存失败 → 半成品零件挪进 <任务>/parts_rejects/（收尾会删）。
+
+    用户要求（原文）：「假设建模失败的文件，直接不用保存即可」。
+    与 sw_bridge._reject_failed_save 同一策略：
+      · 不 unlink（SW 可能还持有句柄 → WinError 32；且失败件是排障证据）；
+      · 挪进 parts_rejects/，保证 parts/ 里不会出现"看着像交付物、实际打不开"的件；
+      · 任何异常只往 out 里写一行 note，绝不影响保存本身的返回语义。
+    """
+    try:
+        import task_workspace as _tw
+        _wd = None
+        for _k in ("DSH_TASK_WORK_DIR", "DSH_WORK_DIR"):
+            _v = (os.environ.get(_k) or "").strip()
+            if _v and os.path.isdir(_v):
+                _wd = _v
+                break
+        if not _wd:
+            try:
+                import _store as _st
+                _p = _st.state_path("workflow_state.json")
+                if os.path.isfile(_p):
+                    with open(_p, "r", encoding="utf-8-sig") as _f:
+                        _wd = str((json.load(_f) or {}).get("work_dir") or "").strip() or None
+            except Exception:
+                _wd = None
+        if not _wd:
+            out["rejected_note"] = "读不到任务目录，失败件保留原处（不擅自删除）"
+            return
+        _r = _tw.reject_part(_wd, target,
+                             reason=str((out or {}).get("error") or stage))
+        if _r.get("ok"):
+            out["rejected"] = {"moved": bool(_r.get("to")), "to": _r.get("to")}
+            out["rejected_note"] = ("失败件已移入 parts_rejects/（收尾会整目录删除）")
+        else:
+            out["rejected_note"] = "移入 parts_rejects 失败: %s" % (_r.get("error") or "未知")
+    except Exception as e:
+        out["rejected_note"] = "移入 parts_rejects 异常: %r" % (e,)
+
+
 def _attach_origin_record(model_obj, target, out):
     """【Bug⑪】保存成功后在零件旁写 origin 记录，并把结果挂到返回体。
 
@@ -5211,10 +5251,12 @@ class SWModel:
         after = _fingerprint(target)
 
         if after is None:
-            return {"ok": False, "path": target, "saved": False, "updated": False,
+            _bad = {"ok": False, "path": target, "saved": False, "updated": False,
                     "rc": rc,
                     "error": "SaveAs3 返回后目标文件【不存在】，保存实际未生效。",
                     "hint": "检查路径是否可写、目录是否存在、文件名是否被 SW 接受。"}
+            _reject_failed_part(target, _bad, stage="save")
+            return _bad
 
         # ── 【BUG-E 判定修正·第十一轮】专家结论：这不是 bug，是判定标准错 ──
         # 专家指出："重复保存 md5 必须一致"这个断言本身就是错的 ——
@@ -5236,12 +5278,15 @@ class SWModel:
 
         if not _touched and not _content_changed:
             # ── 情形 ③：连 mtime 都没变 —— 这才是真正可疑的静默忽略 ──
-            return {"ok": False, "path": target, "saved": True, "updated": False,
+            _bad = {"ok": False, "path": target, "saved": True, "updated": False,
                     "content_same": True, "rc": rc, "size": after[0],
                     "error": ("SaveAs3 未抛异常，但目标文件【完全未变化】"
                               "（大小/mtime/md5 三者全同）—— 保存被静默忽略。"),
                     "hint": ("请确认该文件未被其他程序/会话占用；"
                              "同名零件若已在 SW 中打开，建议先 close-all 再保存。")}
+            # 静默忽略 = 零件没真的更新 → 当作失败件处理（别让它躺在 parts/）
+            _reject_failed_part(target, _bad, stage="save-silent-ignore")
+            return _bad
 
         # ── 情形 ① / ② 都算成功 ──
         _out = {"ok": True, "path": target, "saved": True,
@@ -14554,10 +14599,12 @@ class SWModel:
 
         after = _fp(path)
         if after is None:
-            return {"ok": False, "path": path, "updated": False,
+            _bad = {"ok": False, "path": path, "updated": False,
                     "ret": bool(ret), "sw_error_code": errs,
                     "error": "SaveAs 返回后目标文件不存在，保存未生效。",
                     "hint": "检查路径可写性与目录是否存在。"}
+            _reject_failed_part(path, _bad, stage="save_as")
+            return _bad
 
         # ── 【BUG-E 判定修正】与 save() 保持同一语义 ─────────────────────
         # 只要文件被"触碰"（mtime/size 变化）就算保存成功；
@@ -14565,12 +14612,14 @@ class SWModel:
         #   （专家指出：md5 变化是正常写入的表现，不应判失败。）
         updated = (before is None) or (after != before)
         if not updated:
-            return {"ok": False, "path": path, "updated": False,
+            _bad = {"ok": False, "path": path, "updated": False,
                     "ret": bool(ret), "sw_error_code": errs,
                     "size": after[0],
                     "error": ("SaveAs 未报错，但目标文件【完全未变化】"
                               "（大小与 mtime 全同）—— 保存被静默忽略。"),
                     "hint": "先关闭占用该文件的程序；同名零件若已打开，建议 close-all 后重试。"}
+            _reject_failed_part(path, _bad, stage="save_as-silent-ignore")
+            return _bad
 
         _out = {"ok": True, "path": path, "updated": True,
                 "content_same_unknown": False,

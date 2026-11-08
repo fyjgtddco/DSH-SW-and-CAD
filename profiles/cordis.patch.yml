@@ -19,7 +19,24 @@
   config:
     providers:
       deepseek:
-        streamIdleTimeoutMs: 60000
+        # ══ 【B2 修复】流空闲超时：60s → 90s，并补齐"首包"语义 ══════════════
+        # 现场（2026-11-07 会话 · 总装 #2 `0b161dc4`）：
+        #   `:1550` 09:51:30  step/start step:175
+        #   `:1551` 10:21:22  assistant/attempt {step:175, stream: []}
+        #   → **1791.6 秒，零 chunk、零 retry**
+        # 重试策略里明明有 TIMEOUT 分支（`:4039`），但"连接已建、首包不来"
+        #   走不到它 —— 看门狗只能按"30 分钟无落盘"把活着的房间杀掉。
+        #
+        # 口径（对齐 02 文档「首包 90 s 超时」）：
+        #   · 单值 streamIdleTimeoutMs 的语义是"任一段空闲上限"，
+        #     放在 90s 后：首包 90s 不来就触发超时，回到正常重试链；
+        #   · 若宿主版本支持分开配置，下面两项会被优先采用
+        #     （不支持时会被忽略，不影响旧行为）。
+        streamIdleTimeoutMs: 90000
+        firstByteTimeoutMs: 90000
+        #: 首包超时后要能走重试而不是判死——显式给出重试预算与退避
+        maxRetries: 3
+        retryDelayMs: 800
 
 - id: permission
   name: "@deepseek-ai/dsh-permission-presets"

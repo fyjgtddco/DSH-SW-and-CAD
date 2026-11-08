@@ -68,28 +68,26 @@ check('所有事件类型都可折叠（EngCollapsibleEvent）',
 check('折叠开关渲染 caret 箭头', /eng-evt-caret/.test(SRC));
 check('「命令」仍走自己的 ToolCard 折叠', /function ToolCard\(props\)/.test(SRC));
 
-// ── Bug3：选项倒计时 ─────────────────────────────────────────────────────
-console.log('\n=== Bug3 · 选项倒计时 120s + 推荐项 + 三题豁免 + 设置开关 ===');
-check('倒计时 120 秒（AskCard）', /var COUNTDOWN_SEC = 120;/.test(SRC));
-check('主对话注入点也是 120 秒', /installQuestionCountdown\(120\)/.test(SRC));
-check('不再残留 10 秒测试值',
-  !/COUNTDOWN_SEC = 10;/.test(SRC) && !/installQuestionCountdown\(10\)/.test(SRC));
-check('三题豁免判定 isNoCountdownQuestion()',
-  /function isNoCountdownQuestion\(q\)/.test(SRC));
-check('豁免题含「参数需求强度」', /'参数需求强度'/.test(SRC));
-check('豁免题含「搭建方式」', /'搭建方式'/.test(SRC));
-check('豁免题含「并行策略」', /'并行策略'/.test(SRC));
-check('超时选「推荐」项 pickCountdownOption()',
-  /function pickCountdownOption\(q\)/.test(SRC));
-check('推荐判定 isRecommendedOption()', /function isRecommendedOption\(o\)/.test(SRC));
-check('设置项 enableOptionCountdown 存在', /enableOptionCountdown: true/.test(SRC));
-check('设置页文案改成「是否启用选项倒计时」',
-  /'是否启用选项倒计时'/.test(SRC));
+// ── Bug3：选项倒计时【已于 2026-11-08 整体删除】─────────────────────────
+// 用户原话：「算了算了，你帮我把倒计时给删了吧，不要这个倒计时了」。
+// 删除原因（session-6e5c9b47 现场）：120 秒归零后自动选「推荐项」并提交，
+//   用户真实选择还没送出就被默认值顶掉 —— 对工程模式是灾难（载荷/材料/
+//   公差被默认值替换，后面整个设计都建立在错误前提上）。
+// 因此本组断言【反向锁定】：倒计时不许再被加回来。
+console.log('=== Bug3 · 选项倒计时已删除（反向锁定）===');
+check('不再有 COUNTDOWN_SEC 常量', !/COUNTDOWN_SEC/.test(SRC));
+check('不再有 installQuestionCountdown 装配', !/installQuestionCountdown/.test(SRC));
+check('不再有倒计时辅助函数 isNoCountdownQuestion',
+  !/function isNoCountdownQuestion/.test(SRC));
+check('不再有自动选推荐项 pickCountdownOption',
+  !/function pickCountdownOption/.test(SRC));
+check('不再有设置项 enableOptionCountdown', !/enableOptionCountdown/.test(SRC));
+check('设置页不再有「是否启用选项倒计时」开关',
+  !/'是否启用选项倒计时'/.test(SRC));
+check('不再注入倒计时样式 .eng-cd', !/\.eng-cd/.test(SRC));
+check('「推荐」徽标保留（选项自身属性，与倒计时无关）',
+  /function isRecommendedOption\(o\)/.test(SRC));
 check('原占位「子栏目选项设置2」已移除', !/'子栏目选项设置2'/.test(SRC));
-check('用户点选后立刻停表（cdTakenRef 按题置位）',
-  /cdTakenRef\.current\[cdQid\] = true/.test(SRC));
-check('设置关闭时主对话倒计时不挂表（enabledByUser）',
-  /if \(!isEngMode\(\) \|\| !enabledByUser\(\)\) \{ stopAll\(\); return; \}/.test(SRC));
 
 // ── Bug3 根因：body.dsh-eng-mode 与面板解耦 ──────────────────────────────
 console.log('\n=== Bug3 根因 · eng-mode 标记与面板渲染解耦 ===');
@@ -105,13 +103,10 @@ check('SubagentConsole 内不再重复挂这个类',
 
 // ── Bug3 DOM 加固（按 0.2.1 真实结构）───────────────────────────────────
 console.log('\n=== Bug3 DOM 加固 · 不依赖 hash ===');
-check('选项组优先用 role=radiogroup/group',
-  /\[data-question-key\] \[role="radiogroup"\]/.test(SRC));
-check('选项优先用 role=radio/checkbox',
-  /group\.querySelectorAll\('\[role="radio"\], \[role="checkbox"\]'\)/.test(SRC));
-check('提交按钮只在 footerActions 内找（不误点 pager）',
-  /_footerActions|_footerActions/.test(SRC) && /findNextButton\(cardRoot\)/.test(SRC));
-check('排除「跳过 / 上一题」按钮', /跳过\|skip\|上一题/.test(SRC));
+// 【倒计时删除后】选项组定位 / findNextButton 等 DOM 辅助随倒计时一起删除了；
+//   这些断言原本只为验证"自动点选按钮"的安全性，现已无对应代码。
+check('不再有自动点选按钮的辅助 findNextButton',
+  !/function findNextButton/.test(SRC));
 
 // ── Bug4：小标签可拖动 ───────────────────────────────────────────────────
 console.log('\n=== Bug4 · 收起态「子代理」小标签可拖动 ===');
@@ -127,27 +122,21 @@ check('拖动中禁用过渡（.eng-fab.dragging）',
 
 // ── Bug3：点选立刻停表（用户要求"按了选项就立马停"）─────────────────────
 console.log('\n=== Bug3 · 点选立刻停表（不再继续读秒）===');
-check('AskCard 有倒计时句柄 cdTimerRef', /var cdTimerRef = useRef\(null\)/.test(SRC));
-check('点击选项时 clearInterval 当场停表',
-  /if \(cdTimerRef\.current\) \{ clearInterval\(cdTimerRef\.current\); cdTimerRef\.current = null; \}/.test(SRC));
-check('主对话卡片点选也当场停表（stopThis）',
-  /var stopThis = function \(\) \{[\s\S]{0,200}clearInterval\(iv\)/.test(SRC));
+check('AskCard 不再有倒计时句柄 cdTimerRef', !/cdTimerRef/.test(SRC));
+check('主对话卡片不再有倒计时表 stopThis', !/var stopThis = function/.test(SRC));
 
 
-// ── 第三轮反馈（2026-10-20）：倒计时乱跑 / 折叠默认态 / Markdown ─────────
-console.log('\n=== 第三轮 · 倒计时只在真正的题干选项组上 ===');
-check('徽标只插在提问卡内部（data-question-key）',
-  /_cardRoot = \(group\.closest && group\.closest\('\[data-question-key\]'\)\)/.test(SRC));
-check('找不到提问卡就不插（宁可不显示也不乱跑）',
-  /不是提问卡 → 直接放弃这组，绝不在页面其它地方乱插/.test(SRC));
-check('有孤立徽标巡检 sweepStrayBadges', /var sweepStrayBadges = function \(\)/.test(SRC));
-check('attach 前先清乱跑徽标', /sweepStrayBadges\(\);[\s\S]{0,90}var cards = findCards/.test(SRC));
-check('选项组要求至少 2 个 radio/checkbox', /optCount < 2/.test(SRC));
-check('排除 nav/header/toolbar 等容器', /rc === 'toolbar' \|\| rc === 'navigation'/.test(SRC));
-check('三题豁免只读【本卡片题干】extractStemText',
-  /var extractStemText = function \(group\)/.test(SRC));
-check('豁免不再向上爬 4 层取整页文本',
-  !/for \(var up = 0; up < 4 && scope; up\+\+\)/.test(SRC));
+// ── 第三/四轮（2026-10-20）：倒计时相关调试记录【已随功能整体删除】───────
+// 用户 2026-11-08 要求把倒计时整体删掉，因此原先这一大批"倒计时不乱跑"
+//   的内部实现断言（sweepStrayBadges / questionFingerprint / takenMap …）
+//   所对应的代码已不存在。这里改为【反向锁定】，防止有人把倒计时加回来：
+console.log('\n=== 倒计时相关实现已全部移除（反向锁定）===');
+check('不再有倒计时巡检 sweepStrayBadges', !/sweepStrayBadges/.test(SRC));
+check('不再有题目指纹 questionFingerprint', !/questionFingerprint/.test(SRC));
+check('不再有指纹计时表 timers = {}', !/var timers = \{\};/.test(SRC));
+check('不再有接管标记 takenMap', !/takenMap/.test(SRC));
+check('不再有倒计时徽标 DOM 类 .eng-qc-cd / .eng-cd',
+  !/eng-qc-cd/.test(SRC) && !/\.eng-cd/.test(SRC));
 
 console.log('\n=== 第三轮 · 折叠默认态（输出展开，其余收起）===');
 check('输出(kind=text) 默认展开',
@@ -161,30 +150,6 @@ check('ThinkBox 走 Markdown', /engSafeMarkdown\(props\.text, props\.mdKey \|\| 
 check('渲染失败回退纯文本，绝不吞内容',
   /catch \(e\) \{\s*\n\s*return String\(text == null \? '' : text\);/.test(SRC));
 check('Markdown key 稳定（mdKey 由事件 key 派生）', /mdKey: key \+ '-m'/.test(SRC));
-
-
-// ── 第四轮反馈（2026-10-20）：三题豁免失效 / 换题后倒计时消失 ───────────
-console.log('\n=== 第四轮 · 三题豁免真正生效 ===');
-check('题干提取向上多层查找（不再只取 parentNode）',
-  /for \(var up = 0; up < 5 && node; up\+\+\)/.test(SRC));
-check('题干只取【选项组之外】的兄弟文本',
-  /if \(kid === node\) continue;/.test(SRC));
-check('三题豁免仍按题干判定', /if \(\/搭建方式\/\.test\(head\)\) return true;/.test(SRC));
-
-console.log('\n=== 第四轮 · 换题后倒计时不消失（按指纹而非 DOM 元素）===');
-check('计时器改为按指纹的对象表', /var timers = \{\};/.test(SRC));
-check('接管标记改为按指纹', /var takenMap = \{\};/.test(SRC));
-check('新增 questionFingerprint（题干+选项）',
-  /var questionFingerprint = function \(group, stemText\)/.test(SRC));
-check('元素记录了上次指纹（换题可感知）',
-  /var elementFp = new WeakMap\(\)/.test(SRC));
-check('换题时清掉旧表与旧徽标',
-  /if \(_prevFp !== undefined && _prevFp !== fp\)/.test(SRC));
-check('按指纹判定已挂表', /if \(timers\[fp\]\) return;/.test(SRC));
-check('按指纹判定已接管', /if \(takenMap\[fp\]\) return;/.test(SRC));
-check('点选后按指纹记接管', /takenMap\[fp\] = true;/.test(SRC));
-check('同卡片内去重徽标（不出现两个倒计时）',
-  /_host.querySelectorAll\('\.eng-qc-cd'\)/.test(SRC));
 
 console.log('\n===== 结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
 if (fail > 0) process.exitCode = 1;

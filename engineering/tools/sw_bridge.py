@@ -2058,6 +2058,36 @@ def resolve_save_path(path):
     return _final, meta
 
 
+def _reject_failed_save(final_path, res, room=None):
+    """【2026-11-07】保存失败 → 把半成品零件挪进 parts_rejects/（收尾会删）。
+
+    用户要求（原文）：「假设建模失败的文件，直接不用保存即可」。
+    为什么不直接 unlink：失败件本身是排障证据，且 SW 可能仍持有文件句柄
+      （当场删会 WinError 32）。放进 parts_rejects/ 让收尾统一清理，
+      同时保证 parts/ 里不会出现"看起来能交付、实际是半成品"的零件。
+
+    Returns: {moved: bool, to: str|None, note: str}
+    """
+    out = {"moved": False, "to": None, "note": ""}
+    try:
+        _wd = _task_work_dir()
+        if not _wd:
+            out["note"] = "读不到任务目录，保留原文件（不擅自删除）"
+            return out
+        import task_workspace as _tw
+        _r = _tw.reject_part(_wd, final_path,
+                             reason=(res or {}).get("error") or "保存失败")
+        if _r.get("ok"):
+            out.update({"moved": bool(_r.get("to")), "to": _r.get("to"),
+                        "note": ("已移入 parts_rejects/（收尾会整目录删除）：%s"
+                                 % (_r.get("note") or "")).strip()})
+        else:
+            out["note"] = "移入 parts_rejects 失败: %s" % (_r.get("error") or "未知")
+    except Exception as e:
+        out["note"] = "移入 parts_rejects 异常: %r" % (e,)
+    return out
+
+
 def cmd_save(sw, path):
     """另存为当前活动文档。
 
@@ -2084,6 +2114,12 @@ def cmd_save(sw, path):
            "saved": os.path.exists(_actual) or os.path.exists(_final),
            "rc": rc, "saved_path": _actual}
     out.update(_meta)
+    # ── 【2026-11-07 · 失败件不入 parts/】──────────────────────────────
+    # 用户要求：「假设建模失败的文件，直接不用保存即可」。
+    # 保存没成功（rc!=0 / 文件不存在）→ 把可能残留的半成品挪进 parts_rejects/，
+    # 免得机械工程师在 parts/ 里翻到一个打不开的零件。
+    if not out["ok"] or not out["saved"]:
+        out["rejected"] = _reject_failed_save(_final, out)
     return out
 
 
@@ -7122,12 +7158,24 @@ def _ensure_guard_quiet(room):
 
 
 def _gate_sw_unlock(lock):
-    """【Bug4修复】单命令级锁：命令执行完立即释放，不占整个房间生命周期。
+    """房间级锁：命令结束【默认不释放】，整轮建模由 room-start 持有、room-end 释放。
 
-    旧行为：锁随小屋生命周期保持，只在 room-end 释放。
-            -> 某小屋需要用户交互确认时，其他小屋被无限阻塞。
-    新行为：每条 sw_bridge 命令结束即释放锁，队列中下一个房间立即接管。
-            如需保持旧行为（整个房间持锁），设置 DSH_SW_UNLOCK_ON_EXIT=0。
+    ── 历史与本轮反转（A15）──────────────────────────────────────────────
+    最初是房间级（只在 room-end 释放）；
+    【Bug4 修复】改成了单命令级 —— 理由写成"某小屋需要用户交互确认时，
+    其他小屋被无限阻塞"。但这个理由在 2026-11-07 的会话里被证伪：
+      · 240 次 room-board 读取中 waiting_sw 出现 0 次；
+      · 跨房间 sw_bridge run 实测 **8 对时间重叠**（最长 216 s）；
+      · 13:59:59 有 4 个房间同时在世，同一 SW 实例被多脚本操作，
+        ActiveDoc 是进程级全局状态 —— 文档串写/半成品丢失的结构性风险。
+    也就是说"命令级释放"带来的不是并发收益，而是把房间级串行废掉了。
+    真正解决"交互确认时阻塞别家"的正确做法是 room-fail/room-end 让锁，
+    而不是让锁在每个命令之间漏一次。
+
+    ── 现在的语义 ────────────────────────────────────────────────────────
+      · 默认：**保持锁**（房间级）。room-start 取得，room-end/room-fail 释放。
+      · DSH_SW_UNLOCK_ON_EXIT=1 → 命令结束立即释放（退回旧的单命令级语义）。
+      · DSH_SW_ROOM_HOLD=0      → 全局退回单命令级（与 mode_gate 同一开关）。
     """
     try:
         if not lock or lock.get("skipped") or lock.get("busy"):
@@ -7136,8 +7184,22 @@ def _gate_sw_unlock(lock):
         #   run 可能耗时数分钟，取锁时跳的那一次到结束时可能已经"过期"，
         #   这里补一次，确保收尾阶段房间状态仍是新鲜的（不会刚干完活就被判 stale）。
         _room_heartbeat(lock.get("room"), "released")
-        # 默认：命令级释放（环境变量显式设 "0" 才保持房间级）
-        if os.environ.get("DSH_SW_UNLOCK_ON_EXIT") == "0":
+        # ══ 【A15 修复】默认改为【房间级】：命令结束不再释放 SW 使用权 ══════
+        # 现场（2026-11-07 会话）：旧实现在这里每条命令结束就 sw-release，
+        #   于是 hold_mode 永远是 command —— 240 次 room-board 里 waiting_sw
+        #   出现 0 次，却实测到 8 对跨房间构建区间重叠（最长 216 s）。
+        #   根因就是这一行：锁在"命令之间"释放，等于没有房间级串行。
+        # 现在：默认保持房间级独占（room-start 取得、room-end/room-fail 释放）。
+        #   需要退回旧的单命令级语义时，设 DSH_SW_UNLOCK_ON_EXIT=1。
+        # 环境变量优先级（高 → 低）：
+        #   DSH_SW_UNLOCK_ON_EXIT=1  → 立刻释放（单命令级，旧行为）
+        #   DSH_SW_UNLOCK_ON_EXIT=0  → 保持（房间级，同新默认）
+        #   未设置                   → 保持（房间级）
+        _unlock_env = (os.environ.get("DSH_SW_UNLOCK_ON_EXIT") or "").strip().lower()
+        _room_hold_env = (os.environ.get("DSH_SW_ROOM_HOLD") or "").strip().lower()
+        _room_hold_off = _room_hold_env in ("0", "false", "no", "off")
+        _immediate = _unlock_env in ("1", "true", "yes", "on") or _room_hold_off
+        if not _immediate:
             return
         gate = _get_mode_gate_path()
         if not gate or not os.path.exists(gate):

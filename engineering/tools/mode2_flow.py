@@ -1784,6 +1784,86 @@ def room_type_snapshot(rooms):
     return out
 
 
+# ══ 【A12 修复·rooms 模板】任务书示例缺 type → 子代理照抄必失败 ══════════
+# 现场（d921be74:475）：子代理按任务书里的 rooms 示例照抄后调 set-subagent-plan，
+#   直接被拒："子代理【X】缺少 type 字段"。
+# 根因：set-subagent-plan 强制要求每个 room 有 type（且必须落在规范类型表内），
+#   但任务书/提示词里流传的示例是 {name, parts, why, depends_on} 的旧样子 ——
+#   示例与校验器不同源，模型只能靠猜。
+# 修复：
+#   ① 新增子命令 rooms-template：由【代码】吐出可直接用的完整示例
+#      （字段与 VALID 类型全部从 CANONICAL_ROOM_TYPES 反查，不手写第二份）；
+#   ② 缺 type 的报错里直接指向该子命令（一次说清怎么拿到正确示例）。
+ROOMS_TEMPLATE_FIELDS = (
+    ("name", "房间名（唯一，中文可读，如 结构件 / 传动件）"),
+    ("type", "房间类型，必须是规范类型之一（见 allowed_types，可写同义词）"),
+    ("parts", "本屋负责的零件名清单（非建模屋也要占位名，空数组会被拒）"),
+    ("why", "为什么需要这个子代理（可审计的存在理由）"),
+    ("depends_on", "依赖的房间名清单（可空；指向不存在的房间会被拒）"),
+)
+
+
+def rooms_template(work_dir=None, out_file=None):
+    """输出一份【含 type 的完整 rooms 示例】，供总计子代理照抄后改写。
+
+    字段口径与 set_subagent_plan 的校验逻辑一一对应（同样的 name/type/parts/
+    why/depends_on），type 取值直接来自 CANONICAL_ROOM_TYPES —— 不允许在这里
+    再维护第二份类型表，否则又会变成"示例与校验器不同源"。
+
+    返回结构刻意包了一层 {"rooms": [...]}：
+      set-subagent-plan 对 {"rooms": [...]} 会自动解包（BUG-3 修复），
+      因此把本命令的输出【整份】存成 rooms.json 也能直接用。
+    """
+    rooms = [
+        {"name": "结构件", "type": "structural",
+         "parts": ["DSH_车架底板", "DSH_立柱"],
+         "why": "承载整车与电池，决定主要刚度与安装基准", "depends_on": []},
+        {"name": "传动件", "type": "transmission",
+         "parts": ["DSH_主动齿轮", "DSH_从动齿轮", "DSH_传动轴"],
+         "why": "把电机转矩按减速比传到执行机构", "depends_on": ["结构件"]},
+        {"name": "壳体", "type": "housing",
+         "parts": ["DSH_上壳体", "DSH_下壳体"],
+         "why": "包覆并固定内部件，兼顾散热与防护", "depends_on": ["结构件"]},
+        {"name": "总装与验证", "type": "assembly",
+         "parts": ["DSH_整机装配体"],
+         "why": "完成装配 + 干涉检查 + 整体验证", "depends_on": ["结构件", "传动件"]},
+        {"name": "工程图输出", "type": "drafting",
+         "parts": ["DSH_整机图纸"],
+         "why": "输出三视图/装配图并导出 DWG/PDF", "depends_on": ["总装与验证"]},
+    ]
+    payload = {
+        "ok": True,
+        "rooms": rooms,
+        "fields": [{"field": k, "desc": v} for k, v in ROOMS_TEMPLATE_FIELDS],
+        "allowed_types": list(CANONICAL_ROOM_TYPES),
+        "type_aliases": {k: v for k, v in sorted(ROOM_TYPE_ALIASES.items())},
+        "usage": [
+            "① 直接把本输出存成 rooms.json（整份保存也可以，rooms 键会被自动解包）；",
+            "② 按实际功能分解改 name/parts/why/depends_on，**type 必须保留**；",
+            '③ python mode2_flow.py set-subagent-plan --rooms-json @rooms.json '
+            '--rationale "按功能分解得到 N 个模块"',
+        ],
+        "note": ("total_rooms 至少 1 个；总装(assembly)与出图(drafting)若没写，"
+                 "set-subagent-plan 会按流程自动补齐，不必自己记。"
+                 "非建模房间的 parts 也要写占位名（写装配体名/图纸名即可）。"),
+    }
+    if out_file:
+        try:
+            _p = os.path.abspath(str(out_file))
+            _d = os.path.dirname(_p)
+            if _d:
+                os.makedirs(_d, exist_ok=True)
+            with open(_p, "w", encoding="utf-8") as f:
+                # 落盘时只写【可直接投喂】的部分，避免把 usage/note 混进编制文件
+                json.dump(rooms, f, ensure_ascii=False, indent=2)
+            payload["out_file"] = _p
+        except Exception as e:
+            payload["ok"] = False
+            payload["error"] = "写入模板文件失败: %r" % (e,)
+            payload["out_file"] = None
+    return payload
+
+
 def require_stages_complete(work_dir=None):
     """【强制点】编制作出 / 开工前，十阶段必须全部完成。
 
@@ -1910,9 +1990,10 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None, actor=None):
                              "parts": ["DSH_车架底板"],
                              "why": "承载整车与电池",
                              "depends_on": []}],
-                "types": ["structural", "transmission", "housing", "support",
-                          "spring", "thermal", "corrosion", "assembly",
-                          "drafting", "prime"]}
+                # 【A12 修复】示例只说"长什么样"，报错里直接给出【拿到完整示例】的命令
+                "template_cmd": ("python mode2_flow.py rooms-template "
+                                 "--out rooms.json"),
+                "types": list(CANONICAL_ROOM_TYPES)}
     if not str(rationale or "").strip():
         return {"ok": False,
                 "error": ("必须给出 rationale（为什么是这个编制）—— "
@@ -1975,6 +2056,15 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None, actor=None):
                          "drawing→drafting；总装用 assembly，出图用 drafting。"
                          "非建模房间也要列 parts（可写装配体名/图纸名作占位）。"
                          % " / ".join(_allowed)),
+                # ── 【A12 修复】把"去哪拿正确示例"写进报错本身 ──────────────
+                # 现场（d921be74:475）：子代理照抄任务书里的 rooms 示例 →
+                #   示例没有 type → 这里报"缺少 type 字段" → 它只能反复试错。
+                #   因此报错必须【直接指向】rooms-template 子命令，一次说清。
+                "fix_cmd": ("python mode2_flow.py rooms-template "
+                            "--out rooms.json"),
+                "fix_hint": ("照抄一份含 type 的完整示例再改："
+                             "python mode2_flow.py rooms-template --out rooms.json"
+                             "（输出里的每个房间都带 type，字段与校验器同源）"),
             }
             if _miss:
                 _out["hint"] = ("【最常见原因】忘写 type。请给每个房间补一个："
@@ -2598,6 +2688,268 @@ def prime_reports(work_dir=None):
     reps = plan.get("prime_reports", [])
     return {"ok": True, "count": len(reps), "reports": reps}
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ★ 零件进度表（parts board）—— 用户要求（2026-11-07，图二红线下方那块）
+# ═══════════════════════════════════════════════════════════════════════════
+# 用户原话：「我想这样子分类，红线上面是子代理，下面是要造的零件的表，然后
+#   是总计子代理分析完成之后，把所有的零件都给放在那个展示表中……因为不是会
+#   开总理子代理去看尺寸吗，那么就交给总理子代理去看零件完成度，正在建，那么
+#   就同步成『正在建 xx 零件』，同理『未开始，完成』都是一样的，还有需要
+#   『重建』，还有假设状态是正在建模，那么假设 DSH 断了，比如直接关了 DSH
+#   这种情况，那就显示『失败』」。
+#
+# 状态机（唯一权威，按优先级从高到低判定）：
+#   done        已有 prime-report（零件被总理子代理验收过）
+#   rebuilding  房间被 room-fail/restart 过，正在重做
+#   building    房间正在建模（stage=modeling / 已 room-artifact 但还没上报）
+#   failed      DSH 进程断了（pulse 停了）而零件还没完成 —— 用户明确要求
+#               「正在建模时 DSH 断了 → 显示失败」
+#   not_started 编制里有、房间还没开始
+PART_STATE_DONE = "done"
+PART_STATE_BUILDING = "building"
+PART_STATE_REBUILDING = "rebuilding"
+PART_STATE_FAILED = "failed"
+PART_STATE_TODO = "not_started"
+
+PART_STATE_LABEL = {
+    PART_STATE_DONE: "完成",
+    PART_STATE_BUILDING: "正在建",
+    PART_STATE_REBUILDING: "需要重建",
+    PART_STATE_FAILED: "失败",
+    PART_STATE_TODO: "未开始",
+}
+
+
+def _room_live_map(work_dir=None):
+    """房间 → 看板行（含 state/report_stage/artifact）。失败返回 {}。"""
+    out = {}
+    try:
+        import mode_gate as _mg
+        live = _mg.cmd_room_board(as_json=True)
+        for row in ((live or {}).get("rooms") or []):
+            nm = str(row.get("room") or "")
+            if nm:
+                out[nm] = row
+    except Exception:
+        return {}
+    return out
+
+
+def _pulse_alive():
+    """DSH 主进程是否还在跳（pulse）。无结论时返回 None（不臆断）。"""
+    try:
+        import mode_gate as _mg
+        st = _mg._pulse_state()
+        return bool(st.get("alive"))
+    except Exception:
+        return None
+
+
+def autonomy_mode(work_dir=None):
+    """读本轮"搭建方式" A/B/C（A=完全自主，无需问；B/C=需要问）。
+
+    用户要求（原文）：「总理子代理先删除对应的错误文件（如果没有选择自主
+      干完话，即总计子代理之后还能问的话，应该先调用 DSH 内部的提问用户，
+      先问再删，但是假设选择了『A = 完全自主搭建』那就不用问，直接删即可）」。
+
+    来源：workflow_state.json 的 user_choice（select 当场写入，是权威）。
+    读不到 → 返回 None（调用方必须按"需要问"处理，绝不默认自主）。
+    """
+    try:
+        import _store as _st
+        p = _st.state_path("workflow_state.json")
+        if not os.path.isfile(p):
+            return None
+        with open(p, "r", encoding="utf-8-sig") as f:
+            j = json.load(f) or {}
+        c = str(j.get("user_choice") or "").strip().upper()
+        if c in ("A", "B", "C"):
+            return c
+    except Exception:
+        return None
+    return None
+
+
+def can_delete_without_asking(work_dir=None):
+    """能不能【不问就删】失败件：只有 A（完全自主）可以。
+
+    Returns: {ok, mode, may_delete_silently, must_ask, reason}
+      · mode = None  → 读不到选择 → must_ask=True（保守，绝不擅自删）
+      · mode = "A"   → may_delete_silently=True
+      · mode = "B"/"C" → must_ask=True
+    """
+    mode = autonomy_mode(work_dir)
+    if mode == "A":
+        return {"ok": True, "mode": mode, "may_delete_silently": True,
+                "must_ask": False,
+                "reason": "本轮搭建方式为 A（完全自主搭建）—— 可直接删除失败件，无需询问。"}
+    if mode in ("B", "C"):
+        return {"ok": True, "mode": mode, "may_delete_silently": False,
+                "must_ask": True,
+                "reason": ("本轮搭建方式为 %s（非完全自主）—— 必须先向用户提问确认，"
+                           "得到答复后再删，不得擅自删除。" % mode)}
+    return {"ok": False, "mode": None, "may_delete_silently": False,
+            "must_ask": True,
+            "reason": ("读不到本轮搭建方式（user_choice）—— 按【需要问】处理："
+                       "先用 ask_user.py / ask_user_question 询问，确认后再删。")}
+
+
+def _room_rebuild_flags():
+    """读 mode_state，找出"被 room-fail / restart 过、正在重做"的房间。
+
+    用户要求：「还有需要『重建』」—— 与"未开始"必须区分开：
+      · 从未开始 = 编制里有、一次也没建过；
+      · 需要重建 = 建过但失败/被回退，正在或等着重做。
+    判据（都来自 mode_gate 写的权威状态文件，不靠猜）：
+      · room 记录里 restart_count > 0，或
+      · 存在 last_failed_at 且没有被更晚的 ended_at 覆盖。
+    """
+    out = {}
+    try:
+        import mode_gate as _mg
+        st = _mg.load_state()
+        rooms = st.get("rooms") or {}
+        for name, info in rooms.items():
+            if not isinstance(info, dict):
+                continue
+            _rc = int(info.get("restart_count") or 0)
+            _failed_at = info.get("failed_at")
+            _ended_at = info.get("ended_at")
+            _rebuild = False
+            if _rc > 0:
+                _rebuild = True
+            if _failed_at and not _ended_at:
+                _rebuild = True
+            if _rebuild:
+                out[str(name)] = {
+                    "restart_count": _rc,
+                    "failed_at": _failed_at,
+                    "reason": info.get("failed_reason") or info.get("fail_reason"),
+                }
+    except Exception:
+        return {}
+    return out
+
+
+def parts_board(work_dir=None):
+    """★ 零件进度表：编制里每个零件一行，供子代理面板红线下方渲染。
+
+    Returns: {ok, parts:[{name, room, room_type, state, label, detail,
+                          file, has_report, report_at, room_state, room_stage,
+                          artifact_at, safe_to_restart, next_action}],
+              summary:{counts, total, done, building, failed, rebuilding, not_started},
+              pulse_alive, generated_at}
+    """
+    plan = load_plan(work_dir)
+    if plan.get("_load_error"):
+        return {"ok": False, "error": plan["_load_error"]}
+    sp = plan.get("subagent_plan") or {}
+    rooms = sp.get("rooms") or []
+    reports = plan.get("prime_reports") or []
+    rep_by_part = {}
+    for r in reports:
+        if isinstance(r, dict) and r.get("part_name"):
+            rep_by_part[str(r.get("part_name")).strip()] = r
+    live = _room_live_map(work_dir)
+    rebuild = _room_rebuild_flags()
+    pulse = _pulse_alive()
+
+    parts = []
+    seen = set()
+    for room in rooms:
+        rname = str(room.get("name") or "").strip()
+        rtype = room.get("type")
+        row = live.get(rname) or {}
+        rstate = str(row.get("state") or "")
+        rstage = str(row.get("report_stage") or "")
+        rnext = row.get("next_action")
+        r_safe = row.get("safe_to_restart")
+        art = row.get("artifact") if isinstance(row.get("artifact"), dict) else {}
+        for p in (room.get("parts") or []):
+            pname = str(p).strip()
+            if not pname or pname in seen:
+                continue
+            seen.add(pname)
+            rep = rep_by_part.get(pname)
+            has_rep = bool(rep)
+            # ── 状态推导（顺序即优先级）────────────────────────────────
+            if has_rep:
+                state = PART_STATE_DONE
+                detail = "已由总理子代理验收（" + str((rep or {}).get("at") or "") + "）"
+            elif rname in rebuild and rstate not in ("done",):
+                # ── 【需要重建】建过但失败/被回退（用户要求区分于"未开始"）
+                state = PART_STATE_REBUILDING
+                _why = (rebuild.get(rname) or {}).get("reason")
+                detail = ("房间已回退，需要重建"
+                          + ("（原因：" + str(_why) + "）" if _why else ""))
+            elif rstate == "failed":
+                state = PART_STATE_REBUILDING
+                detail = "房间已 fail，需要重做"
+            elif rstage in ("modeling", "modelling", "building", "sw_modeling")                     or rstate in ("running", "waiting_sw"):
+                state = PART_STATE_BUILDING
+                detail = ("正在建模（房间 " + (rstate or "running") + "）"
+                          if rstate != "waiting_sw" else "正在等 SW 锁（属于正常等待）")
+            elif art.get("path") and art.get("exists") is not False:
+                # 已经有产物文件但还没上报 → 视为"正在建/待上报"
+                state = PART_STATE_BUILDING
+                detail = "已有产物文件，等待总理子代理验收"
+            elif pulse is False and rstate not in ("done",):
+                # 用户明确要求：正在建模时 DSH 断了 → 失败
+                state = PART_STATE_FAILED
+                detail = "DSH 进程已断（pulse 停止），该零件不会自己恢复"
+            elif rstate in ("dead", "detached"):
+                state = PART_STATE_FAILED
+                detail = "子代理失联（" + rstate + "）"
+            elif rstage in ("params_shown", "params_confirmed", "registered"):
+                state = PART_STATE_BUILDING if rstage == "params_confirmed" else PART_STATE_TODO
+                detail = {"params_shown": "参数表已出，等待确认",
+                          "params_confirmed": "参数已确认，准备建模",
+                          "registered": "房间已登记，尚未开工"}[rstage]
+            else:
+                state = PART_STATE_TODO
+                detail = "未开始"
+            parts.append({
+                "name": pname,
+                "room": rname,
+                "room_type": rtype,
+                "state": state,
+                "label": PART_STATE_LABEL.get(state, state),
+                "detail": detail,
+                "has_report": has_rep,
+                "file": (rep or {}).get("file") if has_rep else (art.get("path") or None),
+                "report_at": (rep or {}).get("at") if has_rep else None,
+                "room_state": rstate or None,
+                "room_stage": rstage or None,
+                "artifact_at": art.get("at") or None,
+                "safe_to_restart": r_safe,
+                "next_action": rnext,
+            })
+
+    counts = {}
+    for p in parts:
+        counts[p["state"]] = counts.get(p["state"], 0) + 1
+    return {
+        "ok": True,
+        "parts": parts,
+        "summary": {
+            "total": len(parts),
+            "counts": counts,
+            "done": counts.get(PART_STATE_DONE, 0),
+            "building": counts.get(PART_STATE_BUILDING, 0),
+            "rebuilding": counts.get(PART_STATE_REBUILDING, 0),
+            "failed": counts.get(PART_STATE_FAILED, 0),
+            "not_started": counts.get(PART_STATE_TODO, 0),
+        },
+        "pulse_alive": pulse,
+        "autonomy": can_delete_without_asking(work_dir),
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "note": ("总理子代理是这张表的唯一维护者；房间状态来自 mode_gate.room-board（权威），"
+                 "零件完成度来自 prime-report。pulse_alive=false 表示 DSH 进程已断。"
+                 "autonomy.may_delete_silently=true 时（A 模式）可直接删失败件；"
+                 "否则必须先问用户。"),
+    }
+
+
 def prime_board(work_dir=None):
     """【2026-10-28 重构】总理子代理的监工看板（只读）。
 
@@ -2653,6 +3005,12 @@ def prime_board(work_dir=None):
     if gaps:
         actions.append({"room": "*", "action": "催办未上报零件", "parts": gaps[:20],
                         "why": "编制里有、总理台账没有"})
+    # ── 【2026-11-07】把零件进度表一并给出，总理子代理与 UI 共用同一份判定
+    try:
+        _pb = parts_board(work_dir)
+        _parts_view = _pb if _pb.get("ok") else {"ok": False, "error": _pb.get("error")}
+    except Exception as _e_pb:
+        _parts_view = {"ok": False, "error": repr(_e_pb)}
     return {
         "ok": True,
         "prime_room": PRIME_ROOM_NAME,
@@ -2662,6 +3020,9 @@ def prime_board(work_dir=None):
         "reported_parts": sorted(p for p in reported if p),
         "report_gaps": gaps,
         "consistency": plan.get("prime_consistency"),
+        "parts": _parts_view.get("parts") if isinstance(_parts_view, dict) else None,
+        "parts_summary": _parts_view.get("summary") if isinstance(_parts_view, dict) else None,
+        "pulse_alive": _parts_view.get("pulse_alive") if isinstance(_parts_view, dict) else None,
         "actions": actions,
         "hint": ("state=waiting_sw/running/idle/starting 都是活着，严禁判死；"
                  "只有 dead 才允许 recover/restart。"),
@@ -3075,7 +3436,33 @@ def pre_delivery_check(work_dir=None, registry_work_dir=None, require_primes=Tru
                             "python part_registry.py export-docx --out \"<交付目录>/零件台账.docx\""
                             " --work-dir \"<交付目录>\"")
 
+    # ══ 【A8 修复】强放行必须进交付结论，不许再"报告里仍是全签发" ═════════
+    # 现场：`room-end --force` 两次 + `DSH_DEFENSE_BYPASS=1` 一次，留痕都写了，
+    #   但最终总结仍宣称"三防线全部签发" —— 报告侧从来没读过 defense_bypass.json。
+    # 现在：交付总闸【总是】把强放行汇总挂进返回体，并且：
+    #   · banned_phrase=true 时，交付文案里【禁止】出现"三防线全部签发"；
+    #   · must_render=true 时，调用方必须原样渲染 bypass_line。
+    _bypass = {"count": 0, "line": "", "must_render": False}
+    try:
+        import defense_gate as _dg_a8
+        _bypass = _dg_a8.bypass_summary()
+    except Exception as _e_byp:
+        _bypass = {"count": None, "line": "",
+                   "must_render": False,
+                   "error": "强放行记录读取失败：%r（按不可信处理）" % (_e_byp,)}
+    _banned = ["三防线全部签发", "三防线均已签发", "全部签发", "三道防线全部通过"]
     return {"ok": not blockers, "blockers": blockers, "checked": True,
+            # ── 【A8】强放行披露（交付文案的强制输入）──────────────────────
+            "bypass": _bypass,
+            "bypass_count": _bypass.get("count"),
+            "bypass_line": _bypass.get("line") or "",
+            "bypass_must_render": bool(_bypass.get("must_render")),
+            "banned_phrases": _banned,
+            "delivery_wording_rule": (
+                "若 bypass_count > 0，交付总结【不得】写「三防线全部签发」之类措辞，"
+                "必须原样渲染 bypass_line，并注明这些判定未获真几何 FEA 证据。"
+                if (_bypass.get("count") or 0) > 0 else
+                "本次无强放行记录，可以正常表述三防线结论。"),
             "stages": {"done": st.get("done_count"), "total": st.get("total")},
             "questions": {"asked": qr.get("asked"), "min": qr.get("min"),
                           "max": qr.get("max")},
@@ -3337,6 +3724,12 @@ def _main_body(argv):
     p.add_argument("--task-id", default=None)
     p.add_argument("--work-dir", default=None)
 
+    # ── 【A12 修复】含 type 的完整示例（任务书里的旧示例缺 type，照抄必失败）──
+    p = sub.add_parser("rooms-template",
+                       help="★输出含 type 的完整 rooms 示例（照抄后改成自己的房间）")
+    p.add_argument("--out", default="", help="可选：把 rooms 数组直接写进该 json 文件")
+    p.add_argument("--work-dir", default=None)
+
     p = sub.add_parser("set-subagent-plan", help="★由总计子代理登记子代理编制")
     p.add_argument("--rooms-json", required=True, help="JSON 数组或 @文件路径")
     p.add_argument("--rationale", required=True)
@@ -3414,6 +3807,16 @@ def _main_body(argv):
     p.add_argument("--json", action="store_true", help="强制 JSON 输出（默认即 JSON）")
     p.add_argument("--work-dir", default=None)
 
+    p = sub.add_parser("parts-board",
+                       help="★零件进度表（未开始/正在建/完成/需要重建/失败）")
+    p.add_argument("--json", action="store_true", help="强制 JSON 输出（默认即 JSON）")
+    p.add_argument("--work-dir", default=None)
+
+    p = sub.add_parser("delete-policy",
+                       help="★删失败件前要不要问用户（A 模式=不问，B/C=必须问）")
+    p.add_argument("--json", action="store_true", help="强制 JSON 输出（默认即 JSON）")
+    p.add_argument("--work-dir", default=None)
+
     args = ap.parse_args(argv)
     if not args.cmd:
         ap.print_help()
@@ -3485,6 +3888,10 @@ ooms.json"，
         r = analyst_status(wd)
     elif args.cmd == "prime-board":
         r = prime_board(wd)
+    elif args.cmd == "parts-board":
+        r = parts_board(wd)
+    elif args.cmd == "delete-policy":
+        r = can_delete_without_asking(wd)
     elif args.cmd == "begin-stage":
         r = begin_stage(args.stage, wd, args.note, actor=_actor)
     elif args.cmd == "mark-stage-done":
@@ -3528,6 +3935,9 @@ ooms.json"，
             return 1
         r = sync_rooms_snapshot(_rooms, wd, source=args.source,
                                 task_id=getattr(args, "task_id", None))
+    elif args.cmd == "rooms-template":
+        # 【A12 修复】只读命令：不要求 analyst 身份、不写计划，随时可跑
+        r = rooms_template(wd, getattr(args, "out", "") or None)
     elif args.cmd == "set-subagent-plan":
         try:
             rooms = _load_json_arg(args.rooms_json)

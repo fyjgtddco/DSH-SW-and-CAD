@@ -247,7 +247,12 @@ window.__ModuleLoader__.load({
         'background:var(--dsw-alias-bg-layer-3,rgba(15,23,42,.08));border-radius:999px;' +
         'flex:none;font-size:10px;font-weight:700;padding:1px 6px' +
       '}' +
-      '.eng-tree-list{display:flex;flex:1;flex-direction:column;gap:4px;' +
+      // ── 子代理列表 = 左列【上半区】──────────────────────────────────
+      // 用户要求：零件表/子代理表「要往下滑动，自适应」。
+      // 现在左列拆成「列表(上) + 压缩历史(下)」，因此这里改成 flex:1 1 auto：
+      //   列表吃掉剩余高度并在自己内部滚动，绝不会把下面的压缩历史挤出去。
+      // 【布局 v12】左列 = 目录 50% / 零件表 50%（下方 .eng-lower 用 flex:1 1 50%）。
+      '.eng-tree-list{display:flex;flex:1 1 50%;flex-direction:column;gap:4px;' +
         'min-height:0;overflow-y:auto;padding:7px}',
       // 目录条目：默认透明（不抢眼），选中才实心高亮 —— 一眼看出"当前在看谁"
       '.eng-node{align-items:center;background:transparent;border:1px solid transparent;' +
@@ -304,7 +309,33 @@ window.__ModuleLoader__.load({
         '.eng-node-tw{width:10px;padding:0}' +
       '}',
       '.eng-detail{background:#fff;box-sizing:border-box;display:flex;flex:1 1 0;flex-direction:column;' +
-        'height:100%;min-width:0;overflow:hidden}',
+        'height:100%;min-width:0;overflow:hidden}' +
+      // ── 【右列页签】详情区 = 「实时流程」+「压缩历史」两页（布局 v12）─────
+      // 用户要求：左列选中哪个子代理，右列就展示"那个子代理的流程"与
+      //   "那个子代理的压缩历史"。因此两页共用同一个选中项，切换只换内容。
+      // 页签条常驻（不随内容滚走），页签体自成一列滚动容器。
+      '.eng-dtabs{background:transparent;' +
+        'border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
+        'display:flex;flex:none;gap:2px;padding:6px 10px 0;overflow-x:auto}' +
+      '.eng-dtab{background:transparent;border:1px solid transparent;border-bottom:none;' +
+        'border-radius:7px 7px 0 0;color:var(--dsw-alias-label-tertiary,#8b95a3);' +
+        'cursor:pointer;font-family:inherit;font-size:11.5px;font-weight:600;' +
+        'line-height:1.5;padding:5px 11px;white-space:nowrap}' +
+      '.eng-dtab:hover{color:var(--dsw-alias-label-secondary,#475569);' +
+        'background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.05))}' +
+      '.eng-dtab.on{background:var(--dsw-alias-state-business-tertiary,#eef2ff);' +
+        'border-color:var(--dsw-alias-border-l2,#e5e7eb);' +
+        'color:var(--dsw-alias-state-business-primary,#2563eb)}' +
+      '.eng-dtab-n{background:var(--dsw-alias-bg-layer-3,rgba(15,23,42,.08));border-radius:999px;' +
+        'font-size:9.5px;font-weight:700;margin-left:5px;padding:0 5px}' +
+      '.eng-dtabs-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}' +
+      '.eng-dtabs-body>.eng-log{flex:1 1 auto;min-height:0;overflow-y:auto}' +
+      // ── 【背景 · 2026-11-07】页签条不再自带深色底 ─────────────────────
+      // 踩过的坑：这里原本【没包在 @media 里】，于是无论浅色还是深色主题，
+      //   .eng-dtabs 都被钉成 #1b1e24 —— 用户截图里右列出现整块黑底、
+      //   页签条和下面的内容全是黑的，正是这条造成的。
+      // 现在：页签条一律透明（父容器 .eng-detail 的白底透上来），
+      //   只保留"选中页签"的浅蓝底作为状态色。
       // ── 详情标题栏：两行结构（名称+状态 / 副标题摘要）───────────────
       '.eng-head{' +
         'background:var(--dsw-alias-bg-layer-1,#fff);' +
@@ -486,10 +517,10 @@ window.__ModuleLoader__.load({
       '.eng-ask-btn{background:#4f46e5;border:1px solid #4f46e5;border-radius:7px;color:#fff;cursor:pointer;flex:none;font-size:11.5px;font-weight:600;padding:5px 14px}',
       '.eng-ask-btn:hover{background:#4338ca}',
       '.eng-ask-btn:disabled{background:#c7d2fe;border-color:#c7d2fe;cursor:default}',
-      // ══ 【PhaseB·第2项】确认卡片表格化 + 倒计时 ═══════════════════════
+      // ══ 【PhaseB·第2项】确认卡片表格化 ═════════════════════════════════
       // 用户反馈：步步确认时选项密密麻麻，需要更清爽的排版。
       // 方案：选项改为【表格行】布局（序号 | 单选标记 | 文案 | 说明），
-      //   行距与分隔线让信息分层；顶部右侧放倒计时，超时自动选第一项。
+      //   行距与分隔线让信息分层。
       '.eng-ask-tbl{background:#fff;border:1px solid #e2e8f0;border-radius:8px;margin:7px 11px 3px;overflow:hidden}',
       '.eng-ask-tr{align-items:center;background:#fff;border-top:1px solid #f1f5f9;cursor:pointer;display:flex;gap:9px;padding:8px 10px;text-align:left;width:100%;box-sizing:border-box;transition:background .12s}',
       '.eng-ask-tr:first-child{border-top:none}',
@@ -504,15 +535,10 @@ window.__ModuleLoader__.load({
       '.eng-ask-td-label{color:#1e293b;font-size:11.5px;font-weight:600;line-height:1.4}',
       '.eng-ask-td-desc{color:#64748b;font-size:10.5px;line-height:1.4;margin-top:2px}',
       '.eng-ask-td-tag{background:#e0e7ff;border-radius:5px;color:#4338ca;flex:none;font-size:9.5px;font-weight:700;padding:2px 6px}', +
-      // 【本次改动】「推荐」徽标：比「默认」更醒目（倒计时超时会选它）
+      // 【本次改动】「推荐」徽标：比「默认」更醒目
       '.eng-ask-td-tag.rec{background:#dcfce7;color:#15803d;border:1px solid #86efac}',
       '.eng-ask-tr.on .eng-ask-td-tag{background:#4f46e5;color:#fff}',
-      // ── 倒计时徽标（置于卡片标题栏右侧）──
-      '.eng-cd{align-items:center;background:#eef2ff;border:1px solid #c7d2fe;border-radius:20px;color:#4338ca;display:inline-flex;flex:none;font-size:10.5px;font-weight:700;gap:4px;margin-left:auto;padding:2px 9px;transition:background .2s,color .2s}',
-      '.eng-cd.warn{background:#fef3c7;border-color:#fcd34d;color:#92400e}',
-      '.eng-cd.hot{background:#fee2e2;border-color:#fca5a5;color:#b91c1c;animation:eng-pulse 1s ease-in-out infinite}',
-      '.eng-cd-num{font-variant-numeric:tabular-nums;min-width:16px;text-align:center}',
-      // ══ 【问题1 修复】主对话原生问答卡片 —— 表格化增强 ══════════════════
+                                    // ══ 【问题1 修复】主对话原生问答卡片 —— 表格化增强 ══════════════════
       // 背景：主对话的问答 UI 由 DSH 官方包 @deepseek-ai/dsh-client-ui-user-questions
       //   渲染在 conversation.composer 插槽，【不由本插件渲染】。
       //   它本身已有结构化 DOM（number/optionLabel/description/badge），
@@ -945,7 +971,13 @@ window.__ModuleLoader__.load({
       // ── 右侧面板（25%）：内部自成滚动体系，绝不撑破宽度 ───────────
       // （换行/滚动的基础规则已在上方 .eng-log 与 .eng-tool-card-b 定义，
       //   这里只补"面板 25% 宽度下"的额外约束与目录列表）
-      '.eng-console>.eng-tree{min-width:0;flex:0 0 190px}' +
+      // 【布局 v12】这里原先把目录列【写死 190px】，把 .eng-tree 自己的
+      //   flex-basis:var(--eng-tree-w, clamp(190px,42%,300px)) 完全覆盖掉了
+      //   （选择器权重 0,2,0 > 0,1,0）—— 于是 JS 写的 --eng-tree-w 从来没生效，
+      //   用户看到的就是"列宽不跟面板走、长中文名一律被截断"。
+      //   现在改为同一条自适应表达式：面板变宽 → 目录列按 42% 长，上限 300px。
+      '.eng-console>.eng-tree{min-width:0;' +
+        'flex:0 0 var(--eng-tree-w, clamp(190px, 42%, 300px))}' +
       '.eng-console>.eng-detail{min-width:0;flex:1 1 0}' +
       '.eng-console>*{min-width:0;max-width:100%}' +
       '.eng-detail>*,.eng-tree>*{min-width:0;max-width:100%}' +
@@ -953,6 +985,140 @@ window.__ModuleLoader__.load({
       '.eng-tree-list{overflow-x:hidden}' +
       // 面板内横向永不滚动：任何内容都纵向消化（25% 宽的硬约束）
       '.eng-detail{overflow-x:hidden}' +
+      // ── 【零件进度表】子代理列表下方（用户要求：红线下方放零件表）────────
+      // 视觉上刻意比子代理列表"轻"：小字号、细分隔线、状态用色块分辨，
+      //   避免和上面的子代理频道抢注意力。
+      '.eng-pb-sep{background:var(--dsw-alias-border-l1,#e5e7eb);flex:none;height:1px;margin:6px 0 0}' +
+      // ── 左列下半区容器（只放零件表）────────────────────────────────────
+      // 【2026-11-07 · 布局 v12】用户要求：
+      //   「把那个零件表扩大，扩大到 50% 的大小，然后那个子代理目录和模型表
+      //     各占左边的 50%，自适应即可。然后那个压缩历史移到右边那个绿色的框」
+      //   ⇒ 左列 = 子代理目录 50% + 零件表 50%，两块各自独立滚动；
+      //      压缩历史整块搬到右列详情区（见 .eng-dtabs / EngCompactPage）。
+      //   用 flex-basis:50% + min-height:0 实现"严格五五分且都能滚"，
+      //   任何一块内容再多也不会把另一块挤没（两边都是 min-height:0 的滚动容器）。
+      '.eng-lower{border-top:1px solid var(--dsw-alias-border-l1,#e5e7eb);display:flex;' +
+        'flex:1 1 50%;flex-direction:column;min-height:0;overflow:hidden}' +
+      '.eng-parts-board{display:flex;flex:1 1 auto;flex-direction:column;gap:2px;' +
+        'max-height:none;min-height:0;overflow-y:auto;padding:6px 10px 8px}' +
+      // 紧凑版（左列窄区）：省掉右侧留白，允许更长中文名
+      '.eng-parts-board.compact{padding:6px 8px 4px;max-height:none}' +
+      '.eng-parts-board.compact .eng-pb-name{font-size:11px}' +
+      '.eng-parts-board.compact .eng-pb-row{padding:2px 3px;gap:4px}' +
+      '.eng-pb-cap{align-items:center;display:flex;gap:6px;padding:0 1px 3px}' +
+      '.eng-pb-cap-t{color:var(--dsw-alias-label-secondary,#475569);flex:1;font-size:11.5px;font-weight:600}' +
+      '.eng-pb-cap-n{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11px}' +
+      '.eng-pb-refresh{background:transparent;border:0;border-radius:5px;color:var(--dsw-alias-label-tertiary,#8b95a3);cursor:pointer;font-size:12px;padding:2px 5px}' +
+      '.eng-pb-refresh:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.05))}' +
+      '.eng-pb-empty{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:11.5px;padding:6px 1px}' +
+      '.eng-pb-list{display:flex;flex-direction:column;gap:1px;min-height:0}' +
+      '.eng-pb-row{align-items:center;border-radius:6px;display:flex;gap:6px;padding:3px 4px}' +
+      '.eng-pb-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.04))}' +
+      '.eng-pb-name{color:var(--dsw-alias-label-primary,#1f2328);flex:1;font-size:11.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.eng-pb-room{color:var(--dsw-alias-label-tertiary,#94a3b8);flex:none;font-size:10.5px;max-width:38%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.eng-pb-badge{border-radius:9px;flex:none;font-size:10px;font-weight:600;padding:1px 6px}' +
+      '.eng-pb-badge.idle{background:rgba(148,163,184,.16);color:#64748b}' +
+      '.eng-pb-badge.run{background:rgba(37,99,235,.14);color:#2563eb}' +
+      '.eng-pb-badge.ok{background:rgba(22,163,74,.15);color:#15803d}' +
+      '.eng-pb-badge.warn{background:rgba(234,179,8,.18);color:#a16207}' +
+      '.eng-pb-badge.bad{background:rgba(220,38,38,.15);color:#b91c1c}' +
+      '.eng-pb-ft{align-items:center;border-top:1px solid var(--dsw-alias-border-l1,#f0f2f5);display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;padding-top:4px}' +
+      '.eng-pb-stat{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#8b95a3)}' +
+      '.eng-pb-stat.ok{color:#15803d}' +
+      '.eng-pb-stat.run{color:#2563eb}' +
+      '.eng-pb-stat.warn{color:#a16207}' +
+      '.eng-pb-stat.bad{color:#b91c1c}' +
+      '.eng-pb-alert{color:#b91c1c;font-size:10.5px;font-weight:600}' +
+      // ── 【压缩历史】右列详情区的独立一页（用户截图里的「绿框」）─────────
+      // 【布局 v12】用户要求：
+      //   「那个压缩历史移到右边那个绿色的框（占 1/4）……左边的选择子代理的时候，
+      //     右边会展示出来那个实际的流程，压缩历史也是同样的，左边选择了那个
+      //     子代理，右边就有那个子代理展示页和对应的压缩历史。然后那个压缩历史
+      //     那个页面要自适应」
+      //   ⇒ 压缩历史从"左列底部固定小块"改成"右列的第二个页签"，
+      //      它填满 .eng-detail（即官方右列宽度，约 1/4 屏），内部自适应。
+      //   · 高度：flex:1 1 auto 填满 .eng-dtabs-body，绝不撑破父容器；
+      //   · 字号：clamp(10px, 1.9cqw, 12.5px) 跟着【容器宽度】缩放（cqw）；
+      //   · 宽度：.eng-cp 设 container-type:inline-size 作 cqw 锚点。
+      '.eng-cp{background:transparent;box-sizing:border-box;' +
+        'container-type:inline-size;container-name:engcp;' +
+        'display:flex;flex:1 1 auto;flex-direction:column;' +
+        'min-height:0;overflow:hidden;padding:4px 2px 6px}' +
+      '.eng-cp-cap{align-items:center;display:flex;flex:none;gap:6px;padding:0 2px 6px}' +
+      '.eng-cp-cap-t{color:var(--dsw-alias-label-secondary,#475569);flex:1;font-weight:600;' +
+        'font-size:clamp(11px, 2.6cqw, 13px);' +
+        'overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.eng-cp-cap-n{color:var(--dsw-alias-label-tertiary,#8b95a3);' +
+        'font-size:clamp(10px, 2.2cqw, 12px);flex:none}' +
+      '.eng-cp-tabs{display:flex;flex:none;gap:3px}' +
+      '.eng-cp-tab{background:transparent;border:1px solid transparent;border-radius:5px;' +
+        'color:var(--dsw-alias-label-tertiary,#8b95a3);cursor:pointer;' +
+        'font-size:clamp(10px, 2.2cqw, 12px);' +
+        'line-height:1.4;padding:2px 7px}' +
+      '.eng-cp-tab:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.06));' +
+        'color:var(--dsw-alias-label-secondary,#475569)}' +
+      '.eng-cp-tab.on{background:rgba(37,99,235,.12);border-color:rgba(37,99,235,.35);' +
+        'color:#2563eb;font-weight:600}' +
+      // ── 【自适应】摘要卡：一句话说完这次压缩救回了什么 ────────────────
+      '.eng-cp-sum{display:flex;flex:none;flex-wrap:wrap;gap:4px 10px;' +
+        'border-bottom:1px solid var(--dsw-alias-border-l1,#eef1f5);' +
+        'margin-bottom:5px;padding:0 2px 7px}' +
+      '.eng-cp-sum-i{color:var(--dsw-alias-label-tertiary,#8b95a3);' +
+        'font-size:clamp(9.5px, 2.1cqw, 11.5px)}' +
+      '.eng-cp-sum-i b{color:var(--dsw-alias-label-secondary,#475569);font-weight:600}' +
+      '.eng-cp-list{display:flex;flex:1 1 auto;flex-direction:column;gap:1px;min-height:0;' +
+        'overflow-y:auto;overscroll-behavior:contain;padding-right:2px}' +
+      // 行：时间 / 名称 / L0 / 补回 / 省字数 —— 窄容器下自动折行，绝不横向溢出
+      '.eng-cp-row{align-items:center;border-radius:6px;display:flex;flex-wrap:wrap;' +
+        'gap:4px 6px;padding:4px 5px;font-size:clamp(10px, 2.1cqw, 12px);min-width:0}' +
+      '.eng-cp-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.05))}' +
+      '.eng-cp-row.clickable{cursor:pointer}' +
+      '.eng-cp-time{color:var(--dsw-alias-label-tertiary,#94a3b8);flex:none;' +
+        'font-variant-numeric:tabular-nums}' +
+      '.eng-cp-name{color:var(--dsw-alias-label-primary,#1f2328);flex:1 1 60%;' +
+        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.eng-cp-num{background:rgba(22,163,74,.14);border-radius:9px;color:#15803d;flex:none;' +
+        'font-size:clamp(9px, 1.9cqw, 10.5px);font-weight:600;padding:1px 6px}' +
+      '.eng-cp-fix{background:rgba(234,179,8,.20);border-radius:9px;color:#a16207;flex:none;' +
+        'font-size:clamp(9px, 1.9cqw, 10.5px);font-weight:600;padding:1px 5px}' +
+      '.eng-cp-save{color:var(--dsw-alias-label-tertiary,#8b95a3);flex:none;' +
+        'font-size:clamp(9px, 1.9cqw, 10.5px);font-variant-numeric:tabular-nums}' +
+      // 摘要正文：点开行才显示（避免长文本把列表撑爆）
+      '.eng-cp-body{box-sizing:border-box;color:var(--dsw-alias-label-secondary,#475569);' +
+        'flex:1 1 100%;font-size:clamp(10px, 2.05cqw, 11.5px);line-height:1.55;' +
+        'max-height:9.5em;overflow-y:auto;padding:4px 2px 2px;white-space:pre-wrap;' +
+        'word-break:break-word}' +
+      '.eng-cp-empty{color:var(--dsw-alias-label-tertiary,#8b95a3);' +
+        'font-size:clamp(10.5px, 2.2cqw, 12px);padding:8px 2px}' +
+      // ── 【背景 · 2026-11-07】压缩历史不再自带深色底 ────────────────────
+      // 用户原话：「这压缩历史不要搞背景，你可以参考图二一样，白色背景」。
+      // 根因：这里原先把 .eng-cp 钉成 #16181d（且 .eng-detail/.eng-log 在深色
+      //   模式下也是 #16181d）—— 于是右列/会话视图里出现一大块"黑框"，
+      //   和旁边白色的对话流完全脱节。
+      // 现在：不再给 .eng-cp 任何自己的底色（透明 → 父容器白底透上来），
+      //   深色模式下也只调文字层级色，【永不】出现黑色块。
+      // ── 【会话视图】官方 conversation.view 页签的容器（整页自适应）──────────
+      // 它拿到的是【对话区】的完整尺寸（不像右列只有 1/4），因此这里按
+      //   阅读优先排版：限宽居中、留白充足、字号用 clamp 跟视口走。
+      '.eng-sv{box-sizing:border-box;display:flex;flex:1 1 auto;flex-direction:column;' +
+        'height:100%;min-height:0;overflow:hidden;' +
+        'background:var(--dsw-alias-bg-layer-1,#fff);' +
+        'color:var(--dsw-alias-label-primary,#0f172a);padding:16px 18px 0}' +
+      // 深色模式下也只把底色交给宿主变量，绝不钉死成 #16181d
+      '@media(prefers-color-scheme:dark){' +
+        '.eng-sv{background:var(--dsw-alias-bg-layer-1,#16181d);color:#e5e7eb}' +
+      '}' +
+      '.eng-sv-head{align-items:baseline;display:flex;flex:none;flex-wrap:wrap;' +
+        'gap:4px 12px;padding:0 2px 10px}' +
+      '.eng-sv-title{font-size:clamp(14px, 1.5vw, 17px);font-weight:700}' +
+      '.eng-sv-sub{color:var(--dsw-alias-label-tertiary,#94a3b8);' +
+        'font-size:clamp(11px, 1.05vw, 12.5px)}' +
+      '.eng-sv-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;' +
+        'max-width:1100px;overflow:hidden;width:100%}' +
+      '.eng-sv-body>.eng-cp{background:transparent;padding-bottom:14px}' +
+      '.eng-sv-empty{color:var(--dsw-alias-label-tertiary,#94a3b8);' +
+        'font-size:clamp(11.5px, 1.1vw, 13px);line-height:1.75;padding:22px 2px}' +
+
 
       // ── 极窄屏(<900px)：面板内部纵向堆叠（目录在上、日志在下）──────
       // 注意：仍是【流内】布局，不做任何覆盖。
@@ -1040,155 +1206,8 @@ window.__ModuleLoader__.load({
       '}' +
 
 
-      // ══ 【划词详情】浮层按钮 + 右下角分析面板 ══════════════════════════
-      // 全部使用 eng-sel-* / eng-side-* 前缀，不触碰任何官方类名。
-      // 只用 --dsw-alias-* 语义 token → 自动跟随亮/暗主题。
-      '.eng-sel-btn{' +
-        'background:var(--dsw-alias-bg-layer-1,#fff);' +
-        'border:1px solid var(--dsw-alias-border-l2,#d0d5dd);border-radius:8px;' +
-        'box-shadow:0 4px 14px rgba(15,23,42,.16);color:var(--dsw-alias-label-primary,#111827);' +
-        'cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:600;' +
-        'padding:6px 12px;position:fixed;z-index:60;white-space:nowrap' +
-      '}' +
-      '.eng-sel-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.06))}' +
-      // 面板（图三）：右下角固定。宽高由【用户拖拽】决定（.eng-side 上以
-      //   内联 style 写入），因此这里只给最大约束，不再写死宽度。
-      '.eng-side{' +
-        'background:var(--dsw-alias-bg-layer-1,#fff);' +
-        'border:1px solid var(--dsw-alias-border-l2,#d0d5dd);border-radius:14px;' +
-        'bottom:18px;box-shadow:0 10px 34px rgba(15,23,42,.20);' +
-        'box-sizing:border-box;color:var(--dsw-alias-label-primary,#111827);' +
-        'display:flex;flex-direction:column;font-size:13px;' +
-        'max-height:calc(100vh - 36px);max-width:calc(100vw - 36px);' +
-        'position:fixed;right:18px;z-index:55;overflow:hidden' +
-      '}' +
-      // 左上角拖拽手柄（用户要求能自由放大放小）
-      '.eng-side-grip{' +
-        'align-items:center;color:var(--dsw-alias-label-tertiary,#94a3b8);' +
-        'cursor:nwse-resize;display:flex;font-size:13px;height:22px;' +
-        'justify-content:center;left:0;position:absolute;top:0;' +
-        'touch-action:none;user-select:none;width:22px;z-index:2' +
-      '}' +
-      '.eng-side-grip:hover{color:var(--dsw-alias-state-business-primary,#2563eb)}' +
-      // ── 【一键发送给工作模式建模】按钮 ──────────────────────────────
-      // ⚠️ flex:none 是【必需】的，不是可选优化：
-      //   面板是固定高度 + overflow:hidden 的 flex 列。此块若保持默认
-      //   flex-shrink:1，在内容变多时会被压缩到 0 高并被裁掉 —— 表现正是
-      //   "按钮不见了"。同理列表要能滚动必须 min-height:0（见 .eng-side-list）。
-      '.eng-side-work{flex:none;padding:0 10px 8px}' +
-      '.eng-side-workbtn{' +
-        'background:var(--dsw-alias-state-business-primary,#2563eb);border:0;' +
-        'border-radius:9px;color:#fff;cursor:pointer;font-family:inherit;' +
-        'font-size:13px;font-weight:600;padding:9px 12px;width:100%' +
-      '}' +
-      '.eng-side-workbtn:hover:not(:disabled){filter:brightness(1.08)}' +
-      '.eng-side-workbtn:disabled{background:var(--dsw-alias-bg-layer-2,#e5e7eb);color:var(--dsw-alias-label-tertiary,#94a3b8);cursor:default}' +
-      '.eng-side-ok{color:var(--dsw-alias-state-success-primary,#16a34a);font-size:12px;padding-top:6px;text-align:center}' +
-      '.eng-side-hd{' +
-        'align-items:center;background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.03));' +
-        'border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
-        'display:flex;flex:none;gap:7px;padding:9px 10px' +
-      '}' +
-      '.eng-side-ico{flex:none;font-size:14px}' +
-      '.eng-side-title{flex:1;font-size:13px;font-weight:700;min-width:0}' +
-      '.eng-side-badge{' +
-        'background:var(--dsw-alias-state-business-tertiary,#eef2ff);border-radius:6px;' +
-        'color:var(--dsw-alias-label-primary-bluish,#3730a3);flex:none;' +
-        'font-size:10.5px;font-weight:700;padding:2px 7px' +
-      '}' +
-      '.eng-side-x{' +
-        'background:transparent;border:0;border-radius:6px;color:var(--dsw-alias-label-tertiary,#6b7280);' +
-        'cursor:pointer;flex:none;font-size:16px;line-height:1;padding:2px 6px' +
-      '}' +
-      '.eng-side-x:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.06))}' +
-      // 选中原文摘要：最多两行，超过省略
-      '.eng-side-src{' +
-        'background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.03));' +
-        'border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
-        'color:var(--dsw-alias-label-tertiary,#6b7280);' +
-        'display:-webkit-box;flex:none;font-size:11.5px;line-height:1.5;' +
-        'overflow:hidden;padding:7px 11px;-webkit-box-orient:vertical;-webkit-line-clamp:2' +
-      '}' +
-      // min-height:0（而非 80px）是可滚动 flex 子项的正确写法：
-      //   flex 子项默认 min-height:auto，会被内容撑开、把下面的按钮和输入框
-      //   挤出固定高度的面板（配合 overflow:hidden 就是"看不见了"）。
-      //   设成 0 才允许它收缩并在自身内部滚动。
-      '.eng-side-list{display:flex;flex:1 1 auto;flex-direction:column;gap:8px;' +
-        'min-height:0;overflow-y:auto;padding:10px 11px}' +
-      '.eng-side-row{display:flex;flex-direction:column;gap:3px;max-width:100%}' +
-      '.eng-side-row.me{align-items:flex-end}' +
-      '.eng-side-row.bot{align-items:flex-start}' +
-      '.eng-side-bubble{' +
-        'border-radius:10px;font-size:12.5px;line-height:1.7;max-width:92%;' +
-        'overflow-wrap:anywhere;padding:8px 11px;white-space:pre-wrap;word-break:break-word' +
-      '}' +
-      '.eng-side-row.me .eng-side-bubble{' +
-        'background:var(--dsw-alias-state-business-tertiary,#eef2ff);' +
-        'color:var(--dsw-alias-label-primary,#1e293b)' +
-      '}' +
-      '.eng-side-row.bot .eng-side-bubble{' +
-        'background:var(--dsw-alias-bg-layer-2,#f8fafc);' +
-        'border:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
-        'color:var(--dsw-alias-label-primary,#1e293b)' +
-      '}' +
-      '.eng-side-acts{display:flex;gap:6px;padding-left:2px}' +
-      '.eng-side-act{' +
-        'background:transparent;border:1px solid var(--dsw-alias-border-l2,#d0d5dd);' +
-        'border-radius:6px;color:var(--dsw-alias-label-secondary,#475569);' +
-        'cursor:pointer;font-family:inherit;font-size:11px;padding:3px 9px' +
-      '}' +
-      '.eng-side-act:hover{' +
-        'border-color:var(--dsw-alias-state-business-primary,#2563eb);' +
-        'color:var(--dsw-alias-state-business-primary,#2563eb)' +
-      '}' +
-      '.eng-side-note{color:var(--dsw-alias-label-tertiary,#8b95a3);font-size:12px;padding:10px 2px;text-align:center}' +
-      '.eng-side-err{' +
-        'background:var(--dsw-alias-state-error-tertiary,#fef2f2);border-radius:8px;' +
-        'color:var(--dsw-alias-state-error-primary,#b91c1c);font-size:11.5px;' +
-        'line-height:1.6;overflow-wrap:anywhere;padding:7px 9px' +
-      '}' +
-      '.eng-side-ft{' +
-        'align-items:center;border-top:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
-        'display:flex;flex:none;gap:7px;padding:8px 10px' +
-      '}' +
-      '.eng-side-in{' +
-        'background:transparent;border:0;color:var(--dsw-alias-label-primary,#111827);' +
-        'flex:1;font-family:inherit;font-size:12.5px;min-width:0;outline:none;padding:5px 2px' +
-      '}' +
-      '.eng-side-send{' +
-        'background:var(--dsw-alias-state-business-primary,#2563eb);border:0;border-radius:50%;' +
-        'color:#fff;cursor:pointer;flex:none;font-size:14px;height:28px;line-height:1;' +
-        'padding:0;width:28px' +
-      '}' +
-      '.eng-side-send:disabled{background:var(--dsw-alias-border-l2,#cbd5e1);cursor:default}',
 
-      // ── 【问问AI】多对话切换条 ──────────────────────────────────────
-      // 每个「对话一 / 对话二…」都是独立历史，切换条让它们一眼可辨、一键可切。
-      // flex:none + 横向滚动：对话多到放不下时横滚，不换行、不挤压其它区域。
-      '.eng-side-tabs{' +
-        'border-bottom:1px solid var(--dsw-alias-border-l2,#e5e7eb);' +
-        'display:flex;flex:none;gap:6px;overflow-x:auto;padding:7px 10px;' +
-        'scrollbar-width:thin' +
-      '}' +
-      '.eng-side-tab{' +
-        'align-items:center;background:var(--dsw-alias-bg-layer-2,rgba(15,23,42,.04));' +
-        'border:1px solid transparent;border-radius:8px;color:var(--dsw-alias-label-secondary,#475569);' +
-        'cursor:pointer;display:inline-flex;flex:none;font-family:inherit;font-size:11.5px;' +
-        'gap:5px;line-height:1;padding:6px 9px;white-space:nowrap' +
-      '}' +
-      '.eng-side-tab:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,23,42,.08))}' +
-      '.eng-side-tab.on{' +
-        'background:var(--dsw-alias-state-business-tertiary,#eef2ff);' +
-        'border-color:var(--dsw-alias-state-business-primary,#2563eb);' +
-        'color:var(--dsw-alias-label-primary-bluish,#3730a3);font-weight:600' +
-      '}' +
-      '.eng-side-tab-n{' +
-        'background:rgba(37,99,235,.14);border-radius:999px;font-size:10px;' +
-        'font-weight:700;padding:1px 5px' +
-      '}' +
-      '.eng-side-tab.add{padding:6px 8px}' +
-
-      // ── 【问问AI】Markdown 渲染后的排版（模型输出不再是一堆原始符号）──
+      // ── Markdown 渲染后的排版（子代理面板与工具卡正文）────────
       '.eng-md-p{margin:0}' +
       '.eng-md-p + .eng-md-p{margin-top:6px}' +
       '.eng-md-h{font-weight:700;line-height:1.5;margin:8px 0 4px}' +
@@ -1199,7 +1218,7 @@ window.__ModuleLoader__.load({
       '.eng-md-h:first-child{margin-top:0}' +
       '.eng-md-list{margin:4px 0;padding-left:18px}' +
       '.eng-md-list li{margin:2px 0}' +
-      // 【本次改动】子代理面板里的 Markdown：比"问问AI"更紧凑一点，
+      // 【本次改动】子代理面板里的 Markdown：紧凑一些，
       //   并与 .eng-think / .eng-bubble 的灰黑配色对齐（不抢正文）。
       '.eng-log .eng-md-p{margin:0}' +
       '.eng-log .eng-md-p + .eng-md-p{margin-top:5px}' +
@@ -1258,7 +1277,10 @@ window.__ModuleLoader__.load({
         '.eng-node{background:#22262e;border-color:#3a4048;color:#cbd5e1}' +
         '.eng-node:hover{background:#2c313a}' +
         '.eng-node.on{background:#2563eb;border-color:#2563eb;color:#fff}' +
-        '.eng-detail,.eng-log{background:#16181d}' +
+        // 【背景 · 2026-11-07】.eng-detail 不再跟着变黑 —— 它是右列整块的底，
+        //   变黑会把「压缩历史」那一页也拖成黑底（用户明确要求白底）。
+        //   只保留 .eng-log（日志正文区）的深色，面板整体仍是宿主的浅色分层。
+        '.eng-log{background:#16181d}' +
         '.eng-head{background:#1c1f26;border-bottom-color:#33383f}' +
         '.eng-name{color:#e5e7eb}' +
         '.eng-tag{background:#2c313a;color:#cbd5e1}' +
@@ -1685,539 +1707,6 @@ window.__ModuleLoader__.load({
       obs.observe(document.body, { attributes: true, attributeFilter: ['style'], childList: true, subtree: true });
       return function () { obs.disconnect(); };
     }
-    // ══ 【问题1 修复 → Bug#1 强化】主对话原生问答卡片 —— 逐题独立倒计时 ══
-    // 用户要求：卡片旁边显示倒计时，结束时自动选择默认『可以』。
-    //
-    // ── 【Bug#1 修复】旧实现只认"全局仅一组选项"，多题问卷直接不挂表 ────
-    //   旧判据：`document.querySelectorAll('[class*="_options"]').length !== 1
-    //            → continue`
-    //   后果：17 题问卷（强需求路径）在主对话里【完全没有倒计时】；
-    //   且一旦渲染出多组选项，连第一组的表都被跳过 —— 与"每题都要有
-    //   独立倒计时"的要求直接矛盾。这就是测试反馈的"倒计时有时不出现"。
-    //
-    // ── 新设计：按【选项组】逐个挂表，每组一个独立计时器 ──────────────
-    //   · 每个 [class*="_options"] 组 = 一道系统问题 → 各自一张倒计时表；
-    //   · 多题时按 DOM 顺序串行推进：当前组的默认项被选后自动点
-    //     「下一题/提交」，下一组出现后由 MutationObserver 自动挂新表；
-    //   · 用户点过的那一组 → 该组停表（按组隔离，不串到别组）；
-    //   · 已提交/已消失的卡片不再干预。
-    //
-    // 为什么用 DOM 注入而不是改组件：
-    //   主对话问答由 DSH 官方包渲染（conversation.composer 插槽），
-    //   本插件无法通过 props 介入。改用【非侵入 DOM 增强】：
-    //     ① 监听原生卡片出现；
-    //     ② 在其页脚注入倒计时徽标；
-    //     ③ 倒计时结束 → 程序化点击第一个选项 + 提交按钮。
-    //   全程不修改官方包代码，升级安全；且只在工程模式（ENG_MODE_CLASS）下运行。
-    //
-    // 安全约束：
-    //   · 用户任意点击后立即停【该组】表；
-    //   · 已提交/已消失的卡片不再干预；
-    //   · 每组独立，互不影响（第1题被接管不会让第2题失去倒计时）。
-    function installQuestionCountdown(seconds) {
-      if (typeof document === 'undefined' || typeof MutationObserver !== 'function') return;
-      // ── 【本次改动·设置开关 + 120s + 推荐项】────────────────────────────
-      //   ① 默认 120 秒（原来写死 10 秒的"测试值"）；
-      //   ② 超时自动选【带「推荐」标记】的选项，没有推荐才退回首项；
-      //   ③ 「参数需求强度 / 搭建方式 / 并行策略」三题【永不】倒计时；
-      //   ④ 设置页「设计过程优化 → 是否启用选项倒计时」关掉后整体不挂表。
-      var SEC = Number(seconds) || 120;   // 【本次改动】120 秒（原为 10 秒测试值）
-      // ══ 【本次修复·问题2】计时器/接管标记改为【按题目指纹】而非 DOM 元素 ══
-      // 用户实测：AI 连问三题，选了第一题后，第二、第三题的倒计时就没了。
-      // 根因：官方提问卡是【同一个 DOM 容器复用】展示不同题目 ——
-      //   第一题答完，React 只是把该容器的内容换成第二题，元素本身不变。
-      //   而旧实现用 WeakMap 以【元素】为键记 takenMap/timers：
-      //     · takenMap.get(group) 在第一题点选后永久为 true；
-      //     · timers.has(group) 也仍认为"已挂表"；
-      //   → 换题后 attachOne 直接 return，后续题目全都没有倒计时。
-      // 修法：键 = 题干 + 选项集合的指纹（内容变了就是新题），
-      //   元素只用来做"这个组当前是不是还在页面上"的定位。
-      var timers = {};      // fp -> intervalId
-      var takenMap = {};    // fp -> true（该题已被用户接管）
-      var elementFp = new WeakMap();  // 元素 -> 最近一次算出的指纹
-      var COOLDOWN_MS = 15000;
-      var lastFire = 0;
-
-      // ── 题目指纹：题干 + 各选项文本，稳定且与 DOM 元素无关 ──────────────
-      var questionFingerprint = function (group, stemText) {
-        try {
-          var opts = [];
-          try { opts = group.querySelectorAll('[role="radio"], [role="checkbox"]'); }
-          catch (e) { opts = []; }
-          if (!opts || !opts.length) {
-            try { opts = group.querySelectorAll('[class*="_option"]'); } catch (e) { opts = []; }
-          }
-          var labels = [];
-          for (var i = 0; i < (opts ? opts.length : 0); i++) {
-            labels.push(String((opts[i] && opts[i].textContent) || '').replace(/\s+/g, ' ').trim().slice(0, 40));
-          }
-          var stem = String(stemText || '').replace(/\s+/g, ' ').trim().slice(0, 200);
-          return stem + '||' + labels.join('|');
-        } catch (e) { return ''; }
-      };
-
-      // ── 【本次改动】设置开关：关掉就整体停用（立即生效）──────────────
-      var enabledByUser = function () {
-        try { return _engSettings.enableOptionCountdown !== false; }
-        catch (e) { return true; }
-      };
-      // ── 【本次修复】三题豁免：只认【本卡片自己的题干】──────────────────
-      // 用户明确要求：只有「参数需求强度」「搭建方式（A/B/C）」「并行策略（D/E）」
-      //   这三题必须由用户自己选，其余每一题都要独立倒计时。
-      // 上一版从 group 往上爬 4 层取 textContent：卡片一大，就把"整页文本"
-      //   都算进来 —— 页面上只要出现过"搭建方式"三个字，所有题都被一起豁免，
-      //   表现就是"倒计时时有时无 / 乱跑"。这正是本次要修的。
-      // 现在：只用【卡片根】（[data-question-key] 祖先）或【选项组的直接父节点】
-      //   的文本判定，且只取题干区（选项组之前的文本），不把全页算进去。
-      // ── 【本次修复·问题1】题干提取：向上多找几层，绝不把整页文本算进来 ──
-      // 上一版的缺陷（用户实测：三题豁免没生效，倒计时仍出现）：
-      //   ① closest('[data-question-key]') 未必命中（官方卡片根不一定有这个属性）；
-      //   ② 退化成 group.parentNode 后，父节点常常【只包着选项】，题干在【上一层】；
-      //   ③ 于是 extractStemText 返回 '' → groupIsExempt 直接 false →
-      //      三题照样挂表（这就是"还是有倒计时"的直接原因）。
-      // 现在：从 group 起向上逐层找，找到第一层"包含题干文本"的容器就停，
-      //   并且【严格排除】选项组自身及其后代 —— 保证不会把选项文字当题干，
-      //   也不会一路爬到 body 把整页文本算进来。
-      var extractStemText = function (group) {
-        try {
-          var node = group;
-          for (var up = 0; up < 5 && node; up++) {
-            var parent = node.parentNode;
-            if (!parent) break;
-            // 收集 parent 里【除 node 这一支以外】的文本 —— 那才是题干
-            var parts = [];
-            var kids = parent.childNodes || [];
-            for (var i = 0; i < kids.length; i++) {
-              var kid = kids[i];
-              if (!kid) continue;
-              if (kid === node) continue;                       // 选项组这一支跳过
-              if (kid.nodeType === 3) {
-                var t0 = String(kid.nodeValue || '').trim();
-                if (t0) parts.push(t0);
-                continue;
-              }
-              if (kid.nodeType !== 1) continue;
-              var tag = String(kid.tagName || '').toLowerCase();
-              if (tag === 'button' || tag === 'footer') continue;  // 按钮/页脚不算题干
-              // 该兄弟若包含选项组，跳过（避免把别的题的选项算进来）
-              try { if (kid.contains && kid.contains(group)) continue; } catch (e1) {}
-              var txt = String(kid.textContent || '').trim();
-              if (txt) parts.push(txt);
-            }
-            var joined = parts.join(' ').replace(/\s+/g, ' ').trim();
-            if (joined) return joined;
-            // 这一层没题干 → 继续向上（题干可能在更外层）
-            node = parent;
-          }
-        } catch (e) {}
-        return '';
-      };
-      var groupIsExempt = function (group) {
-        var stem = extractStemText(group);
-        if (!stem) return false;
-        // 只取题干的前 300 字：题干很短，避免误伤选项里的同名文字
-        var head = stem.slice(0, 300);
-        if (/参数需求强度/.test(head)) return true;
-        if (/搭建方式/.test(head)) return true;
-        if (/并行策略/.test(head)) return true;
-        return false;
-      };
-      // ── 【本次改动】在选项组里找"推荐项"，找不到就退回首项 ────────────
-      var pickOptionEl = function (group) {
-        var opts = [];
-        // 真实 DOM：选项是 <button role="radio|checkbox" aria-label="…">，
-        //   标签文本里带「（推荐）」后缀（官方按 label 后缀解析出 badge）。
-        // 优先用 role，class 只作兜底。
-        try {
-          opts = group.querySelectorAll('[role="radio"], [role="checkbox"]');
-        } catch (e) { opts = []; }
-        if (!opts || !opts.length) {
-          try { opts = group.querySelectorAll('[class*="_option"]'); } catch (e2) { opts = []; }
-        }
-        if (!opts || !opts.length) return null;
-        var firstEnabled = null;
-        for (var i = 0; i < opts.length; i++) {
-          var el = opts[i];
-          if (!el || el.disabled) continue;
-          if (!firstEnabled) firstEnabled = el;
-          var t = '';
-          try {
-            t = String(el.textContent || '');
-            var badge = el.querySelector('[class*="_badge"]');
-            if (badge) t += ' ' + String(badge.textContent || '');
-            var aria = el.getAttribute ? (el.getAttribute('aria-label') || '') : '';
-            t += ' ' + aria;
-          } catch (e3) {}
-          if (/推荐|建议|recommended/i.test(t)) return el;
-        }
-        return firstEnabled || opts[0] || null;
-      };
-      // ── 【本次改动】即使正在倒计时，设置被关掉也要立刻停表 ─────────────
-      //   ⚠️ stopAll 定义在下方（函数声明提升不适用于 var 赋值），
-      //      因此这里延后到第一次 attach 之后再订阅读 —— 见文件末尾
-      //      installQuestionCountdown 的返回值处（那里才拿得到 stopAll）。
-
-
-      // ── 【本次改动·Bug3】判断"是不是工程模式"，body 类不再是唯一依据 ────
-      //   body.dsh-eng-mode 由 EngModeMarker 异步挂载（React effect），
-      //   挂载完成前的那几帧里直接判 false 会白跑一轮 attach。
-      //   这里加一条【同步兜底】：主机挂过的 ENG_MODE_CLASS 或当前会话
-      //   预设为 engineering（由订阅者写入的模块级标记）任一成立即可。
-      var isEngMode = function () {
-        try {
-          if (document.body.classList.contains(ENG_MODE_CLASS)) return true;
-        } catch (e) {}
-        return false;
-      };
-
-      // ── 【本次改动·按 0.2.1 真实 DOM 加固】收集页面上的【选项组】──────
-      // 实测：组容器 class 仍是 xxx_options（当期为 mAtvLq_options），
-      //   且带 role="radiogroup"（单选）/ role="group"（多选）。
-      // 优先用【角色 + data-*】这种稳定钩子，class 只作兜底：
-      //   ① [data-question-key] [role=radiogroup|group]（官方卡片根带 data-question-key）
-      //   ② 任意 [role=radiogroup|group] 且内含 radio/checkbox
-      //   ③ [class*="_options"]（旧路径，保留兼容）
-      // ── 【本次修复·倒计时乱跑】严格识别"真正的题干选项组" ──────────────
-      // 上一版把 [role="group"] + 含任意 button 当选项组，结果命中了
-      //   输入框工具条 / 会话操作栏这类普通分组 → 徽标被插到编辑器顶上，
-      //   表现为"倒计时跑到别处去了"（用户截图 1）。
-      // 现在改为【零误报】判据，四条必须同时成立：
-      //   ① 组内至少有 2 个 [role="radio"] 或 [role="checkbox"]（单选/多选选项）；
-      //   ② 该组不是 <nav>/<header>/工具条（用 closest 排除常见容器）；
-      //   ③ 组上方能找到一个"像题干"的兄弟/父级文本（非空、非纯按钮）；
-      //   ④ 组属于官方提问卡：有 [data-question-key] 祖先，或 class 含 _options。
-      var findCards = function () {
-        var out = [];
-        var push = function (el) {
-          if (!el) return;
-          for (var k = 0; k < out.length; k++) { if (out[k] === el) return; }
-          out.push(el);
-        };
-        var seen = [];
-        var collect = function (nodes) {
-          for (var r = 0; r < nodes.length; r++) {
-            var g = nodes[r];
-            if (!g || !document.body.contains(g)) continue;
-            if (seen.indexOf(g) >= 0) continue;
-            seen.push(g);
-            // ① 至少 2 个选项（单选/多选），只有 1 个"选项"多半是普通按钮组
-            var optCount = 0;
-            try {
-              optCount = g.querySelectorAll('[role="radio"], [role="checkbox"]').length;
-            } catch (e) { optCount = 0; }
-            if (optCount < 2) {
-              // 兼容旧 class 形态：_options 容器 + 多个 _option
-              var legacyCount = 0;
-              try { legacyCount = g.querySelectorAll('[class*="_option"]').length; }
-              catch (e) { legacyCount = 0; }
-              if (legacyCount < 2) continue;
-            }
-            // ② 排除导航/工具条这类"长得像分组"的容器
-            var bad = false;
-            try {
-              var p = g;
-              for (var up = 0; up < 4 && p; up++) {
-                var tag = String((p.tagName || '')).toLowerCase();
-                if (tag === 'nav' || tag === 'header') { bad = true; break; }
-                var rc = String(p.getAttribute && (p.getAttribute('role') || '') || '');
-                if (rc === 'toolbar' || rc === 'navigation' || rc === 'tablist' ||
-                    rc === 'banner' || rc === 'menu' || rc === 'menubar') { bad = true; break; }
-                p = p.parentNode;
-              }
-            } catch (e) { bad = false; }
-            if (bad) continue;
-            // ③ 必须属于官方提问卡（data-question-key 或 class 含 _options）
-            var isQuestion = false;
-            try {
-              if (g.closest && g.closest('[data-question-key]')) isQuestion = true;
-            } catch (e) {}
-            if (!isQuestion) {
-              try {
-                var cls = String(g.className || '');
-                if (/_options\b/.test(cls)) isQuestion = true;
-              } catch (e) {}
-            }
-            if (!isQuestion) {
-              // 再兜一层：组内选项 class 形如 xxx_option（官方 CSS module）
-              try {
-                var anyOpt = g.querySelector('[class*="_option"]');
-                if (anyOpt) isQuestion = true;
-              } catch (e) {}
-            }
-            if (!isQuestion) continue;
-            // ④ 组必须处在一张"有题干"的卡片里（题干是文本节点，不是按钮）
-            var hasStem = false;
-            try {
-              var card = (g.closest && g.closest('[data-question-key]')) || g.parentNode;
-              if (card) {
-                var st = String(card.textContent || '').replace(/\s+/g, ' ').trim();
-                if (st.length >= 4) hasStem = true;
-              }
-            } catch (e) { hasStem = false; }
-            if (!hasStem) continue;
-            push(g);
-          }
-        };
-        var byRoleCtx = [];
-        try {
-          byRoleCtx = document.querySelectorAll(
-            '[data-question-key] [role="radiogroup"], [data-question-key] [role="group"]');
-        } catch (e) { byRoleCtx = []; }
-        collect(byRoleCtx || []);
-        if (!out.length) {
-          var byRole = [];
-          try {
-            byRole = document.querySelectorAll('[role="radiogroup"], [role="group"]');
-          } catch (e) { byRole = []; }
-          collect(byRole || []);
-        }
-        // 最后兜底：旧版 class 约定
-        if (!out.length) {
-          var opts;
-          try { opts = document.querySelectorAll('[class*="_options"]'); } catch (e) { opts = []; }
-          collect(opts || []);
-        }
-        return out;
-      };
-
-      var stopAll = function () {
-        try {
-          var badges = document.querySelectorAll('.eng-qc-cd');
-          for (var i = 0; i < badges.length; i++) {
-            if (badges[i].parentNode) badges[i].parentNode.removeChild(badges[i]);
-          }
-        } catch (e) {}
-      };
-      // ── 【本次修复·徽标乱跑】巡检：任何"不在提问卡里的徽标"一律清掉 ────
-      // 兜住两种情况：① 上一版遗留已插在编辑器上的徽标；
-      //               ② 卡片被卸载后徽标没被一起移除。
-      var sweepStrayBadges = function () {
-        try {
-          var badges = document.querySelectorAll('.eng-qc-cd');
-          for (var i = 0; i < badges.length; i++) {
-            var b = badges[i];
-            var inCard = false;
-            try { inCard = !!(b.closest && b.closest('[data-question-key]')); } catch (e) {}
-            if (!inCard) {
-              // 没有 data-question-key 的旧形态：只要祖先里有 role=radiogroup 就算合法
-              try { inCard = !!(b.parentNode && b.parentNode.querySelector && b.parentNode.querySelector('[role="radiogroup"], [role="group"]')); } catch (e) {}
-            }
-            if (!inCard && b.parentNode) b.parentNode.removeChild(b);
-          }
-        } catch (e) {}
-      };
-
-      // ── 【本次改动·按 0.2.1 真实 DOM 校准】找"下一题 / 提交"按钮 ──────────
-      // 实测结构（asar 内 dsh-client-ui-user-questions/lib/client.js）：
-      //   footer.mAtvLq_footer
-      //     > div.mAtvLq_pager        ← 上一题/下一题【翻页】图标按钮（会误命中！）
-      //     > div.mAtvLq_footerActions> 跳过 + 主按钮（下一题 / 提交 / 正在提交…）
-      // 旧选择器 '[class*="_footer"] button' 会先命中 pager 的翻页按钮 ——
-      //   文案恰好也叫「下一题」，于是"自动提交"变成了"只翻页"，流程卡住。
-      // 现在：
-      //   ① 只在 footerActions（或 _actions）里找，绝不碰 pager；
-      //   ② 明确排除「跳过 / skip / 上一题 / prev」；
-      //   ③ 文案不全命中时，兜底取 footerActions 内【最后一个】可用按钮。
-      var findNextButton = function (scopeEl) {
-        var root = scopeEl || document;
-        var groups = [];
-        try {
-          var ga = root.querySelectorAll('[class*="_footerActions"], [class*="_actions"]');
-          for (var gi = 0; gi < ga.length; gi++) groups.push(ga[gi]);
-        } catch (e) { groups = []; }
-        var isAllowed = function (b) {
-          if (!b || b.disabled) return false;
-          var txt = String(b.textContent || '');
-          var aria = b.getAttribute ? String(b.getAttribute('aria-label') || '') : '';
-          var all = txt + ' ' + aria;
-          if (/跳过|skip|上一题|previous|prev\b/i.test(all)) return false;
-          return /下一题|提交|确认|确定|继续|submit|next|ok/i.test(all);
-        };
-        for (var g = 0; g < groups.length; g++) {
-          var btns = [];
-          try { btns = groups[g].querySelectorAll('button'); } catch (e2) { btns = []; }
-          for (var bi = 0; bi < btns.length; bi++) {
-            if (isAllowed(btns[bi])) return btns[bi];
-          }
-        }
-        // 兜底：整张卡片里最后一个可用按钮（仍排除跳过/上一步）
-        var allBtns = [];
-        try { allBtns = root.querySelectorAll('button'); } catch (e3) { allBtns = []; }
-        for (var ai = allBtns.length - 1; ai >= 0; ai--) {
-          var b2 = allBtns[ai];
-          if (!b2 || b2.disabled) continue;
-          var t2 = String(b2.textContent || '');
-          if (/跳过|skip|上一题|previous|prev\b/i.test(t2)) continue;
-          return b2;
-        }
-        return null;
-      };
-
-      // ── 单组的挂表逻辑（每组一个独立计时器）─────────────────────────
-      var attachOne = function (group) {
-        if (!enabledByUser()) return;    // 【本次改动】用户关掉了选项倒计时
-        if (groupIsExempt(group)) return; // 【本次改动】三题豁免：永不倒计时
-        // 【本次修复·问题2】先算【题目指纹】——换题后指纹变化，视为全新题目，
-        //   绝不再因为"同一个 DOM 元素"而误判成"已挂表/已接管"。
-        var _stem = extractStemText(group);
-        var fp = questionFingerprint(group, _stem);
-        if (!fp) return;
-        // 元素当前对应的题目变了 → 清掉该元素的旧徽标，重新挂表
-        var _prevFp = elementFp.get(group);
-        if (_prevFp !== undefined && _prevFp !== fp) {
-          try {
-            var old = group.parentNode && group.parentNode.querySelector('.eng-qc-cd');
-            if (old && old.parentNode) old.parentNode.removeChild(old);
-          } catch (e0) {}
-          if (timers[_prevFp]) {
-            try { clearInterval(timers[_prevFp]); } catch (e0) {}
-            try { delete timers[_prevFp]; } catch (e0) {}
-          }
-        }
-        elementFp.set(group, fp);
-        if (timers[fp]) return;          // 这道题已在走表
-        if (takenMap[fp]) return;        // 这道题已被用户接管
-
-        // ── 注入倒计时徽标 ──
-        var badge = document.createElement('div');
-        badge.className = 'eng-qc-cd';
-        badge.style.cssText = 'align-items:center;background:#eef2ff;border:1px solid #c7d2fe;' +
-          'border-radius:20px;color:#4338ca;display:inline-flex;font-size:11px;font-weight:700;' +
-          'gap:5px;margin:6px 0 0;padding:3px 10px;width:fit-content';
-        var num = document.createElement('span');
-        num.textContent = SEC + 's';
-        num.style.fontVariantNumeric = 'tabular-nums';
-        badge.appendChild(document.createTextNode('⏱ 倒计时 '));
-        badge.appendChild(num);
-        badge.appendChild(document.createTextNode(' 后自动选「推荐」项'));
-        // ── 【本次修复·徽标乱跑】只插在【提问卡片内部】、紧贴选项组下方 ──
-        // 旧实现无条件 group.parentNode.insertBefore(...)，一旦 group 被误判成
-        //   输入框工具条，徽标就会出现在编辑器上方（用户截图的那一行）。
-        // 现在：
-        //   · 先向上找真正的提问卡根（[data-question-key]）；
-        //   · 卡片不存在（或不是提问卡）→ 干脆不插，宁可不显示也不乱跑；
-        //   · 插在卡片内、选项组之后，保证视觉上属于这道题。
-        var _cardRoot = null;
-        try {
-          _cardRoot = (group.closest && group.closest('[data-question-key]')) || null;
-        } catch (e0) { _cardRoot = null; }
-        var _host = null;
-        if (_cardRoot && _cardRoot.contains(group)) {
-          _host = group.parentNode || _cardRoot;
-        } else if (group.parentNode && /_options\b/.test(String(group.className || ''))) {
-          // 旧 class 形态没有 data-question-key，退回到"选项组的父节点"，
-          //   但仍要求父节点里确实有题干文本（超过 4 个字符）。
-          var ptxt = String((group.parentNode.textContent || '')).trim();
-          if (ptxt.length > 4) _host = group.parentNode;
-        }
-        if (!_host) {
-          // 不是提问卡 → 直接放弃这组，绝不在页面其它地方乱插
-          try { if (fp) delete timers[fp]; } catch (e1) {}
-          return;
-        }
-        // 【本次修复·问题2】同一卡片内若已有徽标（换题残留），先移除再加，
-        //   避免出现两个倒计时互相打架。
-        try {
-          var _stale = _host.querySelector ? _host.querySelectorAll('.eng-qc-cd') : [];
-          for (var _si = 0; _si < _stale.length; _si++) {
-            if (_stale[_si] && _stale[_si].parentNode) _stale[_si].parentNode.removeChild(_stale[_si]);
-          }
-        } catch (e1) {}
-        try { _host.insertBefore(badge, group.nextSibling); } catch (e2) {
-          try { _host.appendChild(badge); } catch (e3) {}
-        }
-
-        var left = SEC;
-        // ── 【本次改动】用户一点就【立即停表】────────────────────────────
-        // 用户明确要求：「用户自己按了选项之后，就可以立马停止并且不再倒计时」。
-        // 旧实现只置 takenMap=true，计时器仍每秒跑（读数继续掉），
-        //   到 0 才判断"已接管"并移除徽标 —— 观感上像"点了还在倒计时"。
-        // 现在：点击当场 clearInterval + 移除徽标，一秒都不多等。
-        var stopThis = function () {
-          try { clearInterval(iv); } catch (e0) {}
-          try { delete timers[fp]; } catch (e0) {}
-          try { badge.remove(); } catch (e0) {}
-        };
-        var onPick = function () {
-          takenMap[fp] = true;   // 【本次修复·问题2】按题目指纹记，换题不串
-          stopThis();
-        };
-        try { group.addEventListener('click', onPick, true); } catch (e) {}
-
-        var iv = setInterval(function () {
-          if (!isEngMode() || !document.body.contains(group)) {
-            clearInterval(iv); try { badge.remove(); } catch (e) {}
-            try { delete timers[fp]; } catch (e2) {}
-            return;
-          }
-          left--;
-          num.textContent = Math.max(0, left) + 's';
-          if (left <= 3) { badge.style.background = '#fee2e2'; badge.style.borderColor = '#fca5a5'; badge.style.color = '#b91c1c'; }
-          else if (left <= 5) { badge.style.background = '#fef3c7'; badge.style.borderColor = '#fcd34d'; badge.style.color = '#92400e'; }
-          if (left > 0) return;
-          clearInterval(iv);
-          try { delete timers[fp]; } catch (e2) {}
-          // ── 【Bug#1 修复】归零瞬间再校验一次"本组是否已接管" ──────────
-          //   用户可能恰好在同一瞬间点击 → 必须让人，绝不抢答。
-          if (takenMap[fp]) { try { badge.remove(); } catch (e) {} return; }
-          if (Date.now() - lastFire < COOLDOWN_MS) { try { badge.remove(); } catch (e) {} return; }
-          lastFire = Date.now();
-          takenMap[fp] = true;
-          // ── 【本次改动】自动选择本组「推荐项」（无推荐 → 首项）并推进 ──
-          try {
-            var first = pickOptionEl(group);
-            if (first && !first.disabled) {
-              if (typeof first.click === 'function') first.click();
-              // 等 React 提交选中态后再点「下一题/提交」
-              setTimeout(function () {
-                try {
-                  // 只在【本卡片】范围内找提交按钮 —— 避免多题并存时点错别人的
-                  var cardRoot = group;
-                  try {
-                    cardRoot = group.closest('[data-question-key]') || group.parentNode || group;
-                  } catch (e4) { cardRoot = group.parentNode || group; }
-                  var b = findNextButton(cardRoot);
-                  if (b) b.click();
-                } catch (e2) {}
-              }, 250);
-            }
-          } catch (e3) {}
-          try { badge.remove(); } catch (e) {}
-        }, 1000);
-        timers[fp] = iv;
-      };
-
-      var attach = function () {
-        if (!isEngMode() || !enabledByUser()) { stopAll(); return; }
-        sweepStrayBadges();   // 【本次修复】先把乱跑的徽标清掉，再挂新的
-        var cards = findCards();
-        // 【Bug#1 修复】逐个挂表 —— 多题问卷的每一题都有各自独立的倒计时
-        for (var ci = 0; ci < cards.length; ci++) attachOne(cards[ci]);
-      };
-
-      attach();
-      var mo = new MutationObserver(function () { attach(); });
-      mo.observe(document.body, { childList: true, subtree: true });
-      // ── 【本次改动】设置一关，正在走表的倒计时立刻停掉并移除徽标 ─────────
-      //   放在这里是因为 stopAll 在下方才被赋值（var 赋值不提升），
-      //   必须在同一作用域内、stopAll 已就绪之后再订阅。
-      var unsubSettings = null;
-      try {
-        if (typeof subscribeEngSettings === 'function') {
-          unsubSettings = subscribeEngSettings(function () {
-            // 关 → 立刻停表并移除已注入的徽标；
-            // 开 → 立刻补挂（不必等下一次 DOM 变动）
-            if (!enabledByUser()) stopAll();
-            else attach();
-          });
-        }
-      } catch (e) { unsubSettings = null; }
-      return function () {
-        try { mo.disconnect(); } catch (e) {}
-        try { if (typeof unsubSettings === 'function') unsubSettings(); } catch (e) {}
-        stopAll();
-      };
-    }
 
     // ══ 【本次改动·Bug1】主对话 DOM 层的哨兵清理 ═══════════════════════════
     // 上面的 stripProtocolSentinel 只覆盖【本插件自己渲染】的气泡（子代理面板等）。
@@ -2392,7 +1881,7 @@ window.__ModuleLoader__.load({
     //   一堆星号/反引号，长段落挤成一大坨（用户："太乱了，没有转化成功"）。
     // 根因：Bubble/ThinkBox 直接把 props.text 当纯文本塞进 div，
     //   而插件里【早就有】一个零依赖的 Markdown 渲染器 engRenderMarkdown()
-    //   （原先只给「问问AI」面板用，没接到子代理面板这条渲染链上）。
+    //   （原先只给侧边分析面板用，从没接到子代理面板这条渲染链上）。
     // 修法：接到这条链上。engRenderMarkdown 是函数声明（会提升），
     //   所以这里定义在前面也能直接调用；出错时回退为纯文本，绝不吞内容。
     function engSafeMarkdown(text, keyPrefix) {
@@ -2409,6 +1898,177 @@ window.__ModuleLoader__.load({
         return String(text == null ? '' : text);
       }
     }
+    // 【问问AI · 轻量 Markdown 渲染】
+    // ──────────────────────────────────────────────────────────────────────
+    // 为什么需要它：模型回答里大量使用 **加粗**、行内代码、- 列表、## 标题。
+    //   过去面板直接把原文塞进气泡（white-space:pre-wrap），这些标记就原样
+    //   显示成一串反引号和星号，看起来又乱又不像成品 —— 用户反馈
+    //   "模型原本想要放大字体的符号没有正确"，说的正是这个。
+    //
+    // 设计约束（重要）：
+    //   · 不引入任何新依赖：插件只 require('react')，必须零依赖；
+    //   · 不用 dangerouslySetInnerHTML：模型输出不可信，绝不拼 HTML；
+    //   · 因此这里做【行内解析 + React 节点】的极小子集渲染：
+    //       代码围栏 / # 标题 / - * 列表 / > 引用 / --- 分隔线 /
+    //       **粗体** / *斜体* / 行内代码 / 链接 [t](url)
+    //     不认识的语法一律按纯文本输出，绝不吞字。
+    var ENG_MD_INLINE = [
+      // 行内代码优先级最高：内部的 ** / * 不应再被解析
+      { re: /\x60([^\x60\n]+)\x60/g, kind: 'code' },
+      { re: /\*\*([^*\n]+)\*\*/g, kind: 'bold' },
+      { re: /(?<!\*)\*([^*\n]+)\*(?!\*)/g, kind: 'italic' },
+      { re: /(?<![\w])_([^_\n]+)_(?![\w])/g, kind: 'italic' },
+      { re: /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, kind: 'link' }
+    ];
+
+    /** 把一段行内文本渲染成 React 节点数组（递归下降，最多 3 层防炸）。 */
+    function engRenderInline(text, keyPrefix, depth) {
+      var s = String(text == null ? '' : text);
+      if (!s) return [];
+      var d = depth || 0;
+      if (d > 3) return [s];
+      var best = null;
+      for (var i = 0; i < ENG_MD_INLINE.length; i++) {
+        var rule = ENG_MD_INLINE[i];
+        rule.re.lastIndex = 0;
+        var m = rule.re.exec(s);
+        if (!m) continue;
+        if (!best || m.index < best.m.index ||
+            (m.index === best.m.index && m[0].length > best.m[0].length)) {
+          best = { rule: rule, m: m };
+        }
+      }
+      if (!best) return [s];
+      var m2 = best.m;
+      var out = [];
+      if (m2.index > 0) out.push(s.slice(0, m2.index));
+      var inner = m2[1] != null ? m2[1] : m2[0];
+      var tail = s.slice(m2.index + m2[0].length);
+      var key = keyPrefix + '-' + best.rule.kind;
+      if (best.rule.kind === 'code') {
+        out.push(h('code', { className: 'eng-md-code', key: key }, inner));
+      } else if (best.rule.kind === 'bold') {
+        out.push(h('strong', { key: key }, engRenderInline(inner, key, d + 1)));
+      } else if (best.rule.kind === 'italic') {
+        out.push(h('em', { key: key }, engRenderInline(inner, key, d + 1)));
+      } else if (best.rule.kind === 'link') {
+        out.push(h('a', {
+          className: 'eng-md-link', key: key,
+          href: m2[2], target: '_blank', rel: 'noreferrer noopener'
+        }, engRenderInline(inner, key, d + 1)));
+      } else {
+        out.push(inner);
+      }
+      var rest = engRenderInline(tail, key + 'r', d + 1);
+      for (var j = 0; j < rest.length; j++) out.push(rest[j]);
+      return out;
+    }
+
+    /** 把整段 Markdown 文本渲染成 React 节点数组（块级 + 行内）。 */
+    function engRenderMarkdown(src, keyPrefix) {
+      var text = String(src == null ? '' : src).replace(/\r\n?/g, '\n');
+      var lines = text.split('\n');
+      var out = [];
+      var kp = keyPrefix || 'md';
+      var i = 0;
+      var seq = 0;
+      function nextKey() { return kp + '-' + (seq++); }
+      var FENCE_RE = /^\s*(\x60{3,}|~{3,})\s*([\w+-]*)\s*$/;
+      var H_RE = /^\s*(#{1,6})\s+(.*)$/;
+      var HR_RE = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/;
+      var Q_RE = /^\s*>\s?/;
+      var LI_RE = /^\s*([-*+]|\d{1,3}[.)])\s+/;
+      while (i < lines.length) {
+        var ln = lines[i];
+        // ① 代码围栏
+        var fence = FENCE_RE.exec(ln);
+        if (fence) {
+          var ch = fence[1].charAt(0);
+          var closeRe = new RegExp('^\\s*' + (ch === '~' ? '~' : '\\x60') + '{3,}\\s*$');
+          var codeLines = [];
+          i++;
+          while (i < lines.length && !closeRe.test(lines[i])) {
+            codeLines.push(lines[i]);
+            i++;
+          }
+          i++;
+          out.push(h('pre', { className: 'eng-md-pre', key: nextKey() },
+            h('code', null, codeLines.join('\n'))));
+          continue;
+        }
+        // ② 标题
+        var hd = H_RE.exec(ln);
+        if (hd) {
+          var lv = Math.min(6, hd[1].length);
+          out.push(h('div', { className: 'eng-md-h eng-md-h' + lv, key: nextKey() },
+            engRenderInline(hd[2], nextKey(), 0)));
+          i++;
+          continue;
+        }
+        // ③ 分隔线
+        if (HR_RE.test(ln)) {
+          out.push(h('div', { className: 'eng-md-hr', key: nextKey() }));
+          i++;
+          continue;
+        }
+        // ④ 引用
+        if (Q_RE.test(ln)) {
+          var quote = [];
+          while (i < lines.length && Q_RE.test(lines[i])) {
+            quote.push(lines[i].replace(Q_RE, ''));
+            i++;
+          }
+          out.push(h('div', { className: 'eng-md-quote', key: nextKey() },
+            engRenderMarkdown(quote.join('\n'), nextKey())));
+          continue;
+        }
+        // ⑤ 列表（有序 / 无序）
+        if (LI_RE.test(ln)) {
+          var ordered = /^\s*\d{1,3}[.)]\s+/.test(ln);
+          var items = [];
+          while (i < lines.length && LI_RE.test(lines[i])) {
+            items.push(lines[i].replace(LI_RE, ''));
+            i++;
+            while (i < lines.length && /^\s{2,}\S/.test(lines[i])
+                   && !LI_RE.test(lines[i])) {
+              items[items.length - 1] += ' ' + lines[i].trim();
+              i++;
+            }
+          }
+          out.push(h(ordered ? 'ol' : 'ul', { className: 'eng-md-list', key: nextKey() },
+            items.map(function (it, ii) {
+              return h('li', { key: nextKey() + '-li' + ii },
+                engRenderInline(it, nextKey() + '-li' + ii, 0));
+            })));
+          continue;
+        }
+        // ⑥ 空行
+        if (!ln.trim()) { i++; continue; }
+        // ⑦ 普通段落：连续非空行合并（行间用 <br> 保留换行）
+        var para = [];
+        while (i < lines.length && lines[i].trim()
+               && !FENCE_RE.test(lines[i]) && !H_RE.test(lines[i])
+               && !HR_RE.test(lines[i]) && !Q_RE.test(lines[i])
+               && !LI_RE.test(lines[i])) {
+          para.push(lines[i]);
+          i++;
+        }
+        if (para.length) {
+          var pk = nextKey();
+          var nodes = [];
+          for (var ci = 0; ci < para.length; ci++) {
+            if (ci) nodes.push(h('br', { key: pk + '-br' + ci }));
+            var inl = engRenderInline(para[ci], pk + '-c' + ci, 0);
+            for (var q = 0; q < inl.length; q++) nodes.push(inl[q]);
+          }
+          out.push(h('div', { className: 'eng-md-p', key: pk }, nodes));
+        } else {
+          i++;   // 防御：避免死循环
+        }
+      }
+      return out;
+    }
+
     function Bubble(props) {
       var cls = 'eng-bubble' + (props.sys ? ' sys' : '') + (props.md === false ? ' plain' : '');
       // 结果类（sys）多为工具原始输出，保持等宽纯文本更好读；
@@ -2441,44 +2101,11 @@ window.__ModuleLoader__.load({
           h('span', { className: 'eng-tool-caret' }, openSt[0] ? '\u25be' : '\u25b8')),
         openSt[0] ? h('div', { className: 'eng-tool-card-b' }, args ? prettyArgs(args) : '(无参数)') : null);
     }
-    // ══ 【本次改动】倒计时公共判定（模块级；官方卡片注入与 AskCard 共用）══════
-    // 用户明确要求：以下三题【必须由用户自己选】，永不倒计时自动作答 ——
-    //   · 参数需求强度（门禁第 0 题）
-    //   · 搭建方式（A / B / C）
-    //   · 并行策略（D / E）
-    // 判据按 header / id / 题干三重匹配，避免某个字段缺失就漏判。
-    var NO_CD_HEADERS = ['参数需求强度', '搭建方式', '并行策略', '参数需求'];
-    var NO_CD_IDS = ['build_mode', 'parallel_mode', 'param_depth', 'depth_question',
-                     'question_depth', 'strength'];
-    function isNoCountdownQuestion(q) {
-      if (!q) return false;
-      var hay = String(q.header || '') + '|' + String(q.id || '') + '|' +
-                String(q.question || '') + '|' + String(q.title || '');
-      for (var i = 0; i < NO_CD_HEADERS.length; i++) {
-        if (hay.indexOf(NO_CD_HEADERS[i]) >= 0) return true;
-      }
-      var id = String(q.id || '');
-      for (var k = 0; k < NO_CD_IDS.length; k++) {
-        if (id === NO_CD_IDS[k]) return true;
-      }
-      // 兜底：题干里出现 A / B / C 或 D / E 这类"搭建方式/并行策略"特征
-      var text = String(q.question || '') + ' ' + String(q.header || '');
-      if (/搭建方式/.test(text) || /并行策略/.test(text)) return true;
-      return false;
-    }
     // 「推荐」选项判定：label 或 description 里带「推荐 / 建议 / recommended」
     function isRecommendedOption(o) {
       if (!o) return false;
       var t = String(o.label || '') + ' ' + String(o.description || '');
       return /推荐|建议|recommended/i.test(t);
-    }
-    /** 返回超时后应自动选中的选项：优先「推荐」，没有则退回第一项。 */
-    function pickCountdownOption(q) {
-      if (!q || !q.options || !q.options.length) return null;
-      for (var i = 0; i < q.options.length; i++) {
-        if (isRecommendedOption(q.options[i])) return q.options[i];
-      }
-      return q.options[0] || null;
     }
 
     // ══ 交互式提问卡 ═════════════════════════════════════════════
@@ -2566,6 +2193,12 @@ window.__ModuleLoader__.load({
       // 这里用 ref 标记"是否已由用户交互"，任何非点击路径（如 effect、
       // 定时器、渲染期调用）一律拒绝提交，杜绝"UI 一渲染就自动回继续"。
       var userTouched = useRef(false);
+      // ── 【卡死修复 A】已结案标记：提交成功后禁止二次提交 / 重启计时器 ──
+      //   问：「为什么需要它」—— 原实现提交成功后 stSt 变成 'ok'，但卡片仍然
+      //   可点、倒计时仍在跑；用户在等待期间再点一次就会走到 /answer 拿到
+      //   "该问题已作答，请勿重复提交"，看起来像"点了没反应"，进一步让人
+      //   以为卡死。用一个 ref 一次性闭锁，语义最干净。
+      var settledDoneRef = useRef(false);
       // 【PhaseB】供倒计时回调调用 submit（submit 定义在下方，用 ref 打通时序）
       var submitRef = useRef(null);
 
@@ -2573,6 +2206,10 @@ window.__ModuleLoader__.load({
         // 唯一合法触发源：用户点按钮 / 倒计时超时。其余一律不提交。
         if (cause !== 'user-click') {
           try { console.warn('[eng-ui] 拒绝非用户触发的提交:', cause); } catch (e) {}
+          return;
+        }
+        if (settledDoneRef.current) {
+          // 已结案：静默忽略，不再发请求、不再报错（避免"看起来卡住"）
           return;
         }
         if (!userTouched.current) {
@@ -2617,6 +2254,23 @@ window.__ModuleLoader__.load({
               if (typeof props.onAnswered === 'function') {
                 try { props.onAnswered(props.childSessionId); } catch (e2) {}
               }
+              // ══ 【卡死修复 A · 前端侧】提交成功后必须让卡片进入"已结案" ══
+              //   现场（session-55a2009b）：用户点了提交、服务器也返回 ok，
+              //   但界面仍停在选项页，且 DSH 整轮不再推进 —— 用户只能强关。
+              //   原因不是"没提交成功"，而是**提交成功之后没有任何收尾动作**：
+              //     · 卡片自身没有闭锁（仍可点、仍显示倒计时）；
+              //     · 原生 uq.ask 的挂起此前也没被结掉（见 host 半卡死修复 A）。
+              //   这里做两件事：① 锁死本卡（settled 标记，禁止二次提交）；
+              //   ② 记下 pendingId 供面板做"已答清账"，并在 1.2s 后把卡片
+              //      从待答队列里彻底移除（父组件靠 onAnswered 处理）。
+              try { settledDoneRef.current = true; } catch (e3) {}
+              try {
+                if (typeof props.onAnswered === 'function') {
+                  setTimeout(function () {
+                    try { props.onAnswered(props.childSessionId); } catch (e4) {}
+                  }, 1200);
+                }
+              } catch (e5) {}
             } else {
               stSt[1]('err');
               msgSt[1]('提交失败：' + String((j && j.error) || 'unknown'));
@@ -2632,151 +2286,16 @@ window.__ModuleLoader__.load({
         var _isAuto = (auto === true);
         if (!_isAuto) {
           userTouched.current = true;
-          try { if (cdQid) cdTakenRef.current[cdQid] = true; } catch (e) {}
         }
         if (idx < sorted.length - 1) idxSt[1](idx + 1);
         else {
           stSt[1]('sending'); msgSt[1]('全部答完，提交中…'); submit('user-click');
         }
       };
-      // ══ 【PhaseB·第2项 → Bug#1 修复】倒计时：每题独立 + 多题逐题自动推进 ══
-      // 用户要求（本次明确）：
-      //   · 倒计时必须是【每一条系统问题各自一个】—— 切到第 N 题就重新从
-      //     COUNTDOWN_SEC 起表，上一题的剩余秒数绝不能带到下一题；
-      //   · 多题问卷也要【逐题自动推进】：当前题超时 → 选中默认项(第一项)
-      //     → 自动跳到下一题继续计时 → 直到全部答完再提交。
-      //   · 修复"倒计时概率性在用户点选后仍自动提交"的竞态（见下方 takenOf）。
-      //
-      // ── 旧实现的两个缺陷（本次修复的根因）────────────────────────────
-      //   ① 计时器依赖固定为 [cdOn]，而 cdOn 对多题恒为 false（旧版要求
-      //      sorted.length === 1）→ 多题卡片根本没有倒计时；
-      //   ② 即便单题，切题不会重建计时器 —— 读数沿用上一题的剩余值，
-      //      表现为"第2题刚出现就只剩1~2秒"，正是用户说的"概率性"错乱。
-      //
-      // ── 新设计 ─────────────────────────────────────────────────────
-      //   · 计时器依赖固定为 [cdOn, idx]（当前题序号）：切题即重建，
-      //     每题都拿到完整 COUNTDOWN_SEC —— 这就是"一题一个倒计时"。
-      //   · 自动推进走 nextQRef（与手动点击「下一题」同一条代码路径）。
-      //   · 「用户已接管」用**按题隔离**的 takenOf 记录：用户在第1题的
-      //     点击不能顺延成第2题已接管，反之亦然 —— 消除跨题串扰。
-      //   · 用户任意一次真实点击都会停【当前题】的表（人已接管）。
-      //   · 仅在【子代理面板】(asChild) 生效，主对话走 DSH 原生选项卡。
-      //   · 多选(multi)题不自动作答（多选默认值语义不明确，留给用户）。
-      // ── 【本次改动·设置开关 + 120s + 推荐项】────────────────────────────
-      // 用户明确要求：
-      //   ① 倒计时 120 秒；超时自动选【带「推荐」标记】的选项（无推荐则退回首项）；
-      //   ② 用户一旦点选 → 立刻停表，不再倒计时；
-      //   ③ 以下三题【永不】倒计时，必须用户自己选：
-      //        「参数需求强度」「搭建方式（A/B/C）」「并行策略（D/E）」；
-      //   ④ 设置页「设计过程优化」→「是否启用选项倒计时」关掉后，全部不倒计时。
-      var COUNTDOWN_SEC = 120;
-      // 设置开关（组件内读取，随设置变化重渲染）
-      var engSet = useEngSettings();
-      var cdEnabledByUser = engSet.enableOptionCountdown !== false;
-      var cdSt = useState(COUNTDOWN_SEC);
-      var cdLeft = cdSt[0];
-      var cdOn = false;
-      var cdQid = null;
-      try {
-        cdQid = curQ ? curQ.id : null;
-        cdOn = cdEnabledByUser && !!(props.asChild) && !!curQ && !curQ.multi &&
-               !!(curQ.options && curQ.options.length) &&
-               !isNoCountdownQuestion(curQ) &&
-               state !== 'sending' && state !== 'ok';
-      } catch (e) { cdOn = false; }
-      // ── 【Bug#1 修复·竞态】按题隔离的"已接管"标记 ────────────────────
-      // 旧实现用单个 cdTakenRef 布尔：第1题用户点过之后它永久为 true，
-      //   于是第2题的倒计时走到 0 也不会自动选（表现为"倒计时失效"）；
-      //   更糟的是 effect 重建时机与点击时机交错时，会出现"用户刚点完
-      //   却被自动提交"——这就是"概率性按到选项"的真相。
-      // 现在改为对象，按 question.id 分别记录，切题天然互不影响。
-      var cdTakenRef = useRef({});
-      // 【本次改动】当前倒计时表的句柄（点选后立即 clearInterval）
-      var cdTimerRef = useRef(null);
-      // 供倒计时回调跳题（nextQ 定义在下方，用 ref 打通时序）
-      var nextQRef = useRef(null);
-      nextQRef.current = nextQ;
-      submitRef.current = submit;
-      // 依赖固定为 [cdOn, idx]：
-      //   · cdOn —— 该不该显示倒计时；
-      //   · idx  —— 当前题序号。切题必须重建，否则读数串到下一题。
-      //   刻意不放 state/sending/sel：每次 tick 重渲染都清表重来，
-      //   倒计时永远走不到 0 —— 这是最容易踩的坑，务必保持依赖最小。
-      useEffect(function () {
-        if (!cdOn) return;
-        cdSt[1](COUNTDOWN_SEC);                    // 每题挂载都重置读数
-        // 【Bug#1 修复】进入新题时清掉【本题】的接管标记 ——
-        //   切题 = 新的一题，理应有全新的倒计时与全新的默认项。
-        try { if (cdQid) cdTakenRef.current[cdQid] = false; } catch (e) {}
-        // 【本次改动】把表句柄暴露给点击处理 —— 用户一点就当场停表，
-        //   不再"点了还在掉秒、要到 0 才停"
-        var t = setInterval(function () {
-          cdSt[1](function (prev) {
-            var next = prev - 1;
-            if (next <= 0) {
-              clearInterval(t);
-              var _qid = cdQid;
-              // ── 【Bug#1 修复】以"本题是否已接管"为准，且此刻再校验一次 ──
-              //   用户可能恰好在倒计时归零的同一瞬间点击 → 必须让位于人。
-              var _taken = false;
-              try { _taken = !!cdTakenRef.current[_qid]; } catch (e) { _taken = false; }
-              if (_taken || userTouched.current) return 0;
-              try { cdTakenRef.current[_qid] = true; } catch (e) {}
-              try {
-                // 锁定"归零那一刻"的题，避免异步期间 idx 已变
-                var q = null;
-                for (var _i = 0; _i < sorted.length; _i++) {
-                  if (sorted[_i] && sorted[_i].id === _qid) { q = sorted[_i]; break; }
-                }
-                if (!q) q = curQ;
-                // 【本次改动】超时自动选【带「推荐」标记】的选项；无推荐则退回首项
-                var first = pickCountdownOption(q);
-                if (first) {
-                  userTouched.current = true;
-                  pick(q, first.label);
-                  var _isLast = (idx >= sorted.length - 1);
-                  if (_isLast) {
-                    // ── 最后一题 → 等一帧让 sel 写入后提交（与手动点击同一通道）──
-                    setTimeout(function () {
-                      try {
-                        stSt[1]('sending');
-                        msgSt[1]('倒计时结束，已自动选择默认项：' + first.label);
-                        if (submitRef.current) submitRef.current('user-click');
-                      } catch (e2) {}
-                    }, 80);
-                  } else {
-                    // ── 【Bug#1 新增】非最后一题 → 自动跳到下一题继续计时 ──
-                    //   这就是"多题逐题自动推进"；走 nextQRef，与手动点
-                    //   「下一题」完全同一条代码路径。
-                    setTimeout(function () {
-                      try {
-                        msgSt[1]('倒计时结束，已自动选择默认项：' + first.label + '，进入下一题…');
-                        if (nextQRef.current) nextQRef.current(true);
-                      } catch (e2) {}
-                    }, 80);
-                  }
-                }
-              } catch (e3) {}
-              return 0;
-            }
-            return next;
-          });
-        }, 1000);
-        cdTimerRef.current = t;
-        return function () {
-          clearInterval(t);
-          if (cdTimerRef.current === t) cdTimerRef.current = null;
-        };
-      }, [cdOn, idx]);
-      var cdBadge = (cdOn && state !== 'ok')
-        ? h('span', {
-            className: 'eng-cd' + (cdLeft <= 3 ? ' hot' : (cdLeft <= 5 ? ' warn' : '')),
-            title: '倒计时结束后将自动选择带「推荐」的选项（无推荐则选第一项）；点选后立即停表'
-          },
-            h('span', null, '⏱'),
-            h('span', { className: 'eng-cd-num' }, String(cdLeft)),
-            h('span', null, 's'))
-        : null;
+      // ── 【已删除 · 2026-11-08】本题卡的倒计时 ──────────────────────────
+      // 用户要求把倒计时整体删掉。原实现在 120 秒后自动选「推荐项」并提交，
+      // 导致用户真实选择还没送出就被默认值顶掉（session-6e5c9b47）。
+      // 现在：不挂任何计时器，每题都必须由用户自己点。
 
       // ── 【PhaseB·第2项】选项表格化渲染 ────────────────────────────────
       // 用户反馈：步步确认时选项密密麻麻。改为表格行（序号|标记|文案|说明），
@@ -2786,21 +2305,14 @@ window.__ModuleLoader__.load({
         var multi = !!curQ.multi;
         var opts = (curQ.options || []).map(function (o, oi) {
           var on = curPicked.indexOf(o.label) >= 0;
-          // 【本次改动】标记优先级：「推荐」> 首项「默认」——让用户一眼看到
-          //   倒计时超时会落在哪个选项上（与 pickCountdownOption 完全一致）。
+          // 【倒计时删除】标记只显示「推荐」（选项自身属性）；不再有「默认」
           var isRec = isRecommendedOption(o);
-          var isDefault = !isRec && (oi === 0);
           return h('button', {
             key: curQ.id + ':' + oi,
             className: 'eng-ask-tr' + (on ? ' on' : ''),
             onClick: function () {
               userTouched.current = true;
-              // 【Bug#1 修复】人已接管 → 停【本题】表，不再自动选默认项
-              try { if (cdQid) cdTakenRef.current[cdQid] = true; } catch (e) {}
-              // 【本次改动】用户点选 → 【立即】停表（不再继续读秒）
-              try {
-                if (cdTimerRef.current) { clearInterval(cdTimerRef.current); cdTimerRef.current = null; }
-              } catch (e) {}
+              // 【倒计时已删除】这里不再需要停表 —— 已无任何计时器在跑。
               if (state !== 'sending' && state !== 'ok') pick(curQ, o.label);
             }
           },
@@ -2809,10 +2321,8 @@ window.__ModuleLoader__.load({
             h('div', { className: 'eng-ask-td-txt' },
               h('div', { className: 'eng-ask-td-label' }, o.label),
               o.description ? h('div', { className: 'eng-ask-td-desc' }, o.description) : null),
-            // 「推荐」是选项自身的属性，始终显示；「默认」只在有倒计时时才有意义
-            (isRec || (cdOn && isDefault))
-              ? h('span', { className: 'eng-ask-td-tag' + (isRec ? ' rec' : '') },
-                  isRec ? '推荐' : '默认')
+            isRec
+              ? h('span', { className: 'eng-ask-td-tag rec' }, '推荐')
               : null);
         });
         blocks = h('div', null,
@@ -2832,9 +2342,7 @@ window.__ModuleLoader__.load({
           h('span', null, '❓'),
           h('span', null, total > 1 ? '按顺序作答' : '等待你的选择'),
           seqInfo,
-          // 【PhaseB】倒计时徽标（超时自动选默认项）
-          cdBadge,
-          h('span', { style: { fontSize: '10px', fontWeight: 400, opacity: 0.75, marginLeft: cdBadge ? '8px' : 'auto' } }, multi ? '多选' : '单选')),
+          h('span', { style: { fontSize: '10px', fontWeight: 400, opacity: 0.75, marginLeft: 'auto' } }, multi ? '多选' : '单选')),
         h('div', { style: { padding: '6px 0' } }, blocks || h('div', { className: 'eng-note' }, '加载中…')),
         state !== 'ok'
           ? h('div', { className: 'eng-ask-ft' },
@@ -3019,7 +2527,7 @@ window.__ModuleLoader__.load({
     //     · 用户关掉「使用工程模式自带的子代理显示页」
     //     · entries.length === 0（还没有子代理）
     //   都会【提前 return】→ 它的 useEffect 根本不执行 → 类挂不上。
-    //   而 installQuestionCountdown / 主对话排版样式全都以这个类为前提，
+    //   而主对话排版样式以这个类为前提，
     //   于是表现为「倒计时没了」「样式时灵时不灵」。
     //
     // 现在：本组件【永远渲染 null】，只负责维护 body 类，判定与面板解耦：
@@ -3287,6 +2795,11 @@ window.__ModuleLoader__.load({
       // 子代理 id 串（用作 effect 依赖：ID 集合变了才重算，避免每帧重跑）
       var ids = entries.map(function (e) { return e.id; }).join(',');
       var selSt = useState(entries.length > 0 ? entries[0].id : null);
+      // ── 【布局 v12】右列两页：'flow'（实时流程）/ 'compact'（压缩历史）────
+      // 用户要求：「左边的选择子代理的时候，右边会展示出来那个实际的流程，
+      //   压缩历史也是同样的」。⇒ 两页共享同一个 selected，切换只换内容。
+      //   必须声明在 hooks 区（早退之前），否则会破坏 hooks 顺序。
+      var rightTabSt = useState('flow');
       var logSt = useState([]);
       var errSt = useState(null);
       var seqRef = useRef(0);
@@ -3561,7 +3074,7 @@ window.__ModuleLoader__.load({
       // 时提前 return —— 一旦提前 return，这个 effect 根本不会执行，
       // body 上就没有 dsh-eng-mode，于是：
       //   · 主对话问答卡片样式不生效；
-      //   · installQuestionCountdown() 的 isEngMode() 恒 false → 倒计时不挂表。
+      //   （该函数已随倒计时删除。）
       // 现在改由常驻组件 EngModeMarker 独占维护（见文件上部），
       //   与面板是否渲染彻底解耦。本组件不再重复挂这个类（避免互相抢着摘）。
 
@@ -4084,6 +3597,8 @@ window.__ModuleLoader__.load({
       // 注意：面板始终挂载，用 .collapsed 类切换宽度以驱动过渡动画；
       //       收起时 width:0 + pointer-events:none，等价于完全不占位。
       var stackTree = veryNarrow;
+      // 右列当前页（'flow' | 'compact'）：只是取值，不新增 hook。
+      var rightTab = rightTabSt[0];
       // ── 【UI 美化】面板主体 ────────────────────────────────────────────
       // 用户反馈（对照 DSH 官方子代理界面）：自带的这套面板"很乱，看不来啥"。
       // 主要毛病与对应改法：
@@ -4108,7 +3623,18 @@ window.__ModuleLoader__.load({
               title: '折叠子代理面板，让对话区占满全宽',
               onClick: function () { closedSt[1](true); }
             }, '›')),
-          h('div', { className: 'eng-tree-list' }, nodes)),
+          // ── 子代理频道列表：上半区，超出时自己滚动 ──────────────────────
+          h('div', { className: 'eng-tree-list' }, nodes),
+          // ── 【布局 v12 · 2026-11-07】左列下半区 = 零件表（占 50%）──────────
+          // 用户要求（逐条落实）：
+          //   ① 「把那个零件表扩大，扩大到 50% 的大小」→ 目录/零件表严格五五分；
+          //   ② 「子代理目录和模型表(零件表)各占左边的 50%，自适应即可」
+          //      → 两块都 flex:1 1 50% + min-height:0，各自内部滚动；
+          //   ③ 「压缩历史移到右边那个绿色的框」→ 已搬到右列详情区（.eng-dtabs）。
+          // ⚠️ 这里【只】放零件表；压缩历史在右列，绝不能再挂回来，
+          //    否则同一个组件会出现两份（左窄+右宽），用户看到的还是"乱"。
+          h('div', { className: 'eng-lower' },
+            h(EngPartsBoard, { compact: true }))),
         h('div', { className: 'eng-detail' },
           h('div', { className: 'eng-head' },
             h('div', { className: 'eng-head-main' },
@@ -4125,11 +3651,40 @@ window.__ModuleLoader__.load({
               title: '折叠子代理面板',
               onClick: function () { closedSt[1](true); }
             }, '折叠')),
-          h('div', { className: 'eng-log', ref: boxRef }, body)));
+          // ── 【布局 v12】右列两页：实时流程 / 压缩历史 ─────────────────────
+          // 用户要求：「左边的选择子代理的时候，右边会展示出来那个实际的流程，
+          //   压缩历史也是同样的，左边选择了那个子代理，右边就有那个子代理
+          //   展示页和对应的压缩历史」。
+          //   ⇒ 页签本身不吃 hooks（直接渲染按钮），两页共享同一个 selected，
+          //     切页不改变选中项，因此"选中谁 → 两页都是谁"是结构性成立的。
+          h('div', { className: 'eng-dtabs' },
+            h('button', {
+              type: 'button',
+              className: 'eng-dtab' + (rightTab === 'flow' ? ' on' : ''),
+              title: '这个子代理的实时输出与工具调用',
+              onClick: function () { rightTabSt[1]('flow'); },
+            }, '实时流程'),
+            h('button', {
+              type: 'button',
+              className: 'eng-dtab' + (rightTab === 'compact' ? ' on' : ''),
+              title: '这个子代理的压缩历史（L0 机械数值是否被保住）',
+              onClick: function () { rightTabSt[1]('compact'); },
+            }, '压缩历史')),
+          h('div', { className: 'eng-dtabs-body' },
+            rightTab === 'compact'
+              // 压缩历史：跟着选中项走。selectedId 变化 → 面板自己重新过滤。
+              ? h(EngCompactPage, {
+                  rootSessionId: currentId,
+                  selectedId: selected,
+                  label: title,
+                })
+              : h('div', { className: 'eng-log', ref: boxRef }, body))));
       // 用 Fragment 同时输出：收起态的小标签 + 面板本体
       // 嵌入模式不输出小标签（官方右列自己管开合）
       return embedded ? consoleEl : h(React.Fragment, null, consoleEl, fab);
     }
+
+
     // ══ 【Bug1】主对话内的交互提问节点 ═══════════════════════════════════════
     // 旧版 AskCard 只挂在 SubagentConsole（右侧子代理面板）里 —— 用户必须跑到
     // 子代理面板才能点选项，而答案又靠 followup 当"新消息"发回，属于伪交互。
@@ -4172,6 +3727,417 @@ window.__ModuleLoader__.load({
         mainInline: true
       });
     }
+
+    /* ══════════════════════════════════════════════════════════════════
+     * 【零件进度表】EngPartsBoard
+     * ══════════════════════════════════════════════════════════════════
+     * 用户要求（2026-11-07，图二）：
+     *   「红线上面是子代理，下面是要造的零件的表……总计子代理分析完成之后，
+     *     把所有的零件都给放在那个展示表中……交给总理子代理去看零件完成度，
+     *     正在建就同步成『正在建 xx 零件』，同理『未开始、完成』都一样，
+     *     还有需要『重建』；假设状态是正在建模，那么假设 DSH 断了，比如直接
+     *     关了 DSH 这种情况，那就显示『失败』」。
+     *
+     * 数据源：GET /parts-board（转发 mode2_flow.py parts-board）。
+     *   ⚠️ 状态判定【一律在 Python 侧】——UI 只负责画。历史上 UI 自己猜状态
+     *      与门禁打架，带来过"看板说活着、门禁说已死"的扯皮。
+     */
+    var ENG_PART_STATE_CLS = {
+      done: 'ok', building: 'run', rebuilding: 'warn',
+      failed: 'bad', not_started: 'idle',
+    };
+    function EngPartsBoard(props) {
+      // 紧凑模式：渲染在左列窄区（用户把零件表从右侧详情区搬到了左列下方），
+      //   房间列会被省略、状态徽标收窄，保证长中文零件名不被挤没。
+      var compact = !!(props && props.compact);
+      var boardCls = 'eng-parts-board' + (compact ? ' compact' : '');
+      var useState = React.useState;
+      var useEffect = React.useEffect;
+      var st = useState({ data: null, err: null, busy: false });
+      var S = st[0];
+      var refresh = function () {
+        st[1](function (p) {
+          var n = {}; for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+          n.busy = true; return n;
+        });
+        fetch('/dsh-engineering-ui/parts-board')
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            st[1](function (p) {
+              var n = {}; for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+              n.busy = false;
+              if (j && j.ok !== false) { n.data = j; n.err = null; }
+              else { n.err = String((j && j.error) || '读取失败'); }
+              return n;
+            });
+          })
+          .catch(function (e) {
+            st[1](function (p) {
+              var n = {}; for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+              n.busy = false; n.err = String((e && e.message) || e); return n;
+            });
+          });
+      };
+      // 挂载即拉一次；面板开着时每 6s 刷一次（看板要跟得上建模节奏）
+      useEffect(function () {
+        refresh();
+        var iv = setInterval(refresh, 6000);
+        return function () { clearInterval(iv); };
+      }, []);
+      var data = S.data || {};
+      var parts = Array.isArray(data.parts) ? data.parts : [];
+      var sum = data.summary || {};
+      var counts = sum.counts || {};
+      var label = function (k) {
+        return ({ done: '完成', building: '正在建', rebuilding: '需要重建',
+                  failed: '失败', not_started: '未开始' })[k] || k;
+      };
+      var head = h('div', { className: 'eng-pb-cap' },
+        h('span', { className: 'eng-pb-cap-t' }, '零件'),
+        h('span', { className: 'eng-pb-cap-n' },
+          (parts.length ? (String(counts.done || 0) + '/' + parts.length) : '—')),
+        h('button', {
+          className: 'eng-pb-refresh', type: 'button', title: '刷新零件进度',
+          onClick: function (ev) { ev.stopPropagation(); refresh(); },
+        }, S.busy ? '…' : '↻'));
+      if (S.err) {
+        return h('div', { className: boardCls }, head,
+          h('div', { className: 'eng-pb-empty' }, '读取失败：' + S.err));
+      }
+      if (!parts.length) {
+        return h('div', { className: boardCls }, head,
+          h('div', { className: 'eng-pb-empty' },
+            data.generated_at ? '暂无零件（总计子代理还没登记编制）' : '读取中…'));
+      }
+      var rows = parts.map(function (p, i) {
+        var cls = ENG_PART_STATE_CLS[p.state] || 'idle';
+        return h('div', {
+          className: 'eng-pb-row', key: 'pb' + i,
+          title: (p.room ? ('房间：' + p.room + '\n') : '') + (p.detail || '')
+            + (p.file ? ('\n文件：' + p.file) : '')
+            + (p.next_action ? ('\n下一步：' + p.next_action) : ''),
+        },
+          h('span', { className: 'eng-pb-name' }, String(p.name || '')),
+          h('span', { className: 'eng-pb-badge ' + cls }, label(p.state)),
+          compact ? null : h('span', { className: 'eng-pb-room' }, String(p.room || '')));
+      });
+      var foot = h('div', { className: 'eng-pb-ft' },
+        ['done', 'building', 'rebuilding', 'failed', 'not_started'].map(function (k) {
+          if (!counts[k]) return null;
+          return h('span', { className: 'eng-pb-stat ' + (ENG_PART_STATE_CLS[k] || 'idle'), key: 's' + k },
+            label(k) + ' ' + counts[k]);
+        }),
+        data.pulse_alive === false
+          ? h('span', { className: 'eng-pb-alert' }, 'DSH 已断') : null);
+      return h('div', { className: boardCls }, head,
+        h('div', { className: 'eng-pb-list' }, rows), foot);
+    }
+
+    /* ══════════════════════════════════════════════════════════════════
+     * 【压缩历史】EngCompactPage — 右列详情区的独立一页（用户截图里的「绿框」）
+     * ══════════════════════════════════════════════════════════════════
+     * 【布局 v12 · 2026-11-07】原先它是左列底部固定 40% 高的一小块（黑框），
+     *   用户要求「那个压缩历史移到右边那个绿色的框（占 1/4）」并且
+     *   「左边的选择子代理的时候，右边就有那个子代理展示页和对应的压缩历史」，
+     *   于是改成右列 .eng-dtabs 的第二页：宽度 = 右列宽度，高度自适应，
+     *   内容跟随左列 selectedId。
+     * 用户原文（2026-11-07，图三）：
+     *   「红框里面放上各个子代理的压缩历史……黑框加上主对话的历史压缩记录，
+     *     然后显示的使用设置里面的『使用工程模式自带的子代理显示页』判断是否开启」
+     *   「那个红框的大小不要动了，然后字最好要自适应大小，可以让用户往下滑动的」
+     *
+     * 行为：
+     *   · 开关关闭（设置页「使用工程模式自带的子代理显示页」= 关）→ 整块不渲染；
+     *   · 只读：数据完全来自 /compaction-history（append-only 账本），不在这里改任何东西；
+     *   · 两个分区：选中子代理的压缩链（默认）/ 主对话的压缩链，可切换；
+     *   · 高度锁死在父容器给的区域内，内部滚动，字号随容器宽度自适应。
+     */
+    function EngCompactPage(props) {
+      var useState = React.useState;
+      var useEffect = React.useEffect;
+      var useRef = React.useRef;
+
+      // ── 开关：沿用设置页同一个字段（不新增开关，避免两处语义分叉）──
+      var settings = useEngSettings();
+      var enabled = !!(settings && settings.useOwnSubagentPane);
+      // ── 强制视图（右侧面板用它锁成"主对话"）────────────────────────────
+      // 「会话视图」（官方 conversation.view 页签）里只该看主对话的压缩链，
+      //   而右列 .eng-dtabs 里默认跟随左列选中的子代理。
+      //   因此这里允许父组件传 forceTab='main'，且此时隐藏页签切换（不给用户
+      //   一个"点了会跳去看子代理"的按钮 —— 那是另一个页面的职责）。
+      var forceTab = props && props.forceTab ? String(props.forceTab) : '';
+
+      // ── 视图：选中的子代理 vs 主对话 ──────────────────────────────
+      var tabSt = useState('agent');
+      var tab = forceTab || tabSt[0];
+      // 选中项变化时不强制切 tab：用户正在看主对话链时切房间，不该被打断。
+      var dataSt = useState({ ok: true, entries: [], counts: [], err: null });
+      var D = dataSt[0];
+      var boxRef = useRef(null);
+      // ── 展开状态：哪一条记录的摘要正文被展开（null = 全收起）───────────
+      // 必须在 hooks 区声明：本组件有多个早退分支（err / 空列表），
+      //   把 useState 放在分支后面会让第二次渲染的 hook 数量变化 → React 报错。
+      var openSt = useState(null);
+      var openAt = openSt[0];
+      var setOpenAt = openSt[1];
+
+      var rootId = props && props.rootSessionId ? String(props.rootSessionId) : '';
+      var selectedId = props && props.selectedId ? String(props.selectedId) : '';
+
+      // 换选中的子代理 / 换主对话页 → 收起已展开的摘要（内容已经不是同一条了）
+      useEffect(function () {
+        openSt[1](null);
+      }, [selectedId, tab]);
+
+      // 拉数据：挂载即拉；有活跃压缩时 5s 一次；窗口不可见时停（省电）
+      useEffect(function () {
+        if (!enabled) return undefined;
+        var alive = true;
+        var timer = null;
+        var pull = function () {
+          if (!alive) return;
+          var url = '/dsh-engineering-ui/compaction-history?limit=400';
+          if (rootId) url += '&rootSessionId=' + encodeURIComponent(rootId);
+          fetch(url)
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              if (!alive) return;
+              if (j && j.ok !== false) {
+                // ══ 【压缩面板误报修复 · 2026-11-08】══════════════════════════
+                // 现场（用户截图）：面板红字「压缩引擎未加载：本会话没有启用
+                //   『工程模式压缩器』…」，但磁盘上 compaction_engine.json 明明
+                //   写着 {mode:"real"} —— 引擎其实是加载好的。
+                //
+                // 根因：这里只回填了 entries / counts，把 host 半返回的
+                //   engine / threshold / exists 全【丢掉了】。于是空列表分支里
+                //   D.engine 恒为 undefined → 永远走"未加载"那一条文案。
+                //   用户看到的是"压缩没启动"，而真实原因可能只是"还没到阈值"。
+                //
+                // 修复：把 engine / threshold / exists / stateDir 原样带进 D，
+                //   让空状态能区分「未加载 / 降级 / 只是还没压缩」三种情况。
+                dataSt[1]({
+                  ok: true,
+                  entries: Array.isArray(j.entries) ? j.entries : [],
+                  counts: Array.isArray(j.counts) ? j.counts : [],
+                  engine: j.engine || null,
+                  threshold: j.threshold || null,
+                  exists: j.exists !== false,
+                  stateDir: j.stateDir || '',
+                  err: null
+                });
+              } else {
+                dataSt[1](function (p) {
+                  var n = {}; for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+                  n.err = String((j && j.error) || '读取失败'); return n;
+                });
+              }
+            })
+            .catch(function (e) {
+              if (!alive) return;
+              dataSt[1](function (p) {
+                var n = {}; for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
+                n.err = String((e && e.message) || e); return n;
+              });
+            });
+        };
+        pull();
+        timer = setInterval(function () {
+          try { if (typeof document !== 'undefined' && document.hidden) return; } catch (e) {}
+          pull();
+        }, 5000);
+        return function () { alive = false; if (timer) clearInterval(timer); };
+      }, [enabled, rootId]);
+
+      if (!enabled) return null;
+
+      var all = D.entries || [];
+      // 主对话链 = target === rootId；子代理链 = 其它（含孙代）
+      var mainEntries = all.filter(function (e) { return rootId && String(e.target || '') === rootId; });
+      var agentEntries = all.filter(function (e) { return !rootId || String(e.target || '') !== rootId; });
+      var shown = tab === 'main' ? mainEntries : agentEntries;
+      // ── 【布局 v12】严格跟随左列选中项 ────────────────────────────────
+      // 用户要求「左边选择了那个子代理，右边就有那个子代理展示页和对应的
+      //   压缩历史」。旧实现是"该子代理没有记录就退回显示全部"——那会让用户
+      //   以为别的房间的压缩记在这个房间头上。现在：没有就是没有，显示空态。
+      //   仅当左列还没选中任何子代理时才展示全部（概览语义）。
+      if (tab === 'agent' && selectedId) {
+        shown = shown.filter(function (e) { return String(e.target || '') === selectedId; });
+      }
+
+      // ── 【布局 v12】右列整页：顶部一句话摘要 + 可点开的记录行 ─────────────
+      // 用户要求「压缩历史那个页面要自适应」：
+      //   · 宽度 → 填满 .eng-detail（官方右列 ≈ 1/4 屏），不再挤在 190px 窄列里；
+      //   · 字号 → clamp(px, cqw, px) 跟容器宽度缩放（container-type 在 .eng-cp）；
+      //   · 高度 → flex:1 + 内部滚动，永远不撑破面板。
+      // 摘要统计：一眼看清"这个会话被压缩了几次、共保住多少机械数值"。
+      var sumNums = 0, sumRestored = 0, sumSaved = 0;
+      for (var si = 0; si < shown.length; si++) {
+        sumNums += Number(shown[si].l0_numbers || 0) + Number(shown[si].l0_materials || 0);
+        sumRestored += Number(shown[si].l0_restored || 0);
+        sumSaved += Math.max(0, Number(shown[si].saved_chars || 0));
+      }
+
+      var cap = h('div', { className: 'eng-cp-cap' },
+        h('span', { className: 'eng-cp-cap-t' },
+          tab === 'main' ? '主对话压缩历史' : (props && props.label ? (String(props.label) + ' · 压缩历史') : '压缩历史')),
+        h('span', { className: 'eng-cp-cap-n' }, String(shown.length) + ' 次'),
+        forceTab ? null : h('span', { className: 'eng-cp-tabs' },
+          h('button', {
+            type: 'button',
+            className: 'eng-cp-tab' + (tab === 'agent' ? ' on' : ''),
+            title: '各子代理的压缩链（默认跟随左列选中的子代理）',
+            onClick: function () { tabSt[1]('agent'); },
+          }, '子代理'),
+          h('button', {
+            type: 'button',
+            className: 'eng-cp-tab' + (tab === 'main' ? ' on' : ''),
+            title: '主对话的压缩记录',
+            onClick: function () { tabSt[1]('main'); },
+          }, '主对话')));
+
+      var sumBar = (D.err || !shown.length) ? null : h('div', { className: 'eng-cp-sum' },
+        h('span', { className: 'eng-cp-sum-i' }, '压缩 ', h('b', null, String(shown.length)), ' 次'),
+        h('span', { className: 'eng-cp-sum-i' }, '保住数值 ', h('b', null, String(sumNums)), ' 条'),
+        sumRestored > 0
+          ? h('span', { className: 'eng-cp-sum-i' }, '自动补回 ', h('b', null, String(sumRestored)), ' 条')
+          : null,
+        h('span', { className: 'eng-cp-sum-i' }, '省下 ', h('b', null, String(sumSaved)), ' 字符'));
+
+      if (D.err) {
+        return h('div', { className: 'eng-cp' }, cap,
+          h('div', { className: 'eng-cp-empty' }, '读取失败：' + D.err));
+      }
+      if (!all.length) {
+        // 空态的三种真实原因必须分开说，否则用户永远在猜：
+        //   ① engine 为空 → 压缩引擎没加载（preset 那行没解析到 / 包没装）；
+        //   ② engine 存在但 mode=fallback → 父类没解析到，压缩被降级成空壳；
+        //   ③ engine 正常 → 只是这条会话还没到阈值。
+        var eng = D.engine || null;
+        var th = D.threshold || null;
+        var why;
+        // ── 【判定修正 · 2026-11-08】三种空状态必须说清，别再一律报"未加载" ──
+        //   现场：磁盘上明明有 compaction_engine.json（mode:"real"），
+        //   面板却红字报"未加载"——因为前端把 engine 字段丢了（已修）。
+        //   现在把阈值也一并展示，用户能自己判断"是没到阈值"还是"真坏了"。
+        if (!eng) {
+          why = '压缩引擎未加载：没有读到 compaction_engine.json。'
+              + '请确认 preset 的 compaction 子项解析到 dsh-engineering-compaction，'
+              + '且该插件已随 DSH 重启加载过（引擎标记在它构造时写）。';
+        } else if (eng.mode && eng.mode !== 'real') {
+          why = '压缩引擎已加载但处于【降级模式】（' + eng.mode + '）：'
+              + '父类 @deepseek-ai/dsh-compaction-basic 未解析到，本轮不会产生压缩记录。';
+        } else {
+          var _tv = th && typeof th.value === 'number' ? th.value : null;
+          why = '引擎已就绪（mode=real），只是【还没有压缩过】：'
+              + (_tv ? ('当前阈值 ' + Math.round(_tv / 1000) + 'K token，上下文到阈值才会自动压缩并记账。')
+                     : '等上下文使用量到阈值后会自动压缩并记账。');
+        }
+        return h('div', { className: 'eng-cp' }, cap,
+          h('div', { className: 'eng-cp-empty' }, why));
+      }
+      if (!shown.length) {
+        return h('div', { className: 'eng-cp' }, cap,
+          h('div', { className: 'eng-cp-empty' },
+            tab === 'main' ? '主对话尚未压缩过' : '这个子代理尚未压缩过'));
+      }
+
+      // 每条记录渲染成一行（窄容器自动折行）；点行展开摘要正文。
+      //   openAt 记的是"哪一条被点开"，同一时刻只展开一条（避免长文本堆叠）。
+      var rows = shown.slice(-200).reverse().map(function (e, i) {
+        var nums = Number(e.l0_numbers || 0) + Number(e.l0_materials || 0);
+        var restored = Number(e.l0_restored || 0);
+        var at = Number(e.at) || 0;
+        var hhmm = '';
+        try {
+          var d = new Date(at);
+          hhmm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+        } catch (err) {}
+        var label = String(e.label || '').trim() || String(e.target || '').slice(0, 8);
+        var open = String(openAt) === String(at);
+        var excerpt = String(e.summary_excerpt || '').trim();
+        var rowCls = 'eng-cp-row' + (excerpt ? ' clickable' : '');
+        var children = [
+          h('span', { className: 'eng-cp-time', key: 't' }, hhmm),
+          h('span', { className: 'eng-cp-name', key: 'n' }, label),
+          h('span', { className: 'eng-cp-num', key: 'l', title: '本次保住的机械数值条数' }, 'L0 ' + nums),
+          restored > 0
+            ? h('span', { className: 'eng-cp-fix', key: 'f', title: '模型漏写、已自动补回 ' + restored + ' 条' }, '+' + restored)
+            : null,
+          h('span', { className: 'eng-cp-save', key: 's', title: '字符数 ' + (e.input_chars || 0) + ' → ' + (e.output_chars || 0) },
+            '-' + Math.max(0, Number(e.saved_chars || 0)))
+        ];
+        if (open && excerpt) children.push(h('div', { className: 'eng-cp-body', key: 'b' }, excerpt));
+        return h('div', {
+          className: rowCls,
+          key: 'cp' + i + ':' + at,
+          title: excerpt ? '点击展开/收起本次压缩摘要' : '',
+          onClick: excerpt
+            ? function (ev) {
+                try { ev.stopPropagation(); } catch (err) {}
+                setOpenAt(function (prev) { return String(prev) === String(at) ? null : at; });
+              }
+            : undefined,
+        }, children);
+      });
+
+      return h('div', { className: 'eng-cp' }, cap, sumBar,
+        h('div', { className: 'eng-cp-list', ref: boxRef }, rows));
+    }
+
+    /* ══════════════════════════════════════════════════════════════════
+     * 【会话视图】EngSessionViewPage — 官方 conversation.view 页签的正文
+     * ══════════════════════════════════════════════════════════════════
+     * 用户要求（2026-11-07，图二黑框）：
+     *   「在黑框那里，加一个文字，官方叫"会话视图"，在会话视图中，加上主对话的
+     *     压缩历史，先这样子加吧」
+     *
+     * 为什么用官方 conversation.view，而不是自己在对话区上方塞一排假页签：
+     *   官方把「聊天 / 轨迹」那排页签声明为 conversation.view（list, session
+     *   作用域；Chat 是 order=0 的 chat，Trajectory 是 order=10 的 trajectory）。
+     *   通过 ctx.slots.inject('conversation.view', …) 注册同款条目，本页就会
+     *   作为一个【真正的会话视图页签】出现在那排里，并且官方负责：
+     *     · 页签条显隐（≥2 个视图才显示）、宽度自适应、折叠进"更多会话视图"；
+     *     · 每个会话的选中状态与偏好持久化；
+     *     · 渲染容器（填满对话区）。
+     *   自己造页签则要复刻以上全部行为，且换 DSH 版本就会错位。
+     *
+     * 数据来源：与右列压缩历史同一个只读账本 /compaction-history
+     *   （dsh-engineering-compaction 写的 compaction_history.jsonl）。
+     *   rootSessionId 由页签注入的 sessionId 提供 —— 那就是"当前这条主对话"。
+     */
+    function EngSessionViewPage(props) {
+      var useState = React.useState;
+      var useEffect = React.useEffect;
+      // 开关：关掉工程模式自带显示页 → 交回官方（返回 null，页签照常存在但空白，
+      //   因此这里用 canOpen 之外的第二道闸：直接渲染官方风格的提示，不装死）。
+      var settings = useEngSettings();
+      var enabled = !!(settings && settings.useOwnSubagentPane);
+      // 会话 id：conversation.view 的 inject(sessionId) 会把它作为 prop 注入；
+      //   取不到时退回 DOM/列表兜底（engCurrentSessionId）。
+      var sid = (props && props.sessionId) ? String(props.sessionId) : '';
+      if (!sid) {
+        try { sid = engCurrentSessionId(null) || ''; } catch (e) { sid = ''; }
+      }
+      if (!enabled) {
+        return h('div', { className: 'eng-sv' },
+          h('div', { className: 'eng-sv-empty' },
+            '「工程模式自带显示页」已在设置里关闭 —— '
+            + '会话视图的主对话压缩记录一并关闭。'));
+      }
+      // 页签已经叫「工程模式」，页内标题不再重复一次"会话视图"（用户要求改名）。
+      return h('div', { className: 'eng-sv' },
+        h('div', { className: 'eng-sv-head' },
+          h('span', { className: 'eng-sv-title' }, '工程模式'),
+          h('span', { className: 'eng-sv-sub' }, '主对话的压缩历史（L0 机械数值逐次保住）')),
+        h('div', { className: 'eng-sv-body' },
+          h(EngCompactPage, {
+            rootSessionId: sid,
+            selectedId: '',
+            forceTab: 'main',
+            label: '主对话',
+          })));
+    }
+
 
     // ══ 【问题4·开启侧】官方右列子代理 tab 的正文（本插件自有实现）═════════
     // 用户要求："所有官方的子代理在右侧显示的都指向我们现在搞的"。
@@ -5716,8 +5682,12 @@ window.__ModuleLoader__.load({
       var close = props && props.close;
       var settings = useEngSettings();
       var useOwn = settings.useOwnSubagentPane;
-      var explainOn = settings.enableSelectionExplain;
-      var countdownOn = settings.enableOptionCountdown !== false;
+      // ── 「是否启用工程模式的会话视图」（2026-11-07）─────────────────────
+      // 控制官方 conversation.view 里那个「工程模式」页签。
+      //   · 与「子代理显示页」解耦：那个开关管右列三栏，这个只管对话页头页签；
+      //   · 只影响工程模式会话；非工程模式会话无论开关如何都没有该页签。
+      // 默认 true：装上就能看见，不需要用户先去找开关。
+      var showEngView = settings.showEngConversationView !== false;
       // ── 子目录展开态（用户要求：模型自动接替 / 内存与并发 收进「设计过程优化」）
       //   ⚠️ React hooks 规则：必须【无条件】调用，且放在任何 return 之前。
       //   默认收起 —— 设置页一屏能看全 3 个开关 + 2 个子项，点开才展开细节。
@@ -5772,9 +5742,8 @@ window.__ModuleLoader__.load({
             h(EngRow, { label: '子栏目选项设置3' })),
 
           // ── 主栏目2：设计过程优化（用户指定名称）───────────────────────
-          // 首行「右键引用调出AI解释」= 划词/右键「问问AI」功能的开关与控制。
-          //   用户强调「这个功能是必须要有效的」，因此它是一个【真开关】：
-          //   关闭后 SelectionDetailLayer 不再挂载，绝不出现"按钮在但没反应"。
+          // 首行「是否启用选项倒计时」。原「右键引用调出AI解释 / 问问AI」
+          //   整条功能已按用户要求【整体删除】（2026-11-07），此处不再有该开关。
           //
           // ── 【2026-11-06 结构调整】用户要求（原文）：
           //   「"内存与并发"和"模型自动接替"统一放在"设计过程优化"的子目录下面」。
@@ -5783,37 +5752,6 @@ window.__ModuleLoader__.load({
           //   这样设置页从上到下就是：连接区 → 设计过程优化（3 个开关 + 2 个子项）
           //   → 美化工程模式 → 工程人设，层级与用户的口述一致。
           h(EngGroup, { title: '设计过程优化' },
-            h('div', { className: 'eng-row sw' },
-              h('div', { className: 'eng-row-txt' },
-                h('div', { className: 'eng-row-label' }, '右键引用调出AI解释'),
-                h('div', { className: 'eng-row-hint' }, explainOn
-                  ? '选中文字或右键 → 浮现「问问AI」，可就该段内容展开分析并回填输入框。'
-                  : '已关闭：不再出现「问问AI」入口。')),
-              h(EngSwitch, {
-                bare: true,
-                checked: explainOn,
-                label: '右键引用调出AI解释',
-                onChange: function (next) {
-                  setEngSetting('enableSelectionExplain', next);
-                }
-              })),
-            // ── 【本次改动】原「子栏目选项设置2」占位 → 真开关：是否启用选项倒计时
-            //   开：题目选项卡片显示 120 秒倒计时，超时自动选择带「推荐」的选项；
-            //   关：不挂任何倒计时，每道题都必须由用户自己点。
-            h('div', { className: 'eng-row sw' },
-              h('div', { className: 'eng-row-txt' },
-                h('div', { className: 'eng-row-label' }, '是否启用选项倒计时'),
-                h('div', { className: 'eng-row-hint' }, countdownOn
-                  ? '选项卡片 120 秒倒计时，超时选「推荐」；三个关键题不受影响。'
-                  : '已关闭：所有题目都由你自己选择。')),
-              h(EngSwitch, {
-                bare: true,
-                checked: countdownOn,
-                label: '是否启用选项倒计时',
-                onChange: function (next) {
-                  setEngSetting('enableOptionCountdown', next);
-                }
-              })),
             // ── 子目录 1：模型自动接替（原来是一个独立主栏目）───────────────
             //   点这一行就地展开/收起；箭头方向由 openModelChain 控制。
             h(EngRow, {
@@ -5851,7 +5789,29 @@ window.__ModuleLoader__.load({
                   setEngSetting('useOwnSubagentPane', next);
                 }
               })),
-            h(EngRow, { label: '子栏目选项设置3' })),
+            // ── 【会话视图开关 · 2026-11-07】原来的占位行「子栏目选项设置3」────────
+            // 用户要求（原文）：「图四那里改为"是否启用工程模式的会话视图"，
+            //   小一点，和旁边的一样」。⇒ 与上一行同款紧凑样式（.eng-row.sw），
+            //   不换行、不占额外高度，标签与提示字号完全一致。
+            //
+            // 语义（用户另一条要求）：「那个会话视图哪怕开了，都是只能在工程模式
+            //   运行，不能在其他模式运行」。因此这里【只控制工程模式会话】里的
+            //   那个页签；非工程模式会话无论开关如何都不会出现（见 register 处
+            //   的 _sessionPresetIsEngineering 判定）。
+            h('div', { className: 'eng-row sw' },
+              h('div', { className: 'eng-row-txt' },
+                h('div', { className: 'eng-row-label' }, '是否启用工程模式的会话视图'),
+                h('div', { className: 'eng-row-hint' }, showEngView
+                  ? '对话页头多一个「工程模式」页签，里面是主对话的压缩历史。'
+                  : '已关闭：「工程模式」页签不出现（仅影响工程模式会话）。')),
+              h(EngSwitch, {
+                bare: true,
+                checked: showEngView,
+                label: '是否启用工程模式的会话视图',
+                onChange: function (next) {
+                  setEngSetting('showEngConversationView', next);
+                }
+              }))),
 
           // ── 主栏目4：工程人设（用户要求：新建一个主栏目放填空）────────
           // 用户需求原文：「当使用者使用工程模式的时候，在一开始会当作提示词
@@ -5980,17 +5940,13 @@ window.__ModuleLoader__.load({
         }));
       } catch (e) { /* 写入失败不影响本次会话 */ }
     }
-    // enableSelectionExplain：「设计过程优化」→「右键引用调出AI解释」。
-    //   开 → 选中文字时浮现「问问AI」并可用右下角面板分析；
-    //   关 → SelectionDetailLayer 完全不挂载（零监听、零 DOM）。
     var _engSettings = {
       useOwnSubagentPane: true,
-      enableSelectionExplain: true,
-      // ── 【新增·设置页「设计过程优化」→「是否启用选项倒计时」】───────────────
-      // 开 → 官方提问卡片与子代理提问卡都挂倒计时（默认项超时自动选中）；
-      // 关 → 完全不挂倒计时，所有题目都必须由用户自己点。
-      // 默认 true：与用户此前看到的"有倒计时"的行为保持一致，不静默改变现状。
-      enableOptionCountdown: true,
+      // ── 【新增·设置页「美化工程模式」→「是否启用工程模式的会话视图」】─────
+      // 控制官方 conversation.view 页签「工程模式」（里面是主对话的压缩历史）。
+      // 默认 true：装上就能看见；关掉只是不出现这个页签，不影响其它任何功能。
+      // ⚠️ 它【只】对工程模式会话有效 —— 别的预设里该页签永远不存在。
+      showEngConversationView: true,
     };
     var _engSettingsSubs = [];
     // ══ 【问题3】官方右列占用探针（可选服务，缺失时回落 DOM）══════════════
@@ -6177,7 +6133,7 @@ window.__ModuleLoader__.load({
     /** 组装交给工作会话的首轮任务文本（面板按钮与操作行按钮共用格式）。 */
     function engComposeWorkPrompt(parts) {
       var lines = [];
-      lines.push('以下内容来自「问问AI」侧边面板的分析，请在工程模式下继续推进。');
+      lines.push('以下内容来自历史会话的分析记录，请在工程模式下继续推进。');
       lines.push('');
       if (parts.source) {
         lines.push('【引用的原文】');
@@ -6302,6 +6258,53 @@ window.__ModuleLoader__.load({
     // 初始 false = 不接管，宁可不接管也不要污染非工程模式。
     var _engContextActive = false;
     function _isEngineeringContext() { return _engContextActive === true; }
+    // ── 当前主会话的预设（模块级同步快照）────────────────────────────────
+    // ⚠️ 官方 resolveSlotLabel 的实现是「是函数就调用」，**一个参数都不传**
+    //   （app.asar 里逐字核对：function EI(e){return typeof e=="function"?e():e}）。
+    //   所以 label 回调拿不到 sessionId，只能读模块级的"当前会话"。
+    //   这没问题：页签条本来也只画当前这条会话。
+    //
+    // ⚠️ 也不能沿用 _isEngineeringContext()：那个标记在「工程模式但还没有
+    //   子代理」时会被置成 false（SubagentConsole 里 entries.length===0 就早退
+    //   复位）—— 于是新开会话、子代理还没建时页签就一片空白。
+    //   这就是「工程模式四个字不见了」的根因。
+    //   这里单独维护一份只看【会话预设】的快照，与子代理数量无关。
+    var _engMainPresetId = '';
+    var _engMainSessionId = '';
+    function refreshEngMainPreset() {
+      try {
+        var s = engService('sessions');
+        var snap = s && s.list && s.list.getSnapshot ? s.list.getSnapshot() : null;
+        var byId = (snap && snap.byId) || {};
+        var ids = (snap && snap.ids) || Object.keys(byId);
+        var mainId = '';
+        for (var i = 0; i < ids.length; i++) {
+          var r = byId[ids[i]];
+          if (r && r.retainedBy && (r.retainedBy.mainView || 0) > 0) { mainId = String(ids[i]); break; }
+        }
+        var preset = '';
+        if (mainId && byId[mainId]) {
+          var row = byId[mainId];
+          var pv = row.projectionValues;
+          preset = (pv && typeof pv.agentPreset === 'string')
+            ? pv.agentPreset
+            : (typeof row.agentPreset === 'string' ? row.agentPreset : '');
+        }
+        var wasEng = (_engMainPresetId === 'engineering');
+        _engMainSessionId = mainId;
+        _engMainPresetId = preset;
+        // 预设一从"非工程"变成"工程"（或反过来），页签该出现/消失。
+        //   官方只在 slots 变动或 locale revision 变化时重算 viewTabs()，
+        //   所以这里主动碰一下槽强制重算 —— 否则用户得刷新页面才看得到。
+        if ((preset === 'engineering') !== wasEng) reinstallSessionView();
+      } catch (e) { /* 拿不到就保持上次结果 */ }
+    }
+    /** 当前主会话是不是工程模式（读上面的模块级快照）。 */
+    function _sessionPresetIsEngineering() {
+      if (_engMainPresetId) return _engMainPresetId === 'engineering';
+      // 快照还没建立（刚启动、会话列表未就绪）→ 退回渲染上下文标记
+      return _isEngineeringContext();
+    }
     /** 探测官方右列是否正在占用（true = 本面板应让位）。
      *
      * ── 【根因修复·只认 isExpanded】────────────────────────────────────────
@@ -6350,11 +6353,8 @@ window.__ModuleLoader__.load({
           if (typeof j.useOwnSubagentPane === 'boolean') {
             _engSettings.useOwnSubagentPane = j.useOwnSubagentPane;
           }
-          if (typeof j.enableSelectionExplain === 'boolean') {
-            _engSettings.enableSelectionExplain = j.enableSelectionExplain;
-          }
-          if (typeof j.enableOptionCountdown === 'boolean') {
-            _engSettings.enableOptionCountdown = j.enableOptionCountdown;
+          if (typeof j.showEngConversationView === 'boolean') {
+            _engSettings.showEngConversationView = j.showEngConversationView;
           }
         }
       } catch (e) { /* 读取失败 → 保持默认 */ }
@@ -6365,12 +6365,31 @@ window.__ModuleLoader__.load({
         localStorage.setItem(ENG_SETTINGS_KEY, JSON.stringify(_engSettings));
       } catch (e) { /* 写入失败不影响本次会话 */ }
     }
+    // ── 【会话视图页签】重装钩子（apply() 里装配，这里只留占位）──────────
+    // 为什么需要：官方 viewTabs() 只在 slots 变动时重算，而我们的 label 是
+    //   函数、不订阅设置变化 —— 开关改了必须"注销再注册"才能让页签立刻出现/
+    //   消失。留下这个模块级钩子，设置页与 apply() 之间就不必互相 import。
+    var _reinstallSessionView = null;
+    function reinstallSessionView() {
+      try {
+        if (typeof _reinstallSessionView === 'function') _reinstallSessionView();
+      } catch (e) { /* 忽略：重装失败最多是页签晚一步刷新 */ }
+    }
     function setEngSetting(key, value) {
       _engSettings[key] = value;
       saveEngSettings();
       for (var i = 0; i < _engSettingsSubs.length; i++) {
         try { _engSettingsSubs[i](); } catch (e) {}
       }
+      // ── 【会话视图页签】开关变化后必须让官方重新问一遍 label ────────────
+      // 官方在 slots 发生变化时重算 viewTabs()；label 是函数、不订阅设置，
+      //   所以这里主动"碰一下"槽：注销后立刻重注册，等于强制重算一次。
+      //   不做的话，用户得刷新页面才能看到页签出现/消失。
+      try {
+        if (key === 'showEngConversationView' || key === 'useOwnSubagentPane') {
+          reinstallSessionView();
+        }
+      } catch (e) { /* 重装失败不影响设置本身 */ }
     }
     // 跨标签页/跨窗口同步（官方 shortcuts/storage.ts 同思路）
     try {
@@ -6399,16 +6418,19 @@ window.__ModuleLoader__.load({
       var st = useState(function () {
         return {
           useOwnSubagentPane: _engSettings.useOwnSubagentPane,
-          enableSelectionExplain: _engSettings.enableSelectionExplain,
-          enableOptionCountdown: _engSettings.enableOptionCountdown,
+          showEngConversationView: _engSettings.showEngConversationView,
         };
       });
       useEffect(function () {
         return subscribeEngSettings(function () {
+          // ⚠️ 这里必须把【全部字段】都带上，一个都不能漏。
+          //   bug 现场（2026-11-08）：「是否启用工程模式的会话视图」怎么按都是开的，
+          //   关掉设置页再打开又自己变开 —— 根因就是这个回调只回填了两个字段，
+          //   showEngConversationView 被丢掉 → 组件读到 undefined
+          //   → 判定 `!== false` 恒为真 → 开关永远显示"开"。
           st[1]({
             useOwnSubagentPane: _engSettings.useOwnSubagentPane,
-            enableSelectionExplain: _engSettings.enableSelectionExplain,
-            enableOptionCountdown: _engSettings.enableOptionCountdown,
+            showEngConversationView: _engSettings.showEngConversationView,
           });
         });
       }, []);
@@ -6419,874 +6441,6 @@ window.__ModuleLoader__.load({
     /** 读某个会话挂在会话列表行上的 preset（会话列表是唯一权威来源）。 */
 
 
-    // ══════════════════════════════════════════════════════════════════════
-    // 【划词详情】SelectionDetailLayer —— 三张截图对应的功能
-    // ══════════════════════════════════════════════════════════════════════
-    // 完整交互链：
-    //   ① 用户在 Agent 回复里选中一段文字 → 选区附近浮现「更多详情」按钮（图二）
-    //   ② 点击 → 右下角打开分析面板，自动就该内容发起分析（图三）
-    //   ③ 面板里可继续追问；每条助手回复可「添加到对话」→ 回填主对话输入框
-    //   ④ 本次分析的历史留在面板内（图一红框要求"放左栏"见下方说明）
-    //
-    // 为什么不用官方插槽渲染"左栏历史"：
-    //   图一红框是【子代理目录】所在的侧栏，而侧栏由官方 ui-sidebar 拥有、
-    //   其内部结构不在本插件可注入的插槽清单里（本插件只能往
-    //   conversation.* / settings.* / shell.overlay 等已声明插槽注册）。
-    //   因此历史采用【面板内历史列表】实现，视觉上与子代理严格区分：
-    //     · 子代理 = 蓝色圆点 + 「未运行/运行中」徽标
-    //     · 详情分析 = 紫色对话气泡图标 + 「分析 N 轮」徽标
-    //   若后续要真正嵌进侧栏，需要 ui-sidebar 暴露插槽（属官方改动，不做）。
-    // ══════════════════════════════════════════════════════════════════════
-    // 【问问AI · 轻量 Markdown 渲染】
-    // ──────────────────────────────────────────────────────────────────────
-    // 为什么需要它：模型回答里大量使用 **加粗**、行内代码、- 列表、## 标题。
-    //   过去面板直接把原文塞进气泡（white-space:pre-wrap），这些标记就原样
-    //   显示成一串反引号和星号，看起来又乱又不像成品 —— 用户反馈
-    //   "模型原本想要放大字体的符号没有正确"，说的正是这个。
-    //
-    // 设计约束（重要）：
-    //   · 不引入任何新依赖：插件只 require('react')，必须零依赖；
-    //   · 不用 dangerouslySetInnerHTML：模型输出不可信，绝不拼 HTML；
-    //   · 因此这里做【行内解析 + React 节点】的极小子集渲染：
-    //       代码围栏 / # 标题 / - * 列表 / > 引用 / --- 分隔线 /
-    //       **粗体** / *斜体* / 行内代码 / 链接 [t](url)
-    //     不认识的语法一律按纯文本输出，绝不吞字。
-    var ENG_MD_INLINE = [
-      // 行内代码优先级最高：内部的 ** / * 不应再被解析
-      { re: /\x60([^\x60\n]+)\x60/g, kind: 'code' },
-      { re: /\*\*([^*\n]+)\*\*/g, kind: 'bold' },
-      { re: /(?<!\*)\*([^*\n]+)\*(?!\*)/g, kind: 'italic' },
-      { re: /(?<![\w])_([^_\n]+)_(?![\w])/g, kind: 'italic' },
-      { re: /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, kind: 'link' }
-    ];
-
-    /** 把一段行内文本渲染成 React 节点数组（递归下降，最多 3 层防炸）。 */
-    function engRenderInline(text, keyPrefix, depth) {
-      var s = String(text == null ? '' : text);
-      if (!s) return [];
-      var d = depth || 0;
-      if (d > 3) return [s];
-      var best = null;
-      for (var i = 0; i < ENG_MD_INLINE.length; i++) {
-        var rule = ENG_MD_INLINE[i];
-        rule.re.lastIndex = 0;
-        var m = rule.re.exec(s);
-        if (!m) continue;
-        if (!best || m.index < best.m.index ||
-            (m.index === best.m.index && m[0].length > best.m[0].length)) {
-          best = { rule: rule, m: m };
-        }
-      }
-      if (!best) return [s];
-      var m2 = best.m;
-      var out = [];
-      if (m2.index > 0) out.push(s.slice(0, m2.index));
-      var inner = m2[1] != null ? m2[1] : m2[0];
-      var tail = s.slice(m2.index + m2[0].length);
-      var key = keyPrefix + '-' + best.rule.kind;
-      if (best.rule.kind === 'code') {
-        out.push(h('code', { className: 'eng-md-code', key: key }, inner));
-      } else if (best.rule.kind === 'bold') {
-        out.push(h('strong', { key: key }, engRenderInline(inner, key, d + 1)));
-      } else if (best.rule.kind === 'italic') {
-        out.push(h('em', { key: key }, engRenderInline(inner, key, d + 1)));
-      } else if (best.rule.kind === 'link') {
-        out.push(h('a', {
-          className: 'eng-md-link', key: key,
-          href: m2[2], target: '_blank', rel: 'noreferrer noopener'
-        }, engRenderInline(inner, key, d + 1)));
-      } else {
-        out.push(inner);
-      }
-      var rest = engRenderInline(tail, key + 'r', d + 1);
-      for (var j = 0; j < rest.length; j++) out.push(rest[j]);
-      return out;
-    }
-
-    /** 把整段 Markdown 文本渲染成 React 节点数组（块级 + 行内）。 */
-    function engRenderMarkdown(src, keyPrefix) {
-      var text = String(src == null ? '' : src).replace(/\r\n?/g, '\n');
-      var lines = text.split('\n');
-      var out = [];
-      var kp = keyPrefix || 'md';
-      var i = 0;
-      var seq = 0;
-      function nextKey() { return kp + '-' + (seq++); }
-      var FENCE_RE = /^\s*(\x60{3,}|~{3,})\s*([\w+-]*)\s*$/;
-      var H_RE = /^\s*(#{1,6})\s+(.*)$/;
-      var HR_RE = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/;
-      var Q_RE = /^\s*>\s?/;
-      var LI_RE = /^\s*([-*+]|\d{1,3}[.)])\s+/;
-      while (i < lines.length) {
-        var ln = lines[i];
-        // ① 代码围栏
-        var fence = FENCE_RE.exec(ln);
-        if (fence) {
-          var ch = fence[1].charAt(0);
-          var closeRe = new RegExp('^\\s*' + (ch === '~' ? '~' : '\\x60') + '{3,}\\s*$');
-          var codeLines = [];
-          i++;
-          while (i < lines.length && !closeRe.test(lines[i])) {
-            codeLines.push(lines[i]);
-            i++;
-          }
-          i++;
-          out.push(h('pre', { className: 'eng-md-pre', key: nextKey() },
-            h('code', null, codeLines.join('\n'))));
-          continue;
-        }
-        // ② 标题
-        var hd = H_RE.exec(ln);
-        if (hd) {
-          var lv = Math.min(6, hd[1].length);
-          out.push(h('div', { className: 'eng-md-h eng-md-h' + lv, key: nextKey() },
-            engRenderInline(hd[2], nextKey(), 0)));
-          i++;
-          continue;
-        }
-        // ③ 分隔线
-        if (HR_RE.test(ln)) {
-          out.push(h('div', { className: 'eng-md-hr', key: nextKey() }));
-          i++;
-          continue;
-        }
-        // ④ 引用
-        if (Q_RE.test(ln)) {
-          var quote = [];
-          while (i < lines.length && Q_RE.test(lines[i])) {
-            quote.push(lines[i].replace(Q_RE, ''));
-            i++;
-          }
-          out.push(h('div', { className: 'eng-md-quote', key: nextKey() },
-            engRenderMarkdown(quote.join('\n'), nextKey())));
-          continue;
-        }
-        // ⑤ 列表（有序 / 无序）
-        if (LI_RE.test(ln)) {
-          var ordered = /^\s*\d{1,3}[.)]\s+/.test(ln);
-          var items = [];
-          while (i < lines.length && LI_RE.test(lines[i])) {
-            items.push(lines[i].replace(LI_RE, ''));
-            i++;
-            while (i < lines.length && /^\s{2,}\S/.test(lines[i])
-                   && !LI_RE.test(lines[i])) {
-              items[items.length - 1] += ' ' + lines[i].trim();
-              i++;
-            }
-          }
-          out.push(h(ordered ? 'ol' : 'ul', { className: 'eng-md-list', key: nextKey() },
-            items.map(function (it, ii) {
-              return h('li', { key: nextKey() + '-li' + ii },
-                engRenderInline(it, nextKey() + '-li' + ii, 0));
-            })));
-          continue;
-        }
-        // ⑥ 空行
-        if (!ln.trim()) { i++; continue; }
-        // ⑦ 普通段落：连续非空行合并（行间用 <br> 保留换行）
-        var para = [];
-        while (i < lines.length && lines[i].trim()
-               && !FENCE_RE.test(lines[i]) && !H_RE.test(lines[i])
-               && !HR_RE.test(lines[i]) && !Q_RE.test(lines[i])
-               && !LI_RE.test(lines[i])) {
-          para.push(lines[i]);
-          i++;
-        }
-        if (para.length) {
-          var pk = nextKey();
-          var nodes = [];
-          for (var ci = 0; ci < para.length; ci++) {
-            if (ci) nodes.push(h('br', { key: pk + '-br' + ci }));
-            var inl = engRenderInline(para[ci], pk + '-c' + ci, 0);
-            for (var q = 0; q < inl.length; q++) nodes.push(inl[q]);
-          }
-          out.push(h('div', { className: 'eng-md-p', key: pk }, nodes));
-        } else {
-          i++;   // 防御：避免死循环
-        }
-      }
-      return out;
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // ══════════════════════════════════════════════════════════════════════
-    // 【问问AI】每个 DSH 会话一份独立历史：切会话自动跟随，话题可新建/可关闭。
-    var ENG_SIDE_LIMIT = 30;   // 每个 DSH 会话最多保留 30 个话题，防内存膨胀
-    var ENG_SIDE_CN = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
-                       '十一', '十二', '十三', '十四', '十五', '十六', '十七',
-                       '十八', '十九', '二十'];
-
-    /** 生成「对话一」这种中文序号名。 */
-    function engSideName(n) {
-      var idx = Math.max(0, (n | 0) - 1);
-      return '对话' + (ENG_SIDE_CN[idx] || String(n));
-    }
-
-
-    function SelectionDetailLayer(props) {
-      // ── 作用域门禁：设置里关掉「右键引用调出AI解释」→ 完全不工作 ──────
-      // 用户强调「这个功能是必须要有效的」，所以这里必须是【真门禁】：
-      //   关闭时不挂鼠标监听、不渲染按钮/面板（零副作用）。
-      // ⚠️ 所有 hook 必须在 return 之前调用（React hooks 规则）。
-      var settings = useEngSettings();
-      // ── 当前 DSH 会话 id（响应式：切会话自动重算）──────────────────────
-      // 用 useSessions 选择器取 mainView 保留者 —— 这是官方 root 侧标准做法
-      //   （ui-layout/DocumentTitle.tsx:19-23 等多处）。
-      var dshSessionId = '';
-      try {
-        dshSessionId = (typeof props.useEngCurrentSessionId === 'function')
-          ? String(props.useEngCurrentSessionId(function (v) { return v; }) || '')
-          : '';
-      } catch (e) { dshSessionId = ''; }
-      // props 里拿不到时再退回 DOM 探针（放在 effect 里以保持 hooks 稳定）
-      var st = useState({
-        open: false,
-        anchor: null,
-        btnVisible: false,
-        selectionPreview: '',
-        // ── 按 DSH 会话分组的话题表 ────────────────────────────────────
-        //   bySession: { [dshSessionId]: { topics: [...], activeId, seq } }
-        //   每个 topic = { id, name, selection, messages, input }
-        bySession: {},
-        // DOM 探到的会话 id（props 拿不到时用）
-        domSessionId: '',
-        busy: false,
-        err: null,
-        route: null,
-        sending: false,
-        sentTo: null,
-        sentDrafted: false,
-        size: { w: 470, h: 580 },
-      });
-      var S = st[0];
-      var setS = st[1];
-      function patch(o) {
-        st[1](function (p) {
-          var n = {};
-          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-          for (var k2 in o) if (Object.prototype.hasOwnProperty.call(o, k2)) n[k2] = o[k2];
-          return n;
-        });
-      }
-
-      // ── 有效的 DSH 会话 key ───────────────────────────────────────────
-      //   优先 props 的响应式值；其次 DOM 探针；都没有则用 '__anon__'。
-      var sessionKey = String(dshSessionId || S.domSessionId || '__anon__');
-      var bucket = S.bySession[sessionKey] || { topics: [], activeId: null, seq: 0 };
-      var curTopic = null;
-      for (var bi = 0; bi < bucket.topics.length; bi++) {
-        if (bucket.topics[bi].id === bucket.activeId) { curTopic = bucket.topics[bi]; break; }
-      }
-
-      /** 修改某个 DSH 会话的 bucket（不可变更新）。 */
-      function patchBucket(sid, fn) {
-        st[1](function (p) {
-          var n = {};
-          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-          var bs = {};
-          for (var kk in p.bySession) if (Object.prototype.hasOwnProperty.call(p.bySession, kk)) bs[kk] = p.bySession[kk];
-          var old = bs[sid] || { topics: [], activeId: null, seq: 0 };
-          bs[sid] = fn(old);
-          n.bySession = bs;
-          return n;
-        });
-      }
-      /** 更新当前话题的若干字段。 */
-      function patchCur(fields) {
-        var sid = sessionKey;
-        patchBucket(sid, function (b) {
-          var topics = b.topics.map(function (t) {
-            if (t.id !== b.activeId) return t;
-            var nt = {};
-            for (var k in t) if (Object.prototype.hasOwnProperty.call(t, k)) nt[k] = t[k];
-            for (var k2 in fields) if (Object.prototype.hasOwnProperty.call(fields, k2)) nt[k2] = fields[k2];
-            return nt;
-          });
-          return { topics: topics, activeId: b.activeId, seq: b.seq };
-        });
-      }
-      var panelRef = useRef(null);
-      var listRef = useRef(null);
-
-      /** 在当前 DSH 会话下新建一个话题（点「问问AI」时调用）。 */
-      function newTopic(selectionText) {
-        var id = 't' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
-        var sid = sessionKey;
-        patchBucket(sid, function (b) {
-          var n = (b.seq || 0) + 1;
-          var topic = {
-            id: id,
-            name: engSideName(n),
-            selection: String(selectionText || ''),
-            messages: [],
-            input: '',
-          };
-          var topics = b.topics.concat([topic]);
-          // 超上限：丢最早的（当前这个永不丢）
-          while (topics.length > ENG_SIDE_LIMIT) {
-            var dropIdx = -1;
-            for (var i = 0; i < topics.length; i++) {
-              if (topics[i].id !== id) { dropIdx = i; break; }
-            }
-            if (dropIdx < 0) break;
-            topics.splice(dropIdx, 1);
-          }
-          return { topics: topics, activeId: id, seq: n };
-        });
-        patch({ err: null });
-        return id;
-      }
-
-      /** 关闭某个话题（标签页上的 ×）。 */
-      function closeTopic(topicId) {
-        var sid = sessionKey;
-        patchBucket(sid, function (b) {
-          var topics = b.topics.filter(function (t) { return t.id !== topicId; });
-          var activeId = b.activeId;
-          if (activeId === topicId) {
-            // 关的是当前标签 → 切到相邻的一个（优先右边，其次左边）
-            var oldIdx = 0;
-            for (var i = 0; i < b.topics.length; i++) {
-              if (b.topics[i].id === topicId) { oldIdx = i; break; }
-            }
-            var next = topics[oldIdx] || topics[oldIdx - 1] || null;
-            activeId = next ? next.id : null;
-          }
-          return { topics: topics, activeId: activeId, seq: b.seq };
-        });
-        patch({ err: null });
-      }
-
-      // ── DOM 探针：props 拿不到会话 id 时兜底（切会话时更新）────────────
-      useEffect(function () {
-        if (dshSessionId) return;
-        var read = function () {
-          var v = '';
-          try {
-            var el = document.querySelector('[data-conversation-session]');
-            v = (el && el.getAttribute('data-conversation-session')) || '';
-            if (!v) {
-              var el2 = document.querySelector('[data-conversation-content]');
-              v = (el2 && el2.getAttribute('data-conversation-session')) || '';
-            }
-          } catch (e) { }
-          if (v && v !== S.domSessionId) patch({ domSessionId: String(v) });
-        };
-        read();
-        var iv = setInterval(read, 1200);
-        return function () { clearInterval(iv); };
-      }, [dshSessionId, S.domSessionId]);
-
-      // ── 读取当前会话的模型路由 ────────────────────────────────────────
-      useEffect(function () {
-        if (!S.open || S.route) return;
-        try {
-          var sid = sessionKey === '__anon__' ? null : sessionKey;
-          if (!sid) return;
-          fetch('/dsh-engineering-ui/log?sessionId=' + encodeURIComponent(sid) + '&limit=1')
-            .then(function (r) { return r.json(); })
-            .then(function (j) {
-              if (j && j.ok && j.route && j.route.provider && j.route.model) {
-                patch({ route: j.route });
-              }
-            })
-            .catch(function () { });
-        } catch (e) { }
-      }, [S.open, S.route, sessionKey]);
-
-      // ── ① 划词检测 ────────────────────────────────────────────────────
-      useEffect(function () {
-        var onUp = function () {
-          try {
-            var sel = window.getSelection ? window.getSelection() : null;
-            if (!sel || sel.isCollapsed) { patch({ btnVisible: false }); return; }
-            var text = String(sel.toString() || '').trim();
-            if (text.length < 2) { patch({ btnVisible: false }); return; }
-            var node = sel.anchorNode;
-            var el = node && node.nodeType === 1 ? node : (node ? node.parentElement : null);
-            var inConv = false;
-            while (el) {
-              if (el.getAttribute && (el.getAttribute('data-conversation-content') !== null
-                  || el.getAttribute('data-conversation-scroll') !== null)) { inConv = true; break; }
-              el = el.parentElement;
-            }
-            if (!inConv) { patch({ btnVisible: false }); return; }
-            var rect = null;
-            try {
-              var r = sel.getRangeAt(0).getBoundingClientRect();
-              if (r && (r.width || r.height)) rect = { left: r.left, top: r.top, bottom: r.bottom, right: r.right };
-            } catch (e) { }
-            patch({ btnVisible: true, selectionPreview: text.slice(0, 8000), anchor: rect });
-          } catch (e) { }
-        };
-        var onDown = function (ev) {
-          try {
-            var t = ev.target;
-            if (t && t.closest && (t.closest('.eng-sel-btn') || t.closest('.eng-side'))) return;
-            patch({ btnVisible: false });
-          } catch (e) { }
-        };
-        document.addEventListener('mouseup', onUp, true);
-        document.addEventListener('mousedown', onDown, true);
-        return function () {
-          document.removeEventListener('mouseup', onUp, true);
-          document.removeEventListener('mousedown', onDown, true);
-        };
-      }, []);
-
-      // 面板打开时滚动到底（流式时跟着滚）
-      var curMsgs = (curTopic && curTopic.messages) || [];
-      var lastLen = curMsgs.length ? String(curMsgs[curMsgs.length - 1].text || '').length : 0;
-      useEffect(function () {
-        var box = listRef.current;
-        if (box) box.scrollTop = box.scrollHeight;
-      }, [S.open, bucket.activeId, sessionKey, curMsgs.length, lastLen]);
-
-      // ── ② 发起一次分析（只作用于当前话题）─────────────────────────────
-      var ask = function (questionText) {
-        var q = String(questionText || '').trim();
-        if (S.busy) return;
-        if (!curTopic) return;
-        if (!S.route) {
-          patch({ err: '无法确定模型路由（请确认当前会话已开始过，或稍后重试）' });
-          return;
-        }
-        var nextMsgs = curTopic.messages.slice();
-        if (q) nextMsgs.push({ role: 'user', text: q });
-        var withPlaceholder = nextMsgs.concat([{ role: 'assistant', text: '', streaming: true }]);
-        var botIdx = withPlaceholder.length - 1;
-        var targetSid = sessionKey;
-        var targetTid = curTopic.id;
-        patch({ busy: true, err: null });
-        patchCur({ messages: withPlaceholder, input: '' });
-
-        /** 写回【发起时那个话题】，不依赖"当前显示谁"。 */
-        var writeBot = function (mutate) {
-          st[1](function (p) {
-            var n = {};
-            for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-            var bs = {};
-            for (var kk in p.bySession) if (Object.prototype.hasOwnProperty.call(p.bySession, kk)) bs[kk] = p.bySession[kk];
-            var b = bs[targetSid];
-            if (b) {
-              var topics = b.topics.map(function (t) {
-                if (t.id !== targetTid) return t;
-                var msgs = t.messages.slice();
-                mutate(msgs);
-                var nt = {};
-                for (var k3 in t) if (Object.prototype.hasOwnProperty.call(t, k3)) nt[k3] = t[k3];
-                nt.messages = msgs;
-                return nt;
-              });
-              bs[targetSid] = { topics: topics, activeId: b.activeId, seq: b.seq };
-            }
-            n.bySession = bs;
-            return n;
-          });
-        };
-        var setBotText = function (latest, done) {
-          writeBot(function (msgs) {
-            if (msgs[botIdx]) {
-              msgs[botIdx] = { role: 'assistant', text: String(latest || ''), streaming: !done };
-            }
-          });
-          if (done) patch({ busy: false });
-        };
-        var setErr = function (m) {
-          writeBot(function (msgs) {
-            if (msgs[botIdx] && !msgs[botIdx].text) msgs.splice(botIdx, 1);
-          });
-          patch({ busy: false, err: String(m || '分析失败') });
-        };
-
-        fetch('/dsh-engineering-ui/side-chat', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'accept': 'text/event-stream' },
-          body: JSON.stringify({
-            selection: curTopic.selection,
-            messages: nextMsgs,
-            provider: S.route.provider,
-            model: S.route.model,
-            stream: '1',
-          }),
-        })
-          .then(function (r) {
-            var ct = String((r.headers && r.headers.get && r.headers.get('content-type')) || '');
-            if (ct.indexOf('text/event-stream') < 0) {
-              return r.json().then(function (j) {
-                if (j && j.ok && j.reply) setBotText(j.reply, true);
-                else setErr((j && j.error) || '分析失败');
-              });
-            }
-            var reader = r.body && r.body.getReader ? r.body.getReader() : null;
-            if (!reader) {
-              return r.text().then(function (txt) {
-                var m = /"reply"\s*:\s*"([\s\S]*?)"\s*\}/.exec(txt);
-                if (m) setBotText(m[1], true); else setErr('无法读取响应');
-              });
-            }
-            var dec = new TextDecoder();
-            var buf = '';
-            var finished = false;
-            var pump = function () {
-              return reader.read().then(function (res) {
-                if (res.done) {
-                  if (!finished) setBotText('', true);
-                  return;
-                }
-                buf += dec.decode(res.value, { stream: true });
-                var parts = buf.split('\n\n');
-                buf = parts.pop();
-                for (var i = 0; i < parts.length; i++) {
-                  var line = parts[i].trim();
-                  if (line.indexOf('data:') !== 0) continue;
-                  var obj = null;
-                  try { obj = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
-                  if (!obj) continue;
-                  if (obj.type === 'delta') setBotText(obj.text, false);
-                  else if (obj.type === 'done') { finished = true; setBotText(obj.reply, true); }
-                  else if (obj.type === 'error') { finished = true; setErr(obj.error); }
-                }
-                return pump();
-              });
-            };
-            return pump();
-          })
-          .catch(function (e) {
-            setErr(String((e && e.message) || e));
-          });
-      };
-
-      // ── ③ 回填到主对话输入框 ─────────────────────────────────────────
-      var addToConversation = function (text) {
-        var body = String(text || '').trim();
-        if (!body) return false;
-        try {
-          var el = document.querySelector('[data-conversation-region="composer"] [contenteditable="true"]');
-          if (!el) return false;
-          el.focus();
-          var pre = String(el.textContent || '').trim() ? '\n\n' : '';
-          document.execCommand('insertText', false, pre + body);
-          return true;
-        } catch (e) { return false; }
-      };
-
-      // ── ④ 一键发送给工作模式建模 ──────────────────────────────────────
-      var sendToWorkMode = function () {
-        if (S.sending) return;
-        if (!curTopic) return;
-        var analysis = curTopic.messages.filter(function (m) { return m.role === 'assistant' && m.text; })
-          .map(function (m) { return String(m.text).trim(); }).filter(Boolean).join('\n\n---\n\n');
-        var sel = String(curTopic.selection || '').trim();
-        if (!sel && !analysis) {
-          patch({ err: '没有可发送的内容' });
-          return;
-        }
-        patch({ sending: true, err: null });
-        engSendToWorkSession(engComposeWorkPrompt({ source: sel, analysis: analysis }))
-          .then(function (res) {
-            patch({
-              sending: false, err: null,
-              sentTo: (res && res.sessionId) || null,
-              sentDrafted: !!(res && res.drafted),
-            });
-          })
-          .catch(function (e3) {
-            patch({ sending: false, err: '发送到工作模式失败：' + String((e3 && e3.message) || e3) });
-          });
-      };
-
-      // ══ 设置门禁（所有 hook 之后）══════════════════════════════════════
-      if (!settings.enableSelectionExplain) return null;
-
-      var msgs = (curTopic && curTopic.messages) || [];
-
-      // ── 浮层按钮：在当前 DSH 会话下新建一个话题 ────────────────────────
-      var btn = null;
-      if (S.btnVisible && S.anchor) {
-        var W = 92;
-        var cx = (S.anchor.left + S.anchor.right) / 2;
-        var left = Math.max(8, Math.min((window.innerWidth || 1200) - W - 8, cx - W / 2));
-        var below = (S.anchor.bottom + 8);
-        var useAbove = below + 30 > (window.innerHeight || 800) - 8;
-        var top = useAbove ? Math.max(8, S.anchor.top - 34) : below;
-        btn = h('button', {
-          className: 'eng-sel-btn',
-          type: 'button',
-          style: { left: left + 'px', top: top + 'px' },
-          // ⚠️ 用 onMouseDown 而不是 onClick：mouseup 会先改变选区。
-          onMouseDown: function (ev) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            var picked = String(S.selectionPreview || '').trim();
-            newTopic(picked);
-            patch({ open: true, btnVisible: false, err: null });
-            setTimeout(function () { ask(''); }, 0);
-          },
-        }, '问问AI');
-      }
-
-      // ── 浏览器式标签页（可关闭）───────────────────────────────────────
-      var tabs = null;
-      if (bucket.topics.length) {
-        tabs = h('div', { className: 'eng-side-tabs' },
-          bucket.topics.map(function (t) {
-            var on = t.id === bucket.activeId;
-            return h('div', {
-              key: 'tab-' + t.id,
-              className: 'eng-side-tab' + (on ? ' on' : ''),
-              title: (t.selection ? String(t.selection).slice(0, 90) : t.name),
-            },
-              h('button', {
-                className: 'eng-side-tab-t',
-                type: 'button',
-                onClick: function () {
-                  if (S.busy) return;
-                  var sid2 = sessionKey;
-                  patchBucket(sid2, function (b) {
-                    return { topics: b.topics, activeId: t.id, seq: b.seq };
-                  });
-                  patch({ err: null, sentTo: null, sentDrafted: false });
-                },
-              }, t.name,
-                t.messages.length
-                  ? h('span', { className: 'eng-side-tab-n' }, String(t.messages.length))
-                  : null),
-              h('button', {
-                className: 'eng-side-tab-x',
-                type: 'button',
-                title: '关闭「' + t.name + '」',
-                onClick: function (ev2) {
-                  try { ev2.stopPropagation(); } catch (e) { }
-                  if (S.busy) return;
-                  closeTopic(t.id);
-                },
-              }, '×'));
-          }),
-          h('button', {
-            className: 'eng-side-tab add',
-            type: 'button',
-            title: '用当前选中文字，在本对话下新建一个话题',
-            onClick: function () {
-              if (S.busy) return;
-              var picked = String(S.selectionPreview || '').trim();
-              if (!picked) { patch({ err: '请先在对话里划选一段文字，再新建话题' }); return; }
-              newTopic(picked);
-              patch({ err: null });
-              setTimeout(function () { ask(''); }, 0);
-            },
-          }, '＋'));
-      }
-
-      // ── 右下角面板 ────────────────────────────────────────────────────
-      var panel = null;
-      if (S.open) {
-        var rows = msgs.map(function (m, i) {
-          var isBot = m.role === 'assistant';
-          return h('div', { key: 'm' + i, className: 'eng-side-row ' + (isBot ? 'bot' : 'me') },
-            h('div', { className: 'eng-side-bubble' },
-              isBot
-                ? engRenderMarkdown(m.text, 'md' + i)
-                : m.text),
-            isBot && m.text && !m.streaming
-              ? h('div', { className: 'eng-side-acts' },
-                  h('button', {
-                    className: 'eng-side-act',
-                    type: 'button',
-                    title: '把这段分析插入主对话输入框',
-                    onClick: function () {
-                      var ok = addToConversation(m.text);
-                      if (!ok) patch({ err: '找不到输入框，无法回填' });
-                    },
-                  }, '添加到对话'))
-              : null);
-        });
-        panel = h('div', {
-            className: 'eng-side',
-            ref: panelRef,
-            style: { width: S.size.w + 'px', height: S.size.h + 'px' },
-          },
-          h('div', {
-            className: 'eng-side-grip',
-            title: '拖动调整大小',
-            onPointerDown: function (ev) {
-              try {
-                ev.preventDefault();
-                ev.stopPropagation();
-                var el = ev.currentTarget;
-                if (el.setPointerCapture) el.setPointerCapture(ev.pointerId);
-                var startX = ev.clientX, startY = ev.clientY;
-                var w0 = S.size.w, h0 = S.size.h;
-                var move = function (e2) {
-                  var w = w0 + (startX - e2.clientX);
-                  var hh = h0 + (startY - e2.clientY);
-                  var maxW = Math.max(320, (window.innerWidth || 1200) - 36);
-                  var maxH = Math.max(240, (window.innerHeight || 800) - 36);
-                  w = Math.max(360, Math.min(maxW, w));
-                  hh = Math.max(280, Math.min(maxH, hh));
-                  patch({ size: { w: Math.round(w), h: Math.round(hh) } });
-                };
-                var up = function () {
-                  document.removeEventListener('pointermove', move, true);
-                  document.removeEventListener('pointerup', up, true);
-                };
-                document.addEventListener('pointermove', move, true);
-                document.addEventListener('pointerup', up, true);
-              } catch (e) { }
-            },
-          }, '⤡'),
-          h('div', { className: 'eng-side-hd' },
-            h('span', { className: 'eng-side-ico' }, '💬'),
-            h('span', { className: 'eng-side-title' }, '问问AI'),
-            h('span', { className: 'eng-side-badge' },
-              (curTopic ? curTopic.name : '无话题')
-              + (sessionKey === '__anon__' ? '' : '')),
-            h('button', {
-              className: 'eng-side-x',
-              type: 'button',
-              title: '关闭面板（各话题历史保留，重新打开继续）',
-              onClick: function () { patch({ open: false }); },
-            }, '×')),
-          tabs,
-          curTopic
-            ? h('div', { className: 'eng-side-src', title: curTopic.selection }, curTopic.selection)
-            : h('div', { className: 'eng-side-src' },
-                '本对话还没有话题 —— 在对话里划选一段文字，点「问问AI」开始'),
-          h('div', { className: 'eng-side-list', ref: listRef },
-            rows.length
-              ? rows
-              : h('div', { className: 'eng-side-note' },
-                  S.busy ? '正在分析…' : '正在等待分析…'),
-            S.err ? h('div', { className: 'eng-side-err' }, S.err) : null),
-          h('div', { className: 'eng-side-work' },
-            h('button', {
-              className: 'eng-side-workbtn',
-              type: 'button',
-              disabled: S.sending || S.busy || !curTopic
-                || (!curTopic.selection && !curTopic.messages.length),
-              title: '新建一个工程模式会话，把本次分析交给它去建模',
-              onClick: function () { sendToWorkMode(); },
-            }, S.sending ? '正在交给工作模式…' : '⚙ 一键发送给工作模式建模'),
-            S.sentTo
-              ? h('div', { className: 'eng-side-ok' }, S.sentDrafted
-                  ? '已新建工作会话并把任务填入输入框，请按回车开始'
-                  : '已发送，正在跳转到新的工作会话…')
-              : null),
-          h('div', { className: 'eng-side-ft' },
-            h('input', {
-              className: 'eng-side-in',
-              type: 'text',
-              placeholder: (curTopic ? curTopic.name : '') + '·继续追问…（Enter 发送）',
-              value: curTopic ? (curTopic.input || '') : '',
-              disabled: S.busy || !curTopic,
-              onChange: function (ev) { patchCur({ input: ev.target.value }); },
-              onKeyDown: function (ev) {
-                if (ev.key === 'Enter' && !ev.shiftKey) {
-                  ev.preventDefault();
-                  ask(curTopic ? curTopic.input : '');
-                }
-              },
-            }),
-            h('button', {
-              className: 'eng-side-send',
-              type: 'button',
-              disabled: S.busy || !curTopic || !String(curTopic.input || '').trim(),
-              onClick: function () { ask(curTopic ? curTopic.input : ''); },
-            }, S.busy ? '…' : '↑')));
-      }
-
-      if (!btn && !panel) return null;
-      return h('div', { className: 'eng-sel-host', style: { display: 'contents' } }, btn, panel);
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // 【一键发送给Agent建模】—— 每条助手回复的操作行按钮
-    // ══════════════════════════════════════════════════════════════════════
-    // 落点：官方插槽 conversation.chat.assistant-actions
-    //   （ui-chat/src/client/contract/slots.ts:321，kind:'list' scope:'session'，
-    //     ownerProps = { messageId }；由 ui-chat 的 register-node-renderers.ts:71
-    //     声明，TurnTailNodeView 用 renderSlot 渲染到
-    //     MessageIconActions 那一排 —— 也就是复制/点赞/分享/时间戳所在的行）。
-    //
-    // 行为：读当前会话的完整对话 → 组装任务 → 新开一个工程模式工作会话 →
-    //   把任务作为该会话首轮发出去 → 跳转过去开始建模。
-    function EngSendToAgentAction(props) {
-      // ⚠️ hooks 必须在任何 return 之前（本文件已有前车之鉴）
-      var st = useState({ busy: false, done: false, drafted: false, err: null });
-      var sessionId = props.sessionId;
-      var useSessions = props.useSessions;
-
-      // ── 作用域门禁：只在【工程模式】会话里出现 ──────────────────────
-      // 用户反馈：「蔓延到非工程模式里面去了」。
-      //   这个按钮会把整段对话交给一个新的工程模式工作 Agent，
-      //   它是工程模式的入口，不该出现在标准模式/其它预设的会话里。
-      // 必须在所有 hook 之后判断（否则 hook 数量变化 → entry 永久失效）。
-      var preset = (typeof useSessions === 'function')
-        ? useSessions(function (s) {
-            if (!sessionId) return null;
-            var row = s && s.byId ? s.byId[sessionId] : null;
-            return row
-              ? ((row.projectionValues && row.projectionValues.agentPreset) || row.agentPreset || null)
-              : null;
-          })
-        : null;
-
-      var run = function () {
-        if (st[0].busy) return;
-        st[1](function (p) {
-          var n = {};
-          for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-          n.busy = true; n.err = null; n.done = false;
-          return n;
-        });
-        engFetchTranscript(engCurrentSessionId(sessionId)).then(function (tr) {
-          if (!String(tr || '').trim()) {
-            throw new Error('读不到当前会话的对话内容（请确认该会话已开始过）');
-          }
-          return engSendToWorkSession(engComposeWorkPrompt({ transcript: tr }));
-        }).then(function (res) {
-          st[1](function (p) {
-            var n = {};
-            for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-            n.busy = false;
-            n.done = !!(res && res.sent);
-            n.drafted = !!(res && res.drafted);
-            return n;
-          });
-        }).catch(function (e) {
-          var msg = String((e && e.message) || e);
-          try { console.warn('[dsh-engineering-ui] 一键发送给Agent建模失败:', msg); } catch (e2) {}
-          st[1](function (p) {
-            var n = {};
-            for (var k in p) if (Object.prototype.hasOwnProperty.call(p, k)) n[k] = p[k];
-            n.busy = false; n.err = msg;
-            return n;
-          });
-        });
-      };
-
-      // ── 门禁（所有 hook 之后）────────────────────────────────────────
-      // 只在工程模式会话显示。非工程模式 → return null（零 DOM、零副作用），
-      //   修「蔓延到非工程模式里面去了」。
-      if (preset !== ENG_PRESET_ID) return null;
-      // 该按钮独立于「右键引用调出AI解释」开关：
-      //   那个开关管的是划词浮层，与"把分析交给工作 Agent"是两件事，
-      //   共用一个开关会让用户关掉一个却连带失去另一个。
-      return h('span', { className: 'eng-msg-act-wrap' },
-        h('button', {
-          className: 'eng-msg-act' + (st[0].busy ? ' busy' : '') + (st[0].done ? ' done' : ''),
-          type: 'button',
-          disabled: st[0].busy,
-          title: st[0].err
-            ? ('发送失败：' + st[0].err)
-            : '新开一个「工程模式的工作」Agent，按这段聊天的分析数据开始建模',
-          onClick: function (ev) { ev.preventDefault(); ev.stopPropagation(); run(); },
-        }, st[0].busy ? '正在新建…'
-          : (st[0].done ? '✓ 已交给工作Agent'
-            : (st[0].drafted ? '✓ 已填入新会话，按回车发送' : '⚙ 一键发送给Agent建模'))),
-        // 失败必须【看得见原因】，只写"失败"等于让用户无从下手
-        st[0].err ? h('span', { className: 'eng-msg-act-err', title: st[0].err }, st[0].err.slice(0, 40)) : null);
-    }
 
     function apply(ctx) {
       installStyle();
@@ -7318,11 +6472,10 @@ window.__ModuleLoader__.load({
       } catch (e) { _hostRightbar = null; }
       try { ctx.effect(function () { installStyle(); }, 'dsh-engineering-ui: styles'); } catch (e) { installStyle(); }
       try { ctx.effect(function () { return installFrameWidthSync(); }, 'dsh-engineering-ui: frame sync'); } catch (e) { installFrameWidthSync(); }
-      // 【问题1 修复】主对话原生问答卡片的倒计时（仅工程模式生效）
-      try {
-        ctx.effect(function () { return installQuestionCountdown(120); },
-                   'dsh-engineering-ui: question countdown');
-      } catch (e) { try { installQuestionCountdown(120); } catch (e2) {} }
+      // ── 【已删除 · 2026-11-08】主对话问答卡片的倒计时 ───────────────────
+      // 用户要求整体删除（原话：「算了算了，你帮我把倒计时给删了吧」）。
+      // 原实现在 120 秒后自动选「推荐项」并提交，用户真实选择还没送出
+      // 就被默认值顶掉（session-6e5c9b47 现场）。现不再装配任何计时器。
       // 【本次改动·Bug1】清理模型退化哨兵文本（只影响显示，不改任何数据）
       try {
         ctx.effect(function () { return installSentinelSweeper(); },
@@ -7347,7 +6500,7 @@ window.__ModuleLoader__.load({
       // 旧实现：ENG_MODE_CLASS 只在 SubagentConsole 的 useEffect 里挂，
       //   而该组件在 preset !== 'engineering' 或「设置关闭」时会【提前 return】
       //   → effect 不执行 → body 上没有 dsh-eng-mode →
-      //   installQuestionCountdown() 的 isEngMode() 恒为 false →
+      //   （该函数已随倒计时删除。）
       //   直接 stopAll() 不挂表 → 用户看到「倒计时没了」。
       //   （同时还会让主对话排版样式一起失效，属于同一个根因。）
       // 现在：由常驻的 EngModeMarker 独立维护这个类，与面板是否渲染解耦。
@@ -7365,22 +6518,6 @@ window.__ModuleLoader__.load({
           return ctx.slots.register({ name: 'shell.overlay', id: 'eng-subagent-console', order: 31, label: '子代理控制台' }, SubagentConsole);
         });
       } catch (e) { console.error('[dsh-engineering-ui] console slot', e); }
-
-      // ══ 【划词详情】右下角分析面板（shell.overlay 的独立住户）════════════
-      // 用户需求（对照三张截图）：
-      //   · 在 Agent 回复里划选文字 → 浮现「更多详情」；
-      //   · 点击 → 右下角小面板，就这段内容展开分析；
-      //   · 分析结果可「添加到对话」回填到主对话输入框。
-      // 落点：shell.overlay（root 作用域，全帧覆盖层），因此不受会话切换影响。
-      //   order=40：排在子代理控制台(31)之后，保证浮在最上层。
-      try {
-        ctx.slots.inject('shell.overlay', function () {
-          return ctx.slots.register(
-            { name: 'shell.overlay', id: 'eng-selection-detail', order: 40, label: '划词详情' },
-            SelectionDetailLayer,
-          );
-        });
-      } catch (e) { console.error('[dsh-engineering-ui] selection detail slot', e); }
 
       // ══ 【需求1】模式说明 / 如何使用弹窗（预设卡片上的入口）═════════════
       // 落点：shell.overlay（root 作用域全帧覆盖层），常驻但默认渲染 null，
@@ -7401,19 +6538,93 @@ window.__ModuleLoader__.load({
         console.error('[dsh-engineering-ui] preset guide injector', e);
       }
 
-      // ══ 【一键发送给Agent建模】每条助手回复的操作行按钮 ═════════════════
-      // 落点 = 官方 conversation.chat.assistant-actions（复制/点赞/分享那一排）。
-      // 用 slots.inject 等官方声明出现（由 ui-chat 的 register-node-renderers.ts
-      //   声明），声明消失/重建时自动注销与重装。
+      // ══ 【会话视图 · 页签名「工程模式」】官方 conversation.view 页签 ═══════
+      // 用户要求（2026-11-07）：
+      //   ① 「在黑框那里，加一个文字，官方叫"会话视图"」→ 已实现为官方页签；
+      //   ② 「上面那个应该是把"会话视图"改为"工程模式"」→ 页签显示名改成「工程模式」；
+      //   ③ 「那个会话视图哪怕开了，都是只能在工程模式运行，不能在其他模式运行」
+      //      → 非工程模式会话里【这个页签根本不出现】（不是进去看空页）。
+      //
+      // 官方契约（0.2.2-rc.1，已从 app.asar 逐字核对，别再凭猜）：
+      //   · resolveSlotLabel 的实现是：function EI(e){return typeof e=="function"?e():e}
+      //     —— 是函数就【空参调用】，不是函数就原样返回。没有 sessionId 可拿。
+      //   · viewTabs() 的过滤条件只有两条：id 必须存在；Trajectory 受开发工具开关
+      //     控制。**没有"label 为空就跳过"这回事**。
+      //   ⇒ 所以：想让页签"只在工程模式出现"，**不能**靠 label 返回空串
+      //     （那会得到一个没有文字的空白页签 —— 这正是上一轮的现象）。
+      //     唯一正确的做法是【真的注销注册】：非工程模式时根本不注册。
+      //   本函数的职责就是"按当前状态装或卸"，由 reinstallSessionView() 驱动。
+      var disposeSessionView = null;
+      var _sessionViewDisposer = null;
+      var _presetWatchDisposer = null;
+      /** 当前是否【应该】有「工程模式」页签（唯一判据，装卸都用它）。 */
+      function sessionViewWanted() {
+        // ① 设置页自己的开关（与右列三栏面板开关【解耦】）
+        if (_engSettings.showEngConversationView === false) return false;
+        // ② 只看会话预设：非工程模式会话一律不注册这个页签
+        return _sessionPresetIsEngineering();
+      }
+      var installSessionView = function () {
+        // 幂等：已经装着就不重复注册（同一 id 二次注册会被 SlotCore 拒绝）
+        if (typeof disposeSessionView === 'function') return;
+        if (!sessionViewWanted()) return;
+        try {
+          disposeSessionView = ctx.slots.inject('conversation.view', function () {
+            return ctx.slots.register({
+              name: 'conversation.view',
+              id: 'engineering-session',
+              order: 20,
+              // label 是【零参】函数（见上方契约说明）：返回固定文案即可。
+              //   出现/消失由"装不装"决定，不由返回值决定 —— 返回空串会得到
+              //   一个空白页签，而不是让它消失。
+              label: function () { return '工程模式'; },
+              inject: function (sessionId) {
+                return { sessionId: String(sessionId || '') };
+              },
+            }, EngSessionViewPage);
+          });
+        } catch (e) {
+          disposeSessionView = null;
+          console.error('[dsh-engineering-ui] conversation.view slot', e);
+        }
+      };
+      var uninstallSessionView = function () {
+        try { if (typeof disposeSessionView === 'function') disposeSessionView(); } catch (e) {}
+        disposeSessionView = null;
+      };
+      // 先把"当前主会话预设"快照建起来，再装页签 —— 否则首次渲染时
+      //   label() 只能退回 _isEngineeringContext()（那条在无子代理时为 false），
+      //   用户看到的就是一个【没有文字】的空白页签。
+      refreshEngMainPreset();
+      installSessionView();
+      // 会话列表一变（切换会话 / 预设改完 / 新建会话）就刷新快照，
+      //   并按需重装页签 —— 这样"工程模式"四个字不会因为会话状态变动而消失。
+      // ⚠️ 同样不能直接 disposers.push（此刻它还没赋值，见下方说明）
       try {
-        ctx.slots.inject('conversation.chat.assistant-actions', function () {
-          return ctx.slots.register({
-            name: 'conversation.chat.assistant-actions',
-            id: 'dsh-engineering-ui/send-to-agent',
-            order: 50,
-          }, EngSendToAgentAction);
-        });
-      } catch (e) { console.error('[dsh-engineering-ui] assistant-actions slot', e); }
+        var _engListSvc = engService('sessions');
+        var _engList = _engListSvc && _engListSvc.list;
+        if (_engList && typeof _engList.subscribe === 'function') {
+          var _d = _engList.subscribe(function () { refreshEngMainPreset(); });
+          if (typeof _d === 'function') _presetWatchDisposer = _d;
+        }
+      } catch (e) { console.error('[dsh-engineering-ui] preset watch', e); }
+      // 状态（开关 / 会话预设）一变就【重装】：不想要就真注销，想要就真注册。
+      //   这是"只在工程模式出现"的唯一实现方式 —— label 返回空串只能得到一个
+      //   空白页签，官方不会替你跳过（见上面契约说明）。
+      _reinstallSessionView = function () {
+        if (sessionViewWanted()) installSessionView();
+        else uninstallSessionView();
+      };
+      // ⚠️ 这里【不能】直接 disposers.push：apply() 里的 `var disposers = []`
+      //   声明在下方（var 提升只提升声明不提升赋值），此刻 disposers 还是
+      //   undefined → push 抛 TypeError → 整个 apply 中断（实测会让
+      //   eng-limit-popup 的两组真执行用例全红）。
+      //   因此先存到一个本作用域变量，等下面声明好再一并挂进 disposers。
+      _sessionViewDisposer = function () {
+        _reinstallSessionView = null;
+        uninstallSessionView();
+      };
+
       // ── 【问题4】设置页「工程模式」分区 ──────────────────────────────
       // order=25：紧跟「Agent 预设」(order=20) 之后。
       // label 用中文字面量（注册方自带文案，shell 不订阅 locale）。
@@ -7458,6 +6669,9 @@ window.__ModuleLoader__.load({
       //     同款信息（三栏工作区），只是被挂进了官方的右列 tab。
       var ENG_SUBAGENT_TAB_ID = 'dsh-engineering-ui/subagentchat';
       var disposers = [];
+      // 会话视图页签的卸载器（在上一节就已装配好，这里补挂进统一回收列表）
+      if (typeof _sessionViewDisposer === 'function') disposers.push(_sessionViewDisposer);
+      if (typeof _presetWatchDisposer === 'function') disposers.push(_presetWatchDisposer);
       // ══ 三条独立的 disposer 列表（互不干扰，这是 bug 的根治点）══════════
       // 教训（踩过两次）：
       //   · disposers     —— 插件【卸载】时统一回收，设置变化绝不碰它
@@ -8160,13 +7374,16 @@ window.__ModuleLoader__.load({
     exports.injectPresetGuideButtons = injectPresetGuideButtons;
     exports.startPresetGuideInjector = startPresetGuideInjector;
     exports.EngSwitch = EngSwitch;
+    // 【2026-11-07】零件进度表（子代理面板红线下方）—— 导出便于单测直接渲染
+    // 【布局 v12】EngCompactPanel → EngCompactPage（右列整页）；旧名保留别名，
+    //   避免外部/测试还在按老名字取；真正的渲染入口只认 EngCompactPage。
+    exports.EngCompactPage = EngCompactPage;
+    exports.EngCompactPanel = EngCompactPage;
+    exports.EngSessionViewPage = EngSessionViewPage;
+    exports.EngPartsBoard = EngPartsBoard;
     exports.SubagentDock = SubagentConsole;
     exports.formatMessage = formatMessage;
     exports.renderEvent = renderEvent;
-    // 【问问AI】Markdown 子集渲染器（供回归测试直接验证渲染结果）
-    exports.engRenderMarkdown = engRenderMarkdown;
-    exports.engRenderInline = engRenderInline;
-    exports.engSideName = engSideName;
     exports.AskCard = AskCard;
     exports.parseQuestions = parseQuestions;
     return module.exports;

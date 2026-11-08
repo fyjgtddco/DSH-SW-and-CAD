@@ -52,14 +52,36 @@ export const agentPresetProjectionDefinition = {
 };
 `;
 const url = (s) => 'data:text/javascript;base64,' + Buffer.from(s).toString('base64');
-const rewritten = readFileSync(join(__dirname, '..', 'lib', 'index.js'), 'utf8')
+/**
+ * 【通用兜底】lib/ 下新增模块时，显式替换链会漏一行 → data: URL 无法解析
+ *   相对路径 → 整组用例 ERR_UNSUPPORTED_RESOLVE_REQUEST。已连续踩到两次
+ *   （model-errors.js / turn-guard.js）。这里统一内联，新增文件不必再改测试。
+ */
+function inlineLocalLibs(src, libDir) {
+  let out = src;
+  const names = new Set();
+  const re = /from '\.\/([A-Za-z0-9_.-]+\.js)'/g;
+  let m;
+  while ((m = re.exec(src)) !== null) names.add(m[1]);
+  for (const name of names) {
+    let body;
+    try { body = readFileSync(join(libDir, name), 'utf8'); } catch (e) { continue; }
+    const inner = inlineLocalLibs(body, libDir);
+    out = out.split("from './" + name + "'").join("from '" + url(inner) + "'");
+  }
+  return out;
+}
+
+const rewritten = inlineLocalLibs(readFileSync(join(__dirname, '..', 'lib', 'index.js'), 'utf8'), join(__dirname, '..', 'lib'))
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + url(SHIM_LLM) + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + url(SHIM_REGISTRY) + "'")
   .replace("from './defense-sign.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'defense-sign.js'), 'utf8')) + "'")
   .replace("from './job-wait-guard.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'job-wait-guard.js'), 'utf8')) + "'")
   // 【Webots 接入】webots.js 也是相对 import；data: URL 解析不了相对路径。
   .replace("from './webots.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'webots.js'), 'utf8')) + "'")
-  .replace("from './mem-guard.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'mem-guard.js'), 'utf8')) + "'");
+  .replace("from './mem-guard.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'mem-guard.js'), 'utf8')) + "'")
+  // 【A4】错误码归一模块同样是相对 import，一并内联
+  .replace("from './model-errors.js'", "from '" + url(readFileSync(join(__dirname, '..', 'lib', 'model-errors.js'), 'utf8')) + "'");
 
 const { apply } = await import(url(rewritten));
 

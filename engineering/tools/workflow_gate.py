@@ -1801,18 +1801,62 @@ def cmd_work_dir(new_dir=None):
 
 
 def _get_done_rooms():
+    """【C8 修复】"已完成房间"集合：只认 ended_at，绝不把 failed_at 当完成。
+
+    ── 现场（2026-11-07 会话 :4650）─────────────────────────────────────
+      room-fail 之后 select 仍没有回收那个失败房间：它被算进"已完成"，
+      于是波次判定直接放行，失败房间从没被重做，交付里少了该有的零件。
+
+    ── 根因 ─────────────────────────────────────────────────────────────
+      select 的波次判定有两处：
+        ① `_finished = (_rn in done) or bool(_info.get("ended_at")) or
+                       bool(_info.get("failed_at"))`  ← 失败=完成
+        ② `_all_done = all((r[0] in done) or bool(ended_at))` ← 这条是对的
+      两处口径不一致：① 把失败当完成，② 只认 ended_at。
+      因为 ① 把失败房间从 pending 里剔除，失败房间永远不会被要求重做。
+
+    ── 现在的口径（单一事实源）──────────────────────────────────────────
+      · 本函数只收 ended_at 的房间；
+      · failed_at 且未重开的房间【不算完成】——它必须被再次 room-start
+        （重开时会清掉 failed_at），或被明确放弃；
+      · 同时给出 `_failed_rooms()` 供报错文案引用，让调用方知道"是谁失败了"。
+    """
     ms_path = os.path.join(STATE_DIR, "mode_state.json")
     done = set()
     if os.path.exists(ms_path):
         try:
             with open(ms_path, "r", encoding="utf-8") as f:
                 ms = json.load(f)
-            for rn, rv in ms.get("rooms", {}).items():
+            for rn, rv in (ms.get("rooms", {}) or {}).items():
+                if not isinstance(rv, dict):
+                    continue
                 if rv.get("ended_at"):
                     done.add(rn)
         except Exception:
             pass
     return done
+
+
+def _get_failed_rooms():
+    """【C8】失败待重做的房间（failed_at 有值且没有被重新 room-start）。
+
+    重开房间时 mode_gate.room-start 会整体替换 rooms[name]（failed_at 变 None），
+    因此"重开过"的房间不会出现在这里 —— 只有【真的还欠着重做】的才会。
+    """
+    ms_path = os.path.join(STATE_DIR, "mode_state.json")
+    failed = set()
+    if os.path.exists(ms_path):
+        try:
+            with open(ms_path, "r", encoding="utf-8") as f:
+                ms = json.load(f)
+            for rn, rv in (ms.get("rooms", {}) or {}).items():
+                if not isinstance(rv, dict):
+                    continue
+                if rv.get("failed_at") and not rv.get("ended_at"):
+                    failed.add(rn)
+        except Exception:
+            pass
+    return failed
 
 
 def _rooms_detail():
@@ -2730,11 +2774,24 @@ def prepare_task_workdir(task, state=None):
         parts_dir = os.path.join(wd, "parts")
         drawings_dir = os.path.join(wd, "drawings")
         scripts_dir = os.path.join(wd, "scripts")
-        for _d in (parts_dir, drawings_dir, scripts_dir):
-            try:
-                os.makedirs(_d, exist_ok=True)
-            except Exception:
-                pass
+        # ── 【2026-11-07 · 目录分层】用户要求（原文）：
+        #   「一堆奇奇怪怪的文件夹，包含一些奇奇怪怪的 py 文档、json 文档……
+        #     根本就找不到你需要的文件在哪里。我的建议是：两个文件夹，
+        #     第一个放那种类似于 py 文档、json 文档等等和建模没有关系的，
+        #     第二个是放零件」。
+        #   因此骨架统一由 task_workspace.ensure_layout() 建立：
+        #     parts/ drawings/ reports/  ← 交付物（收尾永不清）
+        #     intermediate/ parts_rejects/ scripts/  ← 收尾清理/归档
+        #   任何散落在根目录的文件，init 时先 tidy 一次归位。
+        try:
+            import task_workspace as _tw
+            _tw.ensure_layout(wd)
+        except Exception:
+            for _d in (parts_dir, drawings_dir, scripts_dir):
+                try:
+                    os.makedirs(_d, exist_ok=True)
+                except Exception:
+                    pass
         # 写任务信息（可追溯：哪个目录属于哪个任务）
         _info = {
             "task_id": _tid,
@@ -2749,14 +2806,23 @@ def prepare_task_workdir(task, state=None):
             "dir_semantics": {
                 "delivery_root": "本机所有任务的【上层】交付根目录，不要往这里直接存零件",
                 "work_dir": "【本任务】的隔离目录，所有产物都应在此之下",
-                "parts_dir": "★ 零件(.sldprt/.sldasm)唯一保存目录",
-                "drawings_dir": "★ 工程图(.slddrw/.dwg/.dxf/.pdf)唯一保存目录",
-                "scripts_dir": "建模脚本(.py)保存目录",
+                "parts_dir": "★ 零件(.sldprt/.sldasm)唯一保存目录（交付物，永不清）",
+                "drawings_dir": "★ 工程图(.slddrw/.dwg/.dxf/.pdf)唯一保存目录（交付物，永不清）",
+                "reports_dir": "防线凭据 / 房间报告 / 清理清单（交付证据，永不清）",
+                "scripts_dir": "建模脚本(.py)保存目录（收尾归档到 reports/scripts_archive/）",
+                "intermediate_dir": "中间产物（json/txt/log/pyc…）—— 收尾整目录删除",
+                "parts_rejects_dir": "建模失败/废弃的零件 —— 收尾整目录删除",
             },
+            "intermediate_dir": os.path.join(wd, "intermediate"),
+            "parts_rejects_dir": os.path.join(wd, "parts_rejects"),
+            "reports_dir": os.path.join(wd, "reports"),
             "note": ("【观察点1/5 修复】每个任务独立交付目录，避免同名零件覆盖上一轮成果。"
                      "上一轮成果保留在同级其它目录中。"
                      "【BUG-观察-1 修复】零件请存 parts_dir，工程图存 drawings_dir —— "
-                     "不要存到 delivery_root（那是所有任务的上层根目录）。"),
+                     "不要存到 delivery_root（那是所有任务的上层根目录）。"
+                     "【2026-11-07 目录分层】与建模无关的脚本/中间文件放 intermediate/，"
+                     "失败零件放 parts_rejects/ —— 收尾时这两类会被整体清掉，"
+                     "所以任务目录最后只剩 parts/ drawings/ reports/ 三个文件夹。"),
         }
         info_path = os.path.join(wd, "TASK_INFO.json")
         try:
@@ -2770,6 +2836,9 @@ def prepare_task_workdir(task, state=None):
                     "parts_dir": parts_dir,
                     "drawings_dir": drawings_dir,
                     "scripts_dir": scripts_dir,
+                    "intermediate_dir": os.path.join(wd, "intermediate"),
+                    "parts_rejects_dir": os.path.join(wd, "parts_rejects"),
+                    "reports_dir": os.path.join(wd, "reports"),
                     # 给模型的唯一权威保存目录（相对路径解析基准）
                     "save_dir_hint": parts_dir,
                     "dir_semantics": _info["dir_semantics"]})
@@ -3901,9 +3970,33 @@ def _archive_finished(state, done_count, total, message):
             }, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+    # ══ 【2026-11-07 · 收尾清理】把中间产物与失败零件清掉，只留交付物 ══════
+    # 用户要求（原文）：「让主对话最后收尾的时候，直接删去那些奇奇怪怪的文件
+    #   和失败的建模文档」。
+    # 为什么写在【代码】里而不是提示词里：用户明确要求"写进代码里面"——
+    #   模型忘一次就白干，而这是每次收尾都要发生的事。
+    # 只删 intermediate/ 与 parts_rejects/，parts/ drawings/ reports/ 原样保留；
+    # 清完写 reports/cleanup_manifest.json 留痕（删了什么、省了多少 MB）。
+    _cleanup = None
+    try:
+        _m2g, _ = _m2_require()
+        _wd = _m2_work_dir(state)
+        if _wd:
+            import task_workspace as _tw
+            _cleanup = _tw.cleanup(_wd)
+    except Exception as _ce:
+        _cleanup = {"ok": False, "error": repr(_ce)}
+    _clean_line = ""
+    if isinstance(_cleanup, dict) and _cleanup.get("ok"):
+        _clean_line = ("清理完成：删掉 %d 项，释放 %.2f MB；任务目录现在只剩 parts/ drawings/ reports/。"
+                       % (len(_cleanup.get("removed") or []), _cleanup.get("saved_mb") or 0))
+    elif isinstance(_cleanup, dict) and _cleanup.get("error"):
+        _clean_line = ("清理未执行（%s）—— 可手动跑 task_workspace.py cleanup <任务目录>。"
+                       % str(_cleanup.get("error"))[:120])
     return {"ok": True, "step": "finished", "finished": True,
             "pending_rooms": [],
             "completed_count": done_count, "total_rooms": total,
+            "cleanup": _cleanup,
             "final_directives": [
                 "收尾协议（只做一遍，做完就停）：",
                 "1) mode_gate.py room-status 确认全部房间 completed；配合 list_agents 对照，残余小屋 interrupt_agent 清理",
@@ -3912,7 +4005,7 @@ def _archive_finished(state, done_count, total, message):
                 "4) 向用户做一次性总结：零件清单/图纸文件/验证结果/文件路径",
                 "5) 停止输出。禁止再调用 select，禁止重复交代结果。",
                 "   注意：之后的『上下文注入/压缩』是系统压缩历史消息的提示，不是让你重新汇报的信号，忽略即可。",
-            ],
+            ] + ([("6) " + _clean_line)] if _clean_line else []),
             "message": message}
 
 
@@ -4620,6 +4713,7 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
                          % ([r[0] for r in rooms],)),
             }
         cur = None
+        _failed_pending = []
         for wnum, wname, wtypes in waves:
             wave_rooms = [r for r in rooms if r[1] in wtypes]
             # ── 【C3 修复】pending 判定必须"以房间名与 mode_state 对账" ──────
@@ -4645,8 +4739,16 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
                         continue
                     pending.append(r)
                     continue
-                _finished = (_rn in done) or bool(_info.get("ended_at")) or bool(_info.get("failed_at"))
+                # ══ 【C8 修复】failed_at 不算完成 ══════════════════════════════
+                # 原实现把 failed_at 也当成"波次已完成"，于是 room-fail 之后
+                #   select 不回收失败房间：它被跳过、从没重做，交付里少了该有的零件。
+                # 现在只有 ended_at（且不 active）才算完成；
+                #   失败的房间留在 pending 里，select 会明确要求重开它。
+                _finished = (_rn in done) or bool(_info.get("ended_at"))
                 _still_active = bool(_info.get("active")) and not _info.get("ended_at")
+                _failed_here = bool(_info.get("failed_at")) and not _info.get("ended_at")
+                if _failed_here:
+                    _failed_pending.append(_rn)
                 if (not _finished) or _still_active:
                     pending.append(r)
             if pending:
@@ -5006,6 +5108,14 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
                                "all_pending_rooms = 全局尚未完成的房间。"
                                "只看 pending_rooms 会漏掉后续波次。"),
         "completed_count": len(_get_done_rooms()),
+        # ── 【C8 修复】失败的房间必须显式列出，不能被"已完成数"吞掉 ────────
+        # 现场：room-fail 之后 select 直接放行，失败房间从没重做。
+        # 现在 select 的返回体里带 failed_rooms / failed_rooms_note，
+        #   pending_rooms 也会把它们算作"待办"（见上方波次判定的 C8 修复）。
+        "failed_rooms": sorted(_get_failed_rooms()),
+        "failed_rooms_note": ("这些房间 failed_at 有值且未被重新 room-start，"
+                              "【不算完成】。必须先 mode_gate.py room-start <房间> "
+                              "重做（重开会自动清掉 failed_at），再 room-end。"),
         # ── 【C3 修复】一致性自检：把"门禁认为的完成数"与
         #    "mode_state 实际 ended 数"并排给出，一眼可辨是否不同步。
         #    若两者不一致，说明 room-end 尚未落盘或有房间被回收，
@@ -5785,6 +5895,298 @@ def cmd_check():
     return {"ok": True, "gate": "OPEN"}
 
 
+# ══ 【A3 修复】重复调用检测必须做【语义归一化】，不能逐字比对 ═══════════════
+# 现场（缺陷清单 A3 / P1）：
+#   同一件事重复调用时，只要把提示里的一个数字改掉就能绕过检测：
+#       "近8分钟:"  →  "intermediate 最新10:"
+#   检测器按【原始参数字符串】建链，改一个字符 = 一条新链 → 计数永远从 1 开始，
+#   重复提醒永远不触发。
+#
+# 根因：链路键用的是"完整参数原样 JSON"（宿主 @deepseek-ai/dsh-repeat-tool-reminder
+#   的 canonicalize() 只做深排序，不做任何语义归一化）。凡是参数里带
+#   数字 / 时间戳 / 路径 / 房间名的调用，改一个字符就绕过。
+#
+# 修复（本文件只做【可复用的后端判定】，不改宿主插件）：
+#   ① 把参数按语义归一化 —— 剥离【数字、时间戳、时间窗、"N 分钟"、绝对路径、
+#      UUID/长 hex、纯序号】等"每次都会变但语义相同"的噪声；
+#   ② 用归一化后的文本算指纹，作为"这是不是同一个调用"的判据；
+#   ③ 保留【真正有语义的差异】（房间名、命令名、选项字母 A/B/C…），
+#      所以"select C" 与 "select D" 仍是两次不同的调用。
+# 宿主要接的话，把 repeat-tool-reminder 的链键换成本函数的 signature 即可
+#   （该模块在 DSH 安装体内，不在本仓库，详见交付报告）。
+_A3_NOISE_PATTERNS = (
+    # ① 时间戳（ISO / 中文 / 只有日期）
+    (r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?", "<TS>"),
+    (r"\d{4}/\d{2}/\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?", "<TS>"),
+    (r"\b\d{2}:\d{2}:\d{2}\b", "<TS>"),
+    # ② "近 8 分钟" / "最近 10 条" / "最新 10" 这类时间窗与窗口大小
+    #    单元可有可无（"最新10:" 后面直接是冒号），因此用边界断言收口，
+    #    避免把 "第10阶段" 里的数字也当成窗口。
+    #    这里【不能】在末尾加 (?![\w])：中文"分钟"后面紧跟"的/内"时
+    #    ？号会把单位留在文本里（实测 "近 8 分钟的心跳" → "<WINDOW> 分钟的心跳"），
+    #    这样"分钟→小时"就变成新指纹，绕过又回来了。
+    (r"(?:近|最近|前|最新|latest|last)\s*\d+(?:\.\d+)?"
+     r"(?:\s*(?:秒钟|秒|分钟|小时|天|条|个|次|minutes?|mins?|seconds?|secs?"
+     r"|hours?|days?))?", "<WINDOW>"),
+    # ③ 绝对路径（Windows 盘符 / UNC / POSIX）
+    #    注意必须把【每一段】都吃掉：旧写法在 "C:\a\b" 上只吃了 "C:\a"，
+    #    剩下的 "\b" 会进入指纹 → 换个文件名就变成"新调用"。
+    (r"[A-Za-z]:(?:\\[^\\\s\"'\[\]{},]*)+", "<PATH>"),
+    (r"\\\\[^\s\"',]+", "<PATH>"),
+    (r"(?<![\w])/(?:[\w.\-]+/)+[\w.\-]+", "<PATH>"),
+    # ④ UUID / 长 hex（session id、nonce、run id 的常见形态）
+    (r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+     r"[0-9a-fA-F]{12}\b", "<UUID>"),
+    (r"\b[0-9a-fA-F]{16,}\b", "<HEX>"),
+    # ⑤ 剩下的纯数字（尺寸/计数/序号）—— 最后做，避免误伤前面的模式
+    (r"(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])", "<N>"),
+)
+
+#: 【A3】任务目录分层里的【结构性容器名】—— 它们只说明"看的是哪个目录"，
+#:   不构成"这次调用想干什么"的差异。实测绕过样例正是这一类：
+#:     "近8分钟:"  ↔  "intermediate 最新10:"
+#:   两条说的都是"看 intermediate/ 最近的记录"，只是窗口数字和目录名写法不同。
+#:   只收【本仓库自己定义的目录名】（见 task_workspace.py 的分层规则），
+#:   不把普通业务词收进来，避免把"不同房间/不同零件"误合并。
+_A3_CONTAINER_TOKENS = (
+    "intermediate", "parts_rejects", "scripts_archive",
+    "parts", "drawings", "reports", "load_cases",
+)
+
+#: 归一化后允许保留的最短长度（太短说明参数几乎全是噪声，比指纹没意义）
+_A3_MIN_TEXT = 4
+
+
+def _json_canonical(args):
+    """把工具参数转成【稳定】文本：dict/list 深排序，字符串原样。"""
+    if args is None:
+        return ""
+    if isinstance(args, str):
+        return args
+    try:
+        return json.dumps(args, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
+    except Exception:
+        return str(args)
+
+
+def _text_tokens(text):
+    """把归一化后的文本切成 token（占位标签 / 标点 / 实义词），供指纹去重。"""
+    import re as _re
+    out = []
+    try:
+        for _m in _re.finditer(r"<[A-Z]+>|[^\s<:：,，;；|]+|[:：,，;；|\-]", str(text or "")):
+            out.append(_m.group(0))
+    except Exception:
+        return []
+    return out
+
+
+def normalize_tool_signature(tool, args=None):
+    """【A3】把一次工具调用归一化成"语义指纹"（剥离每次都会变的噪声）。
+
+    Args:
+        tool: 工具名（保留原样，参与指纹）
+        args: 参数字符串 / dict / list（dict 会深排序后再归一化）
+
+    Returns:
+        {"ok", "tool", "signature", "normalized", "noise_removed": [...],
+         "rule": ...}
+
+    判据（这是"同一个调用"的定义，测试锁定）：
+      · 数字、时间戳、"近 N 分钟"这类窗口、绝对路径、UUID/长 hex → 一律剥离；
+      · 其它文本（房间名、命令名、选项字母、错误串）→ 原样保留；
+      · 因此 "近8分钟:" 与 "intermediate 最新10:" 归一化后相同 → 同一次调用；
+        而 "select C" 与 "select D" 仍然不同 → 不会被误合并。
+    """
+    import hashlib as _hl
+    import re as _re          # 【A3】本文件没有模块级 re，必须在此显式导入
+    raw = _json_canonical(args)
+    text = str(raw or "")
+    noise = []
+    for pat, repl in _A3_NOISE_PATTERNS:
+        try:
+            _hits = _re.findall(pat, text)
+            if _hits:
+                noise.extend(str(x)[:40] for x in _hits[:8])
+            text = _re.sub(pat, repl, text)
+        except Exception:
+            continue
+    # ⑥ 结构性容器名（目录分层里定义的那些）→ 也当噪声
+    for _tok in _A3_CONTAINER_TOKENS:
+        try:
+            _pat = r"(?<![\w\-])" + _re.escape(_tok) + r"(?![\w\-])"
+            if _re.search(_pat, text, flags=_re.IGNORECASE):
+                noise.append(_tok)
+            # 直接删掉（不换成 <DIR> 占位）：它只是"看哪个目录"，
+            #   换成占位会让"有没有写目录名"仍然产生不同指纹 ——
+            #   正是绕过的那个口子（"近8分钟:" ↔ "intermediate 最新10:"）。
+            text = _re.sub(_pat, " ", text, flags=_re.IGNORECASE)
+        except Exception:
+            continue
+    # 折叠空白（含换行），保证"多打一个空格"不产生新链；并去掉纯分隔残留
+    try:
+        text = _re.sub(r"\s+", " ", text).strip()
+        text = _re.sub(r"\s*([:：,，;；])\s*", r"\1", text).strip()
+    except Exception:
+        text = " ".join(str(text).split())
+    # ── 标签规范化（让"顺序不同/多一个目录名"不产生新指纹）─────────────
+    # 归一化后往往只剩几个占位标签（<DIR> <WINDOW> <PATH> <N>），此时
+    #   "谁在前谁在后"已经没有语义：说的都是"看某个目录某段时间的记录"。
+    # 因此：当【整串只由占位标签 + 标点】构成时，把标签去重并按固定顺序重排。
+    # 只要还残留任何实义词（房间名/命令名/选项字母），就原样保留 ——
+    #   这样 "select C" vs "select D"、"room-end 结构件" vs "room-end 传动件"
+    #   仍然算两次不同的调用。
+    _ORDER = ("<PATH>", "<TS>", "<UUID>", "<HEX>", "<WINDOW>", "<DIR>", "<N>")
+    try:
+        _toks = [x for x in _text_tokens(text) if x]
+        _only_placeholders = bool(_toks) and all(
+            (t in _ORDER) or (t in (":", "：", ",", "，", ";", "；", "|", "-"))
+            for t in _toks)
+        if _only_placeholders:
+            _uniq = sorted({t for t in _toks if t in _ORDER},
+                           key=lambda x: _ORDER.index(x))
+            text = " ".join(_uniq)
+    except Exception:
+        pass
+    base = "%s\u0001%s" % (str(tool or ""), text)
+    try:
+        sig = _hl.sha1(base.encode("utf-8", "replace")).hexdigest()[:16]
+    except Exception:
+        sig = None
+    return {
+        "ok": True,
+        "tool": str(tool or ""),
+        "signature": sig,
+        "normalized": text,
+        "normalized_len": len(text),
+        "noise_removed": noise,
+        "short": len(text) < _A3_MIN_TEXT,
+        "rule": ("数字/时间戳/'近N分钟'类窗口/绝对路径/UUID 全部剥离后再算指纹；"
+                 "房间名、命令名、选项字母等语义内容保留。"),
+    }
+
+
+def same_call(tool_a, args_a, tool_b, args_b):
+    """【A3】两次工具调用是否【语义相同】（重复检测的唯一判据）。"""
+    a = normalize_tool_signature(tool_a, args_a)
+    b = normalize_tool_signature(tool_b, args_b)
+    return bool(a.get("signature") and a.get("signature") == b.get("signature"))
+
+
+# ══ 【A9 修复】状态行由【脚本读盘】生成，模型只写叙述 ═══════════════════════
+# 现场（缺陷清单 A9 / P1）：
+#   压缩摘要把"状态"写成了模型自己的叙述 —— 而模型对"文件在不在、多久没动"
+#   只能靠回忆。实测摘要里出现"已生成 xxx.SLDPRT"（文件根本不存在）、
+#   "刚刚更新"（mtime 已是两小时前）这类【错误事实】，压缩后下一轮把它当
+#   权威前提继续干活。
+#
+# 根因：状态行是"让模型写"的 —— 只要模型写，就会有记错的那一天。
+#
+# 修复：所有与"存在性/时间"有关的状态一律由脚本用 os.stat 读盘生成，
+#   模型只负责写叙述（做了什么、为什么这么做）。判据只有三个，全部可复算：
+#     ① 文件是否存在（os.path.exists）
+#     ② mtime（os.path.getmtime）+ 距现在多少秒
+#     ③ 门禁/模式状态文件里的枚举值（step / 房间计数）
+#   任何一项取不到 → 明确写 unknown，绝不猜。
+def _disk_fact(path, label=""):
+    """单个文件的事实（存在性 + mtime + age），取不到就是 unknown（不猜）。"""
+    import time as _t
+    p = str(path or "")
+    out = {"label": label or None, "path": p, "exists": False,
+           "mtime": None, "mtime_text": None, "age_sec": None}
+    try:
+        if p and os.path.exists(p):
+            out["exists"] = True
+            _m = os.path.getmtime(p)
+            out["mtime"] = _m
+            out["mtime_text"] = _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(_m))
+            out["age_sec"] = round(max(0.0, _t.time() - _m), 1)
+    except Exception:
+        out["error"] = "stat 失败"
+    return out
+
+
+def build_state_line(state=None, work_dir=None):
+    """【A9 修复】生成一行【可复算】的状态行（模型必须原样引用，不得自己写）。
+
+    返回 {"text": "...", "facts": {...}}：
+      text 只由 facts 拼出来 —— facts 全部来自磁盘（os.stat / 状态文件枚举），
+      不含任何"刚刚/已经/N 分钟前"这类需要模型判断的措辞（时间一律给秒数）。
+    这样即便模型记错，摘要里那行状态也仍然是盘上的真实情况。
+    """
+    st = state if isinstance(state, dict) else load_state()
+    wd = work_dir or st.get(WORKDIR_STATE_KEY)
+    files = []
+    try:
+        files.append(_disk_fact(STATE_PATH, "workflow_state.json"))
+    except Exception:
+        pass
+    try:
+        files.append(_disk_fact(os.path.join(STATE_DIR, "mode_state.json"),
+                                "mode_state.json"))
+    except Exception:
+        pass
+    if wd:
+        try:
+            files.append(_disk_fact(os.path.join(str(wd), "parts"), "parts/"))
+        except Exception:
+            pass
+        try:
+            files.append(_disk_fact(os.path.join(str(wd), "drawings"), "drawings/"))
+        except Exception:
+            pass
+    # 房间计数（来自 mode_state 的枚举值，不是推断）
+    _rooms = {}
+    try:
+        _ms = os.path.join(STATE_DIR, "mode_state.json")
+        if os.path.exists(_ms):
+            with open(_ms, "r", encoding="utf-8") as _f:
+                _rooms = (json.load(_f) or {}).get("rooms") or {}
+    except Exception:
+        _rooms = {}
+    _active = sorted([r for r, v in _rooms.items() if (v or {}).get("active")])
+    _ended = sorted([r for r, v in _rooms.items() if (v or {}).get("ended_at")])
+    _failed = sorted([r for r, v in _rooms.items() if (v or {}).get("failed_at")])
+
+    def _f(name):
+        for x in files:
+            if x.get("label") == name:
+                return x
+        return {"exists": False, "mtime_text": None, "age_sec": None, "path": None}
+
+    _wf = _f("workflow_state.json")
+    _parts = _f("parts/")
+    _draw = _f("drawings/")
+
+    def _fmt(x):
+        if not x.get("exists"):
+            return "不存在"
+        if x.get("mtime_text") is None:
+            return "存在(mtime unknown)"
+        return "%s(age=%ss)" % (x.get("mtime_text"), x.get("age_sec"))
+
+    text = ("[STATE] step=%s | task_id=%s | rooms: active=%d ended=%d failed=%d"
+            " | workflow_state=%s | parts=%s | drawings=%s"
+            % (str(st.get("step") or "idle"),
+               str(st.get("task_id") or "unknown"),
+               len(_active), len(_ended), len(_failed),
+               _fmt(_wf), _fmt(_parts), _fmt(_draw)))
+    return {
+        "text": text,
+        "facts": {
+            "step": str(st.get("step") or "idle"),
+            "task_id": str(st.get("task_id") or None),
+            "work_dir": wd,
+            "rooms": {"active": _active, "ended": _ended, "failed": _failed},
+            "files": files,
+        },
+        "rule": ("这一行由脚本读盘生成（os.stat + 存在性 + 状态文件枚举）。"
+                 "摘要/进度汇报必须【原样引用】，禁止模型自己改写其中的"
+                 "存在性、时间、计数；叙述部分只写'做了什么、为什么'。"),
+    }
+
+
 def cmd_gate_summary():
     """【Bug-06 修复】单一事实来源的"门禁总览"。
 
@@ -5848,6 +6250,10 @@ def cmd_gate_summary():
     return {
         "ok": True,
         "phase": phase,
+        # ── 【A9 修复】把"读盘生成的状态行"一并返回 ────────────────────────
+        # 压缩摘要 / 阶段性汇报必须引用这一行，而不是让模型凭记忆写
+        # "已生成/刚刚更新"。里面的存在性与时间全部来自 os.stat，可复算。
+        "state_line": build_state_line(state, work_dir=state.get(WORKDIR_STATE_KEY)),
         "workflow": {"step": step, "task": state.get("task"),
                      "user_choice": state.get("user_choice"),
                      "parallel_mode": state.get("parallel_mode"),
@@ -5978,6 +6384,13 @@ def _main_body():
                               "status": "查看当前门禁状态：python %s status" % _me,
                               "gate-summary": "【推荐】门禁总览（能否开新任务）："
                                               "python %s gate-summary" % _me,
+                              "state-line": "【A9】脚本读盘生成的状态行"
+                                            "（摘要必须原样引用）："
+                                            "python %s state-line" % _me,
+                              "call-signature": "【A3】工具调用的语义指纹"
+                                                "（重复检测，剥离数字/路径/时间窗）："
+                                                "python %s call-signature \"<工具名>\" "
+                                                "\"<参数\"" % _me,
                               "check": "检查是否允许建模：python %s check" % _me,
                               "work-dir [新目录]": "查询/设置本任务交付目录"
                                                    "（观察点1/5 隔离）：python %s work-dir" % _me,
@@ -5998,6 +6411,12 @@ def _main_body():
                                               "python %s stage-status" % _me,
                               "pre-delivery": "【模式二】交付前总闸自检（缺项会列出）："
                                               "python %s pre-delivery" % _me,
+                              "workspace": "【目录】看本任务目录的分层与可清理体积："
+                                           "python %s workspace" % _me,
+                              "tidy": "【目录】把根目录散落文件归位到 parts/ drawings/ intermediate/："
+                                      "python %s tidy [--dry-run]" % _me,
+                              "cleanup": "【目录】删中间产物与失败零件（收尾自动跑一次）："
+                                         "python %s cleanup [--dry-run] [--drop-scripts]" % _me,
                           },
                           "note": ("【BUG-03/04】历史文档中的 workflow-gate-init / "
                                    "workflow-gate-provide-context / workflow-gate-select "
@@ -6064,6 +6483,48 @@ def _main_body():
                          ensure_ascii=False, indent=2))
     elif cmd in ("gate-summary", "gate_summary", "summary"):
         print(json.dumps(cmd_gate_summary(), ensure_ascii=False, indent=2))
+    # ── 【A9 修复】只读：输出【脚本读盘生成】的状态行 ──────────────────────
+    # 摘要/压缩前跑一次，把它原样贴进摘要；模型只写叙述，不写事实。
+    elif cmd in ("state-line", "state_line"):
+        _sl = build_state_line()
+        print(json.dumps({"ok": True, **(_sl or {})}, ensure_ascii=False, indent=2))
+    # ── 【A3 修复】只读：把工具调用归一化成语义指纹 ────────────────────────
+    # 用法：workflow_gate.py call-signature "<工具名>" "<参数 JSON 或原文>"
+    # 判据与宿主重复提醒对齐：改数字/时间窗/路径不会产生新指纹。
+    elif cmd in ("call-signature", "call_signature"):
+        _tool = sys.argv[2] if len(sys.argv) > 2 else ""
+        _args = sys.argv[3] if len(sys.argv) > 3 else ""
+        print(json.dumps(normalize_tool_signature(_tool, _args),
+                         ensure_ascii=False, indent=2))
+    # ══ 【2026-11-07 · 目录分层】任务目录整理 / 清理 / 概览 ═══════════════
+    # 用户要求：「写进代码里面，让主对话最后收尾的时候，直接删去那些奇奇怪怪
+    #   的文件和失败的建模文档」。收尾时 _archive_finished 会自动清理，
+    #   这两个命令供【手动/中途】使用（比如任务跑了一半想先看看目录有多乱）。
+    elif cmd in ("tidy", "cleanup", "workspace"):
+        try:
+            import task_workspace as _tw2
+        except Exception as _e_tw:
+            print(json.dumps({"ok": False, "error": "task_workspace 不可用: %r" % (_e_tw,)},
+                             ensure_ascii=False, indent=2))
+            sys.exit(1)
+        _wd2 = cmd_work_dir(None).get("work_dir")
+        if not _wd2:
+            # 允许显式给目录：workflow_gate.py cleanup "D:\some\task"
+            _wd2 = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else None
+        if not _wd2:
+            print(json.dumps({"ok": False, "error": "没有当前任务目录（先 init，或显式传目录）"},
+                             ensure_ascii=False, indent=2))
+            sys.exit(1)
+        _dry = ("--dry-run" in sys.argv) or ("--dryrun" in sys.argv)
+        _keep_scripts = not (("--drop-scripts" in sys.argv) or ("--no-scripts" in sys.argv))
+        if cmd == "tidy":
+            _r2 = _tw2.tidy(_wd2, dry_run=_dry)
+        elif cmd == "workspace":
+            _r2 = _tw2.survey(_wd2)
+        else:
+            _r2 = _tw2.cleanup(_wd2, keep_scripts=_keep_scripts, dry_run=_dry)
+        print(json.dumps(_r2, ensure_ascii=False, indent=2))
+        sys.exit(0 if _r2.get("ok") else 1)
     elif cmd == "reset":
         print(json.dumps(cmd_reset(), ensure_ascii=False, indent=2))
     elif cmd == "recover":

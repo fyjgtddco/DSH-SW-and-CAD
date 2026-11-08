@@ -433,6 +433,11 @@ engineering/
 | 23 | **缺依赖时「设置静默失效」**（python 3.5 → SyntaxError） | 新增 `env_check.py` 自检 + `sw_bridge.py` 版本闸门 + 插件 `resolvePython` 版本校验 |
 | 24 | **提醒弹窗不出现** | 失败可重试（成功才封顶）+ 设置页「立即查看提醒」确定性入口 |
 | 25 | 设置页中文乱码（Python 子进程按 GBK 输出） | 所有 Python 调用注入 `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1` |
+| A1-① | **提示词自相矛盾**："宁可多轮短等"被照抄成单轮 477 次 `sleep(30)` / 4h02m 轮询（占墙钟 66%） | persona「长等待·铁律」重写：禁止 sleep 轮询，只准 `wait-rooms` / `sw-wait` 阻塞原语；无原语时同目标短 sleep ≤3 次；补 `[WAITING]` 结束回合边界 |
+| A6 | **工具输出 U+FFFD 乱码 180 条**，模型据乱码脑补出错误设计前提（"差速+舵机转向"） | persona「工具输出编码·铁律」：每条 python 调用强制 UTF-8 前置模板；出现 `\uFFFD`/"�" 禁下结论，必须重跑 + read 原文核对（注入式根治在 `lib/index.js`） |
+| P1-①② | **坐标系与方向语义没写死**：Top Plane 镜像、`cut()` 方向、"上方向"无声明 | `skills/sw-design` 新增「〇、开工前必读」操作手册（ZSIGN/`flip=True`/`<零件>.SLDPRT.pr.json`/零旋转装配报警），persona 同步压缩版 |
+| C1 | **三套"上"方向**（零件 +Z / 总装 +Y / 图纸 +Z）→ 整机错位 90° | `skills/assembly-orchestration` 新增「二点五、『上』方向契约」：任务级 `up_contract.json` 单点声明、三波共享、六条机器判据 J1~J6 |
+| A12 | 任务书 `rooms` 示例缺 `type`，子代理照抄必被拒 | `rooms-template` 子命令（代码侧）+ `mode-selection` §3.5.4 写入含 `type` 的完整示例与字段表 |
 
 ---
 

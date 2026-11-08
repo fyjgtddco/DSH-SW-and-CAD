@@ -338,7 +338,10 @@ def _dedup_across_sessions(host, questions, my_child):
         peer_qs = p.get("questions") or []
         if not peer_qs or len(peer_qs) != len(questions):
             continue
-        if not _same_question({"questions": peer_qs}):
+        # ── 【A10 修复】这里原先直接调 _same_question 会 NameError（见下方
+        #   模块级定义处的说明）。现在 _same_question 是模块级函数，且显式
+        #   传 questions= 说明"我方题目"，不再依赖 main() 里的闭包时序。
+        if not _same_question({"questions": peer_qs}, questions=questions):
             continue
         out["hit"] = True
         out["pendingId"] = pid
@@ -389,7 +392,117 @@ def _opts_of(qs):
             else:
                 labels.append(str(o))
         out.append(tuple(sorted(labels)))
+
     return tuple(out)
+
+
+# ══ 【A10 修复】题目语义比对：全部提到【模块级】═══════════════════════════
+# 现场（缺陷清单 A10）：
+#   _dedup_across_sessions() 是模块级函数（325 行），它在 341 行调用
+#   _same_question() —— 而 _same_question 当时是 main() 里的【闭包】（661 行）。
+#   于是只要走到"跨会话去重"这条路，就必然
+#       NameError: name '_same_question' is not defined
+#   而且异常发生在 main() 的 try 之外，整个提问进程直接崩掉；
+#   报错文本与"重复提问"毫无关联，排查时极易误判成"宿主桥不可用"。
+#
+# 根因：比对所需的四个助手（_MODIFY_KW / _is_modify_question / _digits_of /
+#   _semantic_key）连同 _same_question 一起被写在 main() 内部 —— 作用域错了，
+#   模块级函数（跨会话去重、已答台账）根本取不到。
+#
+# 修复：
+#   ① 全部提到模块级（与 _norm_text/_opts_of 同一个归一化口径）；
+#   ② _same_question 支持【两种调用口径】，两者都必须成立：
+#        _same_question(p)                     # p = host 侧 pending（自带 questions）
+#        _same_question({"questions": peer})   # 显式指定"要比对的另一侧"
+#      被比对的"我方题目"由 _set_current_questions() 注入（main() 组装完就写），
+#      也可用关键字 questions= 直接指定（测试/复用时最稳）；
+#   ③ 去重层显式传 questions=，不再依赖全局时序。
+_MODIFY_KW = ("改为", "改成", "修改", "调整", "改为为", "变更",
+              "重做", "重新", "换成")
+
+#: 当前调用方"要问的那批题"（模块级单槽；main() 组装完题目立即写入）
+_CURRENT_QUESTIONS = [None]
+
+
+def _set_current_questions(qs):
+    """注入"我方题目"，供 _same_question(p) 这一单参口径使用。"""
+    _CURRENT_QUESTIONS[0] = qs
+    return qs
+
+
+def _is_modify_question(s):
+    """是否为"修改类"问句（这类问句绝不与旧卡合并，见 main 里的注释）。"""
+    t = str(s or "")
+    return any(k in t for k in _MODIFY_KW)
+
+
+def _digits_of(s):
+    """提取文本里的关键数字（尺寸），用于判定是否为同一零件。"""
+    return sorted(_re_mod.findall(r"\d+(?:\.\d+)?", str(s or "")))
+
+
+def _semantic_key(qs):
+    """语义指纹：(归一化问题文本元组, 选项集合, 数字集合)。三者全等=同题。"""
+    norm = tuple(_norm_text(q.get("question", "")) for q in (qs or []))
+    digits = tuple(_digits_of(" ".join(str(q.get("question", ""))
+                                    for q in (qs or []))))
+    return (norm, _opts_of(qs), digits)
+
+
+def _same_question(p, against=None, questions=None):
+    """判断 host 侧 pending 与本脚本要问的题是否【语义相同】（Bug#3 / A10）。
+
+    参数口径（三种都必须成立）：
+      _same_question(pending)                    # 单参：与"我方题目"比
+      _same_question({"questions": peer_qs})     # 单参：显式给出另一侧
+      _same_question(pending, questions=mine)    # 关键字：显式给出我方题目
+      _same_question(pending, against={"questions": peer_qs})
+    """
+    try:
+        mine = questions if questions is not None else _CURRENT_QUESTIONS[0]
+        if mine is None:
+            return False
+        qs = None
+        if isinstance(against, dict):
+            qs = against.get("questions")
+        if qs is None and isinstance(p, dict):
+            qs = p.get("questions")
+        qs = qs or []
+        if len(qs) != len(mine):
+            return False
+        # ── 硬约束 0：修改类问句不合并（否则会复用旧参数的卡）──
+        _new_is_mod = any(_is_modify_question(q.get("question", "")) for q in mine)
+        _old_is_mod = any(_is_modify_question(q.get("question", "")) for q in qs)
+        if _new_is_mod != _old_is_mod:
+            return False
+        # ── 硬约束：选项集合必须一致（用户可选项是契约，不可放宽）──
+        if _opts_of(qs) != _opts_of(mine):
+            return False
+        # 第①层：语义指纹全等
+        try:
+            if _semantic_key(qs) == _semantic_key(mine):
+                return True
+        except Exception:
+            pass
+        # 第②层：归一化后互相包含 / 关键数字一致
+        for a, b in zip(qs, mine):
+            na = _norm_text(a.get("question", ""))
+            nb = _norm_text(b.get("question", ""))
+            if na == nb:
+                continue
+            if not na or not nb:
+                return False
+            if (na in nb or nb in na) and min(len(na), len(nb)) >= 2:
+                continue
+            da = _digits_of(a.get("question", ""))
+            db = _digits_of(b.get("question", ""))
+            if da and da == db:
+                continue
+            return False
+        return True
+    except Exception:
+        return False
+
 
 ASK_LEDGER_NAME = "ask_answered.json"
 ASK_LEDGER_TTL_SEC = 2 * 3600
@@ -554,12 +667,18 @@ def main():
     #   本脚本自身【绝不会】调用 job_output，但调用方会包装它，所以这里给出
     #   单段上限 SEG_MAX，并在超时返回体里【明确要求分段等待】而不是盲目重发。
     _def_to = int(os.environ.get("DSH_ASK_TIMEOUT", "540"))
-    _SEG_MAX = 90          # 单段最长阻塞（秒）：超过就返回"仍在等待，请分段续等"
+    # ── 【卡死修复 C】默认 0 = 不分段（整段守候到 --timeout）──────────────
+    #   旧值 90 会让调用方每 90 秒退出重来一次，重来之间有空窗；
+    #   用户恰在空窗里作答 → 答案丢失 → 界面停在选项页（本次卡死现场）。
+    #   需要分段（中间返回进度）时显式传 --seg-max 90，或设 DSH_ASK_SEG_MAX。
+    _SEG_MAX = 0           # 0 = 不分段；>0 = 单段最长阻塞秒数
     ap.add_argument("--timeout", type=int, default=_def_to,
                     help="等待用户作答的最长秒数（默认 540，须 < DSH shell 上限 600）")
     ap.add_argument("--seg-max", type=int, default=_SEG_MAX,
-                    help="单段最长阻塞秒数（默认 90；到点返回『仍在等待』，"
-                         "由调用方分段续等，避免长时间静默）")
+                    help="单段最长阻塞秒数。默认 0 =【不分段】，一次调用守候到 "
+                         "--timeout（推荐）。传 >0 才会到点返回『仍在等待』由调用方"
+                         "分段续等 —— 注意分段之间有空窗，用户恰在空窗作答会读不到"
+                         "答案（2026-11-08 卡死根因），非必要不要设。")
     ap.add_argument("--interval", type=float, default=2.0, help="轮询间隔秒数")
     args = ap.parse_args()
 
@@ -630,74 +749,18 @@ def main():
     #   ② 归一化后互相包含 / 数字集合一致（措辞微调但主体与尺寸相同）。
     #   硬约束：选项集合必须完全一致才可合并 ——
     #     选项是"用户能选什么"的契约，放宽会把 A 零件的选项套到 B 零件上。
-    import re as _re
-    # _norm_text / _opts_of 已提到模块级（台账复用同一口径），这里不再重复定义
+    # _norm_text / _opts_of / _MODIFY_KW / _is_modify_question / _digits_of /
+    # _semantic_key / _same_question 全部已在【模块级】定义（台账与跨会话去重
+    # 共用同一口径，见上方【A10 修复】说明），这里不再重复定义闭包。
+    #
+    # 【A10 修复】只把"我方题目"注入模块级单槽：_same_question(p) 单参口径
+    #   就是靠它取到 questions 的。必须在下面任何一次 _same_question 调用
+    #   （跨会话去重 / 同 child 复用旧卡）之前完成。
+    _set_current_questions(questions)
 
-    # ── 【Bug#3 修复·防误合并】"修改类"问句不参与合并 ──────────────────
-    # 反例：'底座安装板 厚度改为 12mm 确认' 与 '底座安装板 参数确认'
-    #   归一化后都含"底座安装板"，会被第②层"数字一致/互相包含"误判为同题。
-    #   但前者是【用户已要求修改后的再次确认】，语义上是新的一轮提问，
-    #   若复用旧卡片，用户点的是"旧参数"的选项 → 确认内容与实际建模不符。
-    #   这类必须登记【新卡】，绝不能与旧卡合并。
-    _MODIFY_KW = ("改为", "改成", "修改", "调整", "改为为", "变更",
-                  "重做", "重新", "换成")
-
-    def _is_modify_question(s):
-        t = str(s or "")
-        return any(k in t for k in _MODIFY_KW)
-
-    def _digits_of(s):
-        """提取文本里的关键数字（尺寸），用于判定是否为同一零件。"""
-        return sorted(_re.findall(r"\d+(?:\.\d+)?", str(s or "")))
-
-    # _opts_of 已提到模块级
-
-    def _semantic_key(qs):
-        """语义指纹：(归一化问题文本元组, 选项集合, 数字集合)。三者全等=同题。"""
-        norm = tuple(_norm_text(q.get("question", "")) for q in (qs or []))
-        digits = tuple(_digits_of(" ".join(str(q.get("question", "")) for q in (qs or []))))
-        return (norm, _opts_of(qs), digits)
-
-    def _same_question(p):
-        """判断 host 侧 pending 与本脚本要问的题是否【语义相同】（Bug#3）。"""
-        try:
-            qs = p.get("questions") or []
-            if len(qs) != len(questions):
-                return False
-            # ── 硬约束 0：修改类问句不合并（否则会复用旧参数的卡）──
-            _new_is_mod = any(_is_modify_question(q.get("question", ""))
-                              for q in questions)
-            _old_is_mod = any(_is_modify_question(q.get("question", ""))
-                              for q in qs)
-            if _new_is_mod != _old_is_mod:
-                return False
-            # ── 硬约束：选项集合必须一致（用户可选项是契约，不可放宽）──
-            if _opts_of(qs) != _opts_of(questions):
-                return False
-            # 第①层：语义指纹全等
-            try:
-                if _semantic_key(qs) == _semantic_key(questions):
-                    return True
-            except Exception:
-                pass
-            # 第②层：归一化后互相包含 / 关键数字一致
-            for a, b in zip(qs, questions):
-                na = _norm_text(a.get("question", ""))
-                nb = _norm_text(b.get("question", ""))
-                if na == nb:
-                    continue
-                if not na or not nb:
-                    return False
-                if (na in nb or nb in na) and min(len(na), len(nb)) >= 2:
-                    continue
-                da = _digits_of(a.get("question", ""))
-                db = _digits_of(b.get("question", ""))
-                if da and da == db:
-                    continue
-                return False
-            return True
-        except Exception:
-            return False
+    # 【A10 修复】原先这里还有一个同名的闭包 _same_question —— 已删除。
+    #   模块级实现（含 against=/questions= 两种显式口径）在本文件上方，
+    #   单参写法 _same_question(p) 会去 _CURRENT_QUESTIONS 取"我方题目"。
 
     # ── 【2026-10-29 G03 修复】先选一个真正可达的 host（快速失败，不等 540s）──
     # 旧实现直接拿 args.host 去 POST；3080 没监听时只会在最后报一句
@@ -800,7 +863,36 @@ def main():
     # ── 【长等待修复】把整段等待再切成若干"短段"，每段到点就返回可续等的结果 ──
     #   目的：任何一次 pwsh 调用都不会静默阻塞超过 seg-max 秒，
     #   用户随时能在 GUI 看到进度、随时能打断（2026-10-31 卡死事故的直接成因）。
-    _seg_cap = max(5, min(int(getattr(args, "seg_max", 90) or 90), int(args.timeout)))
+    # ══ 【卡死修复 C】默认不再"每 90 秒退出重来" ═════════════════════════════
+    # 现场（session-55a2009b）：子代理用 --seg-max 90 连续调用了 3 次，
+    #   每次退出到下一次重新登记之间**存在真实空窗**。用户恰好在这个空窗里
+    #   点了提交 → 没有任何进程在轮询 → 答案虽已写进宿主 childResults，
+    #   但"当前这次调用"读不到 → 判成仍在等待 → 界面停在选项页（用户现象）。
+    #
+    # 原来的 --seg-max 设计初衷是「避免长时间静默让用户以为 DSH 卡死」
+    #   （2026-10-31 事故）。但那个风险的真实来源是**调用方用 Start-Sleep +
+    #   job_output wait:true 把脚本整段包住**，而不是脚本自己在轮询。
+    #   本脚本自己轮询时每秒都在读 HTTP，既不占 GUI、也不阻塞宿主，
+    #   所以"分段退出"反而制造了答案丢失的竞态 —— 得不偿失。
+    #
+    # 新语义：单次调用【持续守候】到 timeout（默认 540s，仍低于外壳 600s 上限），
+    #   期间绝不退出；只有 --seg-max 被【显式】指定成较小值时才分段
+    #   （兼容旧调用方 / 需要中间返回进度的场景）。
+    _seg_raw = getattr(args, "seg_max", None)
+    try:
+        _seg_env = os.environ.get("DSH_ASK_SEG_MAX")
+    except Exception:
+        _seg_env = None
+    if _seg_env not in (None, ""):
+        try:
+            _seg_raw = int(_seg_env)
+        except Exception:
+            pass
+    if _seg_raw is None or int(_seg_raw) <= 0:
+        # 默认：不分段（整段守候）
+        _seg_cap = int(args.timeout)
+    else:
+        _seg_cap = max(5, min(int(_seg_raw), int(args.timeout)))
     _seg_deadline = min(deadline, time.time() + _seg_cap)
     base = args.host + PREFIX
     _gone_streak = 0          # pending 消失但取不到 result 的连续次数
@@ -820,7 +912,26 @@ def main():
                     _writeback_answer(args.room, questions, ans, pending_id, args.child)
                     emit(ans)
                     return 0
+                # ── 【卡死修复 B】pending 已消失但 result 还没到 → 先重试再判过期 ──
+                #   现场（session-55a2009b）：用户点提交的瞬间恰好落在
+                #   "本段 90 秒窗口刚结束、本脚本正在退出、下一段还没起来"的间隙。
+                #   宿主侧 ask-child 的 .then 还没把 childResults 写进去，
+                #   脚本就读到了"pending 不在 + result 不在" → 判成 expired。
+                #   实测该间隙真实存在（用户"点了提交还是停在选项页"）。
+                #   现在：先做若干次短重试确认，真没有才判过期。
                 # ── (b) 取不到 result → 可能是过期，也可能刚被删除的竞态 ──
+                # 【卡死修复 B】先用短重试确认，避免"用户已答但读晚了"被判过期
+                _confirmed = None
+                for _k in range(6):
+                    time.sleep(0.25)
+                    _a2 = _get("%s/result-child?pendingId=%s" % (base, pending_id))
+                    if _a2 and _a2.get("ok") and _a2.get("answers") is not None:
+                        _confirmed = _a2
+                        break
+                if _confirmed is not None:
+                    _writeback_answer(args.room, questions, _confirmed, pending_id, args.child)
+                    emit(_confirmed)
+                    return 0
                 _gone_streak += 1
                 if _gone_streak >= _GONE_LIMIT:
                     emit({"ok": False,

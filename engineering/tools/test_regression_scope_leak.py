@@ -71,6 +71,17 @@ def check_file(path):
                 mod_imports.add(a.asname or a.name.split(".")[0])
 
     # 每个函数内本地绑定的名字（赋值/参数/for/with/except/局部 import）
+    #
+    # ── 【误报修复 · 2026-11-07】键必须用【节点】而不是【函数名】 ────────────
+    # 原实现 func_locals[n.name] = names，用函数名做键。但 swapi.py 里存在
+    #   同名重复定义（实测：early 在 3071 与 4686、new_assembly 在 15275 与
+    #   13811、_add 在 277/1485/2699、cb 在 3681/6857、_warn 在 4900/15134）。
+    #   后一个定义会把前一个的局部绑定【整体覆盖】掉，于是：
+    #     early() @3071 明明写了 `_st = _EARLY_STATE`（合法局部绑定），
+    #     却被另一份 early() 的局部表判定成"没有本地绑定"→ 误报跨作用域泄漏。
+    #   实测该误报让 scope_leak 报了 swapi.py 的 8 处假泄漏。
+    # 修复：用 id(节点) 做键（每个 def 节点唯一），并在取值时按【使用点所在
+    #   的那个具体函数节点】去查，而不是按名字查。
     func_locals = {}
     for n in ast.walk(tree):
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -91,7 +102,10 @@ def check_file(path):
                     names.add(sub.asname or sub.name.split(".")[0])
                 elif isinstance(sub, ast.ExceptHandler) and sub.name:
                     names.add(sub.name)
-            func_locals[n.name] = names
+            func_locals[id(n)] = names
+            # 兼容：仍按名字留一份"并集"（同名函数取所有定义的并集），
+            #   只作为兜底；主判据走 id(节点)，避免被后一个定义覆盖。
+            func_locals.setdefault(("name", n.name), set()).update(names)
 
     # 函数内 import 的别名 → 定义它的函数链（可能多处定义）
     local_imports = {}
@@ -115,7 +129,19 @@ def check_file(path):
         if not uc:
             continue
         # 使用者函数内已本地绑定该名 → 不是 import 泄漏
-        if al in func_locals.get(uc[0], set()):
+        # 【误报修复】优先按"使用点所在的具体函数节点"查；取不到再退回按名字的并集。
+        _owner = None
+        cur = n
+        while cur is not None:
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                _owner = cur
+                break
+            cur = parents.get(cur)
+        if _owner is not None and al in func_locals.get(id(_owner), set()):
+            continue
+        if _owner is None and al in func_locals.get(("name", uc[0]), set()):
+            continue
+        if al in func_locals.get(("name", uc[0]), set()):
             continue
         # 链是内→外：定义在使用者的祖先内 <=> 定义链是使用链的【后缀】
         ok = False
@@ -181,6 +207,41 @@ def h():
         print("  [FAIL] 反向自检失败：合法代码（使用者自己赋值）被误报 %s" % (found2,))
         return False
     print("  [PASS] 反向自检通过：合法本地绑定不误报")
+
+    # ③ 反向自检 2：同名函数重复定义不得互相覆盖（2026-11-07 实测误报）
+    #    现场：swapi.py 里 early 在 3071/4686 各定义一次，前者有 `_st = ...`
+    #    局部绑定、后者没有；原实现按函数【名】存局部表，后者把前者覆盖掉，
+    #    于是前者里的 _st 被误报成跨作用域泄漏（实测 8 处假泄漏）。
+    dup_src = """def f():
+    import time as _t
+    return _t.time()
+def f():
+    return 1
+def g():
+    _t = 5
+    return _t
+"""
+    found3 = _run(dup_src)
+    if found3:
+        print("  [FAIL] 同名函数覆盖自检失败：重名定义的局部绑定被覆盖 → 误报 %s"
+              % (found3,))
+        return False
+    print("  [PASS] 同名函数重复定义不互相覆盖（不误报）")
+
+    # ④ 正向自检 2：重名场景下【真】泄漏仍必须被抓出（不能因修复 ③ 而放水）
+    leak3 = """def f():
+    import time as _t
+    return _t.time()
+def f():
+    return 1
+def g():
+    return _t.strftime('%Y')
+"""
+    found4 = _run(leak3)
+    if not found4:
+        print("  [FAIL] 重名场景的真实泄漏未被抓出 —— 修复 ③ 时放水了")
+        return False
+    print("  [PASS] 重名场景下真实泄漏仍被抓出（alias=%s）" % (found4[0][0],))
     return True
 
 

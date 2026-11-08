@@ -254,6 +254,100 @@ python "<工程模式根目录>\tools\mode_gate.py" room-board --json
 - CRITICAL（红线）：必须修复 -> 触发红线路由回小屋5
 - WARNING（黄线）：建议修复
 
+## 二点五、「上」方向契约（C1 · 单点声明、跨房间共享）
+
+> 【2026-11-07】本节是**契约**，不是建议。违反它的机器判据写在 2.5.4，命中即判失败。
+
+### 2.5.1 唯一事实源：任务级 `up` 契约
+
+整个任务只允许**一个**"上"。它在开工时由**总计子代理**（或总理子代理）一次性写定，
+落在任务目录 `reports/up_contract.json`，之后**建模 / 总装 / 出图三波共用同一份**：
+
+```json
+{
+  "schema": "dsh-engineering/up-contract@1",
+  "world_up": "Z",
+  "world_up_sign": 1,
+  "origin_mode": "center_bottom",
+  "decided_by": "总计子代理",
+  "summary": "整机 +Z 朝上；原点=底面中心；回转件主轴写 main_axis",
+  "rooms": { "结构件": {"up_axis": "Z", "up_sign": 1}, "传动件": {"up_axis": "Z", "up_sign": 1} }
+}
+```
+
+- `world_up` / `world_up_sign`：**世界坐标**里的"上"（只能是 X/Y/Z 与 +1/−1），
+  总装房做朝向断言时用的就是这两个值；
+- `origin_mode`：与 `<零件>.SLDPRT.origin.json` 的 `origin_mode` **同口径**
+  （标准值 `center_bottom`：XY 原点=底面轮廓中心，Z=0 在底面，+Z 朝上）；
+- `rooms`：按房间登记的 `up_axis`/`up_sign`，必须与该房间产出的
+  `<零件>.SLDPRT.pr.json` 逐件一致。
+
+> 写法固定为**先声明、再在 prompt 里原样下发**。主对话 / 各小屋**不许**各自解释"上"。
+
+### 2.5.2 三波怎么共享（把契约贴进每个小屋 prompt）
+
+主对话为每个房间写 prompt 时，必须原样包含下面这段（只改房间名与零件名，**不是转述**）：
+
+```text
+【朝向契约 · 原样执行，不许自行解释】
+世界"上" = +Z（来自 reports/up_contract.json，唯一事实源）
+原点约定 = center_bottom（XY 原点在底面轮廓中心，Z=0 在底面）
+本房间零件：<零件名...>
+要求：① save 后必须写 <零件>.SLDPRT.pr.json，up_axis="Z"、up_sign=+1、main_axis=<主轴>；
+      ② Top Plane 草图 y = −世界Z（ZSIGN 修正），cut 方向按材料所在侧给 flip；
+      ③ 不许改 origin 约定；如需偏离，停下上报，由总理子代理统一改契约。
+```
+
+- **建模波（wave1）**：每个小屋按 `rooms[房间名]` 写 `.pr.json`；
+- **总装波（wave2）**：用 `world_up` / `world_up_sign` 做朝向断言（见 2.5.4），
+  **不是**用总装房自己临时决定的某个轴；
+- **出图波（wave3）**：主视图方向按 `world_up` 定，图纸上"上"必须与整机"上"一致。
+
+> 🔴 出现"某个房间想用自己的 +Y 当上"时，唯一合法动作是：`escalate_to_parent=true`
+> 上报 → 由总理子代理统一改 `up_contract.json` → 再原样下发。**不许房间内私改**。
+
+### 2.5.3 每件零件必须携带的声明
+
+建模小屋 `save()` 之后必须写 `<零件>.SLDPRT.pr.json`（与 `.origin.json` 同目录同基）：
+
+```json
+{
+  "schema": "dsh-engineering/part-orientation@1",
+  "part": "<绝对路径>",
+  "part_name": "DSH_立柱",
+  "up_axis": "Z",
+  "up_sign": 1,
+  "main_axis": "Z",
+  "base_plane": "Top Plane",
+  "note": "底面中心为原点，+Z 朝上"
+}
+```
+
+字段口径见 skill `sw-design` 第〇.3 节（含正例/反例代码）。**缺 `.pr.json` 的零件不许进总装**。
+
+### 2.5.4 机器判据（命中任一条 = 判失败，不是"提醒"）
+
+| # | 判据 | 怎么读 |
+|---|---|---|
+| J1 | 房间 `pr.json` 的 `up_axis`/`up_sign` ≠ 契约 `rooms[房间]` | 直接比对两个 JSON |
+| J2 | 零件 `pr.json` 的 `up_axis` ≠ 契约 `world_up`（且未被房间级声明解释） | 逐件比对 |
+| J3 | 总装 `verify_assembly_placement()["rotation_anomalies"]` 非空 | 姿态被配合/拖动改过 |
+| J4 | **零旋转装配报警**：声明 `up_axis` ≠ 世界 `world_up`，但组件旋转子矩阵仍是单位阵（`rotation_ok=true`） | 零件根本没摆正；本仓库无旋转路径 → 只能**重建该零件**，不是"总装时转一下" |
+| J5 | 反向异常：声明已对齐（`up_axis == world_up`）却 `rotation_ok=false` | 姿态被别的路径（配合求解/拖动）改过，必须复核 |
+| J6 | 缺 `up_contract.json`，或某零件缺 `.pr.json` | 无声明 = 不可审计，一律不通过 |
+
+```python
+# 总装房的强制闸门（J3~J5 用现成工具，J1/J2 是两份 JSON 的比对）
+r = m.verify_assembly_placement(expected)
+if not r["assembly_ok"]:
+    raise RuntimeError(r["verdict"])                       # J3/J5
+assert_orientation(m, [(n, load_pr(n)) for n in planned], world_up=contract["world_up"])  # J4
+```
+
+> 现场（为什么必须写成机器判据）：同一个任务里三处"上"各不相同 ——
+> 零件按 +Z 建、总装房按 +Y 摆、出图房按 +Z 出图。每处单独看都对，
+> 合起来整机错位 90°；到干涉检查才炸，而那时零件图全部"已验证过"。
+
 ## 三、大屋（主对话）职责清单
 
 ### 3.1 系统分解（进入②模式后立即执行）
@@ -315,6 +409,22 @@ SW 使用窗口互斥（进程级强制，检测 SLDWORKS.EXE 进程）+ 锁排�
     （`room-board` 里这时显示 `waiting_sw`，**属正常等待，不是死亡**）
   - 🚫不要用 `Start-Sleep 90 + job_output wait:true` 这类长阻塞轮询：静默数十秒会让用户
     以为 DSH 卡死（2026-10-31 事故根因，见 docs/DSH卡死事故分析_job_output阻塞.md）
+  - 🔴**【A1-① 修复 · 等房间一律用阻塞原语，禁止 time.sleep 轮询】**
+    现场：旧提示词写着"宁可多轮短等"，被照抄成单轮 477 次 `sleep(30)`、轮询 4 小时 02 分
+    （占墙钟 66%），期间零产物；用户以为进程卡死。
+    · **只准**用阻塞原语：`mode_gate.py wait-rooms "<房间...>" --timeout 900`（等房间离开 active）、
+      `mode_gate.py room-board --wait 900`（等看板有变化再返回）、
+      `mode_gate.py sw-wait <房间> --timeout 90`（等 SW 锁）、`wait-rooms --all-active`
+      —— 一次调用拿到结论，**外面禁止再套 sleep 循环**；
+    · 判据用 `room-board --json` 的 `state`/`safe_to_restart`/`next_action`，
+      不要"看时间过去了多久"来猜；
+    · **只有在确实没有阻塞原语可用时**（例：等一个 `sw_bridge run` 的后台 job 收尾）
+      才允许短 sleep，且**同一等待目标连续不得超过 3 次**；第 4 次必须改用上面的原语，
+      或按 `[WAITING]` 结束回合（见下）；
+    · 等待期间**允许结束回合**：`[WAITING] 在等：<房间/锁/后台job>；判据：room-board state=…；
+      唤醒条件：<state 变成 done/failed/dead 或产物落盘 <路径>>`。
+      但房间已是 `done/failed/dead/detached` 时必须先按 `next_action` 处置，
+      **禁止用 [WAITING] 掩盖"其实已经完事"或"根本没开工"**。
   - 队首完全关闭 SW 进程后，下一个房间才获得 SW 使用权
   - 小屋完成建模后必须 sw_bridge.py close-all 完全关闭 SW 再收工
   - room-end 兜底：发现本房间启动的残留 SW 进程，等 20 秒后强制关闭
@@ -404,10 +514,19 @@ python "<工程模式根目录>\tools\mode_gate.py" whoami "<你的房间名>"
 ```json
 {
   "schema": "dsh-engineering/part-ownership@1",
-  "rooms": { "结构件": {"keywords": ["车架底板","横梁","悬架臂"]} },
+  "rooms": {
+    "结构件":   {"type": "structural",   "keywords": ["车架底板","横梁","悬架臂"]},
+    "传动机构": {"type": "transmission", "keywords": ["电机座","主动齿轮"]}
+  },
   "part_to_room": { "车架底板": "结构件", "电机座": "传动机构" }
 }
 ```
+
+> 【A12 修复】`rooms.*` 也补上了 `type` 字段（与 `set-subagent-plan` 的编制同口径，
+> 取值见 `mode2_flow.py rooms-template` 的 `allowed_types`）。`part_ownership` 是
+> **只读产物**（由 `select` 生成、`verify-ownership` 核对），**不要手写**；要改房间/类型，
+> 唯一入口是总计子代理重跑 `set-subagent-plan`（缺 `type` 会被拒，模板用
+> `python mode2_flow.py rooms-template --out rooms.json` 拿）。
 
 **大屋**：把每个房间的 keywords 写进小屋 prompt（"只允许产出这些零件"）。
 **小屋**：保存前自检 —— `python sw_bridge.py check-part <文件> --room <房间名>`；
@@ -604,6 +723,47 @@ python "<工程模式根目录>\tools\mode_gate.py" residue-check --clean  # 体
 
 > 🔴 旧版「第1波 = 结构件+传动机构+壳体机架 三个房间」的固定表
 > **已废弃（deprecated）**：房间数与细分由总计子代理决定，可能是 2 个，也可能是 7 个。
+
+## 六点五、任务目录分层与收尾清理（2026-11-07，代码级）
+
+用户要求：「一堆奇奇怪怪的文件夹……根本就找不到你需要的文件在哪里。
+让主对话最后收尾的时候，直接删去那些奇奇怪怪的文件和失败的建模文档」。
+
+**任务目录契约**（`tools/task_workspace.py` 是唯一权威）：
+
+| 目录 | 放什么 | 收尾 |
+|------|--------|------|
+| `parts/` | 零件 .sldprt/.sldasm | **保留**（交付物） |
+| `drawings/` | 工程图 .slddrw/.dwg/.dxf/.pdf | **保留**（交付物） |
+| `reports/` | 防线凭据 / 房间报告 / 清理清单 | **保留**（证据） |
+| `intermediate/` | py/json/txt/log/pyc 等中间产物 | **整目录删除** |
+| `parts_rejects/` | 建模失败/废弃的零件 | **整目录删除** |
+| `scripts/` | 建模脚本 | 归档到 `reports/scripts_archive/` |
+
+- `init` 时自动建骨架并 `tidy` 一次（散落文件归位）；
+- 保存失败时 `sw_bridge` / `swapi` 自动把半成品移入 `parts_rejects/`，
+  **不会**留在 `parts/` 里冒充交付物；
+- 收尾（`_archive_finished`）自动 `cleanup`，并写 `reports/cleanup_manifest.json`；
+- 手动：`workflow_gate.py workspace` / `tidy [--dry-run]` / `cleanup [--dry-run]`。
+
+> 🗑️ **删失败件前要不要问用户**：`mode2_flow.py delete-policy`
+> · 搭建方式 **A（完全自主）** → 直接删，不必问；
+> · **B / C / 读不到** → **必须先问用户**，得到答复后再删。绝不"先删了再说"。
+
+## 六点六、零件进度表（2026-11-07）
+
+总理子代理通过 `mode2_flow.py parts-board` 维护每个零件的完成度：
+
+| 状态 | 含义 |
+|------|------|
+| `not_started` 未开始 | 编制里有、房间还没开工 |
+| `building` 正在建 | 房间在建模 / 等 SW 锁 / 已有产物待验收 |
+| `done` 完成 | 已有 `prime-report`（总理子代理已验收） |
+| `rebuilding` 需要重建 | 房间被 `room-fail`/`restart` 过，正在或等着重做 |
+| `failed` 失败 | 子代理失联，**或 DSH 进程已断（pulse 停）而零件未完成** |
+
+> 右侧面板「零件」区读的就是这一份（`GET /parts-board`），
+> **不要在对话里另报一套状态**。
 
 > 🔴 **并发硬上限 = 3（2026-11-06，代码级）**
 > 宿主按 root 统一计数（含已跑完但仍驻留的小屋）。插件在 `tools/pre-execute`

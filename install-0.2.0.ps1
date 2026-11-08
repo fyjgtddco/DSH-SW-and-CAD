@@ -49,6 +49,12 @@ $LogPath     = Join-Path $Root 'install-0.2.0.log'
 
 $UI_NAME   = 'dsh-engineering-ui'
 $UI_SRC    = Join-Path $Root "engineering\plugins\$UI_NAME"
+# [2026-11-08] Engineering-mode compaction engine. preset-engineering.patch.yml
+#   refers to it by package name 'dsh-engineering-compaction', so it must land in
+#   the profile node_modules alongside the UI plugin. Without it that preset row
+#   cannot resolve and the whole engineering preset fails to load.
+$COMPACT_NAME = 'dsh-engineering-compaction'
+$COMPACT_SRC  = Join-Path $Root "engineering\plugins\$COMPACT_NAME"
 
 $script:Log = New-Object System.Text.StringBuilder
 $script:Bad = 0
@@ -128,8 +134,12 @@ foreach ($prof in $targets) {
     if (-not (Test-Path $NodeModules)) { New-Item -ItemType Directory -Path $NodeModules -Force | Out-Null }
 
     # --- copy plugin packages (copy-overwrite only; never delete) ---
-    # [problem-2 fix] only the UI plugin is installed now
-    foreach ($pair in @(@{ n = $UI_NAME; s = $UI_SRC })) {
+    # [2026-11-08] Two packages: the UI plugin and the compaction engine.
+    #   The engine never enters dsh.profile.bundles (a context may hold only one
+    #   ctx.compaction); it exists only as a preset child. We just make sure the
+    #   files are on disk so the preset row resolves by package name.
+    foreach ($pair in @(@{ n = $UI_NAME; s = $UI_SRC }, @{ n = $COMPACT_NAME; s = $COMPACT_SRC })) {
+        if (-not (Test-Path $pair.s)) { Say ("  [skip] " + $pair.n + " (source missing)"); continue }
         $dst = Join-Path $NodeModules $pair.n
         if (-not (Test-Path $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }
         Copy-Item -Path (Join-Path $pair.s '*') -Destination $dst -Recurse -Force

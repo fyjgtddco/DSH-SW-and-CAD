@@ -225,11 +225,15 @@ python "<根>\tools\ask_user.py" --room "总计子代理" --child "<它自己的
 
 **④ 分析完成后登记房间编制**（房间数 / 细分**由它决定**，禁止照抄固定表）：
 ```powershell
+python "<根>\tools\mode2_flow.py" rooms-template --out rooms.json   # 先拿含 type 的模板
 python "<根>\tools\mode2_flow.py" set-subagent-plan `
-       --rooms-json "<rooms.json 的绝对路径>" --rationale "<按功能分解的理由>" `
+       --rooms-json "@rooms.json" --rationale "<按功能分解的理由>" `
        --decided-by "总计子代理"
 ```
-   - `--decided-by` 必须写「总计子代理」；每房间必须写 `parts`（负责哪些零件）与 `why`；数量 1~24。
+   - `--decided-by` 必须写「总计子代理」；每房间必须写 `type` / `parts`（负责哪些零件）与 `why`；数量 1~24。
+   - 🔴 **不要手写 rooms.json**：漏 `type` 会被 `set-subagent-plan` 直接拒绝（【A12】
+     任务书里的旧示例就没有 `type`）。字段表见 §3.5.4；模板由 `rooms-template` 按
+     校验器的同一份类型表生成，永远不会与校验器不同源。
    - 十阶段没走完就调会被拒 —— 先 `stage-status` 自查（`require_stages_complete` 强制前置）。
 
 **⑤ 结束回合**，返回值里带**编制摘要**：房间名 × 每房间零件 × 该房间属于第几波。
@@ -337,6 +341,43 @@ PartSynthesis → EngineeringValidation → DesignIteration → ExplainableDesig
 - 跳阶段被拒；只有 `DesignIteration` 可以发起回退。
 
 #### 3.5.4 子代理数量【不再固定 3 个】→ 由「总计子代理」决定
+
+**① 先拿一份【含 `type`】的模板（不要手写，不要凭记忆）**
+
+```powershell
+python "<根>\tools\mode2_flow.py" rooms-template
+python "<根>\tools\mode2_flow.py" rooms-template --out rooms.json   # 直接落盘，可被 --rooms-json @rooms.json 投喂
+```
+
+**rooms.json 的每个房间必须有这 5 个字段（`type` 缺了必被拒）**：
+
+```json
+[
+  {"name": "结构件", "type": "structural",
+   "parts": ["DSH_车架底板", "DSH_立柱"],
+   "why": "承载整车与电池，决定主要刚度与安装基准", "depends_on": []},
+  {"name": "传动件", "type": "transmission",
+   "parts": ["DSH_主动齿轮", "DSH_从动齿轮"],
+   "why": "把电机转矩按减速比传到执行机构", "depends_on": ["结构件"]}
+]
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `name` | ✅ | 房间名，唯一、中文可读 |
+| `type` | ✅ | **必须是规范类型之一**（可写同义词，会被归一化）：`structural` / `transmission` / `housing` / `support` / `spring` / `thermal` / `corrosion` / `assembly` / `drafting`（`prime` 由代码追加，不要写） |
+| `parts` | ✅ | 本屋负责的零件名清单；**非建模屋也要写占位名**（装配体名/图纸名），空数组会被拒 |
+| `why` | ✅ | 为什么需要这个子代理（可审计的存在理由，空字符串会被拒） |
+| `depends_on` | ✅（可空数组） | 依赖的房间名；指向不存在的房间会被拒 |
+
+> 🔴 **【A12 修复】现场：任务书里流传的旧示例只有 `{name, parts, why, depends_on}`，**
+> **没有 `type`** —— 子代理照抄后 `set-subagent-plan` 直接被拒
+> （`"子代理【X】缺少 type 字段"`），只能反复试错。现在：
+> ① 示例与校验器**同源**（上面这份就是 `rooms-template` 打印的结构）；
+> ② 缺 `type` 的**报错里会直接给出 `rooms-template` 命令**；
+> ③ `{"rooms": [...]}` 这层包装会被自动解包（BUG-3），但推荐按示例直接传数组。
+
+**② 登记编制**
 
 ```powershell
 python "<根>\tools\workflow_gate.py" mode2 set-subagent-plan `
@@ -591,6 +632,9 @@ python "<工程模式根>\tools\webots_env.py" --json # AI 读 blocking 字段
     answer-question / refresh-stage / set-subagent-plan）**只能由总计子代理调**。
   · 旧规则「门禁每一步都在主对话完成、不进子代理」**已废除（deprecated）** —— 它与
     "spawn 总计子代理"直接矛盾，实测导致主对话自演十阶段、总计子代理从未创建。
+- 🔴 **等房间/等锁禁止 sleep 轮询（【A1-①】）**：用阻塞原语
+  `room-board --wait 900` / `wait-rooms "<房间>" --timeout 900` / `sw-wait <房间> --timeout 90`，
+  一次调用拿到结论；确实无原语时同目标短 sleep 连续 ≤3 次；判据只读 `state`，不看"等了多久"。
 - 🔴 **子代理死活只看 `python "<根>\tools\mode_gate.py" room-board --json` 的 `state`**：
   · `waiting_sw`（在排 SW 锁）/ `running` / `starting` / `idle` = **正常，禁止判死**；
   · `unbound` = 平台 alive 但没 `subagent-assign` → **补 assign**（不是僵尸）；
@@ -627,8 +671,9 @@ AI must（门禁命令在主对话；十阶段在**总计子代理**里）：
    - 按序 `begin-stage` / `mark-stage-done` 走完十阶段（缺阶段会被拒）
    - 缺信息时 `python "<根>\tools\ask_user.py" --room "总计子代理" --child <自己的 sessionId>
      --header ... --question ...`（子代理不能直接 ask_user_question）
-   - 分析完 `python "<根>\tools\mode2_flow.py" set-subagent-plan --rooms-json <file>
-     --rationale "..." --decided-by "总计子代理"`
+   - 分析完先 `python "<根>\tools\mode2_flow.py" rooms-template --out rooms.json` 拿模板，
+     再 `python "<根>\tools\mode2_flow.py" set-subagent-plan --rooms-json "@rooms.json"
+     --rationale "..." --decided-by "总计子代理"`（每房间必须有 `type`，缺了必被拒）
    - 结束回合，返回编制摘要
 6. 主对话 `wait_agent` / `list_agents` 等它结束，再执行
    `... provide_context "<全部提问的答案>"` → 力学估算 + 落盘 `tools/load_cases/gate_load_case.json`

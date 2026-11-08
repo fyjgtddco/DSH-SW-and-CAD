@@ -70,13 +70,44 @@ const WEBOTS_URL = 'data:text/javascript;base64,' + Buffer.from(webotsSource).to
 // 【内存守卫】mem-guard.js 同样是相对 import，一并内联。
 const memGuardSource = readFileSync(new URL('../lib/mem-guard.js', import.meta.url), 'utf8');
 const MEMGUARD_URL = 'data:text/javascript;base64,' + Buffer.from(memGuardSource).toString('base64');
+// 【A4】model-errors.js
+const modelErrorsSource = readFileSync(new URL('../lib/model-errors.js', import.meta.url), 'utf8');
+const MODEL_ERRORS_URL = 'data:text/javascript;base64,' + Buffer.from(modelErrorsSource).toString('base64');
+// 【BUG-A1/A11 修复】turn-guard.js（守卫的可判定事实层）同样是相对 import，
+//   必须一并内联 —— 否则是【加载失败】而不是断言失败，整个测试文件直接挂掉。
+const turnGuardSource = readFileSync(new URL('../lib/turn-guard.js', import.meta.url), 'utf8');
+const TURNGUARD_URL = 'data:text/javascript;base64,' + Buffer.from(turnGuardSource).toString('base64');
+/**
+ * 【通用兜底】lib/ 下新增模块时显式替换链会漏行 → data: URL 无法解析相对
+ *   路径 → 整组用例 ERR_UNSUPPORTED_RESOLVE_REQUEST。已连续踩到两次，
+ *   这里统一内联，新增文件不必再改测试。
+ */
+function inlineLocalLibs(src, libDirUrl) {
+  let out = src;
+  const names = new Set();
+  const re = /from '\.\/([A-Za-z0-9_.-]+\.js)'/g;
+  let m;
+  while ((m = re.exec(src)) !== null) names.add(m[1]);
+  for (const name of names) {
+    let body;
+    try { body = readFileSync(new URL('./' + name, libDirUrl), 'utf8'); } catch (e) { continue; }
+    const inner = inlineLocalLibs(body, libDirUrl);
+    const dataUrl = 'data:text/javascript;base64,' + Buffer.from(inner).toString('base64');
+    out = out.split("from './" + name + "'").join("from '" + dataUrl + "'");
+  }
+  return out;
+}
+
 const rewritten = source
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + SHIM_LLM_URL + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + SHIM_REGISTRY_URL + "'")
   .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'")
   .replace("from './job-wait-guard.js'", "from '" + GUARD_URL + "'")
   .replace("from './webots.js'", "from '" + WEBOTS_URL + "'")
-  .replace("from './mem-guard.js'", "from '" + MEMGUARD_URL + "'");
+  .replace("from './mem-guard.js'", "from '" + MEMGUARD_URL + "'")
+  // 【A4】错误码归一模块（相对 import）一并内联
+  .replace("from './model-errors.js'", "from '" + MODEL_ERRORS_URL + "'")
+  .replace("from './turn-guard.js'", "from '" + TURNGUARD_URL + "'");
 assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换成功');
 const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));
 

@@ -63,14 +63,51 @@ const WEBOTS_URL = 'data:text/javascript;base64,' + Buffer.from(webotsSource).to
 // 【内存守卫】mem-guard.js 同样是相对 import，一并内联。
 const memGuardSource = readFileSync(new URL('../lib/mem-guard.js', import.meta.url), 'utf8');
 const MEMGUARD_URL = 'data:text/javascript;base64,' + Buffer.from(memGuardSource).toString('base64');
+// 【A4】model-errors.js 同样是相对 import，必须一并内联（否则 data: URL 无法解析）
+const modelErrorsSource = readFileSync(new URL('../lib/model-errors.js', import.meta.url), 'utf8');
+const MODEL_ERRORS_URL = 'data:text/javascript;base64,' + Buffer.from(modelErrorsSource).toString('base64');
+// 【BUG-A1/A11 修复】turn-guard.js（守卫的可判定事实层）同样是相对 import，
+//   必须一并内联 —— 否则是【加载失败】而不是断言失败，整个测试文件直接挂掉。
+const turnGuardSource = readFileSync(new URL('../lib/turn-guard.js', import.meta.url), 'utf8');
+const TURNGUARD_URL = 'data:text/javascript;base64,' + Buffer.from(turnGuardSource).toString('base64');
 
-const rewritten = source
+/**
+ * 【通用兜底】lib/ 下新增模块时，测试的显式替换链会漏一行 →
+ *   data: URL 无法解析相对路径 → 整组用例 ERR_UNSUPPORTED_RESOLVE_REQUEST。
+ *   实测已连续踩到 model-errors.js（A4）与 turn-guard.js 两次，
+ *   每次都要改三个测试文件 —— 这种"新增文件就破测试"的结构不可持续。
+ * 这里统一扫一遍：凡源码里 'from ./xxx.js' 且 lib/xxx.js 存在，一律内联
+ *   （递归处理模块间互相 import）；显式替换过的会因为已是 data: URL 而跳过。
+ */
+function inlineLocalLibs(src, libDirUrl) {
+  let out = src;
+  const names = new Set();
+  const re = /from '\.\/([A-Za-z0-9_.-]+\.js)'/g;
+  let m;
+  while ((m = re.exec(src)) !== null) names.add(m[1]);
+  for (const name of names) {
+    let body;
+    try {
+      body = readFileSync(new URL('./' + name, libDirUrl), 'utf8');
+    } catch (e) {
+      continue;   // 不是 lib 目录下的模块 → 交给显式替换链
+    }
+    const inner = inlineLocalLibs(body, libDirUrl);
+    const url = 'data:text/javascript;base64,' + Buffer.from(inner).toString('base64');
+    out = out.split("from './" + name + "'").join("from '" + url + "'");
+  }
+  return out;
+}
+
+const rewritten = inlineLocalLibs(source, new URL('../lib/', import.meta.url))
   .replace("from '@deepseek-ai/dsh-llm'", "from '" + LLM_URL + "'")
   .replace("from '@deepseek-ai/dsh-agent-preset-registry'", "from '" + REG_URL + "'")
   .replace("from './defense-sign.js'", "from '" + SIGN_URL + "'")
   .replace("from './job-wait-guard.js'", "from '" + GUARD_URL + "'")
   .replace("from './webots.js'", "from '" + WEBOTS_URL + "'")
-  .replace("from './mem-guard.js'", "from '" + MEMGUARD_URL + "'");
+  .replace("from './mem-guard.js'", "from '" + MEMGUARD_URL + "'")
+  .replace("from './model-errors.js'", "from '" + MODEL_ERRORS_URL + "'")
+  .replace("from './turn-guard.js'", "from '" + TURNGUARD_URL + "'");
 assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换成功');
 
 const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));
@@ -145,7 +182,7 @@ function harness(handles = {}) {
   return { ctx, root, routes, hooks, asks, dispose, request };
 }
 
-test('全部 32 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
+test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () => {
   const h = harness();
   try {
     // 9 条基础/提问/通知路由
@@ -155,7 +192,6 @@ test('全部 32 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
     //     ※ 第 5 条是【10 分钟自动刷新】新增的纯进程端点：
     //       用户要求"只做检测就行"，它【绝不发 COM】，因此必须与
     //       conn-probe 分开（后者可能把 SW 拉起来）。
-    //   + 1 条【划词详情】侧边分析路由（/side-chat）
     //   + 1 条【工程人设】读写路由（/persona）
     //   + 1 条【第4项·SW 健康看护】ctx.jobs 版路由（/sw-guard-job）= 22
     // 注：/defense/verify-gate 是宿主侧"不消费 nonce"的只读验签入口
@@ -172,13 +208,17 @@ test('全部 32 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
     // 旧断言写死 27 且清单里没有这两条 —— 代码早就是 29 条，
     //   于是这条断言长期失败，而它恰恰是"路由注册完整性"的唯一守门人。
     //   断言数量与清单必须同时维护：加路由时两处一起改。
-    // ── 【Webots 接入】+4 → 【内存守卫】+1(mem-guard) = 32 ──────────────────────────────
+    // ── 【Webots 接入】+4 → 【内存守卫】+1(mem-guard) → 【零件进度表】+1(parts-board) -1(划词详情已删) = 32 ──────────────────────────────
     //   /webots-context / -report / -evidence / -attribute（全部只读 GET）
-    assert.equal(h.routes.size, 32, '路由数量应为 32（含 4 条 Webots 只读路由）');
+    // ── 【2026-11-07 压缩历史】+1(compaction-history) = 33 ────────────────
+    //   /compaction-history（只读 GET，读 append-only 账本，供左列压缩历史面板）
+    assert.equal(h.routes.size, 33, '路由数量应为 33（含 Webots 4 条 + 压缩历史 1 条）');
     // ── 清单必须与 lib/index.js 的 ctx.webServer.register 一一对应 ──────
     // 漏写一条 → 路由存在但没被这条断言保护；多写一条 → 直接失败。
     for (const p of [
       '/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
+      '/dsh-engineering-ui/parts-board',
+      '/dsh-engineering-ui/compaction-history',
       '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
       '/dsh-engineering-ui/pending-child', '/dsh-engineering-ui/result-child',
       '/dsh-engineering-ui/answer', '/dsh-engineering-ui/verify-subagent',
@@ -192,7 +232,6 @@ test('全部 32 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/conn-launch', '/dsh-engineering-ui/conn-diagnose',
       '/dsh-engineering-ui/env-check', '/dsh-engineering-ui/env-prompt',
       '/dsh-engineering-ui/settings',
-      '/dsh-engineering-ui/side-chat',
       '/dsh-engineering-ui/model-catalog', '/dsh-engineering-ui/model-chain',
       '/dsh-engineering-ui/persona',
       '/dsh-engineering-ui/mem-guard',
@@ -204,6 +243,8 @@ test('全部 32 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
     // 反向校验：清单长度必须等于实际注册数，防止"数量对了但清单漏了"
     assert.equal(new Set([
       '/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
+      '/dsh-engineering-ui/parts-board',
+      '/dsh-engineering-ui/compaction-history',
       '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
       '/dsh-engineering-ui/pending-child', '/dsh-engineering-ui/result-child',
       '/dsh-engineering-ui/answer', '/dsh-engineering-ui/verify-subagent',
@@ -216,7 +257,6 @@ test('全部 32 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/conn-launch', '/dsh-engineering-ui/conn-diagnose',
       '/dsh-engineering-ui/env-check', '/dsh-engineering-ui/env-prompt',
       '/dsh-engineering-ui/settings',
-      '/dsh-engineering-ui/side-chat',
       '/dsh-engineering-ui/model-catalog', '/dsh-engineering-ui/model-chain',
       '/dsh-engineering-ui/persona',
       '/dsh-engineering-ui/mem-guard',

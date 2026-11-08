@@ -132,6 +132,10 @@ $env:DSH_ROOM = "结构件"; python "<包目录>\sw_bridge.py" run "script.py"
   再重试同一条命令（必须带 --room）；队列位置已保留，禁止放弃
 - 🚫禁止用 `Start-Sleep 90 + job_output wait:true` 长阻塞轮询：静默等待会让用户以为 DSH 卡死
   （2026-10-31 事故，见 docs/DSH卡死事故分析_job_output阻塞.md）
+- 🔴**【A1-① 修复】等锁/等后台 job 不许多轮 sleep**：`sw-wait` / `wait-rooms` 是唯一的等待方式
+  （一次调用、进程内阻塞、零 token）；确实没有阻塞原语时，同一等待目标短 sleep 连续
+  **不得超过 3 次**，第 4 次必须换原语或按 `[WAITING]` 结束回合。
+  判据永远读 `room-board --json`，不要按"等了多久"猜状态。
 - 前一个小屋完全关闭 SW 进程后，队首小屋自动获得 SW 使用权
 - 串行模式 / 非模式2：锁自动跳过，零影响
 - 锁随小屋生命周期保持，由主对话的 room-end 统一释放并确保 SW 进程关闭

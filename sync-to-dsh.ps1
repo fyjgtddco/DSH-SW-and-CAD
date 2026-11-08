@@ -147,8 +147,15 @@ Copy-Tree $SkillsSrc $SkillsDst 'skills'
 
 # ---- 3. plugin -> each profile's node_modules -----------------------------
 Say ""
-Say "---- 3. dsh-engineering-ui -> profiles\*\node_modules ----" Yellow
+Say "---- 3. plugins -> profiles\*\node_modules ----" Yellow
 $UiSrc = Join-Path $Root 'engineering\plugins\dsh-engineering-ui'
+# [2026-11-08] Engineering-mode compaction engine. preset-engineering.patch.yml's
+#   compaction child refers to it by package name 'dsh-engineering-compaction';
+#   if that package is missing the row cannot resolve and the WHOLE engineering
+#   preset fails to load (symptom: the engineering UI silently vanished).
+#   It does NOT go into dsh.profile.bundles: a context may hold only one
+#   ctx.compaction, so mounting it at the host layer is duplicate registration.
+$CompactSrc = Join-Path $Root 'engineering\plugins\dsh-engineering-compaction'
 $ProfilesDir = Join-Path $DshHome 'profiles'
 if (-not (Test-Path $UiSrc)) {
     Say ("  [WARN] plugin source missing: " + $UiSrc) 'Yellow'
@@ -193,6 +200,13 @@ if (-not (Test-Path $UiSrc)) {
                     if (-not $deps.Contains('dsh-engineering-ui')) {
                         $deps['dsh-engineering-ui'] = 'file:./node_modules/dsh-engineering-ui'
                     }
+                    # Compaction engine: dependency only, NEVER a bundle entry.
+                    #   The preset resolves it by package name from the profile's
+                    #   node_modules; listing it under dsh.profile.bundles would
+                    #   mount it at the host layer and duplicate ctx.compaction.
+                    if (-not $deps.Contains('dsh-engineering-compaction')) {
+                        $deps['dsh-engineering-compaction'] = 'file:./node_modules/dsh-engineering-compaction'
+                    }
                     $bundles = @()
                     if ($obj.dsh -and $obj.dsh.profile -and $obj.dsh.profile.bundles) {
                         foreach ($b in $obj.dsh.profile.bundles) { $bundles += $b }
@@ -230,6 +244,11 @@ if (-not (Test-Path $UiSrc)) {
         }
         Say ("  profile: " + $prof) 'Gray'
         Copy-Tree $UiSrc $dst ('plugin@' + $prof)
+        # Compaction engine: files only, never a bundle (see $CompactSrc above).
+        #   Its only job: make the preset row resolvable by package name.
+        if (Test-Path $CompactSrc) {
+            Copy-Tree $CompactSrc (Join-Path $nm 'dsh-engineering-compaction') ('compaction@' + $prof)
+        }
     }
 }
 

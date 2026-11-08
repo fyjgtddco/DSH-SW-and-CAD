@@ -31,7 +31,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # ★ 部分测试脚本把 tools 目录作为 argv[1] 读取（写成 `TOOLS = sys.argv[1]`）。
 #   原先 runner 一律不传参 → 它们在 __main__ 处 IndexError 直接崩，
 #   表现为"单独跑通过、汇总里却 ❌"的假失败（question_contract 就是这种）。
-_NEEDS_TOOLS_ARG = ("test_regression_question_contract.py",)
+_NEEDS_TOOLS_ARG = (
+    "test_regression_question_contract.py",
+    # 【修复】webots_intake 同样把 tools 目录当 argv[1] 读，而且要求
+    #   必须是【绝对路径】（DSH_ENGINEERING_ROOT 那一项会做 isabs 检查）。
+    #   不传 -> IndexError；传相对路径 "." -> 报"必须是绝对路径"的假失败。
+    #   实测：传 "." = 31/32，传绝对路径 = 32/32。故一律传 HERE（绝对路径）。
+    "test_regression_webots_intake.py",
+)
 
 
 def _needs_tools_arg(filename):

@@ -1,0 +1,8 @@
+# dsh-engineering-compaction — cordis 补丁
+#
+# ⚠️ 本包【刻意不往宿主层 insert 任何东西】。
+#   它是一个「压缩后端」：只能作为 preset 里 compaction group 的一个子项出现，
+#   由 preset-engineering.patch.yml 声明并替换 @deepseek-ai/dsh-compaction-basic。
+#   若在这里 insert，宿主进程级也会加载一份 → 与 preset 里的实例重复注册
+#   compaction 服务（同一上下文只能有一个 ctx.compaction），loader 会直接拒绝。
+- insert: []

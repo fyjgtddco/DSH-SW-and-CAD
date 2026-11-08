@@ -350,13 +350,143 @@ def _read_task_id(work_dir=None):
     return None, None
 
 
-def _load_registry(work_dir=None):
+# ══ 【C8 修复】台账必须属于【当前任务】═══════════════════════════════════
+# 现场（缺陷清单 C8 / P2）：
+#   同一台机器换任务后，读的是【上一轮任务】留下的 load_cases/part_registry.json。
+#   于是"一致性检查"报出的是旧任务的零件/邻接，看起来是"当前任务数据不一致"，
+#   实际是拿错了台账 —— 典型的【一致性假阳性】。
+#   更糟的是写路径：新任务的零件被 add 进旧台账，task_id 一栏如果已经有了旧任务
+#   的戳，_set_task_id 会直接 return（"已打过戳"），旧任务号就永久留在新台账里，
+#   之后任何"按 task_id 比对"的地方都再也对不上。
+#
+# 根因：
+#   ① _read_task_id() 只是"尽力取一个"，取不到就放弃（不区分"没有权威来源"和
+#      "权威来源说是 A、台账却写着 B"）；
+#   ② 读台账时【完全没有】校验台账的 task_id 是否等于当前 workflow_state 的
+#      task_id —— 旧台账被当成当前台账，静默通过。
+#
+# 修复：
+#   ① 新增 _current_task_id()：只读【权威状态目录】的 workflow_state.json；
+#   ② 新增 _task_id_check()：台账 task_id 与当前 task_id 比对，不一致 → 明确的
+#      TASK_ID_MISMATCH（列出两边 task_id + 台账路径 + 状态文件路径 + 怎么修）；
+#   ③ _set_task_id() 不再"有戳就不管"：戳属于旧任务 → 拒绝写入（而不是静默继承）；
+#   ④ _load_registry() 默认校验（strict_task_id=True），所有写路径都在这里返回
+#      明确错误、绝不落盘；只读查询/工具命令（list/info/report/export）传
+#      strict_task_id=False，改由结果里的 task_id_mismatch 字段给出警告。
+
+
+def _state_candidates(work_dir=None):
+    """workflow_state.json 的候选路径（按权威程度排序，去重保序）。
+
+    顺序与 _read_task_id 一致：显式 work_dir > _store 权威状态目录 > 本脚本目录。
+    """
+    out = []
+    if work_dir:
+        out.append(os.path.join(os.path.abspath(str(work_dir)), "workflow_state.json"))
+    try:
+        import _store  # 工程模式状态单一事实源（存在则优先用它）
+        out.append(os.path.join(_store.state_dir(), "workflow_state.json"))
+    except Exception:
+        pass
+    out.append(os.path.join(BASE_DIR, "workflow_state.json"))
+    seen, uniq = set(), []
+    for p in out:
+        k = os.path.abspath(p).lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(os.path.abspath(p))
+    return uniq
+
+
+def _current_task_id(work_dir=None):
+    """当前任务号（只认 workflow_state.json）。返回 (task_id, 来源路径)。
+
+    与 _read_task_id 的区别：不再把"台账自己的 task_id"混进候选来源 ——
+    一个只会自证的值不能用来判断"这是不是当前任务"。
+    """
+    for p in _state_candidates(work_dir):
+        try:
+            if not os.path.isfile(p):
+                continue
+            with open(p, "r", encoding="utf-8-sig") as f:
+                d = json.load(f) or {}
+            tid = d.get("task_id")
+            if tid:
+                return str(tid), p
+        except Exception:
+            continue
+    return None, None
+
+
+def _task_id_check(data, work_dir=None, action=""):
+    """台账 task_id 与当前任务号的一致性检查（C8 的核心判据）。
+
+    Returns: None（通过/无法判定/纯历史归档）或 明确的错误 dict。
+      · 两边都有值且不等 → TASK_ID_MISMATCH（绝不静默通过）
+      · 台账无戳（新台账）→ 通过，由 _set_task_id 补戳
+      · 当前任务号取不到（例如手工在 shell 里跑）→ 通过，但不假装"已核对"
+    """
+    ledger_tid = str((data or {}).get("task_id") or "").strip() or None
+    cur_tid, cur_src = _current_task_id(work_dir)
+    path = registry_path(work_dir)
+    if ledger_tid and cur_tid and ledger_tid != cur_tid:
+        return {
+            "ok": False,
+            "gate": "TASK_ID_MISMATCH",
+            "rejected": True,
+            "action": action or None,
+            "ledger_task_id": ledger_tid,
+            "current_task_id": cur_tid,
+            "registry_file": path,
+            "registry_task_id_source": (data or {}).get("task_id_source"),
+            "workflow_state_file": cur_src,
+            "error": ("台账不属于当前任务：台账 task_id=%s，当前任务 task_id=%s。"
+                      "（台账：%s；当前任务：%s）"
+                      % (ledger_tid, cur_tid, path, cur_src)),
+            "why": ("同一台机器换任务后，默认台账路径仍然指向上一轮的台账 —— "
+                    "旧零件/旧邻接会被当成当前数据，一致性检查因此报出假阳性，"
+                    "新任务的数据还会被追加进旧台账。"),
+            "hint": ("处理方式（任选其一，别直接改 task_id 蒙混过关）：\n"
+                     "  ① 换任务时用独立的台账文件："
+                     "设置 DSH_PART_REGISTRY=<新任务目录>/part_registry.json，"
+                     "或给 add_part 传 work_dir=<当前任务目录>；\n"
+                     "  ② 确属同一任务的延续（workflow_state 刚被重建）："
+                     "把 workflow_state.task_id 恢复成本台账的 task_id；\n"
+                     "  ③ 旧台账要留着审计：改名备份（如 "
+                     "part_registry.<旧task_id>.json）后让本任务从空台账开始。"),
+        }
+    return None
+
+
+def _parts_map(data):
+    """安全地取台账的 parts 字典（拦截/空骨架时返回 {}，绝不抛 KeyError）。
+
+    【C8 修复】配套：_load_registry 在任务号不一致时会返回【空骨架】+ 明确
+    错误，此时调用方若继续 data["parts"][...] 会 KeyError，把"清清楚楚的
+    TASK_ID_MISMATCH"变成"命令执行异常"，反而更难排查。
+    """
+    try:
+        _p = (data or {}).get("parts")
+        return _p if isinstance(_p, dict) else {}
+    except Exception:
+        return {}
+
+
+def _load_registry(work_dir=None, strict_task_id=True):
     """读台账。返回 (data, path, error)。
 
     ── 损坏保护（代码级强制）────────────────────────────────────────────
     文件存在但不是合法 JSON / 顶层不是对象 → 返回 error，且【后续写操作
     一律拒绝落盘】（见 _save_registry 的 error 传递），避免一次误写把
     用户攒了半天的台账覆盖成空骨架。
+
+    ── 【C8 修复】任务归属校验（strict_task_id）─────────────────────────
+    strict_task_id=True（默认，写路径）：台账 task_id 与当前 workflow_state
+      的 task_id 不一致 → 直接返回 error（gate=TASK_ID_MISMATCH），
+      调用方必须 fail-closed，绝不允许把新任务的数据写进旧任务的台账。
+    strict_task_id=False（只读查询/工具命令）：不拦截，改由
+      _task_id_mismatch_warning() 在结果里回显警告 —— 让"我看到的是旧台账"
+      这件事对模型可见，而不是把旧数据当成当前事实。
     """
     path = registry_path(work_dir)
     if not os.path.isfile(path):
@@ -379,6 +509,14 @@ def _load_registry(work_dir=None):
         data["unresolved"] = []
     if not isinstance(data.get("parts"), dict):
         data["parts"] = {}
+    # ── 【C8 修复】任务归属校验（见函数 docstring 的 strict_task_id 说明）──
+    _mm = _task_id_check(data, work_dir, action="load")
+    if _mm:
+        if strict_task_id:
+            _remember_gate(_mm)
+            return _fresh_registry(), path, _mm["error"]
+        # 只读模式：不拦截，但把警告挂到返回的数据上（调用方会原样回显）
+        data["task_id_mismatch"] = _task_id_mismatch_warning(_mm)
     return data, path, None
 
 
@@ -519,7 +657,8 @@ def audit_verification(name=None, work_dir=None):
     这样：正常迭代（每次改动都走模块、都会留下更新的 part_digest）永远自洽；
     只有真正的手改才会暴露。
     """
-    data, path, err = _load_registry(work_dir)
+    # 【C8 修复】只读查询：不拦截旧台账，但在结果里回显 task_id 不一致警告
+    data, path, err = _load_registry(work_dir, strict_task_id=False)
     if err:
         return {"ok": False, "error": err, "file": path}
     parts = data.get("parts") or {}
@@ -612,6 +751,9 @@ def audit_verification(name=None, work_dir=None):
     return {
         "ok": True,
         "file": path,
+        # 【C8 修复】审计读的是哪个任务的台账，必须说清楚
+        "task_id": data.get("task_id"),
+        "task_id_mismatch": data.get("task_id_mismatch"),
         "part_filter": name,
         "parts_in_registry": len(parts),
         "parts_with_fingerprint": len(last_write),
@@ -634,13 +776,31 @@ def audit_verification(name=None, work_dir=None):
 
 
 def _set_task_id(data, work_dir=None):
-    """给台账补任务号（仅当尚未打过戳时）。"""
+    """给台账补任务号（仅当尚未打过戳时）。
+
+    ── 【C8 修复】旧实现是"只要台账已经有 task_id 就直接 return" ──────────
+    于是【上一轮任务的戳】会被无条件继承：新任务的零件被写进旧台账，而台账
+    仍自称属于旧任务 —— 之后任何按 task_id 的比对都永远对不上，一致性检查
+    也会拿旧任务的零件当当前数据（假阳性）。
+
+    现在：已有戳时先与【权威来源】比对，
+      · 一致   → 通过（正常的同一任务续写）；
+      · 不一致 → 返回 TASK_ID_MISMATCH 错误，调用方必须拒绝落盘；
+      · 取不到当前任务号 → 保持原样（手工在 shell 里跑时不臆造结论）。
+
+    Returns: None（通过）/ 错误 dict（必须拒绝落盘）
+    """
     if data.get("task_id"):
-        return
+        _mm = _task_id_check(data, work_dir, action="write")
+        if _mm:
+            _remember_gate(_mm)
+            return _mm
+        return None
     tid, src = _read_task_id(work_dir)
     if tid:
         data["task_id"] = tid
         data["task_id_source"] = src
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1562,11 +1722,16 @@ def add_part(record, work_dir=None, reason=None, allow_mismatch=False,
     # ── ③ 读台账 ──────────────────────────────────────────────────────
     data, path, err = _load_registry(work_dir)
     if err:
-        return {"ok": False, "error": err, "file": path,
-                "hint": "台账损坏时拒绝写入，避免覆盖已有数据；请先人工修复或改名备份"}
+        # 【C8 修复】任务号不一致 → 带结构化判据返回（不是"台账损坏"）
+        return _write_fail(err, path,
+                           hint="台账损坏时拒绝写入，避免覆盖已有数据；"
+                                "请先人工修复或改名备份")
 
-    _set_task_id(data, work_dir)
-    parts = data["parts"]
+    # ── 【C8 修复】补/校验任务号：不一致 → 明确拒绝（不静默继承旧任务号）──
+    _tid_err = _set_task_id(data, work_dir)
+    if _tid_err:
+        return _tid_err
+    parts = _parts_map(data)
     key = _resolve_key(parts, name)
     _ts, at = _now()
 
@@ -1692,7 +1857,7 @@ def add_part(record, work_dir=None, reason=None, allow_mismatch=False,
         parts[key] = merged
         action = "update"
 
-    target = _resolve_key(data["parts"], name)
+    target = _resolve_key(parts, name)
 
     # ── ④b 【强制】fields 声明必须与实际 diff 完全一致（防止谎报改动范围）──
     declared = _parse_fields_arg(fields)
@@ -1739,15 +1904,17 @@ def add_part(record, work_dir=None, reason=None, allow_mismatch=False,
     ok, path, werr = _save_registry(data, work_dir)
     if not ok:
         return {"ok": False, "error": werr, "file": path}
-    parts = data["parts"]
+    # 【C8 修复】统一走 parts 变量 —— 拦截时拿到的是空骨架，
+    #   直接索引 data["parts"] 会把"明确的任务号错误"变成 KeyError。
+    parts = _parts_map(data)
 
     # ── ⑤ 邻接登记后的数据体检（缺零件 → 明确的 warning，不闷声）────────
     for other in sorted(set(adjacent)):
-        if _resolve_key(data["parts"], other) is None:
+        if _resolve_key(parts, other) is None:
             warnings.append("adjacent 中的 %r 尚未登记到台账（悬空邻接），"
                             "请补登记或改用 link_adjacent" % other)
 
-    rec = data["parts"][_resolve_key(data["parts"], name)]
+    rec = parts[_resolve_key(parts, name)]
     out = {
         "ok": True,
         "action": action,
@@ -1758,7 +1925,7 @@ def add_part(record, work_dir=None, reason=None, allow_mismatch=False,
         "reason": _reason_text,
         "warnings": warnings,
         "revision_count": len(data["revisions"]),
-        "parts_count": len(data["parts"]),
+        "parts_count": len(parts),
         "part_record": rec,
         "note": "已落盘（含修订历史 + 核实指纹）；邻接关系建议用 link_adjacent 建立，保证双向。",
     }
@@ -1817,8 +1984,10 @@ def update_part(name, patch, work_dir=None, reason=None, allow_mismatch=False,
 
     data, path, err = _load_registry(work_dir)
     if err:
-        return {"ok": False, "error": err, "file": path}
-    key = _resolve_key(data["parts"], name)
+        return _write_fail(err, path)
+
+    parts = data["parts"]
+    key = _resolve_key(parts, name)
     if key is None:
         return {"ok": False, "error": "零件未登记：%s" % name, "file": path,
                 "hint": "先用 add_part 登记，或用 list_parts 查看已有零件"}
@@ -1920,7 +2089,7 @@ def update_part(name, patch, work_dir=None, reason=None, allow_mismatch=False,
     import copy as _copy
     backup = _copy.deepcopy(data)
 
-    old = data["parts"][key]
+    old = parts[key]
     changed = {}
     merged = dict(old)
     for k, v in newvals.items():
@@ -1953,7 +2122,7 @@ def update_part(name, patch, work_dir=None, reason=None, allow_mismatch=False,
         merged["rev"] = int(old.get("rev") or 1) + 1
     except Exception:
         merged["rev"] = 2
-    data["parts"][key] = merged
+    parts[key] = merged
 
     # ── 【强制】声明字段必须与实际 diff 完全一致 ──────────────────────
     declared = _parse_fields_arg(fields)
@@ -2043,9 +2212,11 @@ def link_adjacent(name_a, name_b, work_dir=None, reason=None,
 
     data, path, err = _load_registry(work_dir)
     if err:
-        return {"ok": False, "error": err, "file": path}
-    ka = _resolve_key(data["parts"], a)
-    kb = _resolve_key(data["parts"], b)
+        return _write_fail(err, path)
+
+    parts = data["parts"]
+    ka = _resolve_key(parts, a)
+    kb = _resolve_key(parts, b)
     missing = [x for x, k in ((a, ka), (b, kb)) if k is None]
     if missing:
         return {"ok": False,
@@ -2053,13 +2224,13 @@ def link_adjacent(name_a, name_b, work_dir=None, reason=None,
                 "hint": "先 add_part 登记两侧零件，再建立邻接关系",
                 "file": path}
 
-    if kb in _parse_list_arg(data["parts"][ka].get("adjacent")) and \
-       ka in _parse_list_arg(data["parts"][kb].get("adjacent")):
+    if kb in _parse_list_arg(parts[ka].get("adjacent")) and \
+       ka in _parse_list_arg(parts[kb].get("adjacent")):
         # 已经双向登记：幂等返回，不产生新修订（避免无意义的 rev 增长）
         return {"ok": True, "action": "link", "already_linked": True,
                 "a": ka, "b": kb, "file": path,
-                "adjacent": {ka: data["parts"][ka].get("adjacent", []),
-                             kb: data["parts"][kb].get("adjacent", [])},
+                "adjacent": {ka: parts[ka].get("adjacent", []),
+                             kb: parts[kb].get("adjacent", [])},
                 "note": "两侧原本就已互相登记，未做改动（因此不需要 reason）"}
 
     import copy as _copy
@@ -2067,7 +2238,7 @@ def link_adjacent(name_a, name_b, work_dir=None, reason=None,
 
     changed_parts = []
     for src, dst in ((ka, kb), (kb, ka)):
-        rec = data["parts"][src]
+        rec = parts[src]
         adj = _parse_list_arg(rec.get("adjacent"))
         if dst in adj:
             continue
@@ -2108,8 +2279,8 @@ def link_adjacent(name_a, name_b, work_dir=None, reason=None,
         "bidirectional": True,
         "updated_parts": changed_parts,
         "reason": _reason_text,
-        "adjacent": {ka: data["parts"][ka].get("adjacent", []),
-                     kb: data["parts"][kb].get("adjacent", [])},
+        "adjacent": {ka: parts[ka].get("adjacent", []),
+                     kb: parts[kb].get("adjacent", [])},
         "file": path,
         "note": "已双向登记（A↔B）；check_adjacency_consistency 会把它当作一个待核对配合对。",
     }
@@ -2150,8 +2321,10 @@ def remove_part(name, work_dir=None, reason=None, skip_verification=False):
 
     data, path, err = _load_registry(work_dir)
     if err:
-        return {"ok": False, "error": err, "file": path}
-    key = _resolve_key(data["parts"], name)
+        return _write_fail(err, path)
+
+    parts = data["parts"]
+    key = _resolve_key(parts, name)
     if key is None:
         return {"ok": False, "error": "零件未登记：%s" % name, "file": path}
 
@@ -2161,12 +2334,12 @@ def remove_part(name, work_dir=None, reason=None, skip_verification=False):
 
     # 删除前先给"被删零件"留下最后指纹，供 audit 判定是【模块合法删除】
     # 还是被人从 JSON 里偷偷抠掉（后者不会有 remove 修订记录）。
-    rec = data["parts"][key]
+    rec = parts[key]
     _removed_digest = _canonical_digest(_substance(rec))
 
-    data["parts"].pop(key)
+    parts.pop(key)
     cleaned = []
-    for other, orec in data["parts"].items():
+    for other, orec in parts.items():
         adj = _parse_list_arg(orec.get("adjacent"))
         if key in adj:
             orec["adjacent"] = [x for x in adj if x != key]
@@ -2191,7 +2364,7 @@ def remove_part(name, work_dir=None, reason=None, skip_verification=False):
     return {"ok": True, "action": "remove", "removed": key,
             "reason": _reason_text,
             "cleaned_adjacency_in": sorted(cleaned),
-            "parts_count": len(data["parts"]), "file": path}
+            "parts_count": len(parts), "file": path}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2239,23 +2412,200 @@ def get_part(name, work_dir=None):
     name = _norm_name(name)
     if not name:
         return {"ok": False, "error": "缺少零件名 name"}
-    data, path, err = _load_registry(work_dir)
+    # 【C8 修复】只读查询：不拦截旧台账，但在结果里回显 task_id 不一致警告
+    data, path, err = _load_registry(work_dir, strict_task_id=False)
     if err:
         return {"ok": False, "error": err, "file": path}
-    key = _resolve_key(data["parts"], name)
+
+    parts = data["parts"]
+    key = _resolve_key(parts, name)
     if key is None:
         return {"ok": False, "error": "零件未登记：%s" % name,
-                "file": path, "known_parts": sorted(data["parts"].keys()),
+                "file": path, "known_parts": sorted(parts.keys()),
                 "hint": "用 list_parts() 查看台账里已有的零件名"}
     return {"ok": True, "part": key, "file": path,
             "task_id": data.get("task_id"),
-            "record": data["parts"][key],
-            "brief": _part_brief(data["parts"][key])}
+            "task_id_mismatch": data.get("task_id_mismatch"),
+            "record": parts[key],
+            "brief": _part_brief(parts[key])}
+
+
+# ══ 【B9 修复】建模前置查重：同一零件不允许被反复重建 ═══════════════════════
+# 现场（2026-11-07 会话，测试员 P3 完全同构）：
+#   · 底盘 05:47 用 scripts/rebuild_chassis_7mm.py 重建（8mm→7mm）；
+#   · 电机安装验证块 14:54:46 与 14:57:16 两次写盘（中间 14:56:12 还改了一次脚本）；
+#   · parts/ 里多出 DSH_万向轮转接板1.SLDPRT（83 KB，无 .material.json）；
+#   · parts_rejects/ 与 parts/ 同时存在 DSH_电机安装验证块（81,386 B / 81,479 B）。
+#   测试员原话：「建模入口没有『目标零件是否已存在 + 是否同规格』的前置检查，
+#     save() 直接覆盖同名文件」。
+#
+# 本函数就是那个前置检查：建模【之前】先问台账，而不是建完再覆盖。
+REUSE_VERDICT = {
+    "reuse": "已存在且规格一致 → 直接复用，不要再建模",
+    "rebuild": "已存在但规格不一致 → 允许重建，必须写明改了什么",
+    "new": "台账无此件 → 正常建模",
+    "unknown": "台账有登记但缺可比对字段 → 不得当作『一致』，按 rebuild 处理",
+}
+
+
+def _dims_equal(a, b, tol=0.01):
+    """尺寸/包围盒比较：容忍浮点误差，缺失一律视为"不可比"。"""
+    if a is None or b is None:
+        return None
+    if isinstance(a, dict) and isinstance(b, dict):
+        keys = set(a.keys()) | set(b.keys())
+        if not keys:
+            return None
+        for k in keys:
+            try:
+                va, vb = float(a.get(k)), float(b.get(k))
+            except Exception:
+                return None
+            if abs(va - vb) > tol:
+                return False
+        return True
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            return False
+        try:
+            return all(abs(float(x) - float(y)) <= tol for x, y in zip(a, b))
+        except Exception:
+            return None
+    return None
+
+
+def check_reusable(name, dims=None, bbox_mm=None, material=None,
+                   file_path=None, work_dir=None, tol=0.01):
+    """【B9】建模前置查重：这个零件是不是已经建好了？
+
+    Args:
+        name:       零件名（与台账同名口径，大小写/空格容错见 _resolve_key）。
+        dims:       本次打算用的尺寸 dict（length_mm/width_mm/height_mm 等）。
+        bbox_mm:    本次期望的包围盒（六元组或 dict）。
+        material:   本次打算用的材料代号（Q235 / PETG …）。
+        file_path:  本次打算落盘的路径（可选，用于给出"目标已被占用"警告）。
+        work_dir:   台账落点覆盖。
+        tol:        尺寸容差（mm），默认 0.01。
+
+    Returns:
+        {"ok", "verdict": reuse|rebuild|new|unknown, "part", "record",
+         "diffs": [...], "why", "file_exists", "action"(可直接照做的下一步),
+         "skip_modeling": bool}
+    判据（缺一不可，任一不满足就不许 reuse）：
+      ① 台账里有这件（同 task_id 台账）；
+      ② 台账记录的 file 【真实存在】于磁盘且非空；
+      ③ 尺寸/包围盒可比对【且一致】；
+      ④ 若给了 material，必须与台账一致。
+      其中 ③ 若缺可比对字段 → verdict=unknown（**不得**当成一致，
+      这正是 P5「不可用被折叠成通过」的同一条机理）。
+    """
+    name_in = _norm_name(name)
+    if not name_in:
+        return {"ok": False, "error": "缺少零件名 name"}
+    data, path, err = _load_registry(work_dir, strict_task_id=False)
+    out = {"ok": True, "part": name_in, "file": path,
+           "task_id": data.get("task_id") if isinstance(data, dict) else None,
+           "task_id_mismatch": (data.get("task_id_mismatch")
+                                if isinstance(data, dict) else None),
+           "target_file": file_path, "diffs": []}
+    if err:
+        return dict(out, ok=False, error=err, verdict="unknown",
+                    skip_modeling=False, why="台账不可读，无法判重（按重建处理）")
+    parts = data["parts"]
+    key = _resolve_key(parts, name_in)
+    if key is None:
+        return dict(out, verdict="new", record=None, skip_modeling=False,
+                    file_exists=(os.path.exists(file_path) if file_path else None),
+                    why="台账未登记该零件 —— 正常建模",
+                    action="正常建模，建完用 add_part 登记")
+
+    rec = parts[key]
+    out["part"] = key
+    out["record"] = rec
+    _f = str(rec.get("file") or "")
+    _exists = bool(_f) and os.path.exists(_f) and os.path.getsize(_f) > 0
+    out["file_exists"] = _exists
+    out["record_file"] = _f or None
+    out["record_rev"] = rec.get("rev")
+
+    diffs = []
+    # ① 文件真的在（文件不存在 → 绝不能"复用"）
+    if not _exists:
+        diffs.append({"field": "file", "record": _f or None,
+                      "now": "（磁盘上不存在/为空）",
+                      "why": "台账登记的文件不在磁盘上，复用会拿到空气"})
+    # ② 尺寸 / 包围盒
+    #    【B9 修复·实测坑】入参可能是 '180x140x8' 这种字符串，而台账里存的是
+    #    {"length_mm":..., "width_mm":..., "height_mm":...} 的 dict。
+    #    直接比 → 类型不同 → _dims_equal 返回 None（"不可比"）→ 判成 unknown，
+    #    于是"尺寸明明改了却不下 rebuild 结论"，查重等于没做。
+    #    这里先统一过一遍 _parse_dims（台账落盘用的同一个解析器），保证同口径。
+    _dims_cmp = dims
+    if isinstance(dims, str):
+        _parsed, _derr = _parse_dims(dims)
+        if _parsed:
+            _dims_cmp = _parsed
+    _bbox_cmp = bbox_mm
+    if isinstance(bbox_mm, str):
+        try:
+            _vals = [float(x) for x in str(bbox_mm).replace("，", ",").split(",") if x.strip()]
+            if len(_vals) == 6:
+                _bbox_cmp = _vals
+        except Exception:
+            _bbox_cmp = bbox_mm
+    _cmp = False
+    for field, now_val in (("dims", _dims_cmp), ("bbox_mm", _bbox_cmp)):
+        if now_val is None:
+            continue
+        eq = _dims_equal(rec.get(field), now_val, tol)
+        if eq is False:
+            diffs.append({"field": field, "record": rec.get(field),
+                          "now": now_val, "why": "尺寸/包围盒不一致"})
+            _cmp = True
+        elif eq is True:
+            _cmp = True
+        # eq is None → 字段缺失，不可比（下面统一按 unknown 处理）
+    # ③ 材料
+    if material:
+        _m_old = str(rec.get("material") or "").strip()
+        if not _m_old:
+            diffs.append({"field": "material", "record": None, "now": material,
+                          "why": "台账没登记材料，无法确认同规格"})
+        elif _m_old.lower() != str(material).strip().lower():
+            diffs.append({"field": "material", "record": _m_old, "now": material,
+                          "why": "材料不一致"})
+
+    out["diffs"] = diffs
+    hard = [d for d in diffs if d.get("field") in ("file", "dims", "bbox_mm",
+                                                   "material")]
+    if hard:
+        out.update(verdict="rebuild", skip_modeling=False,
+                   why="台账有该零件但规格/落盘不一致 —— 允许重建，但必须说明改了什么",
+                   action=("允许重建。重建前先在 report 里写明差异：%s；"
+                           "重建后用 add_part(reason=...) 登记新的 rev"
+                           % "；".join("%s %r→%r" % (d["field"], d.get("record"),
+                                                     d.get("now")) for d in hard)))
+        return out
+    if not _cmp:
+        # 一个可比字段都没给 → 不下"一致"的结论（P5 同源：不可用≠通过）
+        out.update(verdict="unknown", skip_modeling=False,
+                   why=("台账有该零件，但本次没有提供尺寸/包围盒可比对 —— "
+                        "不得据此判定『已建好』"),
+                   action=("补上 dims 或 bbox_mm 再查一次；"
+                           "或直接复用台账记录里的规格"))
+        return out
+    out.update(verdict="reuse", skip_modeling=True,
+               why="台账已登记、文件在盘、规格一致 —— 不要重复建模",
+               action=("直接复用 %s（rev=%s）。禁止再新建同名件："
+                       "重复建模会产生 xxx1.SLDPRT 这类多余件"
+                       % (_f, rec.get("rev"))))
+    return out
 
 
 def list_parts(work_dir=None):
     """列出全部零件（按名称排序，附摘要与统计）。"""
-    data, path, err = _load_registry(work_dir)
+    # 【C8 修复】只读查询：不拦截旧台账，但在结果里回显 task_id 不一致警告
+    data, path, err = _load_registry(work_dir, strict_task_id=False)
     if err:
         return {"ok": False, "error": err, "file": path}
     parts = data["parts"]
@@ -2271,6 +2621,8 @@ def list_parts(work_dir=None):
         "updated_at": data.get("updated_at"),
         "count": len(items),
         "rooms": rooms,
+        # 【C8 修复】回显任务号不一致警告（只读不拦截，但必须让人看见）
+        "task_id_mismatch": data.get("task_id_mismatch"),
         "parts": items,
         "note": ("台账为空时 count=0 —— 这不是错误，但此时任何一致性检查都"
                  "无法给出结论（见 check_adjacency_consistency 的 evaluated 字段）。"),
@@ -2324,7 +2676,8 @@ def related_parts(name, depth=1, work_dir=None):
     if depth < 0:
         return {"ok": False, "error": "depth 不能为负：%d" % depth}
 
-    data, path, err = _load_registry(work_dir)
+    # 【C8 修复】只读查询：不拦截旧台账，但在结果里回显 task_id 不一致警告
+    data, path, err = _load_registry(work_dir, strict_task_id=False)
     if err:
         return {"ok": False, "error": err, "file": path}
     parts = data["parts"]
@@ -2414,7 +2767,8 @@ def reverse_lookup(name, work_dir=None):
     name = _norm_name(name)
     if not name:
         return {"ok": False, "error": "缺少零件名 name"}
-    data, path, err = _load_registry(work_dir)
+    # 【C8 修复】只读查询：不拦截旧台账，但在结果里回显 task_id 不一致警告
+    data, path, err = _load_registry(work_dir, strict_task_id=False)
     if err:
         return {"ok": False, "error": err, "file": path}
     parts = data["parts"]
@@ -2799,7 +3153,8 @@ def check_adjacency_consistency(work_dir=None, only_pairs=None):
         escalate_to_parent : 有 mismatch 或数据完整性问题时为 true（交父代理干涉）
         summary            : 一句话结论
     """
-    data, path, err = _load_registry(work_dir)
+    # 【C8 修复】只读查询：不拦截旧台账，但在结果里回显 task_id 不一致警告
+    data, path, err = _load_registry(work_dir, strict_task_id=False)
     if err:
         return {"ok": False, "evaluated": False, "error": err, "file": path,
                 "checked_pairs": 0, "mismatches": [], "escalate_to_parent": False,
@@ -2848,6 +3203,9 @@ def check_adjacency_consistency(work_dir=None, only_pairs=None):
         "file": path,
         "task_id": data.get("task_id"),
         "updated_at": data.get("updated_at"),
+        # 【C8 修复】旧台账被当成当前台账时，把警告随结论一起回显 ——
+        #   否则"检查通过/不一致"看起来是当前任务的事实，实际读的是上一轮的数据。
+        "task_id_mismatch": data.get("task_id_mismatch"),
         "parts_count": len(parts),
         "checked_pairs": checked,
         "pairs_with_interface_data": with_data,
@@ -2933,7 +3291,8 @@ def list_unresolved(work_dir=None, include_resolved=False):
     这些不是被遗忘的问题 —— 是【被显式记录并放行】的问题，必须始终可见，
     直到有人把它们改一致（自动消解）或显式标记 resolved。
     """
-    data, path, err = _load_registry(work_dir)
+    # 【C8 修复】只读查询：不拦截旧台账，但在结果里回显 task_id 不一致警告
+    data, path, err = _load_registry(work_dir, strict_task_id=False)
     if err:
         return {"ok": False, "error": err, "file": path}
     allrec = [u for u in (data.get("unresolved") or []) if isinstance(u, dict)]
@@ -3043,7 +3402,8 @@ def find_related_for_change(name, work_dir=None, max_depth=3):
     name = _norm_name(name)
     if not name:
         return {"ok": False, "error": "缺少零件名 name"}
-    data, path, err = _load_registry(work_dir)
+    # 【C8 修复】只读查询：不拦截旧台账，但在结果里回显 task_id 不一致警告
+    data, path, err = _load_registry(work_dir, strict_task_id=False)
     if err:
         return {"ok": False, "error": err, "file": path}
     parts = data["parts"]
@@ -3797,7 +4157,8 @@ def export_docx(out_path, work_dir=None, strategy="auto", probe=True):
     if not out.lower().endswith(".docx"):
         return {"ok": False, "error": "输出文件必须以 .docx 结尾：%s" % out}
 
-    data, path, err = _load_registry(work_dir)
+    # 【C8 修复】只读查询：不拦截旧台账，但在结果里回显 task_id 不一致警告
+    data, path, err = _load_registry(work_dir, strict_task_id=False)
     if err:
         return {"ok": False, "error": err, "file": path}
 
@@ -3924,6 +4285,56 @@ def _human_size(n):
 # ══════════════════════════════════════════════════════════════════════════
 #  CLI
 # ══════════════════════════════════════════════════════════════════════════
+
+# 【C8 修复】最近一次被拦下的 TASK_ID_MISMATCH（同一进程内 CLI 用）。
+# _load_registry 只返回 (data, path, error) 三元组，CLI 需要完整结构（含两边
+# task_id 与文件路径）才能给出可执行的报错，因此在这里留一份"最后拦截记录"，
+# main() 发现结果失败且本槽非空时，把详细信息补进输出。
+_LAST_TASK_ID_GATE = [None]
+
+
+def _remember_gate(err):
+    """记录最近一次 TASK_ID_MISMATCH（供 CLI 输出补齐字段）。"""
+    try:
+        _LAST_TASK_ID_GATE[0] = dict(err or {})
+    except Exception:
+        _LAST_TASK_ID_GATE[0] = None
+
+
+def _write_fail(err, path, hint=None):
+    """写路径失败的统一返回（【C8 修复】）。
+
+    台账任务号与当前任务不一致时，_load_registry 只能返回一句 error 文本；
+    这里把结构化判据（两边 task_id + 两个文件路径 + 修法）一并补进结果，
+    让调用方/模型一眼看出"是台账拿错了"，而不是跑去改零件数据。
+    """
+    out = {"ok": False, "error": err, "file": path}
+    _g = _LAST_TASK_ID_GATE[0]
+    if isinstance(_g, dict) and _g.get("error") == err:
+        for _k, _v in _g.items():
+            out.setdefault(_k, _v)
+        out["gate"] = "TASK_ID_MISMATCH"
+    elif hint:
+        out["hint"] = hint
+    return out
+
+
+def _task_id_mismatch_warning(gate):
+    """把 TASK_ID_MISMATCH 压成一条"只读时可见"的警告（不抛错）。"""
+    if not gate:
+        return None
+    return {
+        "gate": "TASK_ID_MISMATCH",
+        "ledger_task_id": gate.get("ledger_task_id"),
+        "current_task_id": gate.get("current_task_id"),
+        "registry_file": gate.get("registry_file"),
+        "workflow_state_file": gate.get("workflow_state_file"),
+        "message": ("⚠ 本台账不属于当前任务（台账 %s ≠ 当前 %s）—— 下面的数据"
+                    "可能来自上一轮任务，不要当成当前任务的既有事实；写入已被拒绝。"
+                    % (gate.get("ledger_task_id"), gate.get("current_task_id"))),
+        "hint": gate.get("hint"),
+    }
+
 
 def _emit(obj):
     """统一 JSON 输出（ensure_ascii=False + indent=2）。
@@ -4108,6 +4519,13 @@ def cmd_unresolved(ns):
     return list_unresolved(work_dir=ns.work_dir)
 
 
+def cmd_check_reusable(ns):
+    """check-reusable 子命令：【B9】建模前置查重。"""
+    return check_reusable(ns.part, dims=ns.dims, bbox_mm=ns.bbox,
+                          material=ns.material, file_path=ns.file,
+                          work_dir=ns.work_dir)
+
+
 def cmd_audit(ns):
     """audit 子命令：★ 重算核实指纹，证明台账数据有没有被绕过模块手改。"""
     return audit_verification(name=ns.part, work_dir=ns.work_dir)
@@ -4229,6 +4647,17 @@ def build_parser():
     s.add_argument("--note", default=None, help="可选备注")
     s.set_defaults(func=cmd_unresolved)
 
+    # ── 【B9 修复】建模前置查重：建之前先问"这件是不是已经有了" ──────────
+    s = sub.add_parser("check-reusable", parents=[common],
+                       help="★建模前置查重：该零件是否已建好、能否直接复用（B9）")
+    s.add_argument("--part", required=True, help="零件名")
+    s.add_argument("--dims", default=None, help="本次打算用的尺寸，如 \"120x40x40\"")
+    s.add_argument("--bbox", default=None,
+                   help="本次期望包围盒 6 元组 xmin,xmax,ymin,ymax,zmin,zmax")
+    s.add_argument("--material", default=None, help="本次打算用的材料牌号")
+    s.add_argument("--file", default=None, help="本次打算落盘的路径（可选）")
+    s.set_defaults(func=cmd_check_reusable)
+
     s = sub.add_parser("audit", parents=[common],
                        help="★重算核实指纹，证明台账数据有没有被绕过模块手改")
     s.add_argument("--part", default=None, help="只审计某个零件（默认全部）")
@@ -4253,11 +4682,21 @@ def main(argv=None):
     if not args.cmd:
         parser.print_help()
         return 2
+    # ── 【C8 修复】每次命令开始前清空"最后拦截记录"，避免串味 ────────────
+    _LAST_TASK_ID_GATE[0] = None
     try:
         result = args.func(args)
     except Exception as e:
         result = {"ok": False, "error": "命令执行异常：%s: %s" % (type(e).__name__, e),
                   "command": args.cmd}
+    # ── 【C8 修复】被 TASK_ID_MISMATCH 拦下时，把完整判据补进输出 ──────────
+    # 写路径只能拿到一句 error 文本；这里补上两边 task_id + 两个文件路径 + 修法，
+    # 让模型/用户一眼看出"是台账拿错了"，而不是去改零件数据。
+    if isinstance(result, dict) and not result.get("ok") and _LAST_TASK_ID_GATE[0]:
+        _gate = _LAST_TASK_ID_GATE[0]
+        for _k, _v in _gate.items():
+            result.setdefault(_k, _v)
+        result["gate"] = "TASK_ID_MISMATCH"
     _emit(result)
     return 0 if isinstance(result, dict) and result.get("ok") else 1
 

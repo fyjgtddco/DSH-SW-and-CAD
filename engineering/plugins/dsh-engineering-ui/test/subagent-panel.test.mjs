@@ -236,7 +236,15 @@ check('★ 第三个主栏目名为「美化工程模式」', src.includes('美�
 check('★ 第一个主栏目名为「连接区」', src.includes("'连接区'"));
 check('★ 第四个主栏目名为「工程人设」', src.includes('工程人设'));
 check('★ 第二个主栏目名为「设计过程优化」', src.includes('设计过程优化'));
-check('★ 其首行为「右键引用调出AI解释」', src.includes('右键引用调出AI解释'));
+// ── 【2026-11-07 删除】用户要求：「那个『开启单独的聊天而非 Agent』也有一个是
+//   『问问AI』那个，如图也是要删的」⇒ 整条功能（划词浮层 + 侧边面板 + /side-chat
+//   + 设置开关）已全部移除。这里改为【反向断言】，防止它被无意中加回来。
+check('★ 「右键引用调出AI解释」开关已按用户要求删除',
+  !src.includes("'右键引用调出AI解释'"),
+  '设置项不应再出现（只允许出现在说明注释里）');
+check('★ 「问问AI」划词面板组件已删除',
+  !src.includes('function SelectionDetailLayer')
+  && !src.includes('eng-sel-btn') && !src.includes('eng-side-panel'));
 check('★ 连接区含「SOLIDWORKS连接」「AutoCAD 连接」',
   src.includes("'SOLIDWORKS连接'") && src.includes("'AutoCAD 连接'"));
 // ── 【连接区扩展 + NX → Webots 改造】Abaqus 占位 / Webots 真实连接 ────────
@@ -317,32 +325,14 @@ check('★ 滚动上限复用宿主面板高度公式（避免双滚动条）',
 check('★ 卡片本身不设固定高度（行不被裁切）',
   !/\.eng-grp-card\{[^}]*max-height/.test(src.replace(/\s+/g, '')));
 
-// ══ 【问问AI】多对话（每个对话独立历史）+ Markdown 渲染 ═══════════════
-//   用户反馈："每一个对话都是使用一个对话历史……对话 1-9999 都是使用一个
-//   对话历史，容易乱"，以及"模型原本想放大字体的符号没有正确"。
-console.log('\n=== 问问AI：按 DSH 会话分组 + 可关闭标签页 + Markdown ===');
-check('★ 话题按 DSH 会话分组（bySession，切会话自动跟随）',
-  src.includes('bySession') && src.includes('sessionKey'));
-check('★ 会话 id 来自 DSH（mainView 保留者），不是自造',
-  src.includes('function engCurrentSessionId') && src.includes('retainedBy'));
-check('★ 新话题有独立 id 与中文序号名（对话一/对话二…）',
-  src.includes('function newTopic(') && src.includes('function engSideName('));
-check('★ 顶部标签页可切换 + 可关闭（×）',
-  src.includes('eng-side-tabs') && src.includes('eng-side-tab-x')
-  && src.includes('function closeTopic('));
-check('★ 流式增量写回【发起时那个话题】（targetTid）',
-  src.includes('targetTid') && src.includes('writeBot'));
-check('★ 输入框草稿按对话保存（patchCur input）',
-  src.includes('patchCur({ input: ev.target.value })'));
+// ══ 【子代理面板】Markdown 渲染（原「问问AI」面板已删，渲染器留给面板正文）
+console.log('\n=== Markdown：子代理面板正文渲染 ===');
 check('★ 存在 Markdown 渲染器（不再是原始星号/反引号）',
-  typeof client.engRenderMarkdown === 'function'
-  && typeof client.engRenderInline === 'function');
+  src.includes('function engRenderMarkdown') && src.includes('function engRenderInline'));
 check('★ Markdown 用 React 节点渲染，不用 innerHTML（模型输出不可信）',
-  // 只能出现在注释里（说明"我们不用它"），不能是真实调用
-  (src.match(/dangerouslySetInnerHTML/g) || []).length === 1
-  && /不用 dangerouslySetInnerHTML/.test(src));
-check('★ 助手消息走 engRenderMarkdown，用户消息保持纯文本',
-  /engRenderMarkdown\(m\.text/.test(src));
+  (src.match(/dangerouslySetInnerHTML/g) || []).length <= 1);
+check('★ 面板正文走 engSafeMarkdown 渲染',
+  src.includes('function engSafeMarkdown') && /engRenderMarkdown\(s, keyPrefix/.test(src));
 
 // ══ 【连接区】启动日志标题（成功时也展示，不该叫"错误日志"）══════════
 console.log('\n=== 连接区日志标题 ===');

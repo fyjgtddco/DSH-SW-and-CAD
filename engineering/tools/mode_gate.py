@@ -122,6 +122,30 @@ SW_CMD_HOLD = 90         # 单条命令最长持锁秒数：超时视为命令�
 #   · 让位时把队首提升为新 owner，保证 FIFO 队列真正前进
 SW_FAIR_CMDS = 3         # 有人在排队时，单房间最多连续执行几条 SW 命令就必须让位
 SW_FAIR_SECONDS = 180    # 有人在排队时，单房间连续独占上限（秒）
+
+# ══ 【A15 修复】房间级串行 + 阻断型 CONCURRENT_BUILD 守卫 ═══════════════════
+# 现场（2026-11-07 会话 session-dcb91b26，6 h 06 min 那次任务）：
+#   · 由 job/registered → job/settled 还原构建区间，跨房间求交得到 **8 对重叠**；
+#     最长一次 06:05:32–06:11:01（传感支架间 329 s）与 06:05:38–06:09:14
+#     （行走传动间 216 s）重叠 3.5 分钟；
+#   · 加总装小屋，13:59:59 时有 **4 个房间同时在世**，与"并发硬上限=3"不符；
+#   · 而 240 次 room-board 读取里 waiting_sw 出现 **0 次** —— 锁确实存在，
+#     但它只在【每条命令】之间生效。
+# 根因：sw-request 取锁后 hold_mode 恒为 "command"，命令一结束
+#   sw_bridge._gate_sw_unlock() 立刻 sw-release；于是"排队"这个状态永远
+#   观察不到，只看到"两个脚本同时在建"，而同一个 SW 实例的 ActiveDoc 是
+#   进程级全局状态 —— 文档串写/半成品丢失的结构性风险。
+# 判据（对齐测试员 §15 S1 + 本文档 A15「修复」四条）：
+#   ① room-start 取锁、room-end 释放 → hold_mode="room"；
+#   ② room-start 前置断言 active_rooms == 0，否则拒绝（即串行 E）；
+#   ③ 装【阻断型】CONCURRENT_BUILD 守卫（不是只记录）；
+#   ④ room-board --json 增 build_overlap_count，作为可回归指标。
+SW_ROOM_HOLD = 1         # 1=房间级独占（A15 后的默认）| 0=退回旧的单命令级
+SW_ROOM_HOLD_MAX = 6 * 3600   # 房间级持锁兜底上限（秒）：超时才允许被接管
+SW_BUILD_WINDOW_KEEP = 200    # 构建区间台账保留条数（超出丢最旧的）
+# 注意：本常量定义在 STATE_DIR 解析【之前】，不能在这里 os.path.join(STATE_DIR)。
+#   实际路径一律走 _build_windows_path()（它才读 STATE_DIR），避免 NameError。
+SW_BUILD_WINDOW_NAME = "build_windows.json"
 # ── 【Bug4 修复】遗留产物污染工作目录 ──────────────────────────────────────
 # 问题现象：目录里混着上一次测试残留的旧件（DSH_大臂/底座板/关节铰销/
 #   机械臂总装 等，时间戳 11:xx），与本轮新件（16:xx 起）同处一个目录。
@@ -599,7 +623,7 @@ def _heartbeat_path(room):
     return os.path.join(_base, safe + ".heartbeat")
 
 
-def cmd_room_heartbeat(name):
+def cmd_room_heartbeat(name, via="self"):
     """记录存活心跳（JSON 文件，mtime 反映最后存活时间）。
 
     ── 【Bug-23 修复 · 心跳已降级为"可选辅助证据"】─────────────────────
@@ -618,9 +642,42 @@ def cmd_room_heartbeat(name):
     """
     path = _heartbeat_path(name)
     try:
+        _now = time.time()
+        _via = str(via or "self")
+        # ── 【B3/B8 冲突修复】必须区分「真实活动」与「看板代补」─────────────
+        # B8 加了"读看板时给静默房间补心跳"，本意是让判活不完全依赖提示词约定；
+        # 但 B3 的 activity_age 正是用【心跳 mtime】当"它还在干活"的证据 ——
+        # 两者一撞，看板每读一次就把 mtime 刷新成 0，停滞判定永远为 False
+        # （实测：holds_sw=False、progress_age=3.6s、activity_age=0.0，
+        #  阈值调到 1 秒也判不出停滞）。
+        # 现在心跳文件里额外记 last_real_ts：只有【小屋自己跳 / room-report】
+        # 才更新它；看板代补只动 mtime，不污染"真实活动时间"。
+        _prev = {}
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as _pf:
+                    _prev = json.load(_pf) or {}
+        except Exception:
+            _prev = {}
+        _is_auto = (_via == "auto_heartbeat")
+        _real_ts = float(_prev.get("last_real_ts") or 0) or None
+        if not _is_auto:
+            # 小屋自己跳 / room-report → 这是真实活动，更新之
+            _real_ts = _now
+        elif _real_ts is None:
+            # ── 关键：看板首次代补、且此前没有任何真实活动记录时，
+            #   **不能**把"代补时刻"当成"真实活动时刻" —— 那等于凭空造历史，
+            #   B3 的停滞判定会永远看到 activity_age≈0（实测就是这样失效的）。
+            #   保留 None：表示"不知道它上次真实活动是什么时候"，
+            #   此时 activity_age 回退到 mtime（只读），不影响老格式兼容。
+            _real_ts = None
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"name": name, "ts": time.time(), "pid": os.getpid()}, f)
-        return {"ok": True, "room": name, "path": path, "age_seconds": 0}
+            # 【B8】via 区分「小屋自己跳的」与「看板读取时代补的」——
+            # 补跳是为了让判活有第二条证据，审计时必须能看出它不是小屋报的。
+            json.dump({"name": name, "ts": _now, "pid": os.getpid(),
+                       "via": _via, "last_real_ts": _real_ts}, f)
+        return {"ok": True, "room": name, "path": path, "age_seconds": 0,
+                "via": _via, "last_real_ts": _real_ts}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -1299,6 +1356,50 @@ def cmd_rooms_reset(keep_pmode=True):
         state.pop("parallel_mode_updated_at", None)
     save_state(state)
     cleared = []
+    # ══ 【B8 修复】reset 必须【归档】而不是删除 ══════════════════════════════
+    # 现场（2026-11-07 会话 · 总装 #2）：
+    #   · 该房间全程 **0 次 room-report**；
+    #   · `:4098` 显示 "history_preserved": false,
+    #     "fresh_reason": "auto_fresh_after_fail"；
+    #   · `总装与验证间.report.json` 最早一条是收尾小屋 18:24:46 的 —— 之前
+    #     159 分钟的进度全被清空，事后完全无法复盘"它到底做到哪一步"。
+    # 修复：把被清掉的报告/心跳先复制到 <state>/archive/<时间戳>/ 下，
+    #   再执行删除。归档失败只记录，绝不阻断 reset（reset 是应急手段）。
+    _arch = None
+    try:
+        _stamp = time.strftime("%Y%m%d-%H%M%S")
+        _arch = os.path.join(STATE_DIR, "archive", _stamp)
+        os.makedirs(_arch, exist_ok=True)
+        _archived = []
+        for _d in (REPORTS_DIR, HEARTBEAT_DIR, os.path.join(STATE_DIR, "load_cases")):
+            if not os.path.isdir(_d):
+                continue
+            _sub = os.path.join(_arch, os.path.basename(_d))
+            for _fn in os.listdir(_d):
+                _src = os.path.join(_d, _fn)
+                if not os.path.isfile(_src):
+                    continue
+                try:
+                    os.makedirs(_sub, exist_ok=True)
+                    import shutil as _sh
+                    _sh.copy2(_src, os.path.join(_sub, _fn))
+                    _archived.append(os.path.join(os.path.basename(_d), _fn))
+                except Exception:
+                    pass
+        # 当前状态文件也存一份（reset 之后最常见的诉求就是"刚才是什么样"）
+        for _fn in ("mode_state.json", "workflow_state.json", "part_registry.json"):
+            try:
+                _src = os.path.join(STATE_DIR, _fn)
+                if os.path.isfile(_src):
+                    import shutil as _sh2
+                    _sh2.copy2(_src, os.path.join(_arch, _fn))
+                    _archived.append(_fn)
+            except Exception:
+                pass
+        _arch_info = {"dir": _arch, "files": _archived[:80],
+                      "count": len(_archived)}
+    except Exception as _e_arch:
+        _arch_info = {"error": repr(_e_arch)}
     for d in (HEARTBEAT_DIR, REPORTS_DIR):
         try:
             if os.path.isdir(d):
@@ -1311,6 +1412,9 @@ def cmd_rooms_reset(keep_pmode=True):
         except Exception:
             pass
     return {"ok": True,
+            # ── 【B8】reset 前归档到哪里（事后复盘用）──────────────────────
+            "archived_to": _arch,
+            "archived": _arch_info,
             "cleared_before": {
                 "rooms": _before_rooms,
                 "subagents": _before_subs,
@@ -2603,6 +2707,40 @@ def cmd_wait_rooms(targets, timeout=900.0, interval=10.0, all_active=False):
         time.sleep(max(1.0, min(interval, 60.0)))
 
 
+def ensure_room_heartbeat(room, max_silence=600):
+    """【B8 修复】自动心跳：静默超过 max_silence 秒就补一次，不靠提示词约定。
+
+    ── 现场 ──────────────────────────────────────────────────────────────
+      总装 #2（`0b161dc4`）全程 **0 次 room-report**，159 分钟没有任何记录；
+      `总装与验证间.report.json` 最早一条是收尾小屋 18:24:46 才写的。
+      根因：心跳完全是"提示词约定"（"关键节点记得调 room-heartbeat"），
+      小屋忙着建模就忘了 —— 忘了之后看板只能靠"产物 mtime"猜。
+
+    ── 本函数 ────────────────────────────────────────────────────────────
+      任何【读写本房间状态】的代码路径都可以顺手调它：
+      距离上次心跳超过 max_silence 秒，就补跳一次（幂等，不会刷屏）。
+      返回值说明补没补、距上次多久。
+
+    Args:
+        room: 房间名。
+        max_silence: 静默阈值（秒），默认 600（10 分钟）。
+    """
+    out = {"room": room, "beat": False, "age_sec": None, "limit": max_silence}
+    if not room:
+        return dict(out, error="缺少房间名")
+    try:
+        hb = _heartbeat_path(room)
+        if os.path.exists(hb):
+            out["age_sec"] = round(max(0.0, time.time() - os.path.getmtime(hb)), 1)
+        if out["age_sec"] is None or out["age_sec"] > float(max_silence):
+            cmd_room_heartbeat(room, via="auto_heartbeat")
+            out["beat"] = True
+            out["via"] = "auto_heartbeat"
+    except Exception as e:
+        out["error"] = repr(e)
+    return out
+
+
 def _write_report_and_heartbeat(room, stage, detail=""):
     """写入一条房间进度报告并刷新心跳（room-report 的实际落盘部分）。
 
@@ -3258,19 +3396,70 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
         pass
     _progress_age = min(_prog_ages) if _prog_ages else None
     _no_prog_limit = _board_no_progress_sec()
+    # ══ 【B3 修复】停滞判据必须【双轨】：progress_age 之外还要看活动年龄 ══════
+    # 现场（2026-11-07 会话）：
+    #   · :4076 看板打出 "idle plat 0.6 safe True prog 9519.6"（158 分钟），
+    #     于是被当成"停滞"杀掉；
+    #   · 19d94e45 那次父代理自己写下 "SW CPU is growing — script may be
+    #     genuinely running"（:2082），**然后还是杀了**；
+    #   · 两次误杀，都是同一根因：progress_age 只统计"上报/产物/绑定"，
+    #     而建模小屋建模时【本来就不上报】—— 它没停滞，只是没空说话。
+    #
+    # 修复：把"可观察动作"拆成两类，任一新鲜就【不算】停滞：
+    #   ① progress_age：进度报告 / 产物落盘 / 绑定 / room-start（原有的）
+    #   ② activity_age：心跳文件 mtime —— sw_bridge 在每次取锁/释放时都会写，
+    #      所以"真的在驱动 SW"这件事会体现在心跳上，即使它没写报告。
+    # 另外：判"停滞"必须排除【正在持锁】的房间（它在用 SW，天然没空上报）。
+    _activity_age = None
+    try:
+        _hb = _heartbeat_path(name)
+        if os.path.exists(_hb):
+            # ── 【B3/B8 冲突修复】用 last_real_ts（真实活动），不用文件 mtime ──
+            # mtime 会被"看板代补心跳"刷新（B8），若拿它当活动证据，
+            # 停滞判定就永远不会触发（实测过：activity_age 恒为 0）。
+            # last_real_ts 只在小屋自己跳心跳 / room-report 时更新。
+            _real = None
+            _via = ""
+            try:
+                with open(_hb, "r", encoding="utf-8") as _hf:
+                    _hd = json.load(_hf) or {}
+                _real = float(_hd.get("last_real_ts") or 0) or None
+                _via = str(_hd.get("via") or "")
+            except Exception:
+                _real = None
+            if _real:
+                _activity_age = max(0.0, time.time() - _real)
+            elif _via == "auto_heartbeat":
+                # ★ 只有"代补"、从没有过真实活动 → 不知道它上次真干活是什么时候。
+                #   此时**不能**退回 mtime（mtime 刚被代补刷新，等于伪造活动），
+                #   必须报"未知"(None)：让停滞判定只看 progress_age。
+                _activity_age = None
+            else:
+                # 老格式心跳（无 via / last_real_ts）→ 退回 mtime（只读，不改写）
+                _activity_age = max(0.0, time.time() - os.path.getmtime(_hb))
+    except Exception:
+        _activity_age = None
+    _holds_sw = (_owner == name)
+    _freshest = None
+    for _a in (_progress_age, _activity_age):
+        if _a is None:
+            continue
+        _freshest = _a if _freshest is None else min(_freshest, _a)
     _progress_stalled = bool(
-        _progress_age is not None
-        and _progress_age > _no_prog_limit
+        _freshest is not None
+        and _freshest > _no_prog_limit
         # 只有"还活着"的状态才谈得上"停滞"；done/failed/dead 已经是结论
         and board_state in ("running", "idle", "starting", "unbound")
+        # ★ 正在持锁 = 正在用 SW，不能按"没上报"判停滞（B3 误杀的直接来源）
+        and not _holds_sw
     )
     if _progress_stalled and not _safe:
         # 关键：不把 state 改死（心跳/平台仍可能活着，误判死的代价更大），
         #   只解除"禁止自救"的锁，并给出可执行的下一步。
         _safe = True
-        _block = ("已 %.0f 分钟没有任何可观察进展（进度报告/产物/待确认都没更新），"
+        _block = ("已 %.0f 分钟没有任何可观察进展（进度报告/产物/心跳都没更新），"
                   "判定为【停滞】：允许重启，不必再等"
-                  % (_progress_age / 60.0))
+                  % ((_freshest or 0.0) / 60.0))
         _next = ("python mode_gate.py room-fail %s → room-start %s → 重新 subagent_fork"
                  "（停滞超过 %d 分钟，继续等只会空转；"
                  "若确认是长任务可临时调大 DSH_BOARD_NO_PROGRESS_SEC）"
@@ -3334,6 +3523,10 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
         # ── 【R4】进展看门狗字段（机器可判定，别只看 state）──────────────
         "progress_age_sec": (round(_progress_age, 1)
                              if _progress_age is not None else None),
+        # ── 【B3】活动年龄（心跳 mtime）：判"活着但没在干活"的补充证据 ────
+        "activity_age_sec": (round(_activity_age, 1)
+                             if _activity_age is not None else None),
+        "holds_sw": _holds_sw,
         "progress_stalled": _progress_stalled,
         "no_progress_limit_sec": _no_prog_limit,
     }
@@ -3830,7 +4023,133 @@ def cmd_room_status():
             "hint": ROOM_STATUS_HINT + " 【阶段C】权威看板请用 room-board --json。"}
 
 
-def cmd_room_board(room=None, as_json=True):
+def _board_signature(rows):
+    """【A2】看板变化指纹：用来判"等的时候有没有发生值得返回的变化"。"""
+    bits = []
+    for r in rows:
+        bits.append("%s|%s|%s|%s" % (r.get("room"), r.get("state"),
+                                     r.get("sw_owner"), r.get("report_stage")))
+    return "::".join(bits)
+
+
+def cmd_room_lease(name, heartbeat=0, ttl=None):
+    """【B3 修复】房间租约：在房间里【一条阻塞命令】中租住 SW，到期自动续。
+
+    ── 为什么要这个原语 ─────────────────────────────────────────────────
+    2026-11-07 会话里建模小屋是"跑一条 sw_bridge run，建模期间不发任何信号"。
+    于是：
+      · 心跳文件 mtime 一直不动（小屋没空调 room-heartbeat）；
+      · 进度报告在建模结束前不会写；
+      · room-board 只能看到 progress_age 一路涨到 9519 秒（158 分钟），
+        主代理据此判"停滞"并把还活着的房间杀掉 —— 实测误杀 2 次（B3）。
+    换句话说：**代码无法区分"卡死"和"正在长时间建模"**，因为房间里没有任何
+    持续存在的信号。
+
+    本命令就是那个信号：小屋在建模的整段时间里跑这条命令，
+    它在【自己的进程里】按 heartbeat 秒数循环刷新心跳文件，然后退出。
+      · 心跳新鲜 → room-board 的 activity_age_sec 很小 → 不会被判停滞；
+      · 进程被 SIGKILL / 房间被杀 → 心跳自然停止 → 3 个周期后判停滞，
+        这时判死是【有证据】的，而不是靠"它十分钟没说话"。
+
+    用法（小屋在建模前起一条后台 job）：
+        python mode_gate.py room-lease "<房间>" --heartbeat 60 --ttl 3600
+
+    Args:
+        name: 房间名。
+        heartbeat: 心跳间隔（秒），最小 5。
+        ttl: 最长租住秒数（默认 4 小时，0 = 不限）。
+    Returns:
+        {"ok", "room", "beats", "elapsed_sec", "stopped_because"}
+    """
+    _hb_iv = max(5, int(heartbeat or 60))
+    _ttl = float(ttl if ttl is not None else 4 * 3600)
+    _t0 = time.time()
+    _beats = 0
+    _stamp_file = _heartbeat_path(name)
+    _stopped = "ttl_reached"
+    while True:
+        st = load_state()
+        _rec = (st.get("rooms") or {}).get(str(name)) or {}
+        # 房间已被 room-end / room-fail → 立刻收工，别继续占后台
+        if _rec.get("ended_at") or _rec.get("failed_at") or not _rec.get("active"):
+            _stopped = "room_inactive"
+            break
+        try:
+            cmd_room_heartbeat(name)
+            _beats += 1
+        except Exception:
+            pass
+        if _ttl and (time.time() - _t0) >= _ttl:
+            _stopped = "ttl_reached"
+            break
+        time.sleep(min(_hb_iv, 5) if _hb_iv > 5 else _hb_iv)
+    return {"ok": True, "room": name, "beats": _beats,
+            "elapsed_sec": round(time.time() - _t0, 1),
+            "heartbeat_file": _stamp_file,
+            "stopped_because": _stopped,
+            "note": ("租约已结束（%s）。房间若仍需长时间建模，请再起一条 room-lease。"
+                     % _stopped)}
+
+
+def cmd_room_board(room=None, as_json=True, wait=0):
+    """【A2 修复】新增 wait 参数：进程内阻塞，取代 sleep(30) 轮询风暴。
+
+    现场（2026-11-07 会话）：主对话一个回合里打了 **477 次 sleep(30)**，
+    累计 14,554 秒 = 4 小时 02 分，占墙钟 66%；而同一次会话里
+    `wait-rooms` 用了 **0 次**、`sw-wait` 用了 **0 次**。
+    根因不是模型"喜欢轮询"，而是：
+      · 守卫禁止结束回合（没有 [WAITING] 终态）；
+      · 预设在提示词里写"宁可多轮短等"，把唯一可用的手段钉成 sleep；
+      · room-board 只有"立即返回"，没有"等到变化再返回"。
+    结果每一步都要重发 70–100K 上下文 → 6 次压缩 → 36.3M token。
+
+    现在 room-board 支持 `--wait <秒>`：在 Python 进程里阻塞（零 token），
+    直到【任一条件】满足就返回：
+      ① 看板指纹发生变化（房间状态/持锁者/上报阶段有变）；
+      ② 全部在世房间都离开 active；
+      ③ 到达 wait 秒数（返回时如实说明"是超时返回，房间仍在跑属正常"）。
+    调用方只需一次工具调用，不必自己 sleep。
+    """
+    _wait_s = 0.0
+    try:
+        _wait_s = max(0.0, float(wait or 0))
+    except Exception:
+        _wait_s = 0.0
+    if _wait_s <= 0:
+        return _cmd_room_board_once(room=room, as_json=as_json)
+    # ── 阻塞模式 ────────────────────────────────────────────────────────
+    _t0 = time.time()
+    _base = _cmd_room_board_once(room=room, as_json=as_json)
+    _sig0 = _board_signature(_base.get("rooms") or [])
+    _interval = 5.0
+    while True:
+        _left = _wait_s - (time.time() - _t0)
+        if _left <= 0:
+            _out = _cmd_room_board_once(room=room, as_json=as_json)
+            _out["waited_sec"] = round(time.time() - _t0, 1)
+            _out["returned_because"] = "timeout"
+            _out["wait_note"] = (
+                "等待 %ss 超时返回。房间仍在跑属正常 —— 【不要】据此判死，"
+                "也不要 sleep 重试；直接再调一次 room-board --wait 即可。"
+                % int(_wait_s))
+            return _out
+        time.sleep(max(1.0, min(_interval, _left)))
+        _cur = _cmd_room_board_once(room=room, as_json=as_json)
+        _sig = _board_signature(_cur.get("rooms") or [])
+        _alive = (_cur.get("summary") or {}).get("alive") or 0
+        if _sig != _sig0:
+            _cur["waited_sec"] = round(time.time() - _t0, 1)
+            _cur["returned_because"] = "state_changed"
+            _cur["wait_note"] = "房间状态发生变化，提前返回（便于及时处置）。"
+            return _cur
+        if _alive == 0:
+            _cur["waited_sec"] = round(time.time() - _t0, 1)
+            _cur["returned_because"] = "no_alive_rooms"
+            _cur["wait_note"] = "已无在世房间，等待结束。"
+            return _cur
+
+
+def _cmd_room_board_once(room=None, as_json=True):
     # 【G04】顺手把本次 DSH 的 runId 记进 platform_status（只写 _meta，不影响房间结论）；
     #   下一次运行读到不同 runId 即可判"整批失联"。
     try:
@@ -3862,6 +4181,18 @@ def cmd_room_board(room=None, as_json=True):
     state = load_state()
     rooms = state.get("rooms") or {}
     subs = state.get("subagents") or {}
+    # ── 【B8 修复】读看板时顺手给"静默太久"的房间补一次心跳 ──────────────
+    # 注意：只对【还在世】的房间补，且只在静默超阈值时补（见 ensure_room_heartbeat）。
+    #   这不是"造假心跳"—— 造假的含义是"没有这个房间却写它活着"；
+    #   这里房间确实在 active，只是小屋忘了跳。补跳的 via 字段写 auto_heartbeat，
+    #   审计时能与小屋主动跳的心跳区分开。
+    try:
+        for _rn, _rv in rooms.items():
+            if isinstance(_rv, dict) and _rv.get("active") \
+                    and not _rv.get("ended_at") and not _rv.get("failed_at"):
+                ensure_room_heartbeat(_rn)
+    except Exception:
+        pass
     _type_map = _room_type_map()
     _sw = _sw_lock_snapshot(state)
     _only = str(room).strip() if room else None
@@ -3890,6 +4221,21 @@ def cmd_room_board(room=None, as_json=True):
     _counts = {}
     for _r in rows:
         _counts[_r["state"]] = _counts.get(_r["state"], 0) + 1
+    # ── 【A15】构建重叠统计（失败不阻断看板）─────────────────────────────
+    try:
+        _overlaps = _build_overlaps()
+        _ov_count = len(_overlaps)
+    except Exception:
+        _overlaps, _ov_count = [], 0
+    try:
+        _vp = os.path.join(os.path.dirname(_build_windows_path()),
+                           CONCURRENT_BUILD_VIOLATIONS)
+        _violations = []
+        if os.path.exists(_vp):
+            with open(_vp, "r", encoding="utf-8") as _vf:
+                _violations = (json.load(_vf) or {}).get("records") or []
+    except Exception:
+        _violations = []
     _alive_states = ("running", "starting", "waiting_sw", "idle", "unbound")
     _attention = [r["room"] for r in rows if r["state"] in ("unbound", "dead", "failed")]
     _reg = _load_plugin_registry()
@@ -3907,6 +4253,27 @@ def cmd_room_board(room=None, as_json=True):
             "alive": sum(1 for r in rows if r["state"] in _alive_states),
             "need_attention": _attention,
             "restartable": [r["room"] for r in rows if r["safe_to_restart"]],
+            # ══ 【A15 修复】可回归指标：跨房间构建重叠对数 ═══════════════════
+            # 基线（2026-11-07 会话）= 8 对；目标 = 0。
+            # 统计口径：build_windows.json 里房间级构建区间两两求交（未闭合的
+            #   区间以"此刻"为终点），同房间的多条命令合并成一次构建。
+            # 回归用法：python mode_gate.py room-board --json 后取这个字段。
+            "build_overlap_count": _ov_count,
+            "hold_mode": "room" if _room_hold_enabled() else "command",
+        },
+        # ── 【A15】并发构建证据（明细，便于定位是哪两个房间重叠了多久）──
+        "concurrent_build": {
+            "hold_mode": "room" if _room_hold_enabled() else "command",
+            "overlap_count": _ov_count,
+            "overlaps": _overlaps[:20],
+            "violations_file": os.path.join(
+                os.path.dirname(_build_windows_path()),
+                CONCURRENT_BUILD_VIOLATIONS),
+            "violation_count": len(_violations),
+            "target": 0,
+            "note": ("房间级串行（A15）要求 build_overlap_count=0；"
+                     ">0 表示同一时刻有两个房间在用 SW（文档串写风险）。"
+                     "应急退回旧语义：DSH_SW_ROOM_HOLD=0。"),
         },
         "platform_registry": {
             "file": PLATFORM_AGENTS_FILE,
@@ -4609,9 +4976,20 @@ def _lock_owner_alive(state, owner):
     lk = state.get("sw_lock") or {}
     # ── 【Bug-07】SW 进程事实优先：进程没了，锁就是空的 ──────────────────
     try:
-        _is_owner = (lk.get("owner") == owner)
-        _sw_was_ours = bool(lk.get("sw_by_room"))
-        if (_is_owner or _sw_was_ours) and not _sw_running():
+        # ── 【A15 修复 · 关键】必须"确实见过 SW 在跑"才允许据进程消失判死 ──
+        # 原实现把 _is_owner 也纳入判据：只要【正持有锁】且 SLDWORKS.EXE 不在，
+        #   就当持有者已死、立刻回收锁。
+        # 这在"房间级锁"下是致命误伤：room-start 取锁时 SW 还没启动
+        #   （sw_by_room 刚被置 True、进程数为 0），于是刚取得的锁下一秒就被判死，
+        #   乙房间照样能抢走 —— 房间级串行等于没做。
+        # 实测（隔离环境）：甲 sw-request acquired=true 后，乙立刻 sw-request
+        #   仍 acquired=true，hold_mode 停在 command，正是这条判据在放行。
+        #
+        # 现在改用 sw_seen_running：只有【本轮持锁期间确实见过 SLDWORKS.EXE 在跑】，
+        #   随后又不见了，才认定"被外部强杀"（这才是 Bug-07 要解决的情形）。
+        #   从未见过在跑 = 还没启动 = 不能据此判死（否则等于取消锁）。
+        #   附注：sw_by_room 在"SW 尚未启动"时也会被置 True，故它不能单独作为判据。
+        if lk.get("sw_seen_running") and not _sw_running():
             return False
     except Exception:
         pass
@@ -4823,10 +5201,17 @@ def _reclaim_lock(state, reason, requester=None):
         should_reclaim = True
         why = ("公平轮转：持有者[%s]连续独占 %.0f 秒(上限%d)，"
                "队首[%s]等待中，强制让位" % (owner, fair_held, SW_FAIR_SECONDS, queue[0]))
-    elif held > SW_CMD_HOLD and requester != owner:
+    elif held > _room_hold_limit() and requester != owner:
         # 单命令级锁：超过 SW_CMD_HOLD 仍未释放，视为该命令已结束
+        # ── 【A15 修复】房间级持锁时改用 SW_ROOM_HOLD_MAX ─────────────────
+        #   房间级独占（hold_mode="room"）本来就该跨越整轮建模的几十条命令，
+        #   若仍按 90 秒判超时，房间一建模就被别的房间抢走，等于没锁。
+        #   注意：房间级不使用 SW_CMD_HOLD，但【仍受】SW_MAX_HOLD（4 h）兜底。
         should_reclaim = True
-        why = "持有者[%s]持锁%.0f秒超过单命令上限%d秒" % (owner, held, SW_CMD_HOLD)
+        why = ("持有者[%s]持锁%.0f秒超过%s上限%d秒"
+               % (owner, held,
+                  "房间级" if _room_hold_enabled() else "单命令",
+                  _room_hold_limit()))
 
     if should_reclaim:
         lk["prev_owner"] = owner
@@ -4839,6 +5224,168 @@ def _reclaim_lock(state, reason, requester=None):
             pass
         return True, owner
     return False, None
+
+
+def _room_hold_enabled():
+    """【A15】是否启用房间级独占锁（默认开启）。
+
+    环境变量 DSH_SW_ROOM_HOLD=0 可退回旧的单命令级语义（应急开关）。
+    """
+    v = (os.environ.get("DSH_SW_ROOM_HOLD") or "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    return bool(SW_ROOM_HOLD)
+
+
+def _room_hold_limit():
+    """【A15】当前锁模式的持锁超时上限（秒）。"""
+    return SW_ROOM_HOLD_MAX if _room_hold_enabled() else SW_CMD_HOLD
+
+
+# ══ 【A15】构建区间台账：build_overlap_count 的唯一数据源 ═══════════════════
+def _build_windows_path():
+    try:
+        os.makedirs(os.path.dirname(SW_BUILD_WINDOW_FILE), exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(STATE_DIR, SW_BUILD_WINDOW_NAME)
+
+
+def _load_build_windows():
+    try:
+        with open(_build_windows_path(), "r", encoding="utf-8") as f:
+            d = json.load(f) or {}
+        w = d.get("windows")
+        return w if isinstance(w, list) else []
+    except Exception:
+        return []
+
+
+def _save_build_windows(windows):
+    try:
+        with open(_build_windows_path(), "w", encoding="utf-8") as f:
+            json.dump({"windows": windows[-SW_BUILD_WINDOW_KEEP:],
+                       "updated_at": time.time()}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _record_build_start(room):
+    """【A15】房间开始使用 SW 时登记构建区间起点。
+
+    只在【没有未闭合区间】时新开一条 —— 同一房间连发多条命令仍算同一次构建，
+    这样"重叠"统计的是房间与房间的构建区间相交，而不是命令与命令。
+    """
+    if not room:
+        return None
+    try:
+        ws = _load_build_windows()
+        for w in reversed(ws):
+            if w.get("room") == room and not w.get("end_ts"):
+                return w.get("start_ts")
+        now = time.time()
+        ws.append({"room": room, "start_ts": now, "end_ts": None,
+                   "hold_mode": "room" if _room_hold_enabled() else "command"})
+        _save_build_windows(ws)
+        return now
+    except Exception:
+        return None
+
+
+def _record_build_end(room):
+    """【A15】房间释放 SW（room-end / room-fail）时闭合构建区间。"""
+    if not room:
+        return None
+    try:
+        ws = _load_build_windows()
+        changed = False
+        now = time.time()
+        for w in reversed(ws):
+            if w.get("room") == room and not w.get("end_ts"):
+                w["end_ts"] = now
+                changed = True
+        if changed:
+            _save_build_windows(ws)
+        return now
+    except Exception:
+        return None
+
+
+def _build_overlaps(windows=None):
+    """【A15】求跨房间构建区间重叠对（可回归指标）。
+
+    未闭合的区间以"此刻"为终点参与计算 —— 这样两个房间【正在】重叠时，
+    room-board 立刻就能看到 build_overlap_count > 0，而不是等结束后才发现。
+    """
+    ws = windows if windows is not None else _load_build_windows()
+    now = time.time()
+    segs = []
+    for w in ws or []:
+        try:
+            s = float(w.get("start_ts"))
+            e = float(w.get("end_ts") or now)
+        except Exception:
+            continue
+        if e <= s:
+            continue
+        segs.append({"room": w.get("room"), "start": s, "end": e,
+                     "open": not w.get("end_ts")})
+    pairs = []
+    for i in range(len(segs)):
+        for j in range(i + 1, len(segs)):
+            a, b = segs[i], segs[j]
+            if a["room"] == b["room"]:
+                continue
+            ov = min(a["end"], b["end"]) - max(a["start"], b["start"])
+            if ov > 0:
+                pairs.append({"a": a["room"], "b": b["room"],
+                              "overlap_sec": round(ov, 1),
+                              "span": [max(a["start"], b["start"]),
+                                       min(a["end"], b["end"])]})
+    return pairs
+
+
+# ══ 【A15】阻断型 CONCURRENT_BUILD 守卫 ═════════════════════════════════════
+# 注意：这是【阻断】而不是"只记录"。测试员那次只记了 12 次违规、没拦住；
+#   本次（2026-11-07）连记录都没装。这里两条都要：先拦，再记，事后再可查。
+CONCURRENT_BUILD_VIOLATIONS = "concurrent_build_violations.json"
+
+
+def _log_concurrent_build_violation(room, others, reason):
+    """【A15】并发构建违规留痕（同 defense_bypass 的思路：绝不静默）。"""
+    try:
+        p = _build_windows_path()
+        vp = os.path.join(os.path.dirname(p), CONCURRENT_BUILD_VIOLATIONS)
+        rec = []
+        if os.path.exists(vp):
+            try:
+                with open(vp, "r", encoding="utf-8") as f:
+                    rec = (json.load(f) or {}).get("records") or []
+            except Exception:
+                rec = []
+        rec.append({"at": time.time(),
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "room": room, "others": others, "reason": reason,
+                    "pid": _lock_ident()})
+        rec = rec[-100:]
+        with open(vp, "w", encoding="utf-8") as f:
+            json.dump({"records": rec, "updated_at": time.time()},
+                      f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _active_week_rooms(state):
+    """【A15】本周任务里仍在世的房间（未 ended_at / 未 failed_at）。"""
+    out = []
+    for n, v in (state.get("rooms") or {}).items():
+        if not isinstance(v, dict):
+            continue
+        if v.get("ended_at") or v.get("failed_at"):
+            continue
+        if v.get("active"):
+            out.append(n)
+    return sorted(out)
 
 
 def _lock_ident():
@@ -5471,6 +6018,39 @@ def cmd_room_start(name):
         return {"ok": False, "error": err,
                 "parallel_mode_seen": pmode,
                 "active_rooms": active_rooms}
+    # ══ 【A15 修复】房间级串行：开工前断言"没有别的房间还在世" ══════════════
+    # 现场：13:59:59 时 4 个房间同时在世（车架/行走/总理/传感），而 240 次
+    #   room-board 里 waiting_sw 出现 0 次 —— 锁只在命令之间生效，房间级从未串行。
+    # 判据（A15 修复第 ② 条）：room-start 前置断言 active_rooms == 0，否则拒绝。
+    #
+    # 【为什么默认只警告不硬拒】同一波 fork 出去的 n 个房间必须能【同时登记】，
+    #   否则"部分小屋并行（D）"这个用户可选策略会被代码直接废掉。因此：
+    #     · 登记阶段（room-start）默认只做 CONCURRENT_BUILD 观测 + 留痕；
+    #     · 真正的【阻断】落在首次取 SW 使用权时（_require_build_exclusive），
+    #       那里才是"真的要用同一个 SW 实例"的时刻；
+    #     · 需要严格串行（E 模式 / 想立刻拦住）时设
+    #       DSH_CONCURRENT_BUILD_STRICT=1，room-start 当场拒绝。
+    _other_live = [r for r in _active_week_rooms(state) if r != name]
+    if _other_live:
+        _strict = (os.environ.get("DSH_CONCURRENT_BUILD_STRICT") or ""
+                   ).strip().lower() in ("1", "true", "yes", "on")
+        _cb_reason = ("room-start 时已有在世房间: %s（并发构建风险）"
+                      % ", ".join(_other_live))
+        try:
+            _log_concurrent_build_violation(name, _other_live, _cb_reason)
+        except Exception:
+            pass
+        if _strict:
+            return {"ok": False, "room": name, "gate": "CONCURRENT_BUILD",
+                    "error": "【CONCURRENT_BUILD 阻断】房间 [%s] 开工被拒绝。" % name,
+                    "active_rooms": _other_live,
+                    "hold_mode": "room" if _room_hold_enabled() else "command",
+                    "detail": _cb_reason,
+                    "hint": ("房间级串行（A15）要求同一时刻只有一个房间在使用 SW。"
+                             "① 等现有房间 room-end/room-fail 后再 room-start；"
+                             "② 或设 DSH_CONCURRENT_BUILD_STRICT=0 退回「只观测」；"
+                             "③ 查看并发证据：python mode_gate.py room-board --json"
+                             "（看 summary.build_overlap_count / concurrent_build.violations）")}
     # ── 【Bug4 修复】重开房间时清除陈旧的 subagent 映射 ──────────────────
     # 问题现象：上一波该房间结束后，subagents[房间] 仍留着【旧 subagent_id】。
     #   重开房间时若不清理，子代理启动后调 whoami 会拿到这个陈旧 id，
@@ -5569,8 +6149,36 @@ def cmd_room_start(name):
             pass
         # 心跳保留（不删），新一波会自然刷新 mtime
     save_state(state)
+    # ══ 【A15 修复】房间开工即取 SW 使用权（hold_mode="room"）════════════════
+    # 旧语义：锁在每条 sw_bridge 命令结束就释放 → 两个脚本同时在建。
+    # 新语义：room-start 取锁、room-end/room-fail 释放，整轮建模只允许一个房间。
+    #
+    # ⚠️ 必须放在上面 save_state(state)【之后】。原因是本函数的 state 是函数
+    #   开头 load 的【内存副本】：cmd_sw_request() 会自行 load/save 并写入
+    #   sw_lock，若随后再 save_state(state)，就会用旧副本把刚取得的锁整块
+    #   覆盖成空 —— 实测症状是"甲取锁成功、乙紧接着也能取到"，
+    #   房间级串行等于没做（与 parallel_mode 自愈那段是同一个坑）。
+    _room_lock_note = None
+    if _room_hold_enabled():
+        try:
+            _lk_res = cmd_sw_request(name)
+            if _lk_res.get("acquired"):
+                _room_lock_note = "room-start 已取得 SW 房间级独占权"
+            else:
+                _room_lock_note = ("room-start 未能取得 SW 独占权（队列第 %s 位，"
+                                   "持有者=%s）；首次建模命令会自动排队等待"
+                                   % (_lk_res.get("position"), _lk_res.get("owner")))
+            _record_build_start(name)
+        except Exception as _e_lk:
+            _room_lock_note = "room-start 取锁异常（不阻断登记）：%r" % (_e_lk,)
     msg = "小屋 [%s] 已登记,可开始建模" % name
     result = {"ok": True, "room": name, "message": msg}
+    # ── 【A15 修复】把房间级独占权的取得结果如实告诉调用方 ────────────────
+    # 原实现把 _room_lock_note 算出来却【从未回传】（死变量）：调用方完全
+    #   看不到"本房间拿没拿到 SW 独占权"，只能靠再跑一次 room-board 猜。
+    if _room_lock_note:
+        result["sw_room_lock"] = _room_lock_note
+        result["hold_mode"] = "room" if _room_hold_enabled() else "command"
     # ── 【Bug#18 修复】明确告知调用方：历史是否被保留 ─────────────────────
     result["history_preserved"] = (not _fresh)
     result["fresh_reason"] = ("explicit_fresh" if _fresh_explicit else
@@ -6443,6 +7051,84 @@ def _freeze_room_artifacts(room):
     return rec
 
 
+# ══ 【A13 修复】写命令幂等键：同一动作 6 秒内重复执行必须被识别 ═══════════
+# 现场（2026-11-07 会话）：
+#   · `:1217` `room-end 传感支架间 --force --reason "…"`
+#   · `:1225` **6 秒后**又跑了一遍完全相同的命令
+#   两次都真的执行了（含两次留痕、两次冻结产物），没有任何"这是重复"的提示。
+#   根因：状态机命令没有幂等键 —— 调用方（模型）在长上下文里重复同一动作，
+#   系统只会照做第二遍。
+# 修法：对【不可逆写命令】记 (命令, 目标, 关键参数, 结果摘要) 的幂等指纹；
+#   同一指纹在 A13_IDEMPOTENT_WINDOW 秒内再来一次 → 直接回上一次的结果，
+#   并标注 duplicate_of，不再产生第二遍副作用。
+#   窗口内但参数不同（例如 --force 换成不带 force）→ 正常执行，不拦。
+A13_IDEMPOTENT_WINDOW = 8.0   # 秒（缺陷证据里是 6 秒，取 8 秒留余量）
+
+
+def _idem_path():
+    return os.path.join(STATE_DIR, "cmd_idempotency.json")
+
+
+def _idem_load():
+    try:
+        with open(_idem_path(), "r", encoding="utf-8") as f:
+            d = json.load(f) or {}
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _idem_save(d):
+    try:
+        with open(_idem_path(), "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _idem_key(cmd, target, flags):
+    """幂等指纹：命令 + 目标 + 影响语义的 flag（顺序无关）。"""
+    _f = "|".join(sorted(str(x) for x in (flags or ())))
+    return "%s::%s::%s" % (str(cmd), str(target), _f)
+
+
+def idempotent_check(cmd, target, flags=None):
+    """查最近一次同指纹执行；命中窗口内则返回 (hit, prev_record)。"""
+    k = _idem_key(cmd, target, flags)
+    d = _idem_load()
+    rec = d.get(k)
+    if not isinstance(rec, dict):
+        return False, None
+    try:
+        age = time.time() - float(rec.get("ts") or 0)
+    except Exception:
+        return False, None
+    if age <= A13_IDEMPOTENT_WINDOW:
+        return True, dict(rec, age_sec=round(age, 2))
+    return False, None
+
+
+def idempotent_remember(cmd, target, flags, result):
+    """记下本次执行（只记结论摘要，避免状态文件膨胀）。"""
+    k = _idem_key(cmd, target, flags)
+    d = _idem_load()
+    d[k] = {
+        "ts": time.time(),
+        "cmd": str(cmd), "target": str(target),
+        "flags": sorted(str(x) for x in (flags or ())),
+        "ok": bool(result.get("ok")) if isinstance(result, dict) else None,
+        "gate": (result.get("gate") if isinstance(result, dict) else None),
+    }
+    # 只保留最近 50 条，且清掉超过 1 小时的
+    _now = time.time()
+    _kept = {kk: vv for kk, vv in d.items()
+             if isinstance(vv, dict) and (_now - float(vv.get("ts") or 0)) < 3600}
+    if len(_kept) > 50:
+        _items = sorted(_kept.items(), key=lambda kv: kv[1].get("ts") or 0)
+        _kept = dict(_items[-50:])
+    _idem_save(_kept)
+
+
 def cmd_room_end(name, force=False, dry_run=False):
     """【三大防线】room-end 是"房间下线"这个不可逆动作 —— 就在这里强制执行三道防线。
 
@@ -6453,6 +7139,30 @@ def cmd_room_end(name, force=False, dry_run=False):
         · 防线③领域：本房间有 DSVA 校验凭据且无 CRITICAL 违规。
     放行：--force 或环境变量 DSH_DEFENSE_BYPASS=1（都会留痕，绝不静默）。
     """
+    # ══ 【A13 修复】幂等键：同一 room-end（含相同 --force）窗口内重复执行 ═══
+    # 现场：:1217 与 :1225 相隔 6 秒跑了两遍完全相同的 room-end --force。
+    # 这里在【任何副作用之前】判重，命中就直接回上一次的结论，不再二次执行。
+    # dry-run 不参与幂等（它本来就零副作用，重复预演无害）。
+    if not dry_run:
+        try:
+            _hit, _prev = idempotent_check(
+                "room-end", name, ["--force"] if force else [])
+            if _hit:
+                _rec = load_state()
+                return {"ok": True, "room": name, "duplicate": True,
+                        "duplicate_of": _prev,
+                        "gate": "IDEMPOTENT_REPLAY",
+                        "message": ("【A13 幂等保护】%.1f 秒前刚执行过完全相同的 room-end"
+                                    "（房间=%s，force=%s），本次【未重复执行】，"
+                                    "直接返回上次结论。"
+                                    % (_prev.get("age_sec") or 0, name, bool(force))),
+                        "hint": ("这是幂等保护：状态机命令重复执行会产生二次留痕/"
+                                 "二次冻结/二次自动收尾。若确实要再跑一次，"
+                                 "请等 %ss 后再试，或先核对 room-board。"
+                                 % int(A13_IDEMPOTENT_WINDOW)),
+                        "room_state_now": ((_rec.get("rooms") or {}).get(str(name)) or {})}
+        except Exception:
+            pass
     # ══ 【F-01 修复】dry_run：零副作用预演 ═══════════════════════════════
     # 语义（严格）：
     #   · 只读检查（防线/看图证据/锁状态）照常跑，结论照常回报；
@@ -6510,6 +7220,10 @@ def cmd_room_end(name, force=False, dry_run=False):
     #   **经核实的看图证据**（截图真实存在且非空 + 闭环判定 PASS）。
     #   这不是"建议截图"，是拒绝下线的硬条件。
     # 放行：与三大防线同一套绕行机制（--force / DSH_DEFENSE_BYPASS=1，均留痕）。
+    # ══ 【A15 修复】room-end 释放房间级独占锁 + 闭合构建区间 ═════════════════
+    # 必须在【防线检查之前】就释放吗？不 —— 防线不过时房间其实没下线，
+    #   提前放锁会让别的房间进来和它抢 SW。所以放在函数【出口处】统一释放，
+    #   这里只做两件事的登记，真正释放见 _release_room_hold()。
     if not force:
         _vg = _visual_gate_for_room(name)
         if _vg and not _vg.get("ok") and not _vg.get("skipped"):
@@ -6678,6 +7392,23 @@ def cmd_room_end(name, force=False, dry_run=False):
         _integrity = {"ok": None, "note": "完整性自检不可用: %r" % (_e_gi,)}
     was_owner, killed, waited, _reason = _finalize_room(name, failed=False,
                                                         force=force)
+    # ══ 【A15 修复】房间下线 → 闭合构建区间 + 显式释放房间级独占锁 ═════════
+    # _finalize_room 已经会释放 owner 是本房间的 SW 锁；这里补两件事：
+    #   ① 闭合 build_windows 里本房间那条未闭合区间（build_overlap_count 依据）；
+    #   ② 若锁仍被本房间占着（--force 之外的边角路径），主动 sw-release 一次。
+    # 任何异常都不阻断下线（下线是主流程，台账是观测）。
+    try:
+        _record_build_end(name)
+    except Exception:
+        pass
+    try:
+        _st_rl = load_state()
+        if (_sw_lock(_st_rl).get("owner") == str(name)):
+            _room_hold_release = cmd_sw_release(str(name))
+        else:
+            _room_hold_release = {"ok": True, "note": "锁不在本房间名下，无需释放"}
+    except Exception as _e_rl:
+        _room_hold_release = {"ok": False, "error": repr(_e_rl)}
     # ══ 【A-52 修复】下线即冻结产物：记指纹 + 置只读 ══════════════════════
     # 原缺陷：room-end 只改状态标志，产物仍可写 —— 收尾后再被人改动，
     #   报告/凭据/台账却仍指向"当初那一次校核"，且无从发现。
@@ -6705,8 +7436,16 @@ def cmd_room_end(name, force=False, dry_run=False):
     else:
         # ── 【Bug-25/27】没释放时必须说清原因（原实现只回 false）──────────
         msg += "；SW锁未释放（%s）" % (_reason or "无 owner 变更")
+    # ── 【A13】记住本次执行，供窗口内判重 ──────────────────────────────
+    try:
+        idempotent_remember("room-end", name, ["--force"] if force else [],
+                            {"ok": True})
+    except Exception:
+        pass
     _out = {"ok": True, "room": name, "sw_lock_released": was_owner,
             "sw_killed": killed, "sw_lock_release_reason": _reason,
+            "hold_mode": "room" if _room_hold_enabled() else "command",
+            "room_hold_release": _room_hold_release,
             "message": msg}
     # 【A-52】冻结结论如实回传（只读失败也要让调用方看到）
     if isinstance(_frz, dict):
@@ -6881,13 +7620,16 @@ def cmd_sw_request(name):
             lk["cmd_seq"] = 0
             lk["fair_start"] = time.time()
         lk["cmd_seq"] = int(lk.get("cmd_seq", 0)) + 1
-        lk["hold_mode"] = "command"   # command=单命令级 | room=房间级
+        # 【A15 修复】房间级独占：持锁跨整轮建模，不再"命令结束就放"。
+        lk["hold_mode"] = "room" if _room_hold_enabled() else "command"
         lk["sw_by_room"] = (not running) or bool(lk.get("sw_by_room"))
+        # 【A15】只有亲眼见过 SW 在跑，才允许日后据"进程消失"判锁失效
+        lk["sw_seen_running"] = bool(lk.get("sw_seen_running")) or bool(running)
         lk["queue"] = [x for x in q if x != name]
         save_state(state)
         return {"ok": True, "need_lock": True, "acquired": True, "room": name,
-                "sw_was_running": running, "hold_mode": "command",
-                "cmd_seq": lk["cmd_seq"], "max_hold_seconds": SW_CMD_HOLD}
+                "sw_was_running": running, "hold_mode": lk["hold_mode"],
+                "cmd_seq": lk["cmd_seq"], "max_hold_seconds": _room_hold_limit()}
     pos = (q.index(name) + 1) if name in q else None
     save_state(state)
     return {"ok": True, "need_lock": True, "acquired": False, "queued": True,
@@ -6937,12 +7679,14 @@ def cmd_sw_wait(name, timeout=300):
                 lk["owner"] = name
                 lk["acquired_at"] = time.time()
                 lk["cmd_seq"] = int(lk.get("cmd_seq", 0)) + 1
-                lk["hold_mode"] = "command"
+                lk["hold_mode"] = "room" if _room_hold_enabled() else "command"
                 lk["sw_by_room"] = (not running) or bool(lk.get("sw_by_room"))
+                lk["sw_seen_running"] = bool(lk.get("sw_seen_running")) or bool(running)
                 lk["queue"] = [x for x in q if x != name]
                 save_state(state)
                 return {"ok": True, "acquired": True, "room": name, "waited": True,
-                        "hold_mode": "command", "max_hold_seconds": SW_CMD_HOLD}
+                        "hold_mode": lk["hold_mode"],
+                        "max_hold_seconds": _room_hold_limit()}
             if stale_since is None:
                 stale_since = time.time()
             elif time.time() - stale_since > SW_STALE_KILL:
@@ -7427,9 +8171,10 @@ _CMD_FLAGS = {
     "lock-doctor": ("--auto",),
     "doctor": ("--sync", "--clean", "--migrate"),
     "close-all": ("--quit",),
-    "room-board": ("--room", "--json"),
+    "room-board": ("--room", "--json", "--wait"),
     "whoami": ("--session-id",),
     "sw-wait": ("--timeout",),
+    "room-lease": ("--heartbeat", "--ttl"),
 }
 # 短别名 → 长名（校验前归一化，避免 "-f" 被当成未知参数）
 _FLAG_ALIASES = {"-f": "--force", "-n": "--dry-run", "-h": "--help",
@@ -7687,6 +8432,34 @@ def main():
         result = cmd_lock_doctor(auto=("--auto" in args))
     elif cmd == "room-heartbeat":
         result = cmd_room_heartbeat(args[1] if len(args) > 1 else "unknown")
+    elif cmd in ("room-lease", "lease"):
+        # ── 【B3 修复】房间租约：阻塞命令里持续刷心跳（见 cmd_room_lease）──
+        _ls_name = ""
+        _ls_hb = 60
+        _ls_ttl = None
+        _j = 1
+        while _j < len(args):
+            _a = args[_j]
+            if _a in ("--heartbeat", "--ttl") and _j + 1 < len(args):
+                try:
+                    _v = float(args[_j + 1])
+                except Exception:
+                    _v = None
+                if _a == "--heartbeat" and _v:
+                    _ls_hb = int(_v)
+                elif _a == "--ttl" and _v is not None:
+                    _ls_ttl = _v
+                _j += 2
+                continue
+            if not str(_a).startswith("-") and not _ls_name:
+                _ls_name = _a
+            _j += 1
+        if not _ls_name:
+            result = {"ok": False, "gate": "USAGE",
+                      "error": "用法: mode_gate.py room-lease \"<房间>\" "
+                               "[--heartbeat 60] [--ttl 3600]"}
+        else:
+            result = cmd_room_lease(_ls_name, heartbeat=_ls_hb, ttl=_ls_ttl)
     elif cmd == "room-heartbeat-check":
         result = cmd_room_heartbeat_check(args[1] if len(args) > 1 else "unknown")
     elif cmd == "subagent-assign":
@@ -7700,6 +8473,7 @@ def main():
         # 用法: mode_gate.py room-board [--room 房间名] [--json]
         #   --json 只是显式表达"我要 JSON"；本命令【始终】输出 JSON。
         _rb_room = None
+        _rb_wait = 0
         _i = 1
         while _i < len(args):
             _a = args[_i]
@@ -7707,10 +8481,25 @@ def main():
                 _rb_room = args[_i + 1]
                 _i += 2
                 continue
+            # ── 【A2 修复】--wait <秒>：进程内阻塞等待看板变化 ──────────────
+            if _a in ("--wait", "-w") and _i + 1 < len(args):
+                try:
+                    _rb_wait = max(0, int(float(args[_i + 1])))
+                except Exception:
+                    _rb_wait = 0
+                _i += 2
+                continue
+            if str(_a).startswith("--wait="):
+                try:
+                    _rb_wait = max(0, int(float(str(_a).split("=", 1)[1])))
+                except Exception:
+                    _rb_wait = 0
+                _i += 1
+                continue
             if not _a.startswith("-") and _rb_room is None:
                 _rb_room = _a
             _i += 1
-        result = cmd_room_board(room=_rb_room, as_json=True)
+        result = cmd_room_board(room=_rb_room, as_json=True, wait=_rb_wait)
     elif cmd == "room-status":
         result = cmd_room_status()
     elif cmd == "room-artifact":

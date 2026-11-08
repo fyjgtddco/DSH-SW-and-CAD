@@ -14,6 +14,38 @@
 //     用户在前端作答后 resolve → 答案以 tool_result 形式绑定到那次工具调用。
 //  4. 【问题3】用 agent/turn-stopping 钩子 + agent.steer() 阻止对话提前结束：
 //     仅对 engineering 预设生效（见 GUARD_PRESET）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+//  【2026-11-07 · v5 收尾守卫修正】A1 / A11 / A14 / B1
+// ══════════════════════════════════════════════════════════════════════════
+// 现场（会话 session-dcb91b26，竞速小车，6 h 06 min / 656 次工具调用）暴露的
+// 四件事，全部落在本文件的收尾守卫与状态暴露上：
+//
+//   A1（P0）守卫没有"等待"这一终态 → 模型只能 sleep 轮询。
+//     3 次想结束回合被打回（:98/:179/:508）后 5 h 40 m 不再尝试；同一回合
+//     用 sleep(30) 轮询 477 次 = 4 h 02 m（占墙钟 66%），几何产出 0 次。
+//     → 新增第 4 种【代码可判】终态 [WAITING]：正文独占一行 + 客观证据
+//       （房间 active 且近 5 分钟有心跳/报告变化 / 未答提问卡 /
+//        workflow_state 挂 pending / 本会话有未 settle 的 job）才放行。
+//       只写标记拿不出证据 → 照旧 steer，绝不削弱守卫。
+//   A11（P1）守卫把"总计子代理"当建模小屋。
+//     总计子代理 d921be74 已完成 10/10 阶段、任务书写明禁调 sw_bridge，却被
+//     催着调 sw_bridge → 空转 5 步 53 秒。→ 先按 mode2_plan.json 的
+//     analyst.session_id 判角色，命中发阶段命令文案；取不到身份保守回退。
+//   A14（P2）压缩阈值固定 ~100K（窗口 200K）。
+//     6 次触发点 99,838–100,025，而会话记着 contextWindow:200000。
+//     → 阈值 = contextWindow × 0.7（下限 60K，取不到回退 100K 并打日志）。
+//       ⚠️ 宿主真实阈值是 min(窗口×ratio, 窗口−reserved−headroom)，
+//       只调 ratio 可能反而更低 —— 故同时暴露 limiter 指出被哪一项压住。
+//   B1（P0）后台 job 未 settle 就 turn/end(completed)。
+//     行走传动间 b55576ac：:672 报 completed、:673 才 job/settled，父代理据此
+//     当完成，21 分钟后才发现 run6.log 是 0 字节。
+//     → turn 结束时同口径探测未 settle job，写 pending_jobs /
+//       turn_completed_but_busy，并在 /parts-board 暴露 pending_jobs_host。
+//
+// 纯判定逻辑放在 lib/turn-guard.js（无副作用、可单测）；本文件只保留接线。
+// 这样拆分是被动的防御：本文件曾被并行改动整份 write 覆盖过两次，
+// 判定逻辑放外面才保得住。
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 // ── DSH 0.2.0 兼容改造（兼容性清单 第 2 项）────────────────────────────────
 // 旧包名 @deepseek-ai/dsh-agent-presets 在 0.2.0 安装体中已不存在：
@@ -45,6 +77,13 @@ import { DefenseSigner } from './defense-sign.js';
 //   宿主层少了任何一个包都会让整块 import 求值失败 → 插件不装配 → 修复白做，
 //   所以这里只引本插件自己的文件。
 import { installJobWaitGuard } from './job-wait-guard.js';
+// 【A4】错误码归一 + 退避（纯函数模块，可脱离宿主单测）
+import { classifyModelError, backoffMsOf } from './model-errors.js';
+// 【BUG-A1/A11/A14/B1 修复】收尾守卫的"可判定事实"层（纯函数、无副作用）。
+//   单独成文件是为了把与并行改动的冲突面从"几百行"压到"一条 import"：
+//   lib/index.js 曾被另一路 agent 整份 write 覆盖过两次，判定逻辑放外面才保得住。
+//   ⚠️ 必须写成【单行 import】：多处测试用 /^import .*$/gm 剥 import 头。
+import { hasStandaloneMarker, collectWaitingEvidence, isAnalystAgent as turnGuardIsAnalystAgent, readAnalystSessionId, latestContextWindow, resolveCompactionThreshold, explainCompactionLimit, describePendingJobs, COMPACTION_THRESHOLD_RATIO } from './turn-guard.js';
 // 【Webots 仿真 · 只读宿主门】配置阶段接入；MCP 行默认禁用，见 preset-engineering.patch.yml。
 //   只做「上下文归属校验 + 报告/证据只读路由」，不启动 Webots、不碰 SolidWorks。
 import { installWebots } from './webots.js';
@@ -95,11 +134,11 @@ export const name = 'dsh-engineering-ui';
 // cordis 的依赖注入要求服务名必须列在 inject 里，否则 ctx.userQuestions 为
 // undefined，/ask 会直接失败（"userQuestions 服务不可用"）。
 //
-// 【刻意不 inject llm】一次性辅助调用（划词详情 /side-chat）只是增强项，
+// 【刻意不 inject llm】只有 /model-catalog（设置页模型目录）会用到它，
 // 而 inject 是【硬依赖】：服务缺失会让本插件整体 PENDING、永不 apply，
 // 连带收尾守卫与三大防线一起失效 —— 代价远大于收益。
 // 因此 llm 走 ctx.get('llm') 惰性读取（与 client 半读 sidebarRight 同一做法），
-// 缺失时 /side-chat 返回 ok:false，主体功能不受影响。
+// 缺失时 /model-catalog 返回 errors[] 并如实标注，主体功能不受影响。
 // webots.js 用 ctx.tools.guard 守卫 mcp__webots__* 的执行归属 → 必须声明 tools。
 //   注：整块装配已对 ctx.tools 缺失/无 guard 做优雅降级（见 installWebots 返回的守卫），
 //   因此旧宿主/测试桩没有 tools 也不会让插件装配失败。
@@ -263,7 +302,6 @@ const RAW_DROP = new Set(['assistant/chunk', 'step/start', 'step/end', 'request/
 //     · POST /persona      —— 写入内容会进入【每个】工程模式会话的 system prompt
 //                             （持久化提示词注入）；
 //     · POST /conn-launch  —— 让宿主 spawn 本地可执行文件。
-//   另有 /side-chat 可无限流调用 LLM（资源滥用），
 //   /defense/verify-gate 不消费 nonce 可作免费验签预言机。
 //
 // 能做与不能做（如实说明，不假装做到了密码学隔离）：
@@ -340,7 +378,6 @@ const SENSITIVE_ROUTES = new Set([
   PREFIX + '/conn-launch',
   PREFIX + '/conn-diagnose',
   PREFIX + '/defense/sign',
-  PREFIX + '/side-chat',
 ]);
 
 function localTokenOf() {
@@ -402,7 +439,6 @@ function guardRoute(route) {
         return send(res, g.status, { ok: false, error: g.error, path: route.path });
       }
       // ── 【P0 修复】全路由限流 ────────────────────────────────────────
-// 原先只有 4 条 /defense/* 走 rateLimited，而 /side-chat
       //   会触发真实 LLM 调用、/conn-launch 会 spawn 本地进程，却完全无限流
       //   → 任何本地进程可反复触发（资源滥用 / 可用性 DoS）。
       //   这里在守卫层统一加桶，按路径分桶；rateLimited 定义在文件后段，
@@ -436,16 +472,31 @@ const GUARD_TEXT = [
   '你正准备结束本轮，但系统尚未检测到【代码级终止态】，因此本轮不予结束。',
   '',
   '⚠️ 注意：散文式的完成声明【一律无效】——"已完成/已生成/已导出"这类措辞不算数，',
-  '   必须让门禁状态文件真正进入终态。唯一的文本级开关是下面第 3 条。',
+  '   必须让门禁状态文件真正进入终态，或命中下面第 4 条的【客观等待】。',
   '',
-  '放行的唯一途径（任一即可）：',
+  '放行的途径（任一即可）：',
   '  1) 走完 workflow_gate 收尾流程，使 workflow_state.json 的 step 变为 finished；',
   '  2) 让所有房间都 room-end / room-fail，使 mode_state.json 中无 active 房间；',
   '  3) 若任务确实全部结束且无需再操作，在正文【独占一行】写出 [TASK_DONE]',
   '     （该标记必须单独成行且无其它文字；写作"[TASK_DONE]"嵌在句子里无效）。',
+  // ── 【BUG-A1 修复】第 4 种合法终态 [WAITING] ──────────────────────────
+  // 现场：模型 3 次想结束回合被打回（:98 / :179 / :508），此后 5 h 40 m 不再尝试；
+  //   同一回合用 sleep(30) 轮询 477 次 = 4 h 02 m（占墙钟 66%），几何产出 0 次。
+  // 根因：守卫只认三种代码级终态。"我在等"在语义上完全合法，但守卫里没有这一档
+  //   → 模型想等就只能"占着回合"sleep 轮询，因为一结束回合就被打回。
+  // 判据（必须代码可判）：正文单独一行 [WAITING] **且** turn-guard.js 的
+  //   collectWaitingEvidence() 拿到客观证据（见该函数注释）。证据不足仍然打回。
+  '  4) 若你【确实只能等】（等房间 / 等 SW 锁 / 等后台 job / 等用户作答），',
+  '     在正文【独占一行】写出 [WAITING]。系统会先核实客观证据：房间仍在世且',
+  '     近 5 分钟内心跳或报告有变化 / 有未答提问卡 / workflow_state 挂 pending /',
+  '     本会话仍有未 settle 的后台 job；一条都对不上就打回。',
+  '     [WAITING] 只表示"我在等"，不等于任务完成，也不写任何房间状态。',
   '',
   '若任务尚未完成，请继续调用工具推进下一步（room-start / sw_bridge 建模 /',
   '  room-report 上报等），而不是仅用文字描述进展。',
+  '',
+  '等房间/等锁请优先用阻塞原语（mode_gate.py wait-rooms / sw-wait），一次调用拿到',
+  '  结论；用 sleep 循环轮询是本守卫要消除的行为，不是允许的姿势。',
   '',
   '若用户已明确要求停止（"停 / 够了 / 不用了 / 就这样"），直接结束即可。'
 ].join('\n');
@@ -456,6 +507,26 @@ const GUARD_TEXT = [
 // 拿主对话的文案去 steer 子代理，等于让它去做一件它无权做的事 ——
 // 实测它只能在"I'm still working"和空转之间反复，最后房间判 dead。
 // 子代理唯一该做的是：继续推进【本房间的建模/验证】，然后如实停下等父代理收尾。
+// ══ 【A11】守卫必须按【角色】发文案，不能把"总计子代理"当建模小屋 ═══
+// 现场（d921be74:497/517）：它已完成 10/10 阶段、任务书写明"禁调 sw_bridge"，
+//   却被催"直接调 sw_bridge.py run / visual_check.py gate / room-report"，空转 5 步 53 秒。
+// 修复：analyst 的 sessionId 由 mode2_flow.py analyst-bind 写进 mode2_plan.json，
+//   命中就发专用文案；取不到身份时保守回退原文案。
+const GUARD_TEXT_ANALYST = [
+  '【系统提示 · 工程模式守卫 · 总计子代理】',
+  '你正准备结束本轮。你是【总计子代理（analyst）】，不是建模小屋 ——',
+  '你的职责是推进十阶段 / 按需提问 / 决定子代理编制，**不要**去调 sw_bridge，',
+  '也不要碰任何建模/装配命令（任务书里通常明写"禁调"）。',
+  '',
+  '请检查你自己这一轮：',
+  '  · 十阶段还没走完 → 用 mode2_flow.py begin-stage / mark-stage-done 推进；',
+  '  · 缺信息 → 用 mode2_flow.py ask --stage <阶段> --reason "为什么缺"；',
+  '  · 编制未登记 → 用 mode2_flow.py set-subagent-plan（房间模板用 rooms-template）；',
+  '  · 都做完了 → 直接结束即可，无需任何标记；父代理会看到你的阶段状态。',
+  '',
+  '⚠️ 只输出文字而不调用工具，等于没有推进（但也不要用 sw_bridge 冒充进展）。',
+].join('\n');
+
 const GUARD_TEXT_SUBAGENT = [
   '【系统提示 · 工程模式守卫 · 子代理】',
   '你正准备结束本轮。你是【建模/专项子代理】，不需要让门禁进入终态 ——',
@@ -932,12 +1003,120 @@ export function apply(ctx) {
   // 注意：不移除该开关 —— 注释 523-532 说明子代理被禁止调用 room-end，
   //   若没有这个显式开关，子代理会陷入"既不能标完成、又不能自己清房间"的死锁。
   function hasStandaloneTaskDone(text) {
-    if (!text) return false;
-    const lines = String(text).split(/\r?\n/);
-    for (const line of lines) {
-      if (line.trim() === '[TASK_DONE]') return true;
+    // 【BUG-A1 修复】实现搬到 lib/turn-guard.js（hasStandaloneMarker），
+    //   语义不变：只认【独占一行】的标记，散文里提一句无效。
+    return hasStandaloneMarker(text, '[TASK_DONE]');
+  }
+
+  // ── 【BUG-A1 修复】把"客观等待证据"接到宿主侧可得的事实上 ─────────────
+  // lib/turn-guard.js 里的 collectWaitingEvidence 只做纯判定；这里负责把它需要
+  // 的四个事实【从宿主现有设施】取出来，不另造一套：
+  //   · mode_state.json / workflow_state.json  → 房间活跃性 + pending 标记
+  //     （与 detectTaskFinished 读的是同一份文件、同一个 toolsDir）
+  //   · 未答提问卡                              → childAsks（/ask-child 的台账）
+  //   · 未 settle 后台 job                      → pendingJobsOf（B1 已建好的那个）
+  // 任何一项取不到都只是"少一条证据"，绝不影响其它证据，也绝不抛。
+  function collectGuardWaitingEvidence(agent) {
+    try {
+      const toolsDir = findToolsDir();
+      const modeState = toolsDir ? readJsonSafe(path.join(toolsDir, 'mode_state.json')) : null;
+      const workflowState = toolsDir ? readJsonSafe(path.join(toolsDir, 'workflow_state.json')) : null;
+      let unsettledJobs = 0;
+      try {
+        const pj = pendingJobsOf(agent && agent.id);
+        if (pj && pj.available) unsettledJobs = pj.pending.length;
+      } catch (e) {}
+      return collectWaitingEvidence({
+        toolsDir,
+        modeState,
+        workflowState,
+        openQuestions: countOpenQuestions(agent),
+        unsettledJobs,
+      });
+    } catch (e) {
+      return { waiting: false, evidence: [], reason: String((e && e.message) || e) };
     }
-    return false;
+  }
+
+  /**
+   * 【BUG-B1 修复】宿主侧"未 settle 后台 job"的只读汇总（给面板用）。
+   *
+   * 为什么要它：B1 的现场是"回合已结束、job 还在跑"，而面板只看 parts-board
+   *   （Python 侧）时是看不见这件事的 —— 那时报告还没写、日志还是 0 字节。
+   *   这里把宿主内存里【此刻还在 running/stopping】的 job 汇总成一张小表，
+   *   让父代理/人去面板上一眼看到"哪个会话还没真收工"。
+   *
+   * 口径与 pendingJobsOf 完全一致（同一个 services、同一套归属判定），
+   *   不另造一套 —— 两套口径必然打架，这正是这次要消灭的东西。
+   * 任何异常都退化成 { available:false }，绝不让面板因此 500。
+   */
+  function pendingJobsSummary() {
+    try {
+      const jobs = (ctx && typeof ctx.get === 'function') ? ctx.get('jobs') : undefined;
+      if (!jobs || typeof jobs.list !== 'function') {
+        return { available: false, reason: 'jobs 服务不可用', sessions: [], total: 0 };
+      }
+      let rows = [];
+      try { rows = jobs.list() || []; } catch (e) {
+        return { available: false, reason: 'jobs.list 失败：' + String((e && e.message) || e),
+                 sessions: [], total: 0 };
+      }
+      if (!Array.isArray(rows)) rows = [];
+      // ⚠️ 这里【故意】不过滤 owner：面板要的是全局视图（谁在忙）。
+      //   与 pendingJobsOf（按会话判定）不同，但数据源同一份，不会矛盾：
+      //   pendingJobsOf 只是在这里再叠一层 owner===id。
+      const byOwner = new Map();
+      for (const j of rows) {
+        if (!j) continue;
+        const st = String(j.status || j.state || '').toLowerCase();
+        if (st !== 'running' && st !== 'stopping') continue;
+        const owner = String(j.owner || '');
+        if (!owner) continue;            // 无主任务不属于任何会话，不进面板
+        const arr = byOwner.get(owner) || [];
+        arr.push({ id: j.id || j.jobId || null,
+                   label: j.label || j.name || null,
+                   kind: j.kind || null,
+                   status: st });
+        byOwner.set(owner, arr);
+      }
+      const sessions = Array.from(byOwner.entries()).map(([id, list]) => ({
+        sessionId: id,
+        count: list.length,
+        jobs: list,
+      }));
+      return {
+        available: true,
+        total: sessions.reduce((n, s) => n + s.count, 0),
+        sessions,
+        note: '这些会话的后台 job 还没 settle —— 不要据此判它们"已完成"（B1）',
+      };
+    } catch (e) {
+      return { available: false, reason: String((e && e.message) || e), sessions: [], total: 0 };
+    }
+  }
+
+  /**
+   * 该会话（或其父会话）名下仍在 pending 的提问卡数量。
+   * 人没作答 → 模型除了等没有别的选择，这是最干净的一种"客观等待证据"。
+   * 直接读 childAsks（/ask-child 的待答台账，声明在本文件下方，运行时已就绪）。
+   */
+  function countOpenQuestions(agent) {
+    try {
+      const id = String((agent && (agent.id || agent.sessionId)) || '');
+      if (!id) return 0;
+      const pid = parentSessionId(agent);
+      const keys = [id];
+      if (pid) keys.push(String(pid));
+      let n = 0;
+      for (const e of childAsks.values()) {
+        if (!e || e.settled) continue;
+        const owner = String(e.childSessionId || '');
+        if (keys.indexOf(owner) >= 0) n += 1;
+      }
+      return n;
+    } catch (e) {
+      return 0;
+    }
   }
 
   function detectTaskFinished(agent) {
@@ -945,6 +1124,32 @@ export function apply(ctx) {
       const _textEarly = collectRecentAssistantText(agent, 60);
       if (hasStandaloneTaskDone(_textEarly)) {
         return { done: true, reason: '检测到显式完成标记 [TASK_DONE]（独占一行，最高优先级）' };
+      }
+      // ── 【BUG-A1 修复】第 4 种合法终态：[WAITING]（等）─────────────────
+      // 现场：模型 3 次想结束回合被守卫打回（:98/:179/:508），此后 5 h 40 m 不再
+      //   尝试结束；同一回合用 sleep(30) 轮询 477 次 = 4 h 02 m（占墙钟 66%），
+      //   几何产出 0 次。根因：守卫只认三种代码级终态，"我在等"没有合法出口。
+      // 判据（代码可判，不信模型口头声明）：
+      //   ① 正文【独占一行】写出 [WAITING]（必要条件，散文里提一句无效）；
+      //   ② turn-guard.collectWaitingEvidence() 拿到至少一条客观证据：
+      //      房间 active 且近 5 分钟有心跳/报告变化 / 有未答提问卡 /
+      //      workflow_state 挂 pending / 本会话仍有未 settle 的后台 job。
+      //   只满足 ① 不满足 ② → 视为"用 [WAITING] 逃避推进"，照旧 steer。
+      //   ⚠️ 这条分支【绝不】返回 done 之外的宽放行：证据缺失时原样落到下面的
+      //      代码级终态判定，守卫的严格性一点没减。
+      if (hasStandaloneMarker(_textEarly, '[WAITING]')) {
+        const _wait = collectGuardWaitingEvidence(agent);
+        if (_wait.waiting) {
+          const _why = _wait.evidence.join('；');
+          try {
+            console.warn('[dsh-engineering-ui] [WAITING] 放行：' + _why);
+          } catch (e) {}
+          return { done: true, reason: '[WAITING] 放行：' + _why };
+        }
+        try {
+          console.warn('[dsh-engineering-ui] [WAITING] 打回：正文有标记但拿不出客观等待证据（'
+            + (_wait.reason || '证据为空') + '）');
+        } catch (e) {}
       }
 
       const toolsDir = findToolsDir();
@@ -1650,7 +1855,11 @@ export function apply(ctx) {
       st.failCounts.set(_failModelKey, _cnt);
 
       // ① 致命类型：立刻换
-      const _fatal = MODEL_CHAIN_SWITCH_CODES.has(code);
+      // ── 【A4】不再只认字面量白名单：先做错误码归一 ─────────────────────
+      //   :164 报 RATE_LIMIT、:166 同因改报 QUOTA_EXCEEDED（当时不在白名单）
+      //   → 5 次重试预算只用 1 次就被判死。
+      const _cls = classifyModelError(code, (failure && failure.message) || '');
+      const _fatal = MODEL_CHAIN_SWITCH_CODES.has(code) || _cls.switchNow;
       // ② 反复失败：达到阈值也换（覆盖各种没被列入白名单的错）
       const _tooMany = _cnt >= MODEL_CHAIN_MAX_SAME_FAILS;
       // ③ 模型明显不正常：空响应 / 编码类错误（输不出内容）
@@ -1733,7 +1942,13 @@ export function apply(ctx) {
           + ' 错误 ' + code + ' → 切到 ' + nxt.provider + '/' + nxt.model);
       } catch (e) {}
       // 冷却一小会儿再重试，避免立刻撞同一个限流窗口
-      const delay = 800;
+      // ── 【A4】退避必须读 retry-after，不能写死 800ms（现场 delayMs:491.59）
+      st._retryAttempt = (st._retryAttempt || 0) + 1;
+      const delay = backoffMsOf(failure, st._retryAttempt);
+      try {
+        console.warn('[dsh-engineering-ui] 限流/额度退避 ' + delay
+          + 'ms（归类 ' + _cls.class + '，第 ' + st._retryAttempt + ' 次）');
+      } catch (e) {}
       await new Promise((r) => setTimeout(r, delay));
       return { kind: 'retry' };
     } catch (e) {
@@ -1785,6 +2000,38 @@ export function apply(ctx) {
       // 兜底：会话 header 带 parentSession 也说明是子代理
       const parent = agent && (agent.parentSession || agent.session?.header?.parentSession);
       return !!parent;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ══ 【A11】判断"我"是不是总计子代理（analyst）════════════════
+  // analyst 的 sessionId 由 mode2_flow.py analyst-bind 写进 mode2_plan.json
+  // 的 plan.analyst.session_id。命中就说明该发"总计子代理"文案。
+  //
+  // 【A11 修复】原实现有三个坑，全部落到"判不出角色 → 发错文案"：
+  //   ① 只读 toolsDirCandidates()[0] 下的 mode2_plan.json —— 而 mode2_flow
+  //      实际把它写在【任务目录】（workflow_state.work_dir）或 load_cases/ 下，
+  //      于是真实任务里这个函数几乎恒 false；
+  //   ② 用 sid.indexOf(bind) >= 0 这种【互相包含】判定 —— 只要一个短 id
+  //      是另一个的子串就判成同一人，属于"宁可误判成分析师"的错误方向：
+  //      误判会把建模小屋的守卫文案换成"你是总计子代理，别调 sw_bridge"，
+  //      正好把它推进空转（比不判角色更坏）。
+  //   ③ JSON.parse 直接抛到 catch，等于"读坏了就当不是"。
+  // 现在：判定搬到 lib/turn-guard.js（纯函数、按 mode2_plan 的权威路径顺序读、
+  //   只做【严格相等】），这里只保留一层包装 + header 的显式角色旁证。
+  // 取不到身份时返回 false —— 保守回退建模小屋文案（宁可发错，也不因读不到就不拦）。
+  function isAnalystAgent(agent) {
+    try {
+      const h = (agent && agent.session && agent.session.header) || {};
+      if (String(h.engineeringRole || '') === 'analyst') return true;
+      // 权威判据：mode2_plan.json 里 analyst.session_id（analyst-bind 写入），
+      //   由 turn-guard.js 按"任务目录 > toolsDir > load_cases"的顺序读，
+      //   只做严格相等比对；读不到 → 返回 false（回退建模小屋文案）。
+      const toolsDir = (typeof findToolsDir === 'function') ? findToolsDir() : null;
+      const wf = toolsDir ? readJsonSafe(path.join(toolsDir, 'workflow_state.json')) : null;
+      const r = turnGuardIsAnalystAgent(agent, toolsDir, wf);
+      return !!(r && r.isAnalyst);
     } catch (e) {
       return false;
     }
@@ -1862,8 +2109,24 @@ export function apply(ctx) {
         }
         sd.count += 1;
         guardState.set(agent.id, sd);
+        // ── 【A11 修复】先判角色，再选文案 ──────────────────────────────
+        // 现场（总计子代理 d921be74:497/517）：守卫对它说"你是【建模/专项子代理】
+        //   …请调 sw_bridge.py run / visual_check.py gate / room-report"，
+        //   而它已完成 10/10 阶段、任务书明写"禁调 sw_bridge"→ 空转 5 步 53 秒。
+        // 根因：守卫只有"主对话/子代理"两套文案，analyst 被算进了建模小屋。
+        // 判据：mode2_plan.json 的 analyst.session_id（analyst-bind 写入）与本
+        //   agent 的 sessionId 严格相等 → 它是总计子代理，发阶段命令文案。
+        // 取不到身份 → false，保守回退建模小屋文案（宁可发错，也不因读不到就不拦）。
+        let _isAnalyst = false;
+        try { _isAnalyst = isAnalystAgent(agent); } catch (e) { _isAnalyst = false; }
+        if (_isAnalyst) {
+          try {
+            console.warn('[dsh-engineering-ui] guard 角色判定：session=' + agent.id
+              + ' 是【总计子代理 analyst】→ 发阶段命令文案（不催 sw_bridge）（A11）');
+          } catch (e) {}
+        }
         const subMsg = createUserMessage({
-          content: [{ type: 'text', text: GUARD_TEXT_SUBAGENT }],
+          content: [{ type: 'text', text: _isAnalyst ? GUARD_TEXT_ANALYST : GUARD_TEXT_SUBAGENT }],
           source: { kind: 'plugin:dsh-engineering-ui' }
         });
         agent.steer(subMsg);
@@ -1953,6 +2216,345 @@ export function apply(ctx) {
       try {
         const list = await ctx.subagents.listDescendants(root);
         return send(res, 200, { ok: true, rootSessionId: root, agents: list });
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  })));
+
+  // ══ 【压缩历史】GET /dsh-engineering-ui/compaction-history ═══════════════
+  // 用户要求（2026-11-07，图三）：
+  //   「红框里面放上各个子代理的压缩历史……黑框加上主对话的历史压缩记录」
+  //   「显示的使用设置里面的『使用工程模式自带的子代理显示页』判断是否开启」
+  //
+  // 数据源：dsh-engineering-compaction 写下的 append-only 账本
+  //   <state_dir>/compaction_history.jsonl（一行一条，只增不改）
+  //
+  // 为什么这里【自己读文件】而不 import 那个包：
+  //   · 压缩包是 preset 子项，UI 插件是宿主层插件，两者生命周期不同；
+  //   · 一个只读 JSONL 解析不值得引入跨包耦合与版本约束。
+  //   契约只有两个文件名，见 dsh-engineering-compaction/lib/history.js。
+  const COMPACT_HISTORY_FILE = 'compaction_history.jsonl';
+
+  /** 解析压缩账本所在目录（与 Python _store.state_dir() 同优先级）。 */
+  function compactionStateDir() {
+    try { return findToolsDir(); } catch (e) { return null; }
+  }
+
+  // ══ 【BUG-A14 修复】压缩阈值必须跟着【会话自己的 contextWindow】走 ═══════
+  // 现场（2026-11-07 会话）：6 次压缩触发点全在 99,838–100,025 token 之间，
+  //   而 `:224` 明确记着 `{"type":"request/context","contextWindow":200000}`
+  //   —— 窗口只用到 50% 就开始压缩。代价是每次压缩都要重写摘要、丢细节，
+  //   直接引出"压缩后重复读同一文件"和"同一段逻辑重写 4 版"（B6）。
+  //
+  // 判据：阈值 = contextWindow × 0.7，且不低于 60K（小窗口按比例算会过频压缩）。
+  //   取不到 contextWindow → 回退 100000（历史行为）并【打日志】，绝不崩。
+  //
+  // 为什么这里只"算 + 记 + 暴露"而不直接改 compaction-basic 的配置：
+  //   · 真正的触发点在 @deepseek-ai/dsh-compaction-basic 的 agent/pre-step，
+  //     它的 config 在构造时就被 deepFreeze 了（见其 resolveConfig 的返回值），
+  //     运行期改不动，硬改只会静默失败；
+  //   · 所以阈值本身由 preset 的 thresholdRatio 下发（见 preset-engineering.patch.yml），
+  //     宿主这一侧负责【把 effective 阈值如实算出来并留痕】，让"阈值配错了"
+  //     这件事第一次变得可观测 —— 本轮缺陷的根源恰恰是没人知道它一直是 100K。
+  const compactThresholdCache = new Map();   // sessionId -> { value, source, contextWindow, at }
+  let compactThresholdWarned = new Set();
+
+  /**
+   * 【BUG-A14 修复·补】读 preset 里 compaction-basic 的阈值参数（只读，带缓存）。
+   *
+   * 为什么不直接读宿主的运行时 config：@deepseek-ai/dsh-compaction-basic 在
+   *   resolveConfig() 里就 deepFreeze 了（源码:75-86），运行期拿不到也改不动。
+   *   而 preset yml 是【唯一真源】：宿主启动时正是照它装配的。
+   * 找不到 preset 时回落到 host 侧常量（0.7 / 48000），并标 source='default'，
+   *   让排查时能区分"按配置算的"与"按默认算的"。
+   */
+  let compactPresetCache = null;
+  let compactPresetCacheAt = 0;
+  function compactionPresetConfig() {
+    const now = Date.now();
+    if (compactPresetCache && (now - compactPresetCacheAt) < 30000) return compactPresetCache;
+    const out = { thresholdRatio: COMPACTION_THRESHOLD_RATIO, headroomTokens: 48000,
+                  retainRatio: 0.12, source: 'default', file: null };
+    try {
+      const dir = findToolsDir();
+      const cands = [];
+      if (dir) {
+        // preset yml 通常装在安装副本的 .agent-presets/engineering 下
+        cands.push(path.join(dir, '..', 'preset-engineering.patch.yml'));
+      }
+      for (const p of cands) {
+        let raw;
+        try {
+          if (!fs.existsSync(p)) continue;
+          raw = fs.readFileSync(p, 'utf8');
+        } catch (e) { continue; }
+        // 极简 YAML 取值：只认这三个键（不引 yaml 库 —— 宿主层少一个依赖少一个故障点）
+        const grab = (key) => {
+          const m = new RegExp('^\\s*' + key + '\\s*:\\s*([0-9.]+)\\s*$', 'm').exec(raw);
+          return m ? Number(m[1]) : null;
+        };
+        const tr = grab('thresholdRatio');
+        const hd = grab('headroomTokens');
+        const rr = grab('retainRatio');
+        if (tr !== null) out.thresholdRatio = tr;
+        if (hd !== null) out.headroomTokens = hd;
+        if (rr !== null) out.retainRatio = rr;
+        out.source = 'preset';
+        out.file = p;
+        break;
+      }
+    } catch (e) {}
+    compactPresetCache = out;
+    compactPresetCacheAt = now;
+    return out;
+  }
+
+  /**
+   * 取该会话的压缩阈值（contextWindow × 0.7，下限 60K，取不到回退 100K）。
+   * @returns {{value:number, source:string, contextWindow:number|null, ratio:number, at:number}}
+   */
+  function compactionThresholdOf(agent) {
+    try {
+      const sid = String((agent && (agent.id || agent.sessionId)) || '');
+      const cached = compactThresholdCache.get(sid);
+      if (cached) return cached;
+      const events = sessionEvents(agent && agent.session) || [];
+      const header = (agent && agent.session && agent.session.header) || {};
+      const cw = latestContextWindow(events, header);
+      const r = resolveCompactionThreshold(cw);
+      const rec = {
+        value: r.threshold,
+        source: r.source,
+        contextWindow: r.contextWindow,
+        ratio: r.ratio,
+        // 下限高于窗口本身 → 这个阈值永远达不到（退化情形，必须看得见）
+        exceedsWindow: !!r.exceedsWindow,
+        at: Date.now(),
+      };
+      // ── 【BUG-A14 修复·补】指出"被哪一项压住"，供设置页/排查定位 ────────
+      // 见 turn-guard.explainCompactionLimit 的注释：宿主实际阈值是
+      //   min(contextWindow×ratio, contextWindow−reserved−headroom)，
+      // 只调 ratio 可能反而让阈值更低（200K/48000 headroom 时压到 ~86K）。
+      // headroomTokens / thresholdRatio 取自 preset 的 compaction-basic 配置
+      //   （宿主那份 config 构造后 deepFreeze，运行期不可写，故这里只做核算）。
+      try {
+        const pc = compactionPresetConfig();
+        const ex = explainCompactionLimit(cw, pc.thresholdRatio, pc.headroomTokens, null);
+        rec.presetThresholdRatio = pc.thresholdRatio;
+        rec.presetHeadroomTokens = pc.headroomTokens;
+        rec.limitRatioTokens = ex.limitRatioTokens;
+        rec.limitBudgetTokens = ex.limitBudgetTokens;
+        rec.limiter = ex.limiter;
+      } catch (e) {}
+      if (sid) compactThresholdCache.set(sid, rec);
+      // 每个会话只打一次，避免每步刷屏（守卫/hook 都在热路径上）
+      if (sid && !compactThresholdWarned.has(sid)) {
+        compactThresholdWarned.add(sid);
+        try {
+          if (r.source === 'fallback') {
+            console.warn('[dsh-engineering-ui] 压缩阈值：会话 ' + sid
+              + ' 取不到 contextWindow → 回退 ' + r.threshold
+              + '（历史行为；若窗口更大就会过早压缩）（A14）');
+          } else if (r.source === 'floor') {
+            console.warn('[dsh-engineering-ui] 压缩阈值：会话 ' + sid
+              + ' 窗口 ' + r.contextWindow + ' × ' + r.ratio + ' 低于下限 → 采用 '
+              + r.threshold + '（防止小窗口过频压缩）'
+              + (r.exceedsWindow ? '；⚠️ 但该阈值已高于窗口本身，实际永不触发，'
+                 + 'upper bound 会被 CONTEXT_WINDOW_EXCEEDED 兜住' : '')
+              + '（A14）');
+          } else {
+            console.warn('[dsh-engineering-ui] 压缩阈值：会话 ' + sid
+              + ' 窗口 ' + r.contextWindow + ' × ' + r.ratio + ' = ' + r.threshold + '（A14）');
+          }
+        } catch (e) {}
+      }
+      return rec;
+    } catch (e) {
+      // 任何异常都不能影响会话：按"取不到 contextWindow"处理
+      return { value: COMPACTION_THRESHOLD_FALLBACK, source: 'fallback',
+               contextWindow: null, ratio: COMPACTION_THRESHOLD_RATIO, at: Date.now() };
+    }
+  }
+
+  // 会话释放时清缓存（否则 Map 与 warned 集合会无界增长）
+  disposers.push(ctx.on('agent/disposed', (payload) => {
+    try {
+      const id = payload && payload.agent && payload.agent.id;
+      if (!id) return;
+      compactThresholdCache.delete(String(id));
+      compactThresholdWarned.delete(String(id));
+    } catch (e) {}
+  }));
+
+  /**
+   * 读"压缩引擎已加载"标记（dsh-engineering-compaction 在构造时写的）。
+   *
+   * 为什么面板需要它：账本为空时，用户看不出是
+   *   ① 引擎没加载（preset 那行没解析到 / 包没装好）→ 永远不会有记录；
+   *   ② 引擎加载了、只是这条会话还没到阈值。
+   * 这两种在界面上完全一样，以前只能翻日志。
+   */
+  const COMPACT_ENGINE_FILE = 'compaction_engine.json';
+  function readCompactionEngine() {
+    const dir = compactionStateDir();
+    if (!dir) return null;
+    try {
+      const p = path.join(dir, COMPACT_ENGINE_FILE);
+      if (!fs.existsSync(p)) return null;
+      const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (!j || typeof j !== 'object') return null;
+      return {
+        at: Number(j.at) || 0,
+        mode: String(j.mode || ''),
+        pid: Number(j.pid) || 0,
+      };
+    } catch (e) { return null; }
+  }
+
+  /** 读账本，按 root/target 过滤。坏行跳过，绝不让 UI 因一行损坏而空白。 */
+  function readCompactionHistory(opts) {
+    const o = opts || {};
+    const dir = compactionStateDir();
+    if (!dir) return { ok: false, entries: [], error: '未找到工程模式状态目录' };
+    const p = path.join(dir, COMPACT_HISTORY_FILE);
+    let raw;
+    try {
+      if (!fs.existsSync(p)) {
+        return { ok: true, entries: [], stateDir: dir, exists: false, engine: readCompactionEngine() };
+      }
+      raw = fs.readFileSync(p, 'utf8');
+    } catch (e) {
+      return { ok: false, entries: [], stateDir: dir, error: String((e && e.message) || e) };
+    }
+    let entries = [];
+    for (const line of raw.split(/\\r?\\n/)) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        const rec = JSON.parse(s);
+        if (rec && typeof rec === 'object') entries.push(rec);
+      } catch (e) { /* 坏行跳过 */ }
+    }
+    if (o.root) entries = entries.filter((r) => String(r.root || '') === String(o.root));
+    if (o.target) entries = entries.filter((r) => String(r.target || '') === String(o.target));
+    const limit = Number.isFinite(o.limit) && o.limit > 0 ? Math.floor(o.limit) : 400;
+    const total = entries.length;
+    if (entries.length > limit) entries = entries.slice(entries.length - limit);
+    // 每个会话的累计计数（红框里「压缩 3 次」这种徽标要用）
+    const counts = {};
+    for (const e of entries) {
+      const k = String(e.target || '');
+      const c = counts[k] || { target: k, label: e.label || '', count: 0, lastAt: 0, numbers: 0 };
+      c.count += 1;
+      if (Number(e.at) > c.lastAt) { c.lastAt = Number(e.at) || 0; c.label = e.label || c.label; }
+      c.numbers += Number(e.l0_numbers || 0) + Number(e.l0_materials || 0);
+      counts[k] = c;
+    }
+    return {
+      ok: true,
+      stateDir: dir,
+      exists: true,
+      total,
+      entries,
+      counts: Object.keys(counts).map((k) => counts[k]),
+      // 引擎是否被加载过（面板用它区分"引擎没起来"和"还没到阈值"）
+      engine: readCompactionEngine(),
+    };
+  }
+
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/compaction-history',
+    handler: async (req, res) => {
+      const q = queryOf(req);
+      const rootId = (q.get('rootSessionId') || '').trim();
+      const target = (q.get('target') || '').trim();
+      const limit = Number(q.get('limit') || 400);
+      try {
+        const r = readCompactionHistory({
+          root: rootId || undefined,
+          target: target || undefined,
+          limit,
+        });
+        // ── 【BUG-A14 修复】把 effective 压缩阈值一并回给前端 ──────────────
+        // 目标会话：显式 target 优先，否则 rootId（主对话自己的阈值）。
+        // 取不到会话对象就退回"100K + fallback"，并如实标注来源 ——
+        //   宁可让面板显示"未知"，也不能让面板显示一个编出来的阈值。
+        let threshold = null;
+        try {
+          const probeId = target || rootId;
+          let ag = null;
+          if (probeId) {
+            ag = (ctx.agents && typeof ctx.agents.get === 'function')
+              ? ctx.agents.get(String(probeId)) : null;
+          }
+          if (ag) {
+            threshold = compactionThresholdOf(ag);
+          } else {
+            const fb = resolveCompactionThreshold(null);
+            threshold = { value: fb.threshold, source: 'fallback',
+                          contextWindow: null, ratio: fb.ratio, at: Date.now() };
+          }
+        } catch (e) {}
+        return send(res, 200, Object.assign({}, r, { threshold }));
+      } catch (error) {
+        return send(res, 200, { ok: false, entries: [], error: String((error && error.message) || error) });
+      }
+    }
+  })));
+
+  // ══ 【零件进度表】GET /dsh-engineering-ui/parts-board ═══════════════════
+  // 用户要求（2026-11-07，图二）：「红线上面是子代理，下面是要造的零件的表……
+  //   总计子代理分析完成之后，把所有的零件都给放在那个展示表中……交给总理子
+  //   代理去看零件完成度：正在建 / 未开始 / 完成 / 需要重建 / 失败」。
+  //
+  // 数据源是【唯一权威】：mode2_flow.py parts-board（读 mode2_plan 的编制 +
+  //   prime_reports，房间态来自 mode_gate.room-board，pulse 断 = 失败）。
+  //   JS 侧不重新判定状态，只做 HTTP 转发 —— 保证面板与门禁看到的完全是同一份
+  //   结论（历史教训：UI 自己猜状态，和门禁打架）。
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/parts-board',
+    handler: async (req, res) => {
+      try {
+        const dir = findToolsDir();
+        if (!dir) return send(res, 200, { ok: false, error: '未定位到 tools 目录' });
+        const script = path.join(dir, 'mode2_flow.py');
+        if (!fs.existsSync(script)) {
+          return send(res, 200, { ok: false, error: '未找到 mode2_flow.py: ' + script });
+        }
+        const py = resolvePython();
+        if (!py) return send(res, 200, { ok: false, error: '未找到可用的 Python 解释器' });
+        const r = spawnSync(py, [script, 'parts-board'], {
+          encoding: 'utf8', timeout: 90000, cwd: dir, windowsHide: true, env: pyEnv(),
+        });
+        const out = String((r && r.stdout) || '');
+        const start = out.indexOf('{');
+        let parsed = null;
+        if (start >= 0) { try { parsed = JSON.parse(out.slice(start)); } catch (e) { parsed = null; } }
+        if (!parsed) {
+          return send(res, 200, {
+            ok: false, error: 'parts-board 没有返回可解析的 JSON',
+            stdout_tail: out.slice(-800),
+            stderr_tail: String((r && r.stderr) || '').slice(-800),
+            // 【BUG-B1 修复】解析失败也带 pending_jobs —— 面板至少要能看出
+            //   "有子代理收工了但后台还在跑"，而不是因为 Python 那一步挂了
+            //   就整块空白（B1 的现场正是"报告没写、job 还在跑"）。
+            pending_jobs: pendingJobsSummary(),
+          });
+        }
+        // ── 【BUG-B1 修复】把"回合已结束但后台 job 未 settle"的会话一并暴露 ──
+        // 现场（b55576ac:670-673）：turn/end{completed} 先到、job/settled 后到，
+        //   父代理据此当完成，21 分钟后才发现 run6.log 是 0 字节。
+        // 这里把宿主已知的未完成 job 作为【只读附加字段】挂上去：
+        //   · 不改 Python 的判定结论（面板的权威仍是 parts-board 本身）；
+        //   · 名字带 _host 后缀，明确它来自宿主侧而不是门禁侧，避免两套结论打架；
+        //   · 读不到就留空数组 + unavailable 标记，绝不让面板因此报错。
+        try {
+          parsed.pending_jobs_host = pendingJobsSummary();
+        } catch (e) {}
+        return send(res, 200, parsed);
       } catch (error) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
@@ -2833,6 +3435,19 @@ export function apply(ctx) {
       const pendingId = 'c_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
       let settleResolve, settleReject;
       const settledPromise = new Promise((r2, j2) => { settleResolve = r2; settleReject = j2; });
+      // ══ 【卡死修复 A · 2026-11-08】用户点了提交，卡片却永远不消失 ═══════════
+      // 现场（session-55a2009b）：用户选完点提交后，界面停在选项页动不了，
+      //   子代理 ask_user.py 一直轮询"用户尚未作答"，最后用户只能强关 DSH。
+      //
+      // 根因：本端点有两套"等待"，但只有一套被接住。
+      //   ① settleResolve/settledPromise —— 插件自建的 Promise，
+      //      **没有任何人 await 它**；
+      //   ② uq.ask(...) —— 真正挂起、真正驱动原生选项卡的那个 Promise。
+      //   /answer 端点执行的是 entry.resolve() → 只 resolve ①，
+      //   而 ② 的原生挂起无人理会 → 选项卡永远等不到 settle → 界面卡死。
+      //
+      // 修法：把②的 resolve 通道也挂到 entry 上（entry.nativeSettle），
+      //   /answer 与原生作答两条路径都走"只 settle 一次"的闸门。
 
       const entry = {
         childSessionId,
@@ -2861,8 +3476,24 @@ export function apply(ctx) {
       // 【问题4 核心】用 root 承载 ask() —— 帧路由到主对话框，
       // 由 DSH 原生 ui-user-questions 渲染选项卡，真人在主对话里作答；
       // 答案经 root 的 wait.respond() 回到宿主，本插件再留存给 ask_user.py。
+      //
+      // ══ 【卡死修复 A】原生 ask() 必须可被 /answer 提前 settle ═══════════════
+      //   原生 ask() 返回的是 ctx.waterfall(...) 的 Promise，它由**前端选项卡**
+      //   决定何时 settle。但本插件自己的卡片（子代理面板里的 AskCard）走的是
+      //   /answer → entry.resolve()，那条路径**碰不到**原生 Promise，
+      //   于是"用户已经点了提交，选项卡却还挂着" —— 这正是本次卡死的直接现象。
+      //   修法：把原生的 settle 也接进来（entry.nativeSettle / nativeReject），
+      //   让 /answer 在 resolve 自建 Promise 的同时，也把原生那次挂起结掉。
+      let nativeSettle = null;
+      let nativeReject = null;
+      entry.nativeSettle = (ans) => {
+        try { if (typeof nativeSettle === 'function') nativeSettle(ans); } catch (e) {}
+      };
+      entry.nativeReject = (err) => {
+        try { if (typeof nativeReject === 'function') nativeReject(err); } catch (e) {}
+      };
       try {
-        uq.ask({
+        const _nativePromise = uq.ask({
           questions: questions.map((q) => ({
             id: String(q.id || 'q1'),
             question: String(q.question || ''),
@@ -2871,27 +3502,32 @@ export function apply(ctx) {
             ...(q.multiSelect !== undefined ? { multiSelect: !!q.multiSelect } : {})
           })),
           agent: holder
-        }).then((answer) => {
-          if (!entry.settled) {
-            entry.settled = true;
-            // 【问题4】答案先留存，再删除 pending —— 保证 ask_user.py 轮询时
-            // "pending 消失"与"result 可取"始终成对出现，不会读到空结果。
-            try {
-              const answers = normalizeAnswers(entry.questions, answer);
-              childResults.set(pendingId, { answers, at: Date.now() });
-            } catch (e) {
-              // 留存失败不阻断 resolve
-            }
-            childAsks.delete(pendingId);
-            settleResolve(answer);
-          }
-        }).catch((err) => {
-          if (!entry.settled) {
-            entry.settled = true;
-            childAsks.delete(pendingId);
-            settleReject(err);
-          }
         });
+        // 【卡死修复 A】拿到原生 Promise 的 resolve/reject —— 但不能 await，
+        //   否则本端点会一直挂着（ask 本身就是阻塞式的）。
+        if (_nativePromise && typeof _nativePromise.then === 'function') {
+          Promise.resolve(_nativePromise).then((answer) => {
+            if (!entry.settled) {
+              entry.settled = true;
+              // 【问题4】答案先留存，再删除 pending —— 保证 ask_user.py 轮询时
+              // "pending 消失"与"result 可取"始终成对出现，不会读到空结果。
+              try {
+                const answers = normalizeAnswers(entry.questions, answer);
+                childResults.set(pendingId, { answers, at: Date.now() });
+              } catch (e) {
+                // 留存失败不阻断 resolve
+              }
+              childAsks.delete(pendingId);
+              settleResolve(answer);
+            }
+          }).catch((err) => {
+            if (!entry.settled) {
+              entry.settled = true;
+              childAsks.delete(pendingId);
+              settleReject(err);
+            }
+          });
+        }
       } catch (err) {
         childAsks.delete(pendingId);
         return send(res, 200, { ok: false, error: String((err && err.message) || err) });
@@ -3068,6 +3704,14 @@ export function apply(ctx) {
           // "result 可取"成对出现，绝不出现中间的读取空窗。
           if (isChild) childResults.set(pendingId, { answers, at: Date.now() });
           entry.resolve({ answers });
+          // ══ 【卡死修复 A】必须同时结掉【原生】那次挂起 ══════════════════════
+          //   否则：插件自建 Promise 结束了，但原生选项卡（uq.ask）还挂着 →
+          //   界面停在选项页、用户点提交没反应、只能强关 DSH（本次现场）。
+          //   原生 settle 的期望形状是 { answers: [{id, selected}] }，
+          //   与 entry.questions 的 id 口径一致，直接复用即可。
+          if (isChild && typeof entry.nativeSettle === 'function') {
+            try { entry.nativeSettle({ answers }); } catch (e) {}
+          }
           return send(res, 200, {
             ok: true, pendingId,
             bound: isChild ? 'child-tool-result' : 'tool_result',
@@ -4173,272 +4817,9 @@ export function apply(ctx) {
     }
   })));
 
-  /**
-   * 把一次 LLM 流收成纯文本。
-   *
-   * ── 为什么不用官方的 BlockAssembler ──────────────────────────────────────
-   * 官方确实提供 BlockAssembler（dsh-llm 的 assembler.ts，且从包根导出），
-   *   用它也能work。但本插件刻意【不新增任何 import】：
-   *   · 本插件是【独立分发包】，要保证别人 clone 下来即可运行；每多一个
-   *     从官方包静态 import 的名字，就多一个"该名字在本机 DSH 构建里
-   *     是否存在/同名同形"的假设，一旦 DSH 版本变动就会让整个 Host 插件
-   *     求值失败（连带守卫与三大防线一起失效）。
-   *   · 只用手写累加，依赖面收敛到【流协议本身】（StreamChunk），这是
-   *     最稳定的一层契约：
-   *       { type:'text-delta', index, text }
-   *       { type:'finish', reason: { kind } }
-   *   · 包内测试用 data-URL 替身模拟官方模块，替身只有 createUserMessage；
-   *     不引入新导出，测试替身无需改动、回归测试保持绿色。
-   *
-   * @param llm - ctx.llm 服务。
-   * @param options - GenerateOptions。
-   * @returns 累计的纯文本（多块按换行拼接）。
-   */
-  async function collectLlmText(llm, options, timeoutMs, onDelta) {
-    let text = '';
-    let finishKind = null;
-    let finishMsg = '';
-    // ── 超时策略（修「一直出不来分析」/「请求被中断（超时）」）─────────────
-    // 原实现给了 90 秒硬上限，实测对 high reasoning 的深度分析太短：
-    //   一次 1200 token 的推理很容易超过 90 秒 → 我自己的计时器把
-    //   本来能成功的请求打断 → 用户看到"请求被中断（超时）"。
-    //
-    // 现在改成【空闲超时】而不是【总时长超时】：
-    //   · 只要模型还在吐 token，就一直等（不打断正常的长回答）；
-    //   · 只有【连续 N 秒没有任何数据】才判定卡死并中断。
-    //   这才是"卡住"与"思考久"的正确区分方式。
-    // 默认 120 秒空闲；可用 DSH_SIDE_CHAT_IDLE_MS 覆盖。
-    let idleMs = 120000;
-    try {
-      const raw = process.env.DSH_SIDE_CHAT_IDLE_MS;
-      if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
-        const v = Number(String(raw).trim());
-        if (Number.isFinite(v) && v > 0) idleMs = v;
-      }
-    } catch (e) { /* 用默认值 */ }
-    // 兼容旧的第三参语义：若调用方显式给了更长的总时限，取较大者作为空闲窗口
-    if (Number.isFinite(timeoutMs) && timeoutMs > idleMs) idleMs = timeoutMs;
-
-    const ctrl = new AbortController();
-    let timer = null;
-    let lastActivity = Date.now();
-    const armIdle = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        // 到点再确认一次是否真的无活动，避免边界误杀
-        if (Date.now() - lastActivity >= idleMs) {
-          try { ctrl.abort(); } catch (e) {}
-        } else {
-          armIdle();
-        }
-      }, idleMs);
-    };
-    armIdle();
-    try {
-      for await (const chunk of llm.stream(Object.assign({}, options, { signal: ctrl.signal }))) {
-        if (!chunk || typeof chunk !== 'object') continue;
-        // 任何 chunk 都算活动 → 重置空闲计时
-        lastActivity = Date.now();
-        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
-          text += chunk.text;
-          // 边流边回调，让前端能渐进显示（避免长时间空白）
-          if (typeof onDelta === 'function') {
-            try { onDelta(text); } catch (e) { /* 回调异常不影响收流 */ }
-          }
-        } else if (chunk.type === 'finish') {
-          const reason = chunk.reason || {};
-          finishKind = reason.kind || null;
-          finishMsg = (reason.failure && reason.failure.message) || '';
-        }
-      }
-    } catch (error) {
-      if (ctrl.signal.aborted) {
-        throw new Error('模型连续 ' + Math.round(idleMs / 1000) + ' 秒没有返回任何内容，已中断'
-          + '（可能是模型无响应或网络问题，请重试）');
-      }
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
-    // 只有 stop（或无 finish 帧）算正常收尾；其余都当失败。
-    if (finishKind && finishKind !== 'stop') {
-      if (finishKind === 'aborted') {
-        // 走到这里说明是【上游】中断的（不是我们的空闲计时器，
-        //   否则上面 catch 就已经抛出了）。如实说明，便于排查。
-        throw new Error('请求被中断' + (finishMsg ? '：' + finishMsg : ''));
-      }
-      throw new Error('模型返回异常（' + String(finishKind) + '）' + (finishMsg ? '：' + finishMsg : ''));
-    }
-    return text;
-  }
 
 
 
-  // ══ 【划词详情】侧边分析对话（POST /side-chat）══════════════════════════
-  // 用户需求（对照三张截图）：
-  //   · 在 Agent 回复里【划选一段文字】→ 出现「更多详情」；
-  //   · 点它 → 右下角弹出一个小聊天面板，就这段内容与你展开分析；
-  //   · 结果可以「添加到对话」回填到主对话输入框。
-  //
-  // 设计要点：
-  //   · 【无状态】：历史由前端持有并每次整包回传。宿主不写任何文件、
-  //     不落会话日志 —— 这样它既不污染工程模式的会话与守卫判定，
-  //     也让"别人 clone 下来即用"成立（无需任何持久化目录假设）。
-  //   · 【一次性辅助调用】：RequestUserInput 不落库、不建 Agent。
-  //     用同一个模型路由（前端把当前会话的 provider/model 传进来）。
-  //   · 失败一律 ok:false，前端显示错误 —— 这是用户主动发起的操作，
-  //     因此失败必须显式回报给用户。
-  const SIDE_CHAT_SYSTEM = [
-    'You are a focused engineering analysis assistant shown in a side panel.',
-    'The user selected a passage from an AI agent conversation and wants deeper analysis of it.',
-    '',
-    'Rules:',
-    '- Answer in the SAME language as the selected passage and the user question.',
-    '- Ground every claim in the selected passage; quote it when useful.',
-    '- Be concrete and technical. If the passage contains a plan, a result, or code,',
-    '  point out assumptions, risks, and what to verify next.',
-    '- Keep it tight: a few short paragraphs or a compact list. No filler, no restating the question.',
-    '- You have no tools; if something needs execution, say what should be run instead of pretending.',
-  ].join('\n');
-
-  disposers.push(ctx.webServer.register(guardRoute({
-    kind: 'exact',
-    path: PREFIX + '/side-chat',
-    handler: async (req, res) => {
-      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
-      let payload;
-      try { payload = JSON.parse(await readBody(req)); } catch {
-        return send(res, 400, { ok: false, error: 'bad json' });
-      }
-
-      // llm 走 ctx.get：未装配时明确报错（用户主动操作，不静默）
-      let llm = null;
-      try { llm = ctx.get ? ctx.get('llm') : ctx.llm; } catch (e) { llm = null; }
-      if (!llm || typeof llm.stream !== 'function') {
-        return send(res, 200, { ok: false, error: 'llm 服务不可用（无法进行详情分析）' });
-      }
-
-      const provider = String((payload && payload.provider) || '').trim();
-      const model = String((payload && payload.model) || '').trim();
-      if (!provider || !model) {
-        return send(res, 200, {
-          ok: false,
-          error: '缺少模型路由（provider/model）：前端应从当前会话读取后传入',
-        });
-      }
-
-      // 选中文本：这是本次分析的锚点，必须有
-      const selection = String((payload && payload.selection) || '').trim().slice(0, 8000);
-      if (!selection) return send(res, 200, { ok: false, error: '没有选中内容' });
-
-      // 历史：前端整包回传，宿主只用不管生命周期。限制条数与单条长度防滥用。
-      const rawHistory = Array.isArray(payload && payload.messages) ? payload.messages : [];
-      const history = rawHistory.slice(-20).map((m) => ({
-        role: String((m && m.role) || 'user') === 'assistant' ? 'assistant' : 'user',
-        text: String((m && m.text) || '').slice(0, 4000),
-      })).filter((m) => m.text.trim());
-
-      // 拼成一次请求：
-      //   [选中内容（锚点）] + [历史...] + [本次提问]
-      // 选中内容每次都带上，保证多轮里锚点不丢（历史是整包来的，不依赖宿主记忆）。
-      const parts = [];
-      parts.push('【选中的原文】\n' + selection);
-      if (history.length) {
-        parts.push('【此前的分析对话】\n' + history.map((m) => (
-          (m.role === 'assistant' ? 'Assistant: ' : 'User: ') + m.text
-        )).join('\n'));
-      }
-      // 最后一轮如果是用户提问，它就是本次要回答的问题（历史里已含）；
-      //   否则给一个默认指令，保证模型有明确任务。
-      const last = history.length ? history[history.length - 1] : null;
-      if (!last || last.role !== 'user') {
-        parts.push('请就以上选中内容给出深入分析：关键结论、隐含假设、风险点与下一步建议。');
-      }
-
-      // ── 【流式输出】检测前端是否要 SSE ──────────────────────────────────
-      // 修「一直出不来分析」：原来只能等整段生成完才一次性返回，长分析
-      //   （high reasoning + 1200 token）会让面板长时间空白，用户以为坏了。
-      // 现在支持 SSE：边生成边把增量推给前端，面板立刻有字。
-      //   前端用 Accept: text/event-stream 或 ?stream=1 请求该模式。
-      const wantStream = String((payload && payload.stream) || '') === '1'
-        || /text\/event-stream/.test(String(req.headers && req.headers.accept || ''));
-
-      if (wantStream) {
-        try {
-          res.writeHead(200, {
-            'content-type': 'text/event-stream; charset=utf-8',
-            'cache-control': 'no-cache, no-transform',
-            'connection': 'keep-alive',
-            'x-accel-buffering': 'no',
-          });
-        } catch (e) {
-          return send(res, 200, { ok: false, error: '无法开启流式响应' });
-        }
-        const sse = (obj) => {
-          try { res.write('data: ' + JSON.stringify(obj) + '\n\n'); } catch (e) {}
-        };
-        let lastSent = 0;
-        try {
-          const reply = await collectLlmText(llm, {
-            provider,
-            model,
-            system: SIDE_CHAT_SYSTEM,
-            messages: [{
-              role: 'user',
-              content: [{ type: 'text', text: parts.join('\n\n') }],
-            }],
-            maxTokens: 8192,
-          }, 0, (full) => {
-            // 节流：约每 120ms 推一次，避免刷爆连接
-            const now = Date.now();
-            if (now - lastSent < 120) return;
-            lastSent = now;
-            sse({ type: 'delta', text: full });
-          });
-          const text = String(reply || '').trim();
-          if (!text) {
-            sse({ type: 'error', error: '模型未返回内容（可能被安全策略拦截或输出为空）' });
-          } else {
-            sse({ type: 'done', reply: text, provider, model });
-          }
-        } catch (error) {
-          const msg = String((error && error.message) || error);
-          sse({ type: 'error', error: msg });
-        }
-        try { res.end(); } catch (e) {}
-        return undefined;
-      }
-
-      try {
-        const reply = await collectLlmText(llm, {
-          provider,
-          model,
-          system: SIDE_CHAT_SYSTEM,
-          // RequestUserInput：一次性、不落库
-          messages: [{
-            role: 'user',
-            content: [{ type: 'text', text: parts.join('\n\n') }],
-          }],
-          maxTokens: 8192,
-        }, 0);
-        const text = String(reply || '').trim();
-        if (!text) return send(res, 200, { ok: false, error: '模型未返回内容（可能被安全策略拦截或输出为空）' });
-        return send(res, 200, { ok: true, reply: text, provider, model });
-      } catch (error) {
-        // 把失败原因说清楚，前端直接展示（用户要求"必须有效"，不能只转圈）
-        const msg = String((error && error.message) || error);
-        return send(res, 200, {
-          ok: false,
-          error: msg,
-          hint: /中断|超时/.test(msg)
-            ? '模型长时间无响应。可稍后重试、减少选中文字量，或换一个更快的模型。'
-            : (/路由|模型/.test(msg)
-              ? '无法确定模型路由：请先在该会话里正常发送一条消息，让会话记录下所用模型。'
-              : null),
-        });
-      }
-    }
-  })));
 
 
   // ══ 【工程人设】设置页可填写的自定义提示词（GET/POST /persona）══════════
@@ -5194,6 +5575,73 @@ export function apply(ctx) {
     } catch (e) {}
   }));
 
+  // ══ 【B1】后台 job 未 settle 就报 completed → 父代理误判完成 ═══
+  // 现场：:670 "Log is 0 bytes (buffered). Build still ru…" → :672 turn/end{completed}
+  //   → :673 才是 job/settled；:1133 父代理据此当完成。
+  // 修复：有未 settle 的 job 就不能当 completed —— 仍记 running，
+  //   并写 pending_jobs，让父代理/看板看得见"它还没真收工"。
+  // ── 【BUG-B1 修复·取数口径】────────────────────────────────────────────
+  // 初版有两个会把结论带偏的取数错误（均已按宿主源码核对，见 dsh-jobs-local）：
+  //
+  //  ① **没有把 caller 传给 jobs.list()**。
+  //     真实签名是 `list(caller)`，过滤条件是
+  //         `job.owner === undefined || job.owner.id === caller`
+  //     （dsh-jobs-local/lib/index.js:503-505）。
+  //     不传 caller → 只拿回【无主】任务，该 agent 自己的 job 全都看不到。
+  //     实测复刻：agent 自己有 j-own、别人有 j-other、另有一个无主 j-none 时，
+  //       list()        → 只剩 j-none      （漏报自己的 → B1 完全失效）
+  //       list('A')     → j-own + j-none   （对，但还得过滤掉无主的）
+  //     这正是 B1 要修的那个现场（b55576ac 的建模 job）—— 漏报就等于没修。
+  //
+  //  ② **把无主任务算进每个 agent**。
+  //     `owner === undefined` 的任务（DSH 自己的看护任务等）不属于任何会话，
+  //     若把它算成"该 agent 还有活没干"，【所有】子代理都会被判 pending_jobs，
+  //     父代理看到的是一律"未完成" —— 又一个"永远不放行"，比漏报更糟。
+  //
+  // 现在的口径（严格）：只认 `owner === agentId` 的 job；无主任务一律不算。
+  //   owner 缺失时也不猜（拿不到归属就不拿它当证据）。
+  // 状态判定同样对齐宿主：只有 running / stopping 算"未 settle"
+  //   （宿主 isTerminal 判的是 completed / killed / failed；这里把 done/settled/
+  //    cancelled 也覆盖上，兼容其它实现的叫法）。
+  function pendingJobsOf(agentId) {
+    try {
+      const jobs = (ctx && typeof ctx.get === 'function') ? ctx.get('jobs') : undefined;
+      if (!jobs || typeof jobs.list !== 'function') {
+        return { available: false, pending: [], reason: 'jobs 服务不可用（ctx.get("jobs") 为空）' };
+      }
+      const id = String(agentId || '');
+      if (!id) return { available: false, pending: [], reason: '缺少 agentId' };
+      // ⚠️ list() 抛异常必须报 available=false，不能吞成 rows=[]。
+      //   "读不到"和"确实没有"是两件事：吞成空数组 = 告诉父代理"它没在忙"，
+      //   而那正是 B1 要防的误判方向。与 jobs 服务缺失同一处理。
+      let rows;
+      try {
+        rows = jobs.list(id) || [];
+      } catch (e) {
+        return { available: false, pending: [],
+                 reason: 'jobs.list 探测失败：' + String((e && e.message) || e) };
+      }
+      if (!Array.isArray(rows)) {
+        return { available: false, pending: [], reason: 'jobs.list 返回非数组' };
+      }
+      const pending = [];
+      for (const j of rows) {
+        if (!j) continue;
+        // 只认【归属本会话】的 job；无主（owner 缺失）不算 —— 理由见上
+        if (String(j.owner || '') !== id) continue;
+        const st = String(j.status || j.state || '').toLowerCase();
+        // 只有"还在跑"才算未 settle；终态一律不算（与宿主 isTerminal 同口径）
+        if (st !== 'running' && st !== 'stopping') continue;
+        pending.push({ id: j.id || j.jobId || null,
+                       label: j.label || j.name || null, status: st || null,
+                       kind: j.kind || null });
+      }
+      return { available: true, pending, reason: null };
+    } catch (e) {
+      return { available: false, pending: [], reason: String((e && e.message) || e) };
+    }
+  }
+
   disposers.push(ctx.on('agent/turn-stopping', (payload) => {
     try {
       const agent = payload && payload.agent;
@@ -5201,6 +5649,8 @@ export function apply(ctx) {
       const meta = platformAgentMeta(agent);
       // 只有"已登记过的子代理"或"能证明是子代理"的才更新 —— 主会话不写
       if (!meta && !platformAgentKnown(agent.id)) return;
+      // ── 【B1】先看有没有未 settle 的后台 job ────────────────────────────
+      const pj = pendingJobsOf(agent.id);
       const rec = {
         id: String(agent.id),
         // 【关键】回合结束 ≠ 死亡：子代理仍然活着，禁止让 mode_gate 判死
@@ -5208,8 +5658,23 @@ export function apply(ctx) {
         lastEventAt: new Date().toISOString(),
         lastEventAtMs: Date.now(),
       };
+      if (pj.available) {
+        rec.pending_jobs = pj.pending;
+        rec.pending_job_count = pj.pending.length;
+        rec.turn_completed_but_busy = pj.pending.length > 0;
+      } else {
+        rec.pending_jobs_unavailable = pj.reason || true;
+      }
       if (meta) { rec.label = meta.label; rec.parentId = meta.parentId; }
       stagePlatformAgent(rec);
+      if (pj.available && pj.pending.length) {
+        try {
+          console.warn('[dsh-engineering-ui] agent ' + rec.id + ' 回合结束但仍有 '
+            + pj.pending.length + ' 个后台 job 未完成：'
+            + pj.pending.map((j) => j.label || j.id || '?').join('、')
+            + ' —— 不要据此判它"已完成"（B1）');
+        } catch (e2) {}
+      }
     } catch (e) {}
   }));
 

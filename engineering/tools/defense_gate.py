@@ -3251,20 +3251,104 @@ def check_task_defense():
             "rooms": rooms, "room_count": len(rooms)}
 
 
-def log_bypass(where, reason="", by="unknown"):
-    """记录一次绕行（绝不静默绕过）。"""
+def log_bypass(where, reason="", by="unknown", scope=None):
+    """记录一次绕行（绝不静默绕过）。
+
+    ── 【A8 修复】留痕必须能被【报告侧】读到 ─────────────────────────────
+    现场（2026-11-07 会话）：
+      · :1217 `room-end 传感支架间 --force` + :1225 6 秒后又跑一遍；
+      · :1705 `DSH_DEFENSE_BYPASS=1` 走 confirm-assembly；
+      · 留痕确实写了（defense_bypass.json 14:32:53 / 15:09:31）；
+      · **但最终 BUG 总结仍写"三防线全部签发"** —— 报告侧从来没读这份留痕。
+
+    修复：除了原有 items，再落一条带 `scope`（房间名 / "task" / 事件）的结构化
+    记录，并提供 `bypass_summary()` 供报告与总结【强制渲染"N 处强放行"】。
+    scope 不传时从 where 里按 "mode_gate.room-end:<房间>" 反推，保持向后兼容。
+    """
     try:
         items = _read_json(BYPASS_LOG_FILE) or {"items": []}
         if not isinstance(items, dict) or not isinstance(items.get("items"), list):
             items = {"items": []}
-        items["items"].append({
+        _w = str(where)
+        _scope = scope
+        if not _scope:
+            # 形如 "mode_gate.room-end:传感支架间" 才反推房间名；
+            # 其余（confirm-assembly / finish / auto-finish 这类任务级动作）
+            # 一律记成 scope="task" —— 它们不属于某个房间。
+            _head, _sep, _tail = _w.partition(":")
+            if _sep and _tail.strip():
+                _scope = _tail.strip()
+            elif ("room-end" in _head) or ("room-fail" in _head):
+                _scope = "task"
+            else:
+                _scope = "task"
+        rec = {
             "at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "where": str(where), "reason": str(reason), "by": str(by),
-        })
+            "ts": time.time(),
+            "where": _w, "reason": str(reason), "by": str(by),
+            "scope": str(_scope),
+            # 报告侧据此写"未获真几何 FEA 证据"，而不是含糊的"已放行"
+            "bypassed": True,
+            "evidence_quality": "NOT_VERIFIED",
+        }
+        items["items"].append(rec)
         items["items"] = items["items"][-200:]
         _write_json(BYPASS_LOG_FILE, items)
+        return rec
     except Exception:
+        return None
+
+
+def load_bypasses():
+    """【A8】读取全部强放行记录（报告/总结必须调用它，不能再"看不见"）。"""
+    try:
+        d = _read_json(BYPASS_LOG_FILE) or {}
+        items = d.get("items") if isinstance(d, dict) else None
+        return [x for x in (items or []) if isinstance(x, dict)]
+    except Exception:
+        return []
+
+
+def bypass_summary(task_id=None):
+    """【A8】强放行汇总：报告与总结的唯一入口。
+
+    Returns: {"count", "rooms", "events", "items", "line", "must_render"}
+      · `line` 是**必须原样渲染**进交付总结的一句话（count=0 时为空字符串）；
+      · `must_render=True` 表示 count>0，交付文案里【不准】再写"三防线全部签发"。
+    """
+    items = load_bypasses()
+    if task_id:
+        # 只统计本轮任务（留痕里不带 task_id，按完成时间粗筛由调用方决定；
+        # 这里保持保守：不过滤 —— 少报比漏报更危险）
         pass
+    rooms, events = [], []
+    for it in items:
+        sc = str(it.get("scope") or "")
+        if sc and sc != "task":
+            if sc not in rooms:
+                rooms.append(sc)
+        else:
+            events.append(it.get("where") or "task")
+    n = len(items)
+    line = ""
+    if n:
+        bits = []
+        if rooms:
+            bits.append("房间 %s" % "、".join(rooms))
+        if events:
+            bits.append("任务级 %d 次" % len(events))
+        line = ("⚠️ 本任务有 %d 处【强放行】(bypass)：%s —— "
+                "这些判定【未获真几何 FEA 证据】，不得表述为「三防线全部签发」。"
+                % (n, "；".join(bits) if bits else "见 defense_bypass.json"))
+    return {
+        "count": n,
+        "rooms": rooms,
+        "events": events,
+        "items": items[-50:],
+        "file": BYPASS_LOG_FILE,
+        "line": line,
+        "must_render": bool(n),
+    }
 
 
 def bypass_requested():

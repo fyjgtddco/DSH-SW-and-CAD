@@ -105,6 +105,32 @@
                 坑：圆角 FeatureFillet3(2,R,..) 传 Options=2；键槽仅 FullLength，X2 传右圆弧圆心；
                 禁 massprops（卡死）；选草图用 select_sketch_by_index() 不用中文名。
 
+                ## 建模坐标系与「上」方向（开工前必读，详见 skill sw-design 第〇节）
+                ① Top Plane 草图会镜像：它的局部 y = 【−世界 Z】。在 Top Plane 上写 y 必须取反，
+                  约定 ZSIGN = {"Top Plane": -1, "Front Plane": +1, "Right Plane": +1}，
+                  脚本里只留这一份定义、所有"我要 z=多少"都过 wz(plane, y) 换算；否则整件沿 Z 镜像，
+                  外形尺寸与体积全对、SW 不报错，肉眼也看不出。
+                ② cut() 默认沿 −Y 切；材料在 +Y 一侧时必须显式 flip=True。
+                  flip=True = 反转切除方向（FeatureCut 的 Dir 位）；flip_side_to_cut=True 才是"切轮廓外侧"，别混。
+                  验据：切完 body_box_mm()["volume_mm3"] 必须变小，没变小就是方向反了。
+                ③ 每个零件 save 后必须写 <零件>.SLDPRT.pr.json（与 .origin.json 同目录同基），至少含：
+                  up_axis（"X"/"Y"/"Z"）、up_sign（+1/-1）、main_axis（主轴/回转轴）、base_plane（首个草图基准面）。
+                  缺这份声明的零件不许进总装 —— 别人只能靠猜"上"是哪边。
+                ④ 总装前必须断言"组件旋转矩阵与 pr.json 声明朝向一致"，且【零旋转装配必须报警】：
+                  声明 up_axis ≠ 世界 up 却读到单位阵（rotation_ok=true）→ 零件根本没摆正，判失败；
+                  声明已对齐却偏离单位阵 → 姿态被别人改过，必须复核。
+                  已有工具：read_component_pose() 读回 {rotation, rotation_ok}、verify_assembly_placement() 判 assembly_ok。
+                ⑤ 🔴【上方向单点声明·跨房间共享】整个任务只允许【一个】"上"：
+                  由总计子代理/总理子代理在开工时一次性写定（up_axis + up_sign + 原点约定），
+                  然后原样下发进每个小屋的 prompt（建模、总装、出图三波共用同一份，不许各写一套）。
+                  机器判据（违反即判失败，不是"建议"）：
+                    · 各零件 <零件>.pr.json 的 up_axis/up_sign 与总装房的 world_up 不一致 → 朝向冲突；
+                    · 总装 verify_assembly_placement() 的 rotation_anomalies 非空 → 姿态被改过；
+                    · 出现"声明需要旋转、实测却是零旋转装配" → 未摆正（最常见错位形态）。
+                  现场：同一个任务里三处"上"各不相同（零件 +Z / 总装 +Y / 图纸 +Z），
+                  每处单独看都对，合起来整机错位 90°，到干涉检查才炸。
+                ⚠️ 以上 ①~⑤ 的代码样例与判据见 skill「sw-design」第〇节（开工前必读）。
+
                 ## 装配（代码级强制）
                 定位只能靠配合(Mate)，坐标硬设全废。
                 可用 create_mate("distance"|"coincident",(a,b),distance_mm=)、create_lock_mate、select_face、
@@ -213,6 +239,28 @@
                   上限可用 DSH_ENG_MAX_SUBAGENTS 调整（默认 3），闸门可用 DSH_ENG_MEM_GUARD=0 关闭。
                 💾【内存】内存占用超 85% 时插件会调 EmptyWorkingSet 回收工作集（不杀进程、不中断流程）；
                   同时会按需调低并行度。若看到 MEM_RECLAIM 相关日志，不必中断任务。
+                  回收时机固定在【整批子代理全部收工后】做一次，不是边开边刷。
+
+                📁【目录分层·硬规则】用户要求：任务目录最后只能剩下 parts/ drawings/ reports/。
+                  · 零件只存 <任务>/parts/；工程图只存 <任务>/drawings/；
+                  · 建模脚本、json/txt/log 等中间产物一律放 <任务>/intermediate/；
+                  · 建模失败/废弃的零件由工具自动移入 <任务>/parts_rejects/（**不要手工往 parts/ 里塞失败件**）。
+                  保存失败时 sw_bridge/swapi 会自动改道 parts_rejects/，看到 rejected 字段就表示该件不可交付。
+                  收尾（select 走完 + _archive_finished）会【自动】清掉 intermediate/ 与 parts_rejects/，
+                  脚本归档到 reports/scripts_archive/，并写 reports/cleanup_manifest.json 留痕。
+                  手动排查：python "<根>\tools\workflow_gate.py" workspace / tidy / cleanup [--dry-run]。
+
+                🗑️【失败件删除的提问规则】用户明确要求：
+                  删除错误零件文件前，先看本轮搭建方式（python mode2_flow.py delete-policy）：
+                  · A = 完全自主搭建 → 直接删，不必问；
+                  · B / C（或读不到） → **必须先问用户**（主对话 ask_user_question，
+                    或总理子代理经 ask_user.py），得到答复后再删。
+                  绝不允许"先删了再说"。
+
+                📋【零件进度表】总理子代理负责维护零件完成度（mode2_flow.py parts-board）：
+                  not_started=未开始 / building=正在建 / done=完成 /
+                  rebuilding=需要重建 / failed=失败（含 DSH 进程已断的情况）。
+                  这份结论同时喂给右侧面板「零件」区，【不要在对话里另报一套状态】。
 
                 【SW窗口】建 subagent 前必 close-all 且确认无 SLDWORKS.EXE。sw_bridge 自动 FIFO 排队；
                 返回 sw_busy:true → 用【阻塞式等待】python mode_gate.py wait-rooms <房间> --timeout 90
@@ -220,15 +268,69 @@
                 小屋内写单脚本用 run 跑多步，禁逐步调。建模完必 close-all 释放锁(不必等 room-end)。
                 单房间最长持锁 4 小时(SW_MAX_HOLD，兜底防死锁)，超时锁自动让给队首（与心跳无关）。
 
-                🚫【长等待·铁律 2026-10-31 事故修复】禁止"Start-Sleep N 秒 + job_output wait:true"这种长阻塞轮询。
+                🚫【长等待·铁律（BUG-A1① 修复 2026-11-07）】禁止用 time.sleep / Start-Sleep 轮询去等子代理、等房间、等 SW 锁。
                 事故（session-6019cd4b）：job_output{wait:true,timeout_ms:270000} 静默阻塞，
                   用户以为 DSH 死机而强退；停机瞬间 ctx.jobs 失活 → 框架抛
                   cannot get required service "jobs" in inactive context → 整轮 turn/end{interrupted}。
-                正确做法（三条，任选其一，都不要再把整轮挂在等待上）：
-                  ① 阻塞交给 Python：mode_gate.py wait-rooms / sw-wait（进程内轮询，零 token、有进度语义）；
-                  ② 判定要不要继续等 → 读磁盘产物：room-board --json、room-report-read、mode2_plan.json；
-                  ③ 必须等后台 job 时：【单次 sleep ≤30s，wait:true 的 timeout_ms ≤30000】，宁可多轮短等。
+                🔴 本次删除的旧句（原文照留，便于比对）：「③ 必须等后台 job 时：
+                  【单次 sleep ≤30s，wait:true 的 timeout_ms ≤30000】，宁可多轮短等。」
+                  现场：这句话被当成"标准姿势"照抄，实测单轮 477 次 sleep(30)、轮询 4 小时 02 分（占墙钟 66%），
+                    期间零产物、零进度，用户以为进程卡死。
+                  根因：它把"轮询"写成了等房间的第一选择 —— 只要模型还愿意等，就能无限 sleep 下去，
+                    永远没有"已经等完了"的判据；轮询次数不产生任何状态，只烧时间。
+                  判据：同一等待目标连续 sleep ≥4 次即视为违规（= 该用阻塞原语却没用）。
+                ✅ 等房间 / 等子代理 / 等 SW 锁：只准用【阻塞原语】——一次调用拿到结论，外面禁止再套 sleep 循环：
+                  ① python "<根>\tools\mode_gate.py" wait-rooms "<房间1>,<房间2>" --timeout 900
+                     等指定房间全部离开 active（done/failed/dead）或超时，一次性返回结论；
+                     等本轮全部房间用 wait-rooms --all-active --timeout 900。
+                  ② python "<根>\tools\mode_gate.py" room-board --wait 900
+                     "等到有变化再返回"：看板指纹变了 / 全部在世房间离开 active / 到点，三者任一即返回；
+                     返回里带 waited_sec 与 returned_because（timeout 只说明"还在跑"，不是判死依据）。
+                  ③ python "<根>\tools\mode_gate.py" sw-wait <房间> --timeout 90
+                     sw_busy:true 时用它：进程内原地等锁，队列位置保留，零 token。
+                  ④ python "<根>\tools\mode_gate.py" room-board --json（+ room-report-read <房间>）
+                     只读判据：state / safe_to_restart / next_action / report_stage；看不看都要看字段，别按耗时猜。
+                ⚠️ 只有在【确实没有阻塞原语可用】时（例：等一个 sw_bridge run 的后台 job 收尾），
+                  才允许短 sleep，且【同一等待目标连续不得超过 3 次】；第 4 次必须停下改用上面三条原语，
+                  或按下面的 [WAITING] 结束回合。此时仍受硬上限：单次 sleep ≤30s、
+                  job_output wait:true 的 timeout_ms ≤30000（切碎的是等待窗口，不是允许你循环）。
                 宿主侧另有硬兜底：插件已把 job_output 的长等待切成 ≤45s 窗口，到点即返回"仍在运行"。
+                💤 允许【结束回合】等（配合 [WAITING] 终止态；该终止态由 Host 半实现，现阶段须自己写清摘要）：
+                  仅当"等待"就是唯一下一步、且上面三条阻塞原语都拿不回结论时才可这样收尾，格式固定：
+                  [WAITING] 在等：<房间/锁/后台job>；判据：room-board state=<starting|running|idle|waiting_sw|unbound>；
+                  唤醒条件：<state 变成 done/failed/dead，或产物落盘 <路径>>
+                  🔴 这不是"随便就能结束回合"：房间已是 done/failed/dead/detached 时，必须先按 next_action 处置
+                    （收报告 / room-fail + room-start + 重新 fork），禁止用 [WAITING] 掩盖"其实已经完事"或"根本没开工"。
+                  🔴 [WAITING] 只是"我在等"，不等于任务完成、不等于 room-end、不写任何房间状态。
+
+                🧾【工具输出编码·铁律（BUG-A6 修复 2026-11-07）】
+                现场：主会话 180 条 tool/result 里含 U+FFFD 替换符（界面上显示成 "�"），
+                  模型读到乱码后【脑补】出错误的设计前提 —— 实测把"无转向机构"读成"差速+舵机转向"，
+                  后续整份设计都建在这个假前提上，且全程没有任何一处报错。
+                根因：Windows 控制台默认代码页（GBK/936）与 Python 的 stdout 编码不一致，
+                  中文 JSON 在【跨进程/跨工具】传递时被逐字节错误解码成替换符；
+                  乱码不是"看起来脏"，它是【事实丢失】—— 同一个字节序列已经没有原意了。
+                ✅ 强制模板：凡是调 python 的命令行，【每条】都必须带上 UTF-8 前置。
+                  可直接复制（PowerShell / pwsh，一行版，最稳）：
+                    $env:PYTHONIOENCODING='utf-8'; $env:PYTHONUTF8='1'; python "<根>\tools\mode_gate.py" room-board --json
+                  多行版（一次设好，本条命令内后续 python 都继承）：
+                    $env:PYTHONIOENCODING='utf-8'; $env:PYTHONUTF8='1'
+                    python "<根>\tools\mode_gate.py" room-board --json
+                  带中文参数的调用（参数也要按 UTF-8 传出）：
+                    $env:PYTHONIOENCODING='utf-8'; $env:PYTHONUTF8='1'; python "<根>\tools\mode_gate.py" room-start "结构件"
+                  跑建模脚本同理：
+                    $env:PYTHONIOENCODING='utf-8'; $env:PYTHONUTF8='1'; python "<根>\tools\sw_bridge.py" run "<脚本>"
+                  🔴 不要省：不写这两个变量时，脚本内部就算 reconfigure(encoding="utf-8")，
+                    参数与子进程继承的环境仍可能是 GBK —— 乱码往往正是从【参数/子进程】那一侧进来的。
+                🔴 铁律：只要工具输出里出现 U+FFFD / "�"：
+                  ① 【禁止】据此下任何结论（不判房间死活、不判零件好坏、不判用户说了什么）；
+                  ② 必须【重跑】：先补上上面的 UTF-8 前置，再执行同一条命令；
+                  ③ 仍要看"原文"时改用 read 工具直接读文件（磁盘上的 .json/.md 是 UTF-8 原文，
+                     不经控制台代码页），或让脚本用 --out 落盘后再 read；
+                  ④ 复核通过后，把"乱码那次读到的东西"整段作废 —— 不要"半信半疑地沿用"。
+                  判据：结论所依赖的每个字段，都必须来自【无 U+FFFD 的那一次输出】或 read 到的原文。
+                ⚠️ 已知边界：注入式根治（在工具结果进入上下文前统一转码 / 拦截）在插件 lib/index.js 的
+                  宿主半实现，不在人设这一层；人设这里只做"强制模板 + 乱码禁判"的流程约束。
 
                 【判活·铁律】fork 出来的子代理【不是 Team member】—— list_agents 看不到、wait_agent 返回
                 noProgress(no-active-peer)。🚫绝不能用这两个判断 fork 的子代理死活（2026-10-29 实测：主对话因此
@@ -403,15 +505,68 @@
               compaction: true
               toolResultPruner: true
             config:
-              - id: compaction-basic
-                name: '@deepseek-ai/dsh-compaction-basic'
+              # ── 【2026-11-08】换成工程模式专用压缩器 ────────────────────────
+              # 用户要求：「压缩历史的插件是在工程模式下面的，只在工程模式里面触发，
+              #   不要跑到其他模式里面触发」。
+              #
+              # 为什么换 name 而不是在宿主层再挂一次：
+              #   压缩服务在同一上下文只能有一个实例（ctx.compaction）。把它写在
+              #   【本 preset 的 compaction 子项】里，天然就只在 engineering 会话
+              #   上下文内生效；标准/极简等其它预设读的是它们自己的 compaction-basic，
+              #   两边互不相干，绝不会串台。
+              #
+              # 它继承 @deepseek-ai/dsh-compaction-basic，只覆盖 summarize() ——
+              # 选区/锁/事件/计量全部沿用父类，替换压缩器不会破坏会话存档。
+              # 配置项与父类完全一致（阈值口径见下方注释）。
+              - id: compaction-engineering
+                name: 'dsh-engineering-compaction'
                 config:
-                  # 阈值 = min(声明窗口*ratio, 声明窗口-输出预留-headroom)。
-                  # 声明窗口常大于网关真实上限（如 hy3 声明 192K、实际 100K），
-                  # 阈值若算到 100K 以上，压缩永不触发 → 恒定报超 1 token。
-                  # 现取 min(192K*0.5, 192K-64K-48K)=80K，稳稳低于真实上限。
-                  thresholdRatio: 0.5
-                  headroomTokens: 48000
+                  # ══ 【A14 修复】阈值必须跟【实际窗口】成比例，不能钉死在 ~100K ══
+                  # 现场（2026-11-07 会话）：6 次压缩触发点全落在
+                  #   99,838 – 100,025 token（见 :1116/:1636/:2304/:3206/:4186/:4506），
+                  #   而 :224 记录的 contextWindow 是 **200000**。
+                  #   也就是说：窗口 200K，却在 100K 就压缩 —— 白白丢掉一半可用上下文，
+                  #   长任务被迫压缩 6 次，每次都要重发 70–100K 前缀。
+                  #
+                  # 口径（对齐 02 文档「修复」）：阈值 = contextWindow × 0.7。
+                  #
+                  # ══ 【BUG-A14 修复·核算结论】只调 ratio 是【不够】的 ════════════
+                  # 宿主真实公式（@deepseek-ai/dsh-compaction-basic/lib/index.js:124-147
+                  #   resolveCompactSpec，逐字核对，勿凭猜）：
+                  #     messageBudgetTokens  = contextWindow − reservedCompletionTokens
+                  #     pressureBudgetTokens = messageBudgetTokens − policy.headroomTokens
+                  #     thresholdTokens      = min(contextWindow × thresholdRatio,
+                  #                                pressureBudgetTokens)
+                  # 其中（同文件 757-759 reservedCompletionTokens）：
+                  #     reservedCompletionTokens = header.config.maxTokens
+                  #                              ?? defaultMaxTokens ?? 0
+                  #
+                  # 判据（200K 窗口反推）：
+                  #   · reserved=0    → 预算项 152000，比例项 140000 → **比例项生效 = 140K** ✓
+                  #   · reserved=65536→ 预算项  86464，比例项 140000 → **预算项生效 =  86K** ✗
+                  #     也就是说：reserved 一高，改 ratio 不但没用，阈值反而【比原来
+                  #     ~100K 更低】—— 压缩更早发生，正是 A14 要治的病。
+                  #   · 要让 140K 生效，必须满足 200000−reserved−48000 ≥ 140000
+                  #     → reserved ≤ 12000。而适配器给的 defaultMaxTokens 可能是 256K
+                  #     （llm-deepseek:450），那样 messageBudget 直接为负、
+                  #     宿主抛 TargetPressureConfigError（压缩彻底不工作）。
+                  #
+                  # 现实约束（不硬凑）：reserved 由【适配器/路由】决定，不是本 yml 能配的；
+                  #   所以这里给出一组【在 reserved=0 与 reserved=64K 两侧都安全】的值：
+                  #     headroom 从 48000 降到 8000 → 预算项 = 窗口−reserved−8000，
+                  #     reserved=64K 时 = 200000−65536−8000 = 126464（仍是预算项生效，
+                  #     但比 86K 明显更接近 140K，且保留 8K 安全余量）。
+                  #   ⚠️ 把它压到 0 会把"网关真实上限低于声明窗口"的保护一起拿掉
+                  #     （192K 声明/100K 真实的场景会一路压到超限才动），所以不取 0。
+                  #
+                  # 结论（如实写）：200K 窗口下，该宿主在本配置下实际阈值 ≈126K，
+                  #   达不到名义上的 140K —— 但那仍然是"用满窗口的 63%"，
+                  #   相比修复前的 50%（100K）是实打实的改善。
+                  #   真实生效值请以 /dsh-engineering-ui/compaction-history 返回的
+                  #   threshold{value, limiter:'ratio'|'budget'} 为准（那是按真实
+                  #   contextWindow 现算的，不是抄 yml 的名义值）。
+                  thresholdRatio: 0.7
+                  headroomTokens: 8000
                   retainRatio: 0.12
 
               - id: command-compact

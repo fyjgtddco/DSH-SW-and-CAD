@@ -427,7 +427,8 @@ def main():
     # ══════════════════════════════════════════════════════════════════
     section("H. CLI 全路径（room-types 子命令可构建并真跑）")
     _bad = []
-    for _s in ["room-types", "set-subagent-plan", "subagent-plan"]:
+    # 【A12 修复】新增 rooms-template（含 type 的完整示例）—— 同样要能构建
+    for _s in ["room-types", "rooms-template", "set-subagent-plan", "subagent-plan"]:
         try:
             with contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(io.StringIO()):

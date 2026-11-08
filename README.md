@@ -691,6 +691,28 @@ python -m venv $env:USERPROFILE\.dsh\engineering-webots\venv
 
 回归：`node --test engineering\plugins\dsh-engineering-ui\test\job-wait-guard.test.mjs`（6/6）。
 
+### 仓库层还改了提示词本身（BUG-A1-①）
+
+旧人设里有一句「必须等后台 job 时：单次 sleep ≤30s，timeout_ms ≤30000，**宁可多轮短等**」——
+这句把"轮询"写成了等待的第一选择，实测被照抄成**单轮 477 次 `sleep(30)`、轮询 4 小时 02 分**
+（占墙钟 66%），期间零产物。现已改写为：
+
+- **禁止**用 `time.sleep` / `Start-Sleep` 轮询等子代理、等房间、等 SW 锁；
+- 只准用**阻塞原语**：`mode_gate.py wait-rooms "<房间>" --timeout 900` /
+  `mode_gate.py room-board --wait 900` / `mode_gate.py sw-wait <房间> --timeout 90`；
+- 确实没有原语时（如等一个 `sw_bridge run` 的后台 job 收尾）才允许短 sleep，
+  且**同一等待目标连续不得超过 3 次**；
+- 等待期间**允许结束回合**，格式固定为 `[WAITING] 在等：…；判据：room-board state=…；唤醒条件：…`
+  （该终止态由 Host 半实现，现阶段须自己写清摘要；房间已是 done/failed/dead 时必须先处置，
+  禁止用它掩盖"其实已经完事"）。
+
+### 工具输出乱码：先重跑，再下结论（BUG-A6）
+
+人设里新增铁律：工具输出里出现 `U+FFFD` / `�` 时**禁止据此下结论**，
+必须补上 `$env:PYTHONIOENCODING='utf-8'; $env:PYTHONUTF8='1'` 重跑，
+或用 read 工具直接读磁盘原文核对（磁盘上的 .json/.md 不经控制台代码页）。
+注入式根治在插件 `lib/index.js` 的宿主半，人设层只做流程约束。
+
 ---
 
 ## ⚠️ 已知限制
