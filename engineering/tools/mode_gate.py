@@ -8237,6 +8237,35 @@ def _reject_unknown_flags(cmd, args):
         "message": "请修正参数后重新调用。合法参数已在上面的 allowed_flags 中列出。",
     }
 
+def cmd_stop_all(reason=None, by="user"):
+    """【P2/S2 修复】落 STOP_ALL：让所有命令入口 fail-closed。
+
+    用法: python mode_gate.py stop-all [原因...]
+    现场（减速机任务 §7 P2）：用户停止后子代理仍在下一条命令。
+    """
+    try:
+        import _stop as _stop_mod
+    except Exception as _e:
+        return {"ok": False, "error": "_stop 模块不可用: %r" % (_e,)}
+    _reason = " ".join([str(x) for x in (reason or []) if str(x).strip()]).strip()
+    out = _stop_mod.request_stop(reason=_reason or "用户要求停止任务", by=by)
+    out["gate"] = "STOP_ALL"
+    out["next"] = ("1) interrupt_agent 所有子代理；2) close-all --quit / sw-kill；"
+                   "3) 确认无 SLDWORKS.EXE 与 python *sw_bridge* 残留；"
+                   "4) 新任务前执行 python mode_gate.py resume")
+    return out
+
+
+def cmd_resume(by="user"):
+    """【P2/S2 修复】清除 STOP_ALL：恢复任务执行。"""
+    try:
+        import _stop as _stop_mod
+    except Exception as _e:
+        return {"ok": False, "error": "_stop 模块不可用: %r" % (_e,)}
+    out = _stop_mod.clear_stop(by=by)
+    out["gate"] = "RESUME"
+    return out
+
 
 def main():
     args = sys.argv[1:]
@@ -8288,6 +8317,8 @@ def main():
                   "lock-doctor [--auto]": "锁体检：检测/清理失效锁",
                   "doctor [--sync|--clean|--migrate]": "状态文件多副本一致性体检"
                                                         "（--migrate 把副本更新的状态搬到权威目录，Bug-08）",
+                  "stop-all [原因]": "【P2/S2】全局停机：落 STOP_ALL，之后建模/编排命令一律 TASK_STOPPED（fail-closed）",
+                  "resume": "【P2/S2】恢复：清除 STOP_ALL（新任务开始前必须调用）",
                   "status": "门禁总状态（只读）",
                   "check": "是否允许建模（只读）",
               },
@@ -8300,6 +8331,26 @@ def main():
               "modes": MODE_NAMES})
         sys.exit(1)
     cmd = args[0]
+    # ══ 【P2/S2 修复】全局停机开关：命令入口第一行检查（_stop.py）══════════
+    # 减速机任务 §7 P2：用户已下达停止令，子代理手里的 room-start / sw-request
+    #   仍照常执行。现在：STOP_ALL 或 DSH_KILL_SWITCH=1 命中时，只放行
+    #   只读/清理/恢复类命令，其余一律 TASK_STOPPED（fail-closed）。
+    try:
+        import _stop as _stop_mod
+        _stop_hit = _stop_mod.guard(cmd, allow={
+            "stop-all", "stop", "resume", "clear-stop",
+            "status", "room-board", "board", "sw-status", "sw-proc",
+            "close-all", "gate-integrity", "doctor", "sw-monitor-start",
+            "sw-monitor-stop", "sw-monitor-status", "sw-monitor-bg",
+            "residue-check", "residue", "stale-artifacts", "wait-rooms",
+        })
+        if _stop_hit:
+            emit(_stop_hit)
+            sys.exit(4)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
     # ══ 【F-01 修复】未知 --flag 一律显式拒绝（不再静默丢弃）══════════════
     # 放在【任何命令执行之前】：未知参数必须在产生任何副作用之前就失败。
     # 这是"预演(如 --dry-run)被丢弃 → 变成真操作"的根治点。
@@ -8307,7 +8358,13 @@ def main():
     if _flag_reject is not None:
         emit(_flag_reject)
         sys.exit(2)
-    if cmd == "declare":
+    if cmd in ("stop-all", "stop"):
+        # 【P2/S2 修复】全局停机：落 STOP_ALL，之后所有建模命令 fail-closed
+        result = cmd_stop_all(args[1:], by="user")
+    elif cmd in ("resume", "clear-stop"):
+        # 【P2/S2 修复】恢复：清除 STOP_ALL
+        result = cmd_resume(by="user")
+    elif cmd == "declare":
         result = cmd_declare(args[1] if len(args) > 1 else "1")
     elif cmd == "room-start":
         result = cmd_room_start(args[1] if len(args) > 1 else "小屋")

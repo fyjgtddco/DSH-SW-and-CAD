@@ -438,6 +438,12 @@ engineering/
 | P1-①② | **坐标系与方向语义没写死**：Top Plane 镜像、`cut()` 方向、"上方向"无声明 | `skills/sw-design` 新增「〇、开工前必读」操作手册（ZSIGN/`flip=True`/`<零件>.SLDPRT.pr.json`/零旋转装配报警），persona 同步压缩版 |
 | C1 | **三套"上"方向**（零件 +Z / 总装 +Y / 图纸 +Z）→ 整机错位 90° | `skills/assembly-orchestration` 新增「二点五、『上』方向契约」：任务级 `up_contract.json` 单点声明、三波共享、六条机器判据 J1~J6 |
 | A12 | 任务书 `rooms` 示例缺 `type`，子代理照抄必被拒 | `rooms-template` 子命令（代码侧）+ `mode-selection` §3.5.4 写入含 `type` 的完整示例与字段表 |
+| **P2** | **停止令下达后子代理仍在下一条命令**（回溯报告 §7 P2：interrupt 只是"请求"，建模进程照跑） | 新增 `tools/_stop.py`（`STOP_ALL` 文件 + `DSH_KILL_SWITCH` 环境变量）；`sw_bridge` / `mode_gate` / `workflow_gate` / `physics_bridge` / `visual_check` 五个入口在**任何副作用之前** guard，命中即 `TASK_STOPPED`（退出码 4），只放行 status/room-board/close-all/sw-kill 等只读清理类；`mode_gate.py stop-all` / `resume` |
+| **P3** | **同一零件 4 版脚本反复重建**（回溯报告 §7 P3：无已完成零件台账查重） | `sw_bridge.run` 执行前按脚本声明的产物名查 `part_registry`：已建好且尺寸一致 → `PART_ALREADY_BUILT` 并跳过重建（`--force-rebuild` 可覆盖）；台账缺 `dims` → `PART_REUSE_UNKNOWN`，**unknown 绝不当作已建好** |
+| **P5 / M1** | **没有齿的"齿轮"被宣布建模成功**（回溯报告 §7 P5：大齿轮=轮廓 revolve、小齿轮轴=φda 圆柱段） | `swapi.SWModel.gear()` 新增 `_verify_gear_geometry`：回读**齿顶圆**（≈ m·z+2m，偏差 ≤0.05 mm）与**实体体积**（≈ 齿廓解析面积×齿宽，偏差 ≤2%），任一不符 → `ok=false` |
+| **D2** | 可见窗口 + 人工操作打断 COM（回溯报告 §12.2） | `swapi` 新增可选无头模式 `DSH_SW_VISIBLE=0`，按官方配方 `UserControl=False → Visible=False → Frame.KeepInvisible=True`；**恒不改文档级 Visible**（`SelectByID2` 要求 "open and visible document"，且官方警告 `IModelDoc2.Visible=false` 会导致资源耗尽） |
+| **D3** | **`ActiveDoc` 被当作文档身份** → 多房间串写、未命名零件凭空消失（回溯报告 §12.1） | 新增 `doc_identity` / `same_document` / `find_open_document` / `from_path` / `get_model(expect=…, strict=)`，走官方显式句柄通路（`GetOpenDocumentByName` / `GetDocuments`）；`SWModel.close()` 在取不到标题时**拒绝调用** `CloseDoc("")`（官方语义：空串=关掉当前活动文档）；`sw_bridge.run` 前后比对文档快照，误关他人文档 → `CROSS_ROOM_DOC_CLOSED` |
+| **D4** | **全仓无 COM 忙/被拒重试** → 用户点一下 SW 就导致小屋改脚本重跑（回溯报告 §12.2） | 新增 `swapi.com_retry`：只对 `RPC_E_CALL_REJECTED`(0x80010001) / `RPC_E_SERVERCALL_RETRYLATER`(0x8001010A) / `RPC_E_RETRY` 等**忙类** HRESULT 做指数退避（300 ms→5 s，≤5 次），业务错误原样抛出；`extrude()` / `cut()` 已内置。另加 `batch_mode()` 包装官方 `CommandInProgress`（跨进程批处理减刷新） |
 
 ---
 

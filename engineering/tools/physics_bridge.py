@@ -2565,6 +2565,19 @@ def cmd_validate_domain_cli(domain_id="structural", room="", pairs=None, params_
 
 
 def main():
+    # ══ 【P2/S2 修复】全局停机开关：命令入口第一行检查（_stop.py）══════════
+    # 减速机任务 §7 P2：停止令下达后，物理校核命令仍会执行。
+    try:
+        import _stop as _stop_mod
+        _sub = (sys.argv[1] if len(sys.argv) > 1 else "").strip().lower()
+        _hit = _stop_mod.guard(_sub, allow={"status", "report", "recommend"})
+        if _hit:
+            print(json.dumps(_hit, ensure_ascii=False, indent=2))
+            sys.exit(4)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(
         description="Physics-in-the-Loop CAD Engineering Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,

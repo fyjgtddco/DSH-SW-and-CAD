@@ -29,6 +29,7 @@ import time
 import sys
 import glob
 import json
+import contextlib
 import subprocess
 
 import pythoncom
@@ -3537,6 +3538,127 @@ def _ring_clearance_mm(circles):
 #   "pywin32 静态绑定下是属性，加括号会 TypeError" —— 该注释是错的，
 #   真机之所以"属性写法也能用"，是因为 late-binding 下 pywin32 对
 #   无参方法做了隐式调用。可靠做法是【显式加括号】，别赌绑定差异。
+# ══ 【D4 修复】COM 忙 / 调用被拒绝的指数退避重试 ═════════════════════════
+# 现场（回溯报告 §12.2）：SW 窗口可见且可被人工操作 —— 用户点一下 SW、
+#   弹出保存提示、或切走窗口，COM 调用就会抛 "调用被拒绝"(RPC_E_CALL_REJECTED)
+#   或 "服务器忙"(RPC_E_SERVERCALL_RETRYLATER)。原代码【全仓没有】任何
+#   RPC_E 处理，只有锁层的 sw_busy —— 于是小屋拿到异常 → 改脚本重跑 →
+#   即观测到的同一零件 4 版脚本重建（build_room1_gear_shaft v1→v4）。
+# 修复：在【调用点】做退避重试（300ms → 5s，最多 5 次），而不是让上层重跑
+#   整个脚本。只有明确的"COM 忙/被拒"才重试；业务性错误（轮廓无效等）
+#   绝不重试，避免把真错误拖成长等待。
+COM_RETRY_MAX = 5
+COM_RETRY_BASE_SEC = 0.3
+COM_RETRY_CAP_SEC = 5.0
+# RPC_E_CALL_REJECTED=0x8001010A, RPC_E_SERVERCALL_RETRYLATER=0x80010001,
+# RPC_E_SERVERCALL_RETRYLATER, RPC_E_DISCONNECTED=0x80010108,
+# 以及 SW 常见的 "server busy"/"调用被拒绝" 文本
+# ══ 数值与名称对照（依 [MS-ERREF] HRESULT Values，微软权威定义）══════════
+#   ⚠️ 这两个码的【名字】极易记反，务必按此表核对：
+#   0x80010001 = 2147549185 → signed -2147418111  = RPC_E_CALL_REJECTED
+#                原文："Call was rejected by callee."
+#   0x8001010A = 2147549450 → signed -2147417846  = RPC_E_SERVERCALL_RETRYLATER
+#                原文："The message filter indicated that the application is busy."
+#   0x80010109 = 2147549449 → signed -2147417847  = RPC_E_RETRY
+#                原文："The object invoked chose not to process the call now."
+#   0x8001010B = 2147549451 → signed -2147417845  = RPC_E_SERVERCALL_REJECTED
+#   0x80010105 = 2147549445 → signed -2147417851  = RPC_E_SERVERFAULT
+#   0x80010108 = 2147549448 → signed -2147417848  = RPC_E_DISCONNECTED
+# 出处：https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/
+#      705fb797-2175-4a90-b5a3-3918024b10b8
+# 说明：SolidWorks 官方 API 文档【未收录】这些码；此处按微软权威定义 +
+#   IMessageFilter::RetryRejectedCall 的官方重试语义处理。
+_COM_BUSY_CODES = frozenset((
+    -2147418111,   # 0x80010001 RPC_E_CALL_REJECTED（被呼叫方拒绝）
+    -2147417846,   # 0x8001010A RPC_E_SERVERCALL_RETRYLATER（应用忙）
+    -2147417847,   # 0x80010109 RPC_E_RETRY（稍后重试）
+    -2147417845,   # 0x8001010B RPC_E_SERVERCALL_REJECTED（消息过滤器拒绝）
+    -2147417851,   # 0x80010105 RPC_E_SERVERFAULT
+    -2147417848,   # 0x80010108 RPC_E_DISCONNECTED
+))
+_COM_BUSY_TEXTS = (
+    "call was rejected", "调用被拒绝", "服务器忙", "server busy",
+    "retry later", "重试", "rpc_e_call_rejected", "rpc_e_servercall_retrylater",
+    "被呼叫方拒绝接收呼叫", "com 对象与其基础 rcw 分开",
+)
+
+
+def _com_error_code(exc):
+    """从 com_error / 任意异常里取 HRESULT（取不到返回 None）。"""
+    for attr in ("hresult", "args"):
+        try:
+            v = getattr(exc, attr, None)
+            if attr == "args" and v:
+                v = v[0]
+            if isinstance(v, int):
+                return int(v)
+        except Exception:
+            continue
+    return None
+
+
+def is_com_busy_error(exc):
+    """该异常是否属于"COM 忙 / 调用被拒绝 / 可重试"这一类。
+
+    只认明确的 RPC_E_* 码与已知文案 —— 业务性失败（轮廓无效、特征返回 None）
+    绝不算忙，否则会把真错误拖成 5 次长等待。
+    """
+    try:
+        code = _com_error_code(exc)
+        if code is not None:
+            # pywin32 有时给 unsigned，统一按 signed 比较
+            if code > 0x7FFFFFFF:
+                code -= 0x100000000
+            if code in _COM_BUSY_CODES:
+                return True
+        text = ("%s %s" % (type(exc).__name__, exc)).lower()
+        for t in _COM_BUSY_TEXTS:
+            if t in text:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def com_retry(fn, *args, **kwargs):
+    """调用 COM 成员；命中"忙/被拒"时指数退避重试（300ms→5s，最多 5 次）。
+
+    用法：
+        feat = com_retry(self.fm.FeatureExtrusion3, True, False, ...)
+    或带说明：
+        feat = com_retry(lambda: self.fm.FeatureExtrusion3(...), _what="拉伸")
+
+    业务性异常【原样抛出】，不做任何重试。
+    """
+    _what = kwargs.pop("_what", None) or getattr(fn, "__name__", "COM 调用")
+    _log = kwargs.pop("_log", None)
+    delay = COM_RETRY_BASE_SEC
+    last = None
+    for attempt in range(COM_RETRY_MAX):
+        try:
+            return fn(*args, **kwargs)
+        except SystemExit:
+            raise
+        except Exception as e:
+            last = e
+            if not is_com_busy_error(e):
+                raise
+            if attempt >= COM_RETRY_MAX - 1:
+                break
+            try:
+                if callable(_log):
+                    _log("COM 忙（%s）：%s 第 %d 次重试，等待 %.2fs"
+                         % (type(e).__name__, _what, attempt + 1, delay))
+            except Exception:
+                pass
+            try:
+                time.sleep(delay)
+            except Exception:
+                pass
+            delay = min(delay * 2.0, COM_RETRY_CAP_SEC)
+    raise last
+
+
 class ComMemberError(Exception):
     """【R11 修复】COM 成员访问失败（属性/方法误用、签名不符、对象缺失）。
 
@@ -3638,8 +3760,35 @@ _PLANES = ("Front Plane", "Top Plane", "Right Plane",
            "前视基准面", "上视基准面", "右视基准面",
            "后视基准面", "下视基准面", "左视基准面")
 
-# 可视化建模模式
-VISUAL_MODE = True
+# ── 【D2 修复】建模期可见性开关（回溯报告 §12.5 D2 / §12.2）─────────────
+# 默认保持用户偏好"实时看到建模过程"（solidworks-modeling.md §0.2）。
+# 但多房间/排队建模时，可见窗口 + 人工操作会打断 COM（用户点 SW、弹保存框
+#   → RPC_E_CALL_REJECTED → 小屋改脚本重跑）；此时可 opt-in 无头模式：
+#       DSH_SW_VISIBLE=0   （或 false/no/off/hidden/headless）
+# 无头模式下：连接后隐藏窗口、不做每步置前/可视化、bring_to_front 不再弹窗。
+# 注意：这是"可配置"，不是强制隐藏 —— 用户明确要求可视化时保持默认。
+_VIS_ENV = (os.environ.get("DSH_SW_VISIBLE") or "").strip().lower()
+HEADLESS_MODE = _VIS_ENV in ("0", "false", "no", "off", "hidden", "headless")
+VISUAL_MODE = not HEADLESS_MODE
+# ── 无头模式的【官方正确姿势】（重要，别再自己发明）────────────────────
+# 依据 help.solidworks.com 三处原文：
+#  ① ISldWorks::Visible —— "the SOLIDWORKS Design application can only be
+#     hidden if ISldWorks::UserControl is false and there are no visible
+#     documents open."  → 直接 sw.Visible=False 在【有可见文档时会被忽略】，
+#     所以必须先 UserControl=False。
+#  ② IModelDoc2::Visible —— 官方警告："User-interface resources are not
+#     released by setting this property to false. Opening large numbers of
+#     models and then hiding them ... will eventually cause critical resource
+#     shortages and instability."  → 绝不用它批量藏文档。
+#  ③ IFrame::KeepInvisible —— 官方无头示例（Keep SOLIDWORKS Invisible While
+#     Activating Documents）的唯一正确做法：UserControl=False + Visible=False
+#     + Frame.KeepInvisible=True，操作完再复原。
+# 另：SelectByID2 硬性前提 "must be an open and visible document"，
+#   本模块 65 处 SelectByID2 依赖它 → 只做【应用级】隐藏，文档保持可见。
+HEADLESS_DOCS_VISIBLE = True   # 恒为 True：文档级 Visible 一律不动（见 ②）
+# 无头模式的实际生效状态（供 status / 排障读取，绝不用它假装成功）
+_HEADLESS_STATE = {"app_visible": None, "frame_keep_invisible": False,
+                   "note": None}
 VISUAL_PAUSE = 0.5
 VIEW_ISO_NAME = "*Isometric"
 VIEW_ISO_ID = 7
@@ -3943,6 +4092,43 @@ def get_sw():
     except Exception:
         pass
     _disable_snapping(sw)
+    # ── 【D2 修复】无头模式：连接后隐藏 SW 窗口 ──────────────────────────
+    # ⚠️ 已知约束（官方语义）：SelectByID2 要求 "open and visible document"。
+    #   本模块 65 处用到 SelectByID2（选基准面/选面/选草图段），把文档也设为
+    #   invisible 会让这些路径失败。因此这里只做"应用窗口隐藏"，并允许
+    #   HEADLESS_DOCS_VISIBLE=False 时才真正把文档隐藏（默认不隐藏）。
+    #   若某机器上无头仍导致选面失败 → 设 DSH_SW_VISIBLE=1 恢复可见即可。
+    if HEADLESS_MODE:
+        # ── 【D2 修复·官方配方】按 Keep SOLIDWORKS Invisible 示例的顺序：
+        #   ① UserControl=False（否则 Visible=False 会被 SW 直接忽略）
+        #   ② Visible=False
+        #   ③ Frame.KeepInvisible=True（防止后续 ActivateDoc 把窗口又拉出来）
+        # 文档级 Visible 一律【不动】：SelectByID2 要求 open and visible
+        #   document，且官方警告 IModelDoc2.Visible=False 会导致资源耗尽。
+        try:
+            sw.UserControl = False
+        except Exception:
+            pass
+        try:
+            sw.Visible = False
+            _headless_visible_result = bool(sw.Visible)
+        except Exception:
+            _headless_visible_result = None
+        try:
+            _frame = sw.Frame()
+            if _frame is not None:
+                _frame.KeepInvisible = True
+                _HEADLESS_STATE["frame_keep_invisible"] = True
+        except Exception:
+            pass
+        _HEADLESS_STATE["app_visible"] = _headless_visible_result
+        # 若隐藏没生效（有可见文档 / 被策略阻止），如实记一条告警，
+        #   而不是假装"已经无头了"（假成功是这套系统最忌讳的）。
+        if _headless_visible_result is True:
+            _HEADLESS_STATE["note"] = (
+                "sw.Visible=False 未生效（官方限制：必须有 UserControl=False "
+                "且无可见文档）。窗口仍可见，但已开 KeepInvisible —— "
+                "ActivateDoc 时不会再弹到前台。")
     if VISUAL_MODE:
         _wait_sw_window(timeout=60)
         time.sleep(1.0)
@@ -4180,6 +4366,66 @@ def _attach_origin_record(model_obj, target, out):
     return out
 
 
+@contextlib.contextmanager
+def batch_mode(sw, label="建模批处理"):
+    """【D4 配套】把一串 API 调用包进 ISldWorks::CommandInProgress。
+
+    官方语义（ISldWorks::CommandInProgress，SW 2006 SP2 / Rev 14.2 起）：
+      原文："Improves performance of out-of-process applications by informing
+      SOLIDWORKS that a sequence of API calls will be made by the out-of-process
+      application." / "Set to True before calling the sequence of API calls,
+      then set to false after calling the sequence of API calls."
+      / "SOLIDWORKS then reduces the number of updates it makes during these
+      calls. Use of this property only effects out-of-process applications."
+    对我们的价值（回溯报告 §12.2）：
+      · 本仓库正是 out-of-process（python 经 COM 驱动 SW），每次特征后 SW 都要
+        刷新 UI —— 那既是性能损耗，也是"窗口一直在动、用户容易去点"的诱因；
+      · 置 True 期间 SW 减少刷新，建模更快、被人工打断的窗口也更小。
+    ⚠️ 它不是"忙检测"、不是重试机制（官方页无 busy/retry 字样）。
+      忙/被拒的重试仍由 com_retry 负责。
+
+    用法：
+        with swapi.batch_mode(sw):
+            m.extrude(10); m.cut(through=True)
+    异常安全：finally 里一定复位为 False，绝不把 SW 留在批处理态。
+    """
+    _ok = False
+    try:
+        if sw is not None:
+            sw.CommandInProgress = True
+            _ok = True
+    except Exception:
+        _ok = False
+    try:
+        yield _ok
+    finally:
+        if _ok:
+            try:
+                sw.CommandInProgress = False
+            except Exception:
+                pass
+
+
+def _stop_guard(action=""):
+    """【P2/S2 修复】建模动作入口的停机检查。
+
+    与 sw_bridge / mode_gate 共用 _stop 单一事实源。_stop 不可用（例如
+    swapi 被单独复制到别处）时静默放行 —— 命令入口闸门仍在 sw_bridge main()。
+    """
+    try:
+        import _stop as _stop_mod
+        hit = _stop_mod.guard(action or "modeling")
+        if hit:
+            raise RuntimeError(
+                "TASK_STOPPED: %s —— %s"
+                % (action or "modeling",
+                   hit.get("error") or "用户已要求停止任务"))
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
+
 def new_part(sw=None, material=None, density=None):
     """新建零件，返回 SWModel。
 
@@ -4193,6 +4439,8 @@ def new_part(sw=None, material=None, density=None):
       赋材质结果写入 m.material_result，失败时进 warnings 而非静默。
       density= 可强制写入密度（材质库找不到时的兜底）。
     """
+    # ══ 【P2/S2 修复】停机开关：新建零件是建模的起点，必须 fail-closed ══
+    _stop_guard("new_part")
     if sw is None:
         sw = get_sw()
     _disable_snapping(sw)
@@ -4240,9 +4488,13 @@ def new_part(sw=None, material=None, density=None):
             # 已命名的文档属于别的房间/别的轮次 —— 保留，不再往下关
             _kept.append(_title or _path)
             break
+        if not _title:
+            # ── 【D3 修复】取不到标题就绝不用 "" 调 CloseDoc ──────────────
+            # 官方语义：CloseDoc("") = 关掉【当前活动文档】。并发时会关错人。
+            break
         try:
             # CloseDoc 必须传标题（传 0 会触发模态"是否保存"框）
-            sw.ActiveDoc.CloseDoc(_title if _title else "")
+            sw.ActiveDoc.CloseDoc(_title)
             _closed.append(_title)
         except Exception as _e_cd:
             try:
@@ -4333,14 +4585,199 @@ def new_part(sw=None, material=None, density=None):
     return m
 
 
+def doc_identity(model):
+    """【D3 修复】文档身份三元组：(完整路径, 标题, 文档类型)。
+
+    官方语义依据（ISldWorks / IModelDoc2 API Help）：
+      · IModelDoc2::GetPathName — "if the document has not yet been saved,
+        then the string is empty"（未保存新零件拿不到路径，只能回退标题）；
+      · IModelDoc2::GetTitle — 标题受"是否显示扩展名"设置影响
+        （Part1.sldprt vs Part1），故不能单独作为唯一标识；
+      · IModelDoc2::GetType — 返回 swDocumentTypes_e，用于消解同名
+        sldprt/sldasm 撞车（GetOpenDocument 官方也警告过这点）。
+    结论：身份判定必须用【路径优先 + 标题 + 类型】三元组，
+      并且【不存在】IModelDoc2::GetID 这种唯一 id（官方成员表里没有），
+      所以不要用 GetID 做校验。
+    """
+    def _call(obj, name, default=None):
+        try:
+            v = getattr(obj, name, None)
+            if v is None:
+                return default
+            return v() if callable(v) else v
+        except Exception:
+            return default
+    if model is None:
+        return (None, None, None)
+    return (_call(model, "GetPathName", "") or "",
+            _call(model, "GetTitle", "") or "",
+            _call(model, "GetType", None))
+
+
+def same_document(a, b):
+    """两个 IModelDoc2 是否指向同一份文档（路径优先，未保存时比标题）。
+
+    【D3 修复】用于"当前 ActiveDoc 到底是不是我要操作的那一个"的判定，
+    替代把 ActiveDoc 当身份的做法（ActiveDoc 是进程级全局状态，
+    多房间并发时随时被别人切换 —— 那正是零件串写的根因）。
+    """
+    pa, ta, ty_a = doc_identity(a)
+    pb, tb, ty_b = doc_identity(b)
+    if a is None or b is None:
+        return False
+    # ① 双方都有路径 → 比路径（最可靠）
+    if pa and pb:
+        try:
+            return os.path.normcase(os.path.abspath(pa)) ==                    os.path.normcase(os.path.abspath(pb))
+        except Exception:
+            return str(pa).lower() == str(pb).lower()
+    # ② 至少一方未保存 → 比标题（注意扩展名设置会变，做去扩展名容错）
+    if not ta or not tb:
+        return False
+
+    def _stem(t):
+        t = str(t).strip().lower()
+        for ext in (".sldprt", ".sldasm", ".slddrw"):
+            if t.endswith(ext):
+                return t[: -len(ext)]
+        return t
+    return _stem(ta) == _stem(tb)
+
+
+def find_open_document(sw, path):
+    """【D3 修复】按完整路径查找已打开文档，返回 IModelDoc2 或 None。
+
+    官方语义依据：
+      · ISldWorks::GetOpenDocumentByName(DocumentName) —— 参数要求
+        "Fully qualified name (path, filename, and file extension)"，失败返回 NULL；
+      · 这是【显式句柄】的官方来源之一：它返回的对象与 ActiveDoc 无关，
+        不需要文档处于激活状态即可拿到指针。
+      · 对照 ISldWorks::OpenDoc6 官方说明："OpenDoc6 does not activate and
+        display the document if the file is already open in memory...
+        calling ISldWorks::ActiveDoc will not return a pointer to this document."
+        —— 即"显式指针"与"ActiveDoc"是两条独立通路，这正是本模块要走的路线。
+    """
+    if sw is None or not path:
+        return None
+    _p = str(path)
+    try:
+        m = sw.GetOpenDocumentByName(_p)
+        if m is not None:
+            return m
+    except Exception:
+        pass
+    # 退路：遍历已打开文档逐个比路径（GetDocuments 官方返回数组）
+    try:
+        docs = sw.GetDocuments()
+        try:
+            docs = list(docs) if docs is not None else []
+        except TypeError:
+            docs = [docs] if docs is not None else []
+        for d in docs:
+            _dp, _dt, _ = doc_identity(d)
+            if not _dp:
+                continue
+            try:
+                if os.path.normcase(os.path.abspath(_dp)) == os.path.normcase(os.path.abspath(_p)):
+                    return d
+            except Exception:
+                if str(_dp).lower() == _p.lower():
+                    return d
+    except Exception:
+        pass
+    return None
+
+
 def from_active(sw=None):
-    """包装当前活动文档为 SWModel。"""
+    """包装当前活动文档为 SWModel。
+
+    ⚠️ 【D3 说明】本函数仍然返回 ActiveDoc —— 它是【进程级全局状态】，
+    多房间并发时随时可能被别的房间切走。新代码请优先用：
+        from_path(sw, 路径)       # 按路径取显式句柄（推荐）
+        get_model(sw, expect=...) # 取 ActiveDoc 并校验身份（带警告）
+    这里保留 from_active 仅为向后兼容（单房间/串行场景等价安全）。
+    """
     if sw is None:
         sw = get_sw()
     model = sw.ActiveDoc
     if model is None:
         raise RuntimeError("no active document")
     return SWModel(sw, model)
+
+
+def from_path(sw, path):
+    """【D3 修复】按【文件路径】包装一个已打开的文档为 SWModel。
+
+    与 from_active 的区别：不依赖进程级 ActiveDoc，因此多个房间/多个
+    建模进程交错执行时，A 的操作不会落到 B 的文档上。
+    文档没打开时返回 None（调用方应显式 open_part 后再取）。
+    """
+    if sw is None:
+        sw = get_sw()
+    model = find_open_document(sw, path)
+    if model is None:
+        return None
+    return SWModel(sw, model)
+
+
+def get_model(sw=None, expect=None, strict=False):
+    """【D3 修复】取当前活动文档，并【校验它是不是我要的那一个】。
+
+    Args:
+        sw:     ISldWorks（可空，空则自动连接）
+        expect: 期望的文档路径（str）或 IModelDoc2。
+                - 传具体期望 → 只做身份校验；
+                - 传 "any" / None → 不校验，直接返回（保持旧语义）。
+        strict: True 时身份不符直接抛异常；False 时只记警告
+                （warnings 挂在返回的 SWModel 上）。
+    Returns:
+        SWModel 或 None。
+    Raises:
+        RuntimeError: strict=True 且身份不符。
+    """
+    if sw is None:
+        sw = get_sw()
+    model = sw.ActiveDoc
+    if model is None:
+        if strict:
+            raise RuntimeError("no active document")
+        return None
+    # ── 【D3 修复·顺序】先校验身份，再构造 SWModel ──────────────────────
+    # 原顺序先 SWModel(sw, model) 再比对，导致"身份不符"时先炸在构造里
+    #   （模型对象缺 SketchManager 等），真正的身份错误被掩盖。
+    _ap, _at, _ = doc_identity(model)
+    if expect in (None, "", "any"):
+        return SWModel(sw, model)
+    _norm = lambda s: os.path.normcase(os.path.abspath(s))
+    ok = False
+    try:
+        if isinstance(expect, str):
+            if _ap:
+                try:
+                    ok = (_norm(_ap) == _norm(expect))
+                except Exception:
+                    ok = (str(_ap).lower() == str(expect).lower())
+            else:
+                _exp_doc = find_open_document(sw, expect)
+                ok = (_exp_doc is not None and same_document(model, _exp_doc))
+        else:
+            ok = same_document(model, expect)
+    except Exception:
+        ok = False
+    if ok:
+        return SWModel(sw, model)
+    msg = ("【D3 文档身份不符】当前 ActiveDoc = %r（路径=%r），"
+           "而本次操作期望 %r。ActiveDoc 是进程级全局状态，"
+           "多半是别的房间切换了活动文档 —— 继续操作会写到别人的零件上。"
+           % (_at, _ap, expect))
+    if strict:
+        raise RuntimeError(msg)
+    m = SWModel(sw, model)
+    try:
+        m._warn(msg + "（已按非严格模式继续，风险自担）")
+    except Exception:
+        pass
+    return m
 
 
 # ══ 【Bug-20/24/28 修复】特征创建失败诊断助手 ═══════════════════════════════
@@ -5206,6 +5643,8 @@ class SWModel:
 
         Returns: {ok, path, saved, updated, size, rc, error?, hint?}
         """
+        # ══ 【P2/S2 修复】停机开关：保存是落盘的最后一步，必须 fail-closed ══
+        _stop_guard("save")
         def _fingerprint(p):
             """返回文件指纹 (size, mtime, md5)。不存在返回 None。
 
@@ -6885,7 +7324,21 @@ class SWModel:
             pass
 
     def bring_to_front(self):
-        """把 SolidWorks 主窗口调到前台（保持最大化），隐藏欢迎页。"""
+        """把 SolidWorks 主窗口调到前台（保持最大化），隐藏欢迎页。
+
+        【D2 修复】无头模式（DSH_SW_VISIBLE=0）下不做任何置前/显隐操作，
+        避免把排队建模时的窗口重新弹出来、打断 COM。
+        """
+        if HEADLESS_MODE:
+            # 官方配方：无头时不要重新把窗口拉出来；但 ActivateDoc 之类的
+            # 调用仍可能让 SW 自己变可见 —— 用 Frame.KeepInvisible 挡住。
+            try:
+                _frame = self.sw.Frame()
+                if _frame is not None:
+                    _frame.KeepInvisible = True
+            except Exception:
+                pass
+            return self
         try:
             self.sw.Visible = True
         except Exception:
@@ -7164,12 +7617,21 @@ class SWModel:
             title = self.model.GetTitle
         except Exception:
             title = None
+        # ── 【D3 修复·官方语义】CloseDoc("") 会关掉【当前活动文档】──────────
+        # 官方原文（ISldWorks::CloseDoc）：'If Name is specified with an empty
+        #   string ("") , then the active document is closed without saving.'
+        #   → 并发场景下取不到 title 时传 ""，等于随机关掉别人的文档。
+        # 现在：title 为空就【不关】，只回报告警，绝不盲关。
         if title:
             try:
                 self.sw.CloseDoc(title)
-            except Exception:
-                pass
-        return {"ok": True, "closed": title or "unknown"}
+            except Exception as _e_cd:
+                return {"ok": False, "closed": None, "title": title,
+                        "error": "CloseDoc 失败: %r" % (_e_cd,)}
+            return {"ok": True, "closed": title}
+        return {"ok": False, "closed": None, "title": None,
+                "error": ("取不到文档标题，拒绝调用 CloseDoc —— "
+                          "空字符串会关掉【当前活动文档】（可能属于别的房间）。")}
 
     # ---------- 基准面 / 草图 ----------
     _PLANE_VIEW = {
@@ -7180,6 +7642,205 @@ class SWModel:
         "Back Plane": "*Back",
         "Left Plane": "*Left",
     }
+
+    # ══ 【M5 修复】基准面姿态改为【代码查询】，不再靠硬编码 ZSIGN ══════════
+    # 背景（回溯报告 §15.1 M5 / §7 P1）：历史上"Top Plane 草图 y 要取反"
+    #   这条知识只存在于文档/模型记忆里（skills/sw-design 的 ZSIGN 硬编码），
+    #   换台机器、换 SW 版本、或用户自建基准面时全靠猜，一错就整件沿 Z 镜像。
+    #
+    # 官方给的查询通路（不是猜测）：
+    #   · IRefPlane::Transform —— 原文 "Gets the plane transform with respect
+    #     to the world."（SOLIDWORKS 2004 SP4 / Rev 12.4 起）；
+    #   · IMathTransform::ArrayData —— 16 个 double：
+    #       0..8  旋转部分（局部 x/y/z 三轴在世界系里的方向，行主序）
+    #       9..11 平移（基准面原点）
+    #       12    缩放；13..15 未用
+    #   · 官方示例 "Get the Normal and Origin of a Reference Plane Using Its
+    #     Transform" 的做法：把变换作用于局部 (0,0,1) 即得世界法向。
+    #   · FeatureCut4 Remarks 原文也指向同一路径：
+    #     "To determine the sketch normal, see IFace2::Normal and
+    #      IRefPlane::Transform."
+    #
+    # ⚠️ 官方【没有】给出三个默认基准面基向量的数值表（我让检索专员逐页查证过，
+    #   全部 API Help 与 CAD 帮助均无）→ 因此这里【绝不硬编码】，一律现场查询；
+    #   查不到时才退回经验值，并在返回值里显式标注 source，绝不静默假设。
+    _DEFAULT_PLANE_NAMES = {
+        "front plane": "Front Plane", "front": "Front Plane",
+        "前视基准面": "Front Plane",
+        "top plane": "Top Plane", "top": "Top Plane",
+        "上视基准面": "Top Plane",
+        "right plane": "Right Plane", "right": "Right Plane",
+        "右视基准面": "Right Plane",
+        "back plane": "Back Plane", "back": "Back Plane",
+        "bottom plane": "Bottom Plane", "bottom": "Bottom Plane",
+        "left plane": "Left Plane", "left": "Left Plane",
+    }
+
+    def plane_axes_world(self, plane="Top Plane"):
+        """【M5】查询基准面在世界系里的三轴方向（x/y/z）与法向。
+
+        Returns:
+            {"ok": True,
+             "plane": <基准面名>,
+             "axes_world": {"x": [..], "y": [..], "z": [..]},   # 单位向量
+             "normal_world": [...],                            # = 局部 z 轴
+             "origin_world_mm": [x, y, z],
+             "sketch_y_to_world": {...},   # 草图 y 轴导数（含符号判断）
+             "source": "IRefPlane::Transform" | "fallback_table"
+            }
+            或 {"ok": False, "error": ...}
+
+        用途：替代 `ZSIGN` 这类硬编码。建模脚本应写
+            ax = m.plane_axes_world("Top Plane")
+            # 要世界 +Z 的意图 → 草图 y = ±z
+        而不是"我记得 Top Plane 要取反"。
+        """
+        out = {"ok": False, "plane": str(plane)}
+        _name = self._DEFAULT_PLANE_NAMES.get(
+            str(plane).strip().lower(), str(plane))
+        out["plane_resolved"] = _name
+        _arr = None
+        # ── ① 官方通路（真机实测可用的那一条）────────────────────────────
+        # 为什么不用 FeatureByName / FirstFeature 遍历：
+        #   本机 SW2025 Rev33.5.0（晚绑定）实测 ——
+        #     · FeatureByName("Top Plane") 返回 None（基准面不在"按名可查"范围）
+        #     · FirstFeature().GetNextFeature() 在【收藏文件夹】节点后就抛
+        #       com_error(-2147352573, '找不到成员。')，遍历直接断在第一个节点
+        #   这两条路都不可靠，因此改用【选择集】取对象：
+        #     select_plane(多语言兜底) → SelectionManager.GetSelectedObject6
+        #     → early(IFeature).GetSpecificFeature2() → IRefPlane.Transform
+        #   实测 Top/Front/Right 三个基准面全部读到了正确 ArrayData。
+        try:
+            _ok_sel = False
+            try:
+                _ok_sel = bool(self.select_plane(_name))
+            except Exception:
+                _ok_sel = False
+            _sel = None
+            if _ok_sel:
+                try:
+                    _sm = self.model.SelectionManager
+                    _sel = _sm.GetSelectedObject6(1, -1)
+                except Exception:
+                    _sel = None
+            if _sel is not None:
+                # 选中对象是 IFeature（type=RefPlane）；先包早期绑定再往下取，
+                #   晚绑定下 GetSpecificFeature2 的属性访问会失败。
+                _feat = sel = _sel
+                try:
+                    _feat = early(_sel, "IFeature") or _sel
+                except Exception:
+                    _feat = _sel
+                _ref = None
+                for _acc in ("GetSpecificFeature2", "GetSpecificFeature"):
+                    try:
+                        _fn = getattr(_feat, _acc, None)
+                        if _fn is None:
+                            continue
+                        _ref = _fn() if callable(_fn) else _fn
+                        if _ref is not None:
+                            break
+                    except Exception:
+                        continue
+                if _ref is not None:
+                    _rp = _ref
+                    try:
+                        _rp = early(_ref, "IRefPlane") or _ref
+                    except Exception:
+                        _rp = _ref
+                    try:
+                        _mt = _rp.Transform
+                        _arr = list(_mt.ArrayData)
+                    except Exception as _e_mt:
+                        out["transform_error"] = repr(_e_mt)
+            # 用完清选择（不打扰后续建模）
+            try:
+                self.model.ClearSelection2(True)
+            except Exception:
+                pass
+        except Exception as _e_tr:
+            out["transform_error"] = repr(_e_tr)
+        if _arr and len(_arr) >= 12:
+            try:
+                def _v(i):
+                    return [round(float(_arr[i]), 9),
+                            round(float(_arr[i + 1]), 9),
+                            round(float(_arr[i + 2]), 9)]
+                out["axes_world"] = {"x": _v(0), "y": _v(3), "z": _v(6)}
+                out["normal_world"] = _v(6)
+                out["origin_world_mm"] = [round(float(_arr[9]) * 1000.0, 6),
+                                          round(float(_arr[10]) * 1000.0, 6),
+                                          round(float(_arr[11]) * 1000.0, 6)]
+                # 草图 y 轴在世界各轴的投影（最大分量即主导轴，符号即方向）
+                _y = out["axes_world"]["y"]
+                _imax = max(range(3), key=lambda k: abs(_y[k]))
+                out["sketch_y_axis_index"] = _imax
+                out["sketch_y_sign"] = 1.0 if _y[_imax] >= 0 else -1.0
+                out["source"] = "IRefPlane::Transform"
+                out["ok"] = True
+                return out
+            except Exception as _e_p:
+                out["parse_error"] = repr(_e_p)
+        # ② 查不到 → 退回经验表，并【显式标注】不是查到的
+        #    经验值来源：skills/sw-design ZSIGN（社区实测，非官方数值表）
+        _fb = {"top plane": ("y", -1.0), "front plane": ("y", 1.0),
+               "right plane": ("y", 1.0)}
+        _k = _name.strip().lower()
+        if _k in _fb:
+            _axis, _sign = _fb[_k]
+            out.update({
+                "ok": True,
+                "source": "fallback_table",
+                "note": ("未能从 IRefPlane::Transform 读到变换，"
+                         "退回经验值（社区实测，非官方数值表）—— "
+                         "请勿据此做精密镜像判断，优先排查 RefPlane 读取。"),
+                "sketch_y_axis_name": "Z" if _k == "top plane" else _axis.upper(),
+                "sketch_y_sign": _sign,
+            })
+            return out
+        out["error"] = ("无法查询基准面 %r 的变换，且它不在经验表里。"
+                        "自建基准面必须先确认 IRefPlane::Transform 可读。"
+                        % (_name,))
+        return out
+
+    def sketch_y_for_world_z(self, plane, world_z_mm):
+        """【M5】把"我要在世界 Z 上的位置"换算成本基准面草图里的 y。
+
+        这是 `ZSIGN` 的代码替代：先查真实变换，再换算；查不到才退回经验值。
+        Top Plane 上 `world_z=20` → 草图 y = −20（因为草图 y 轴指向世界 −Z）。
+
+        Returns: {"ok", "sketch_y", "source", "plane"}
+        """
+        out = {"ok": False, "plane": str(plane)}
+        _ax = self.plane_axes_world(plane)
+        if not _ax.get("ok"):
+            out["error"] = _ax.get("error")
+            out["detail"] = _ax
+            return out
+        out["source"] = _ax.get("source")
+        _idx = _ax.get("sketch_y_axis_index")
+        _sign = float(_ax.get("sketch_y_sign") or 1.0)
+        if _idx is None:
+            # 经验表分支：Top 的草图 y 对应世界 −Z；其它对应世界 +Y
+            _is_top = "top" in str(plane).lower()
+            out["sketch_y"] = round((-1.0 if _is_top else 0.0) * float(world_z_mm), 6)
+            if not _is_top:
+                out["warning"] = ("该基准面的草图 y 不沿世界 Z —— "
+                                  "world_z 无法直接映射到草图 y，"
+                                  "请改用 plane_axes_world() 自行换算。")
+            out["ok"] = True
+            return out
+        if _idx == 2:      # 草图 y 沿世界 Z
+            out["sketch_y"] = round(_sign * float(world_z_mm), 6)
+        elif _idx == 1:    # 草图 y 沿世界 Y —— Z 无法直接映射
+            out["sketch_y"] = None
+            out["warning"] = ("草图 y 沿世界 Y，不沿 Z；世界 Z 的意图无法只靠草图 y 表达。"
+                              "请改用 begin_sketch_on_face 或自建偏移基准面。")
+        else:              # 草图 y 沿世界 X
+            out["sketch_y"] = None
+            out["warning"] = "草图 y 沿世界 X，无法映射世界 Z。"
+        out["ok"] = True
+        return out
 
     def _normal_to(self, view_name):
         """正视于当前草图平面并居中。"""
@@ -8980,30 +9641,36 @@ class SWModel:
                 % (self._extrude_profile_used,
                    _diag_s.get("cause"), _diag_s.get("detail"),
                    _diag_s.get("advice")))
-        feat = self.fm.FeatureExtrusion3(
-            True,            # Sd      单向
-            False,           # Flip    反转切除侧（增料特征无意义，恒 False）
-            reverse,         # Dir     ★反向（负深度走这里，不再污染 Dchk1）
-            T1,              # T1      终止条件1
-            0,               # T2      终止条件2（单向不用）
-            d,               # D1      深度
-            0,               # D2
-            _draft_on,       # Dchk1   方向1拔模开关
-            False,           # Dchk2
-            False,           # Ddir1   拔模方向（False=向内）
-            False,           # Ddir2
-            _draft_rad,      # Dang1   拔模角（弧度）
-            0.0,             # Dang2
-            False,           # OffsetReverse1
-            False,           # OffsetReverse2
-            False,           # TranslateSurface1
-            False,           # TranslateSurface2
-            True,            # Merge   ★合并结果（第 18 位，不是切除位）
-            False,           # UseFeatScope
-            auto_select,     # UseAutoSelect
-            0,               # T0      起始条件：0=草图基准面
-            0.0,             # StartOffset
-            False)           # FlipStartOffset
+        # ── 【D4 修复】用 com_retry 包住：用户正在操作 SW 时，
+        #    "调用被拒绝/服务器忙" 会退避重试（300ms→5s），而不是让上层
+        #    把整个建模脚本重跑一遍（那正是同一零件 4 版脚本的成因）。
+        feat = com_retry(
+            lambda: self.fm.FeatureExtrusion3(
+                True,            # Sd      单向
+                False,           # Flip    反转切除侧（增料特征无意义，恒 False）
+                reverse,         # Dir     ★反向（负深度走这里，不再污染 Dchk1）
+                T1,              # T1      终止条件1
+                0,               # T2      终止条件2（单向不用）
+                d,               # D1      深度
+                0,               # D2
+                _draft_on,       # Dchk1   方向1拔模开关
+                False,           # Dchk2
+                False,           # Ddir1   拔模方向（False=向内）
+                False,           # Ddir2
+                _draft_rad,      # Dang1   拔模角（弧度）
+                0.0,             # Dang2
+                False,           # OffsetReverse1
+                False,           # OffsetReverse2
+                False,           # TranslateSurface1
+                False,           # TranslateSurface2
+                True,            # Merge   ★合并结果（第 18 位，不是切除位）
+                False,           # UseFeatScope
+                auto_select,     # UseAutoSelect
+                0,               # T0      起始条件：0=草图基准面
+                0.0,             # StartOffset
+                False),          # FlipStartOffset
+            _what="FeatureExtrusion3(拉伸)",
+            _log=self.warnings.append)
         if feat is None:
             # ── 【Bug-20 修复】失败时给出可操作诊断，而不是只丢一句"创建失败" ──
             _diag = diagnose_feature_failure(self, api="FeatureExtrusion3",
@@ -9558,6 +10225,16 @@ class SWModel:
                 out["error"] = ("齿轮轮廓点数不足（%d）—— 检查模数/齿数/压力角"
                                 % len(full))
                 return out
+            # ── 【M1/P5 修复】齿廓解析面积：作为"齿形是否真的生成"的判定基准 ──
+            # 没有这条断言时，把齿圈画成 φda 圆柱也能 PASS（P5 事故：无齿"齿轮"
+            #   被宣布建模成功）。鞋带公式算闭合多边形面积，乘齿宽 = 解析体积。
+            _s2 = 0.0
+            _n2 = len(full)
+            for _i2 in range(_n2):
+                _x1, _y1 = full[_i2]
+                _x2, _y2 = full[(_i2 + 1) % _n2]
+                _s2 += _x1 * _y2 - _x2 * _y1
+            _profile_area_mm2 = abs(_s2) / 2.0
             # 闭合（polyline(close=True) 会补最后一段，这里显式补首点更稳）
             full.append(full[0])
             # ── 一次画出完整齿圈并挤出 ─────────────────────────────────
@@ -9607,10 +10284,442 @@ class SWModel:
                 except Exception as _e_bore:
                     out["bore_warning"] = ("中心孔加工失败(%r)；齿轮本体已生成，"
                                            "可单独用 bore() 补做" % (_e_bore,))
+            # ── 【M1/P5 修复】回读断言：拒绝"无齿齿轮" ─────────────────────
+            # 回溯报告 §7 P5：小齿轮轴/大齿轮被宣布"建模完成、三道防线 PASS"，
+            #   但几何里根本没有齿（按齿顶圆圆柱简化）。根因是完成判据只看
+            #   "文件存在 + 凭据 + 看图 PASS"，没有零件定义断言。
+            # 现在：齿顶圆 + 体积双重回读，任一不符即 ok=False。
+            out["verify"] = self._verify_gear_geometry(
+                module_mm=module_mm, teeth=teeth,
+                thickness_mm=thickness_mm, bore_dia_mm=bore_dia_mm,
+                profile_area_mm2=_profile_area_mm2)
+            if not out["verify"].get("ok", True):
+                out["ok"] = False
+                out["stage"] = "verify"
+                out["error"] = out["verify"].get("error") or "齿轮几何回读校验失败"
             return out
         except Exception as e:
             out["error"] = "齿轮生成失败: %r" % (e,)
             return out
+
+    def helix_gear(self, module_mm, teeth, thickness_mm, helix_angle_deg,
+                   pressure_angle_deg=20.0, bore_dia_mm=0.0,
+                   plane="Top Plane", steps_per_flank=4,
+                   tooth_extrude_mm=None):
+        """【斜齿】参数化斜齿圆柱齿轮（模数/齿数/齿宽/螺旋角 → 一次成型）。
+
+        为什么必须单独实现（回溯报告 §7 P5 / §16.3）：
+          报告指出"小齿轮轴/大齿轮无齿形"，并要求斜齿必须真正成形。
+        官方查证结论（检索专员逐页核对 help.solidworks.com 2026）：
+          · **FeatureExtrusion3 / FeatureCut3 / FeatureCut4 都没有 twist 参数**
+            （23 / 26 / 27 参全部逐位核对过），
+            `Dchk1/Dchk2` 是【拔模开关】("allows a draft angle")，
+            `Dang1/Dang2` 是【拔模角】—— 与绕轴扭转无关，**不能拿来当螺旋角**；
+          · 官方**没有** gear/helix-for-gear 专用接口（IFeatureManager 成员表
+            grep "gear" 零命中）；
+          · 唯一正规的"沿路径扭转"途径是 **Sweep + ISweepFeatureData**：
+              TwistControlType = swTwistControlConstantTwistAlongPath(8)
+              SetTwistAngle(角度)
+            经 IFeatureManager::CreateDefinition(swFmSweep) + CreateFeature 创建。
+          · 螺旋线用 IModelDoc2::InsertHelix（官方："Creates a constant-pitch
+            helix or spiral."，Height 单位【米】）。
+
+        实现策略（分两条路，优先级从稳到险）：
+          A【sweep 扭转】剖面 = 单齿齿廓 → 沿轴向直线 path 扫掠 + twist 角；
+            需要 CreateDefinition/CreateFeature，晚绑定下易失败 → 作为首选尝试。
+          B【分段放样近似】把齿宽等分成 N 段，每段端面按螺旋角旋转一个相位，
+            逐段 loft/扫掠近似 —— 几何上等价于"扭转拉伸"的离散化。
+          两条都失败则【明确返回 ok=False】，绝不退回"圆柱当齿轮"（P5 事故根因）。
+
+        Args:
+            module_mm: 模数 m
+            teeth: 齿数 z
+            thickness_mm: 齿宽 b
+            helix_angle_deg: 分度圆螺旋角 β（斜齿轮核心参数）
+            pressure_angle_deg: 压力角（20°）
+            bore_dia_mm: 中心孔直径（0=不开）
+            plane: 草图基准面（齿轮轴线沿该面法向）
+            steps_per_flank: 齿廓采样段数
+            tooth_extrude_mm: 单齿初始拉伸高度（默认 = 齿宽，仅路径 A 用）
+        Returns:
+            {"ok", "method", "params", "verify", "error"?}
+        """
+        import math as _mth
+        out = {"ok": False, "params": None, "method": None}
+        try:
+            m_ = float(module_mm)
+            z_ = int(teeth)
+            b_ = float(thickness_mm)
+            beta = float(helix_angle_deg)
+            if m_ <= 0 or z_ < 3:
+                out["error"] = "模数必须>0且齿数>=3"
+                return out
+            if abs(beta) < 1e-9:
+                out["error"] = ("helix_angle_deg=0 —— 直齿请直接用 gear()，"
+                                "不要用 helix_gear()（避免误以为做出了斜齿）")
+                return out
+            if abs(beta) >= 45:
+                out["error"] = ("螺旋角 %.2f° 超常见范围（人字/双斜齿请分两段建模）；"
+                                "单斜齿通常 8°~25°" % beta)
+                return out
+            d_ = m_ * z_                 # 分度圆直径
+            da_ = d_ + 2.0 * m_          # 齿顶圆
+            # 导程 L 与螺旋角的关系：tan(β) = π·d / L  →  L = π·d / tan(β)
+            _tan = _mth.tan(_mth.radians(beta))
+            lead = _mth.pi * d_ / _tan if abs(_tan) > 1e-12 else float("inf")
+            # ── 齿宽范围内的【总扭转角】（必须按"轴向推进/导程"算，别算成齿距角）
+            # 正确关系：沿轴向走 b，绕轴转过的角度 = 360° × b / L
+            #   其中 L = π·d / tan(β)（导程，与 z 无关）。
+            # ⚠️ 曾误写成"每齿轴向节距 lead/z"，于是把【一个齿距的相位】当成
+            #   整圈扭转，z=24 的小齿轮算出 1666°（4.6 圈）—— 完全不是斜齿。
+            # 校验（回溯报告的真实参数 m=2,z=24,b=47,β=14.5337°）：
+            #   d=48, L=π·48/tan(14.5337°)=581.7, 扭转=360×47/581.7=29.09°
+            #   → 一个齿距角 = 360/24 = 15°，扭转约 1.94 个齿距，物理合理。
+            twist_total_deg = (360.0 * b_ / lead) if (lead and lead != float("inf")) else 0.0
+            out["params"] = {
+                "module_mm": m_, "teeth": z_, "thickness_mm": b_,
+                "helix_angle_deg": beta, "pressure_angle_deg": float(pressure_angle_deg),
+                "pitch_dia_mm": round(d_, 4), "tip_dia_mm": round(da_, 4),
+                "lead_mm": (None if lead == float("inf") else round(lead, 4)),
+                "twist_total_deg": round(twist_total_deg, 4),
+                "axial_pitch_mm": round(lead / z_ if lead else 0.0, 4),
+            }
+
+            # ── 路径 A：单齿剖面 + 轴向扫掠 + twist ──────────────────────
+            _errA = None
+            try:
+                _r = self._helix_gear_via_sweep(
+                    module_mm=m_, teeth=z_, thickness_mm=b_,
+                    helix_angle_deg=beta, pressure_angle_deg=pressure_angle_deg,
+                    plane=plane, steps_per_flank=steps_per_flank,
+                    twist_total_deg=twist_total_deg)
+                if _r.get("ok"):
+                    out.update(_r)
+                    out["method"] = "sweep_twist"
+                else:
+                    _errA = _r.get("error") or "sweep 路径失败"
+            except Exception as _eA:
+                _errA = repr(_eA)
+
+            # ── 路径 B：分段放样近似（A 失败时的退路）────────────────────
+            if not out.get("ok"):
+                try:
+                    _r2 = self._helix_gear_via_segments(
+                        module_mm=m_, teeth=z_, thickness_mm=b_,
+                        helix_angle_deg=beta,
+                        pressure_angle_deg=pressure_angle_deg,
+                        plane=plane, steps_per_flank=steps_per_flank,
+                        twist_total_deg=twist_total_deg)
+                    if _r2.get("ok"):
+                        out.update(_r2)
+                        out["method"] = "segmented_loft"
+                    else:
+                        out["error"] = (
+                            "斜齿两条路径都失败。\n"
+                            "  A(sweep+twist): %s\n  B(分段放样): %s\n"
+                            "【重要】绝不退回圆柱当齿轮 —— 请改用直齿 gear() "
+                            "并如实告知用户【斜齿未成形】。"
+                            % (_errA, _r2.get("error")))
+                except Exception as _eB:
+                    out["error"] = ("斜齿两条路径都失败。\n  A: %s\n  B: %r"
+                                    % (_errA, _eB))
+            # 中心孔
+            if out.get("ok") and bore_dia_mm and float(bore_dia_mm) > 0:
+                try:
+                    self._bore_by_revolve(bore_dia_mm, b_, plane=plane)
+                    out["bore_method"] = "revolve"
+                except Exception as _eb:
+                    out.setdefault("warnings", []).append(
+                        "中心孔失败（斜齿本体已成型）: %r" % (_eb,))
+            return out
+        except Exception as e:
+            out["error"] = "斜齿生成失败: %r" % (e,)
+            return out
+
+    @staticmethod
+    def _sweep_definition_type(fm):
+        """探测本机 CreateDefinition 里哪个 type 值是 ISweepFeatureData。
+
+        ── 为什么必须探测，不能写死枚举 ────────────────────────────────
+        官方枚举名是 swFeatureNameID_e.swFmSweep，但本机（SW2025 Rev33.5.0）
+        的 gen_py 里【没有 swconst 常量模块】（实测 gen_py 只有 2 个文件，
+        且不含任何 swFm* 常量），所以无法按名字取值。
+        实测穷举 0..39 的结果：type=17 / 18 返回的对象带
+          TwistControlType / SetTwistAngle / Path / Profile / SweepType
+        —— 即 ISweepFeatureData（17 与 18 在本机等价，取 17）。
+        该探测结果会缓存在 swapi 模块级，避免每次建模都穷举 40 次 COM 调用。
+        """
+        _cached = globals().get("_SWEEP_DEF_TYPE")
+        if _cached:
+            return _cached
+        for _v in (17, 18, 16, 19, 20):
+            try:
+                _fd = fm.CreateDefinition(_v)
+                if _fd is None:
+                    continue
+                try:
+                    _ = _fd.TwistControlType
+                    _ = _fd.SetTwistAngle
+                    globals()["_SWEEP_DEF_TYPE"] = _v
+                    return _v
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        return None
+
+    def _helix_gear_via_sweep(self, module_mm, teeth, thickness_mm,
+                              helix_angle_deg, pressure_angle_deg,
+                              plane, steps_per_flank, twist_total_deg):
+        """路径 A：官方 sweep + twist（ISweepFeatureData.TwistControlType=8）。
+
+        官方依据（检索专员核对 help.solidworks.com 2026）：
+          · 拉伸/切除【没有】twist 参数（FeatureExtrusion3 23 参、FeatureCut4 27 参
+            逐一核对过），Dchk/Dang 只是拔模；
+          · 唯一"沿路径扭转"途径 = ISweepFeatureData：
+              TwistControlType = swTwistControlConstantTwistAlongPath(8)
+              原文："Defines the twist of the profile along the sweep path;
+                     corresponds to Profile Twist > Specify Twist Value"
+              SetTwistAngle(角度)
+            经 IFeatureManager::CreateDefinition(swFmSweep) + CreateFeature 创建。
+
+        实现步骤：
+          ① 画【单齿齿廓】作扫描剖面（草图 1）
+          ② 沿齿宽方向画一条【直线路径】（草图 2，垂直于剖面）
+          ③ CreateDefinition(探测到的 sweep 类型) → 设 Path/Profile
+             → TwistControlType=8 → SetTwistAngle(twist_total_deg)
+          ④ CreateFeature 生成单齿（已扭转）
+          ⑤ 圆周阵列 z 份
+        """
+        out = {"ok": False}
+        try:
+            import math as _mth
+            # ① 单齿剖面
+            prof = self.involute_gear_profile(
+                module_mm, teeth, pressure_angle_deg,
+                steps_per_flank=steps_per_flank)
+            if not prof.get("ok"):
+                out["error"] = "单齿齿廓生成失败: %s" % prof.get("error")
+                return out
+            pts = prof.get("points") or []
+            if len(pts) < 3:
+                out["error"] = "单齿齿廓点数不足"
+                return out
+            # 剖面草图（在 plane 上）
+            self.begin_sketch(plane)
+            self.polyline(pts, close=True)
+            self.end_sketch()
+            _prof_sketch = getattr(self, "_active_sketch_name", None)
+            if not _prof_sketch:
+                out["error"] = "剖面草图名未记录（begin_sketch 异常）"
+                return out
+            # ② 路径草图：沿法向的一条直线（长度 = 齿宽）
+            _axis = int(getattr(self, "_sketch_normal_axis", 2))
+            self.begin_sketch(plane)
+            # 在草图平面内无法直接画"法向"直线 → 用 3D 草图概念不可行；
+            # 官方做法：路径用【垂直剖面的直线】，在 plane 上画一条垂直于
+            #   草图平面的线需要一个 3D sketch。本实现改用"垂直于该平面的
+            #   另一张草图的边"太绕 —— 因此这里换更稳的做法：
+            #   直接在 plane 的草图里画一条【沿局部 y 的直线】作为路径，
+            #   剖面草图放在【垂直于它的另一张基准面】上。
+            out["error"] = ("sweep 路径需要 3D 路径草图（垂直于剖面），"
+                            "当前封装未实现 3D sketch 支持 —— 走分段路径")
+            try:
+                self.exit_sketch(merge=False)
+            except Exception:
+                pass
+            return out
+        except Exception as e:
+            out["error"] = "sweep 路径异常: %r" % (e,)
+            try:
+                self.exit_sketch(merge=False)
+            except Exception:
+                pass
+            return out
+
+    def _helix_gear_via_segments(self, module_mm, teeth, thickness_mm,
+                                 helix_angle_deg, pressure_angle_deg,
+                                 plane, steps_per_flank, twist_total_deg):
+        """路径 B：分段近似斜齿（每段一张偏移基准面 + 相位旋转 + 独立拉伸）。
+
+        ── 为什么必须用【偏移基准面】────────────────────────────────────────
+        首版实现直接对每段调 `begin_sketch(plane)` —— 那是【同一张基面】，
+        于是所有段都从 z=0 起拉、互相重叠。实测包围盒 z 只有 0~2mm（齿宽 6mm），
+        却返回 ok=True —— 典型的「假成功」，比直接报错更危险。
+        现在：第 k 段在【离面 k·dz】的偏移基准面上开草图，段段相接。
+
+        几何：把连续扭转离散成 n_seg 个端面，每段相位差 = 总扭转 / n_seg。
+          段数按"每段不超过 3°"选取（上限 24 段）。
+        """
+        out = {"ok": False}
+        try:
+            import math as _mth
+            n_seg = max(2, int(_mth.ceil(abs(twist_total_deg) / 3.0)))
+            n_seg = min(n_seg, 24)
+            out["segments"] = n_seg
+            prof = self.involute_gear_profile(
+                module_mm, teeth, pressure_angle_deg,
+                steps_per_flank=steps_per_flank)
+            if not prof.get("ok"):
+                out["error"] = "单齿齿廓生成失败: %s" % prof.get("error")
+                return out
+            base_pts = prof.get("points") or []
+            if len(base_pts) < 3:
+                out["error"] = "单齿齿廓点数不足"
+                return out
+            dz = thickness_mm / float(n_seg)
+            d_phase = twist_total_deg / float(n_seg)
+            made = 0
+            # 预生成每段的整圈轮廓（避免重复算）
+            for i_seg in range(n_seg):
+                _phase = _mth.radians(d_phase * i_seg)
+                full = []
+                for k in range(teeth):
+                    _base = 2.0 * _mth.pi * k / teeth + _phase
+                    for (x, y) in base_pts:
+                        _r = _mth.hypot(x, y)
+                        _a = _mth.atan2(y, x) + _base
+                        full.append((_r * _mth.cos(_a), _r * _mth.sin(_a)))
+                # 第 0 段用原始基准面；其余用偏移基准面（z = i_seg*dz）
+                if i_seg == 0:
+                    self.begin_sketch(plane)
+                else:
+                    _op = self._make_offset_plane(plane, i_seg * dz)
+                    if not _op.get("ok"):
+                        out["error"] = ("第 %d 段偏移基准面创建失败: %s"
+                                        % (i_seg + 1, _op.get("error")))
+                        return out
+                    self.begin_sketch_on_feature(
+                        _op.get("feature"), label="斜齿段%d" % (i_seg + 1))
+                self.polyline(full, close=True)
+                self.end_sketch()
+                f = self.extrude(dz)
+                if f is None:
+                    out["error"] = "第 %d 段拉伸失败（共 %d 段）" % (i_seg + 1, n_seg)
+                    return out
+                made += 1
+            out.update({
+                "ok": made == n_seg,
+                "segments_made": made,
+                "note": ("分段近似：%d 段 × 每段相位 %.3f°，总扭转 %.3f°；"
+                         "段数越多越接近真螺旋面，但特征数也越多。"
+                         % (n_seg, d_phase, twist_total_deg)),
+            })
+            # ── 断言：成型后【轴向】尺寸必须 ≈ 齿宽（防"各段重叠"的假成功）──
+            # ⚠️ 轴向【不能写死成 Z】：实测在 Top Plane 上建齿轮时，
+            #   Top Plane 法向是世界 +Y，所以齿轮轴线落在 Y 轴，
+            #   包围盒呈现为 [x:±da/2, y:0~b, z:±da/2]。
+            #   首版断言按 z 判 → 把正确结果误判成"重叠"（29.999 vs 6）。
+            # 现在：轴向 = 草图法向轴（_sketch_normal_axis，由 begin_sketch
+            #   按真实基准面设置），并从包围盒的【该轴】取长度。
+            try:
+                _box = self.body_box_mm()
+                if _box:
+                    # 轴向判定：齿宽 b 必然远小于齿顶圆直径 da = m*z+2m，
+                    #   所以"三条边长里最接近 b 的那一轴"就是轴向。
+                    # 不能依赖 _sketch_normal_axis —— 走 begin_sketch_on_feature
+                    #   （偏移基准面）时它不会被更新，会一直停在默认 2，实测误判。
+                    _exts = [abs(float(_box[i * 2 + 1]) - float(_box[i * 2]))
+                             for i in range(3)]
+                    _b = float(thickness_mm)
+                    _ax = min(range(3), key=lambda _i: abs(_exts[_i] - _b))
+                    _alen = _exts[_ax]
+                    out["axial_axis"] = "XYZ"[_ax]
+                    out["thickness_actual_mm"] = round(_alen, 3)
+                    # 直径方向用于二次校验（应为齿顶圆）
+                    _diams = [abs(float(_box[i * 2 + 1]) - float(_box[i * 2]))
+                              for i in range(3) if i != _ax]
+                    out["diameter_actual_mm"] = round(max(_diams), 3) if _diams else None
+                    if abs(_alen - float(thickness_mm)) > max(0.5, 0.1 * thickness_mm):
+                        out["ok"] = False
+                        out["error"] = (
+                            "斜齿成型后【轴向(%s)】尺寸 %.3f mm ≠ 齿宽 %.3f mm —— "
+                            "各段没有沿轴向错开（重叠了），不是真斜齿。"
+                            % ("XYZ"[_ax], _alen, thickness_mm))
+            except Exception as _e_box:
+                out["bbox_warning"] = "无法回读包围盒: %r" % (_e_box,)
+            return out
+        except Exception as e:
+            out["error"] = "分段近似异常: %r" % (e,)
+            return out
+
+    def _verify_gear_geometry(self, module_mm, teeth, thickness_mm,
+                              bore_dia_mm=0.0, profile_area_mm2=None,
+                              tol_dia_mm=0.05, tol_vol_pct=2.0):
+        """【M1/P5 修复】齿轮零件定义断言：回读体积 + 齿顶圆，拒绝"无齿齿轮"。
+
+        判据（对齐回溯报告 §15.1 M1 / §7 P5）：
+          · 齿顶圆实测（包围盒 X/Y 较大边）≈ da = m·z + 2m，偏差 ≤ tol_dia_mm；
+          · 实体体积 ≈ 齿廓解析面积 × 齿宽 − 中心孔体积，偏差 ≤ tol_vol_pct%；
+        任一不满足 → ok=False。这样"把齿圈画成 φda 圆柱"的假件会被当场拒绝，
+        而不是靠人去看图才发现。
+
+        说明：body_box_mm() 返回 [xmin,xmax,ymin,ymax,zmin,zmax]（mm），
+          齿轮轴线沿 Z 时，齿顶圆 = max(xmax-xmin, ymax-ymin)。
+        """
+        out = {"ok": True, "teeth": int(teeth)}
+        try:
+            import math as _math
+            m = float(module_mm)
+            z = int(teeth)
+            b = float(thickness_mm)
+            da = m * z + 2.0 * m
+            out["tip_dia_design_mm"] = round(da, 4)
+            # ── 齿顶圆回读 ────────────────────────────────────────────────
+            try:
+                box = self.body_box_mm()
+                if not box:
+                    out["ok"] = False
+                    out["error"] = ("齿轮回读失败：body_box_mm 返回空 —— "
+                                    "零件没有实体，齿圈没有真正生成。")
+                else:
+                    dx = abs(float(box[1]) - float(box[0]))
+                    dy = abs(float(box[3]) - float(box[2]))
+                    da_actual = max(dx, dy)
+                    out["tip_dia_actual_mm"] = round(da_actual, 4)
+                    out["tip_dia_dev_mm"] = round(abs(da_actual - da), 4)
+                    if abs(da_actual - da) > tol_dia_mm:
+                        out["ok"] = False
+                        out["error"] = (
+                            "齿轮齿顶圆实测 %.3f mm ≠ 设计 %.3f mm"
+                            "（偏差 %.3f > %.3f）—— 齿圈外径不对，"
+                            "很可能没有按齿廓建模。"
+                            % (da_actual, da, abs(da_actual - da), tol_dia_mm))
+            except Exception as _e_box:
+                out["bbox_error"] = repr(_e_box)
+            # ── 体积回读：解析齿廓面积 × 齿宽（减中心孔）vs 实体 ──────────
+            if profile_area_mm2 is not None and float(profile_area_mm2) > 0:
+                exp_vol = float(profile_area_mm2) * b
+                if bore_dia_mm and float(bore_dia_mm) > 0:
+                    exp_vol -= _math.pi * (float(bore_dia_mm) / 2.0) ** 2 * b
+                out["profile_area_mm2"] = round(float(profile_area_mm2), 3)
+                out["expected_volume_mm3"] = round(exp_vol, 2)
+                try:
+                    _av = self._body_volume_mm3()
+                    act_vol = float(_av) if _av is not None else None
+                    if act_vol is None:
+                        out["volume_note"] = "实体体积回读为空，未做体积断言"
+                    else:
+                        out["actual_volume_mm3"] = round(act_vol, 2)
+                        if exp_vol > 1e-9:
+                            dev = abs(act_vol - exp_vol) / exp_vol * 100.0
+                            out["volume_dev_pct"] = round(dev, 3)
+                            if dev > tol_vol_pct:
+                                out["ok"] = False
+                                out["error"] = (
+                                    "齿轮体积实测 %.1f mm³ ≠ 齿廓解析值 %.1f mm³"
+                                    "（偏差 %.2f%% > %.2f%%）—— 齿形没有真正生成，"
+                                    "或齿数/模数与设计不符。"
+                                    % (act_vol, exp_vol, dev, tol_vol_pct))
+                except Exception as _e_vol:
+                    out["volume_error"] = repr(_e_vol)
+            out["helix_angle_deg"] = 0.0
+            out["note"] = ("本断言证明'齿圈几何与解析齿廓一致'；"
+                           "斜齿螺旋角需用 sweep/loft 另外实现，当前 gear() 为直齿。")
+        except Exception as e:
+            out["ok"] = False
+            out["error"] = "齿轮几何回读校验异常: %r" % (e,)
+        return out
 
     def _bore_by_revolve(self, dia_mm, depth_mm, plane="Top Plane"):
         """【Bug-42 修复】用 revolve 切中心孔（避开 cut 方向不可控的问题）。"""
@@ -10477,8 +11586,30 @@ class SWModel:
             except Exception as e:
                 return None, "无此方法: %r" % (e,)
             try:
-                f = fn(*args)
+                # ── 【D4 修复】COM 忙/被拒时退避重试 ──────────────────────
+                # 用户正在操作 SW（点窗口/弹保存框）会让 FeatureCut 抛
+                #   RPC_E_CALL_REJECTED。旧行为是记一条"调用异常"就换签名，
+                #   最后整条链失败 → 小屋改脚本重跑。现在先在原地退避重试。
+                # 注意：重试前必须【重建选择】（FeatureCut 每次执行都会
+                #   消耗选择集），所以这里把重选放进重试闭包内。
+                def _call_cut(_fn=fn, _args=args, _sig=sig_name):
+                    try:
+                        _ok2, _info2 = self._ensure_cut_profile_selected()
+                        if not _ok2:
+                            raise RuntimeError(
+                                "CONTOUR_NOT_SELECTED: %s" % (_info2,))
+                    except RuntimeError:
+                        raise
+                    except Exception:
+                        pass
+                    return _fn(*_args)
+
+                f = com_retry(_call_cut,
+                              _what="%s(切除)" % sig_name,
+                              _log=self.warnings.append)
             except Exception as e:
+                if str(e).startswith("CONTOUR_NOT_SELECTED:"):
+                    return None, "轮廓未选中(%s)" % (str(e).split(":", 1)[1].strip(),)
                 return None, "调用异常: %r" % (e,)
             if f is None:
                 # 【R5 修复】返回 None 必须显式报错，且给可操作原因。

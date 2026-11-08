@@ -6431,6 +6431,23 @@ def _main_body():
         # 现在三道门禁统一：帮助=0，用法错误=2，业务失败=1。
         sys.exit(0)
     cmd = sys.argv[1].lower()
+    # ══ 【P2/S2 修复】全局停机开关：编排命令入口检查（_stop.py）══════════
+    # 回溯报告 §7 P2：停止令下达后，子代理仍可能跑 init/provide_context/select
+    #   等编排命令，把门禁状态继续往前推。这里与 mode_gate / sw_bridge 同源拦截。
+    # 只放行只读与恢复类命令，避免"停机后连状态都看不了"。
+    try:
+        import _stop as _stop_mod
+        _stop_hit = _stop_mod.guard(cmd, allow={
+            "status", "check", "help", "-h", "--help",
+            "resume", "stop-all", "stop",
+        })
+        if _stop_hit:
+            print(json.dumps(_stop_hit, ensure_ascii=False, indent=2))
+            sys.exit(4)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
     if cmd == "init":
         print(json.dumps(cmd_init(sys.argv[2]) if len(sys.argv) > 2 else {"ok":False,"error":"need task"}, ensure_ascii=False, indent=2))
     elif cmd == "provide_context":

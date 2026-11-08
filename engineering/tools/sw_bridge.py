@@ -2473,6 +2473,239 @@ def _verify_export_artifact(path, before=None, min_bytes=1, kind="", hint=""):
         return out
 
 
+def _flag_present(args, name):
+    """args 里是否有该开关（支持 --flag 与 --flag=value 两种写法）。"""
+    for a in (args or []):
+        s = str(a)
+        if s == name or s.startswith(name + "="):
+            return True
+    return False
+
+
+def _check_part_reuse_before_run(script_path, room=None, extra_args=None):
+    """【P3 修复】建模前查重：这个零件的脚本是否【已经成功产出过】同规格零件。
+
+    现场（回溯报告 §7 P3）：同一零件 4 版脚本反复重建，每版都全量重跑；
+      下箱体还出现两套脚本各建一次。根因是没有"已完成零件台账"这一层。
+
+    判据（复用 part_registry.check_reusable，缺一不可）：
+      ① 脚本声明的产物文件名能解析出来；
+      ② 台账里有这件，且台账记录的 file 真实存在且非空；
+      ③ 尺寸/包围盒可比对【且一致】。
+    → 三者齐备才 skip_modeling=True（跳过重建，直接复用）。
+      任一不满足 → 不跳过（正常建模），并把原因写进 why。
+
+    Returns:
+        None（无法判断/无需拦截）或 dict：
+          {ok, gate:"PART_ALREADY_BUILT", skip_modeling, verdict, part,
+           why, action, check}
+    """
+    try:
+        import part_registry as _pr
+    except Exception:
+        return None
+    # ① 从脚本里解析产物文件名（复用既有的产物路径解析，口径一致）
+    try:
+        _out = _extract_output_paths(script_path) or []
+    except Exception:
+        _out = []
+    if not _out:
+        return None
+    try:
+        # 候选名要同时生成【带前缀】与【去前缀】两种写法：
+        #   脚本产物常叫 DSH_大齿轮.SLDPRT（§0.1 命名约定强制 DSH_ 前缀），
+        #   而台账里登记的是概念名"大齿轮"。只按一种写法查 → 永远查不到，
+        #   查重名存实亡（本闸门首次联调就是这样静默失效的）。
+        _names = []
+        for _p in _out:
+            _b = os.path.splitext(os.path.basename(str(_p)))[0]
+            if not _b:
+                continue
+            _cands = [_b]
+            for _pfx in ("DSH_", "dsh_", "Dsh_"):
+                if _b.startswith(_pfx) and len(_b) > len(_pfx):
+                    _cands.append(_b[len(_pfx):])
+            # 去掉常见的版本后缀（_v2/_v3/（2））再试一次
+            for _c in list(_cands):
+                _base = _c
+                for _sfx in ("_v2", "_v3", "_v4", "_v5", "_final", "_ok"):
+                    if _base.lower().endswith(_sfx):
+                        _base = _base[: -len(_sfx)]
+                        break
+                if _base and _base not in _cands:
+                    _cands.append(_base)
+            for _c in _cands:
+                if _c and _c not in _names:
+                    _names.append(_c)
+        if not _names:
+            return None
+    except Exception:
+        return None
+    _hits = []
+    _unknown = []
+    for _n in _names:
+        try:
+            # ── 【P3 关键】必须提供可比对的基准，否则 check_reusable 只会
+            #   返回 verdict=unknown（"有该零件但没有可比字段"），而 unknown
+            #   【绝不能】被当成"已建好"（那正是 P5 那条"不可用被折叠成通过"
+            #   的同一条机理）。这里分两步：
+            #     ① 先不带基准查一次，确认台账里有这件且文件真在磁盘上；
+            #     ② 用【脚本声明的产物路径】回读磁盘文件尺寸作为基准再查一次。
+            _r0 = _pr.check_reusable(_n)
+        except Exception:
+            continue
+        if _r0.get("verdict") == "new":
+            continue
+        # 台账里有该零件：用它登记的 file 拿真实文件大小/存在性做二次判定
+        _rec_file = None
+        try:
+            _rec = _r0.get("record") or {}
+            _rec_file = _rec.get("file") or None
+        except Exception:
+            _rec_file = None
+        if not _r0.get("file_exists"):
+            continue
+        _dims = None
+        try:
+            _dims = (_r0.get("record") or {}).get("dims")
+        except Exception:
+            _dims = None
+        if not _dims and _rec_file:
+            # 台账没登记尺寸 → 无法比对 → 记入 unknown，不当作已建好
+            _unknown.append({"part": _n, "why": "台账无 dims，无法比对"})
+            continue
+        try:
+            _r = _pr.check_reusable(_n, dims=_dims, file_path=_rec_file)
+        except Exception:
+            continue
+        if _r.get("verdict") == "reuse" and _r.get("skip_modeling"):
+            _hits.append(_r)
+        elif _r.get("verdict") == "unknown":
+            _unknown.append({"part": _n, "why": _r.get("why")})
+    if not _hits:
+        if _unknown:
+            return {
+                "ok": True,
+                "gate": "PART_REUSE_UNKNOWN",
+                "skip_modeling": False,
+                "blocked": False,
+                "verdict": "unknown",
+                "room": room,
+                "script": script_path,
+                "unknown": _unknown,
+                "why": ("台账里有同名零件，但【缺少可比对字段】，"
+                        "结论为 unknown —— 按报告 §15 判据，"
+                        "unknown 不得当作『已建好』，因此仍正常建模。"),
+                "action": ("若确认要复用旧件 → 先把尺寸登记进台账"
+                           "（part_registry update-part --dims ...），"
+                           "下次 run 即可自动跳过重建。"),
+            }
+        return None
+    _first = _hits[0]
+    return {
+        "ok": True,
+        "gate": "PART_ALREADY_BUILT",
+        "skip_modeling": True,
+        "verdict": "reuse",
+        "room": room,
+        "parts": [h.get("part") for h in _hits],
+        "why": ("台账显示这些零件已建好且尺寸一致，"
+                "本次 run 将【不重建】，直接复用磁盘上的成品。"),
+        "action": ("如需强制重建 → 给 run 传 --force-rebuild；"
+                   "如需改尺寸 → 先 update-part 改台账再建，"
+                   "否则重建出来的仍是旧规格。"),
+        "check": _first,
+        "script": script_path,
+    }
+
+
+def _snapshot_open_docs(sw):
+    """【D3 修复】快照当前已打开文档：{小写绝对路径: 标题}。
+
+    官方语义依据（ISldWorks API Help）：
+      · GetDocuments() 返回本次 SW 会话里已打开文档的数组；
+      · IModelDoc2::GetPathName() 对未保存文档返回空串；
+      · IModelDoc2::GetTitle() 受"是否显示扩展名"设置影响（Part1.sldprt / Part1）。
+    因此键统一用【小写绝对路径】，未保存文档用 title 补一个 "untitled::" 前缀，
+    保证基线/复测两侧口径一致。
+    连接或遍历失败返回 None（调用方据此跳过对比，绝不误报）。
+    """
+    if sw is None:
+        return None
+    out = {}
+    try:
+        docs = sw.GetDocuments()
+        try:
+            docs = list(docs) if docs is not None else []
+        except TypeError:
+            docs = [docs] if docs is not None else []
+    except Exception:
+        return None
+    for d in docs:
+        try:
+            p = d.GetPathName()
+            p = p() if callable(p) else p
+            t = d.GetTitle()
+            t = t() if callable(t) else t
+        except Exception:
+            continue
+        key = ""
+        if p:
+            try:
+                key = os.path.normcase(os.path.abspath(str(p)))
+            except Exception:
+                key = str(p).lower()
+        elif t:
+            key = "untitled::" + str(t).strip().lower()
+        if key:
+            out[key] = str(t or p or key)
+    return out
+
+
+def _cross_room_doc_violation(baseline, after, room=None, script=None):
+    """【D3 修复】对比 run 前后文档基线，找出被"误关"的【已命名】文档。
+
+    判据（只报确定的事，不猜）：
+      · 基线里是【已命名文档】（键为绝对路径，不含 untitled:: 前缀）；
+      · 该文档在 run 后【不见了】；
+      · 且它不是本次脚本自己产出的（文件名不在本次 run 的产物列表里时也算违规）。
+    → 说明建模脚本的 new_part()/close 逻辑关了别人的文档（回溯报告 §12.1）。
+
+    返回 list（可为空）；无基线时返回 None。
+    """
+    if baseline is None:
+        return None
+    try:
+        after = after if after is not None else {}
+        closed = []
+        for key, title in (baseline or {}).items():
+            if key.startswith("untitled::"):
+                continue          # 未命名文档被清掉属正常（本来就是要清的垃圾）
+            if key in after:
+                continue
+            closed.append({"path": key, "title": title})
+        if not closed:
+            return None
+        return {
+            "gate": "CROSS_ROOM_DOC_CLOSED",
+            "room": room,
+            "script": script,
+            "closed_named_docs": closed,
+            "count": len(closed),
+            "error": ("【D3】本次 run 关闭了 %d 个【已命名文档】，"
+                      "它们不属于本次建模产物 —— 典型的 ActiveDoc 串扰"
+                      "（别的房间正在编辑的文档被本脚本的 new_part/close 关掉）。"
+                      % len(closed)),
+            "hint": ("① 建模脚本应改用 swapi.from_path(sw, 路径) / "
+                     "swapi.get_model(sw, expect=路径, strict=True) 绑定显式文档；"
+                     "② 不要用 SelectByID2 之外的 ActiveDoc 语义做文档定位；"
+                     "③ new_part() 已按 A-105 只关未命名文档，若仍出现说明"
+                     "脚本里自己调了 CloseDoc/close-all。"),
+        }
+    except Exception:
+        return None
+
+
 def _verify_run_artifacts(script_path, result):
     """【C9 修复】校验脚本执行后预期产物是否存在【且非 0 字节】。
 
@@ -2703,6 +2936,8 @@ def cmd_run(sw, script_path, extra_args, room=None):
     #   与 0/1/2/3 彻底隔离；父进程侧同步按新码判定。
     _WRAPPER_EXIT_PATH_MISSING = 11
     _WRAPPER_EXIT_SHA_MISMATCH = 12
+    # 【D3 修复】跨房间文档误关的检出结果（run 前后文档基线对比得出）
+    _cross_room_violation = None
     if not os.path.exists(script_path):
         return {"ok": False, "error": f"script not found: {script_path}"}
     # ── 【本次修复·问题3】Mode 2 前置校验：装配类任务必须先开总计子代理 ──
@@ -2713,6 +2948,26 @@ def cmd_run(sw, script_path, extra_args, room=None):
         return _m2_gate
     bridge_dir = _HERE
     script_abs = os.path.abspath(script_path)
+
+    # ── 【P3 修复】同零件重复建模闸门 ─────────────────────────────────────
+    # 现场（回溯报告 §7 P3）：同一零件出现 4 版脚本反复重建
+    #   （build_room1_gear_shaft.py → _v2 → _v3 → _v4），
+    #   下箱体还出现"波1 + 串行"两套脚本。根因是【没有已完成零件台账查重】：
+    #   每次 COM 被拒/异常 → 小屋改脚本重跑 → 全量重建，旧件被覆盖。
+    # 现在：run 之前按【脚本里声明的产物文件名】去 part_registry 查重；
+    #   已建好且尺寸一致 → 返回 reused 结论，不再重建（除非 --force-rebuild）。
+    #   判据严格对齐 part_registry.check_reusable 的四条件（文件真在磁盘、
+    #   尺寸可比对且一致），"不可比对"绝不折叠成"可以通过"。
+    _p3 = _check_part_reuse_before_run(script_abs, room=room,
+                                       extra_args=extra_args)
+    if _p3 is not None:
+        if _p3.get("skip_modeling") and not _flag_present(
+                extra_args, "--force-rebuild"):
+            _p3.setdefault("command", "run")
+            _p3["skipped_script"] = script_abs
+            return _p3
+        if _p3.get("blocked"):
+            return _p3
 
     # ══ 【Bug-39 修复】wrapper 必须【每个进程唯一】，否则并行小屋互相覆盖 ══
     # 原缺陷（实测 · 并行架构下最危险的正确性问题）：
@@ -2929,6 +3184,19 @@ def cmd_run(sw, script_path, extra_args, room=None):
                 _timeout_sec = None        # 显式不限时（长任务自担风险）
             elif _timeout_sec < 60:
                 _timeout_sec = 60.0        # 下限保护
+            # ── 【D3 修复】执行前记录【文档基线】，执行后核对身份 ──────────
+            # 现场（回溯报告 §12.1）：new_part()/建模脚本依赖进程级 ActiveDoc，
+            #   多房间交错时会关掉/写到别人的文档上。这里做两件事：
+            #     ① 记录 run 前已打开的文档集合（路径→标题）；
+            #     ② run 结束后比对：若【别的房间的已命名文档消失了】，
+            #        说明本次 run 误关了他人文档 → 记入 cross_room_docs_closed。
+            # 只做【检测与留痕】，不强行回滚（回滚会引入更大风险），
+            #   但结论会透传给主对话，避免"零件凭空消失"又被当成正常。
+            _doc_baseline = None
+            try:
+                _doc_baseline = _snapshot_open_docs(sw)
+            except Exception:
+                _doc_baseline = None
             proc = subprocess.run(
                 [sys.executable, "-X", "utf8", wrapper] + list(extra_args),
                 capture_output=True, text=True, timeout=_timeout_sec,
@@ -2936,6 +3204,17 @@ def cmd_run(sw, script_path, extra_args, room=None):
                 encoding='utf-8', errors='replace',
                 env=run_env,
             )
+            # ── 【D3 修复】执行后核对文档归属 ────────────────────────────
+            try:
+                if _doc_baseline is not None:
+                    _doc_after = _snapshot_open_docs(sw)
+                    _closed = _cross_room_doc_violation(
+                        _doc_baseline, _doc_after,
+                        room=room, script=script_abs)
+                    if _closed:
+                        _cross_room_violation = _closed
+            except Exception:
+                pass
         finally:
             # 停心跳线程（无论成功/异常/超时都要停）
             try:
@@ -3367,6 +3646,11 @@ def cmd_run(sw, script_path, extra_args, room=None):
     # 修复：run 结束后，对本次磁盘上真实存在的 .sldprt 逐个做归属校验；
     #   越界即判本次 run 失败（与 save 侧同口径），并写入违规台账。
     #   注意：只在有 room 上下文时校验（串行/单房间无归属概念，保持原行为）。
+    # ── 【D3 修复】跨房间文档误关结论透传（不判失败，但必须可见）─────────
+    if _cross_room_violation:
+        result["cross_room_docs_closed"] = _cross_room_violation
+        result.setdefault("warnings_list", []).append(
+            _cross_room_violation.get("error"))
     if room and _art.get("checked"):
         try:
             import workflow_gate as _wg_own
@@ -7303,6 +7587,24 @@ def main():
                          ensure_ascii=False))
         sys.exit(2)
     cmd = args[0]
+    # ══ 【P2/S2 修复】全局停机开关：命令入口第一行检查（_stop.py）══════════
+    # 现场（减速机任务 §7 P2）：用户已下达停止令，子代理手里的下一条
+    #   sw_bridge 命令仍照常执行 → 停止后仍有建模进程在跑。根因是入口不查
+    #   "停机令牌"。现在：STOP_ALL 文件或 DSH_KILL_SWITCH=1 命中时，除
+    #   只读/清理类命令外一律返回 TASK_STOPPED 并非零退出，绝不产生建模副作用。
+    try:
+        import _stop as _stop_mod
+        _stop_hit = _stop_mod.guard(cmd, allow={
+            "status", "doctor", "self-path", "ping", "version", "sw-proc",
+            "close-all", "sw-kill", "cleanup", "check-part", "help",
+        })
+        if _stop_hit:
+            print(json.dumps(_stop_hit, ensure_ascii=False, indent=2))
+            sys.exit(4)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
     # Bug-26: 路径解析——任何位置调用均可自动定位本脚本
     _SW_BRIDGE_SELF = os.path.abspath(__file__)
     # ── SW 互斥锁: 并行小屋在此自动排队（串行/单房间直接通过）──

@@ -2517,6 +2517,20 @@ def _build_parser():
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    # ══ 【P2/S2 修复】全局停机开关：在参数解析【之前】检查（_stop.py）══════
+    # 减速机任务 §7 P2：停止令下达后，看图闭环仍会执行。仅放行只读的
+    #   report / verify（事后取证），capture / loop / gate 一律拒绝。
+    # 放在 parse_args 之前，避免 --help / 坏参数把停机闸门绕过。
+    try:
+        import _stop as _stop_mod
+        _cmd0 = (argv[0].strip().lower() if argv else "")
+        _hit = _stop_mod.guard(
+            _cmd0, allow={"report", "verify", "-h", "--help", "help"})
+        if _hit:
+            emit(_hit)
+            return 4
+    except Exception:
+        pass
     parser = _build_parser()
     if not argv:
         parser.print_help()
