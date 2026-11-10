@@ -559,6 +559,84 @@ if _i_x >= 0:
           "cross_standard_rejected" in _seg, _seg[:400])
 
 # ══════════════════════════════════════════════════════════════════════
+sec("J. 【R3】先验后写 + 被拒回滚：零件不能被试错写入改脏")
+# ══════════════════════════════════════════════════════════════════════
+# 现场（2026-11-10 复检 · probe_material_readback.json）：
+#   请求 40Cr，SW 库无 GB 牌号 → 候选链里的 DIN 1.2083/1.2311/1.2312
+#   被【逐个真实写入】、读回不符后再 continue —— SW 不会自动恢复，
+#   零件最终停在被拒的 1.2312 上（属性栏一个"精确得像真的"错误牌号）。
+# 修复：① 名字不符/跨标准的候选【先验后写】（根本不下笔）；
+#       ② 写入后被判拒 → 立即回滚到写入前的材质。
+
+class FakeLibDoc(FakeMaterialDoc):
+    """SetMaterialPropertyName2 只接受库内真实存在的名字（SW 语义）。"""
+
+    def __init__(self, lib_names, actual="普通碳钢", **kw):
+        FakeMaterialDoc.__init__(self, **kw)
+        self._lib = set(lib_names)
+        self._actual = actual
+
+    def SetMaterialPropertyName2(self, cfg, db, name):
+        self.write_calls.append((cfg, db, name))
+        if name in self._lib:
+            self._actual = name
+        return None
+
+
+_real_lm = swapi.list_materials
+try:
+    _FAKE_LIB = {
+        "SolidWorks Materials": ["普通碳钢", "AISI 1020"],
+        "SolidWorks DIN Materials": ["1.2083 (X40Cr14)", "1.2311 (40CrMnMo7)",
+                                     "1.2312 (40CrMnMoS8-6)"],
+    }
+    swapi.list_materials = lambda db="", force=False: list(_FAKE_LIB.get(str(db), []))
+
+    # J1：请求 40Cr（GB），SW 库只有 DIN → 一次都不许写入
+    _docJ = FakeLibDoc(_FAKE_LIB["SolidWorks DIN Materials"], actual="普通碳钢")
+    _mJ = make_swmodel(_docJ)
+    _resJ = _mJ.set_material("40Cr")
+    check("★ J1 请求 40Cr → ok=False（库内无精确匹配）",
+          _resJ.get("ok") is False, (_resJ.get("ok"), _resJ.get("method")))
+    _w_names = [w[2] for w in _docJ.write_calls]
+    check("★★ J1 不写入任何【看名字像】的错误候选（无 1.2083/1.2311/1.2312）",
+          not any(("1.20" in n) or ("1.23" in n) for n in _w_names), _w_names)
+    check("★ J1 写入尝试只允许请求名本身（SW 库无此名=写不进去，无害）",
+          all(n in ("40Cr", "普通碳钢") for n in _w_names), _w_names)
+    check("★ J1 零件材质保持原样（不是 1.2312）",
+          _docJ.GetMaterialPropertyName2() == "普通碳钢",
+          _docJ.GetMaterialPropertyName2())
+    check("★ J1 prefilter_rejected 审计明细存在",
+          bool(_resJ.get("prefilter_rejected")), _resJ.get("prefilter_rejected"))
+    check("★ J1 material_left_unchanged=True",
+          _resJ.get("material_left_unchanged") is True,
+          _resJ.get("material_left_unchanged"))
+
+    # J2：静默替换（写 Q235 实际变成 AISI 1020）→ 读回拒后必须回滚
+    _docJ2 = FakeLibDoc(["Q235"], actual="普通碳钢")
+    class _SwapDoc(FakeLibDoc):
+        def SetMaterialPropertyName2(self, cfg, db, name):
+            self.write_calls.append((cfg, db, name))
+            if name == "Q235":
+                self._actual = "AISI 1020"      # SW 静默换成美标
+            else:
+                self._actual = name             # 其它名字（含回滚）正常生效
+            return None
+    _docJ2 = _SwapDoc(["Q235"], actual="普通碳钢")
+    _mJ2 = make_swmodel(_docJ2)
+    _resJ2 = _mJ2.set_material("Q235")
+    check("★ J2 静默替换 → ok=False", _resJ2.get("ok") is False, _resJ2.get("ok"))
+    check("★★ J2 被拒后回滚到写入前材质（不是 AISI 1020）",
+          _docJ2._actual == "普通碳钢", _docJ2._actual)
+    check("★ J2 回滚留痕 material_restore_log",
+          bool(_resJ2.get("material_restore_log")), _resJ2.get("material_restore_log"))
+    check("★ J2 restored_material.ok=True",
+          (_resJ2.get("restored_material") or {}).get("ok") is True,
+          _resJ2.get("restored_material"))
+finally:
+    swapi.list_materials = _real_lm
+
+# ══════════════════════════════════════════════════════════════════════
 sec("I. 材质写入失败路径：三类原因都要可读")
 # ══════════════════════════════════════════════════════════════════════
 _m = make_swmodel(FakeMaterialDoc(mode="silent_swap"))

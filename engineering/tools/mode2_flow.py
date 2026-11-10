@@ -2670,15 +2670,75 @@ def record_prime_report(report, work_dir=None):
         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "ts": time.time(),
     }
+    # == 【v2 回归复测 S3 修复】回执制：每次上报都发一个 receipt_id ==
+    # 报告 v2 第8节：「record_prime_report 仍只写 plan["prime_reports"]，
+    #   无 receipt id；全 tools 搜 receipt/回执 仅 webots 无关字段。判定：未修。」
+    #
+    # 为什么必须有回执：报告 §15.2 S3 的判据是
+    #   「每个零件有总理回执 id；无回执的零件不计入完成」。
+    #   没有 receipt_id 时，"上报过"与"没上报过"只能靠数组长度猜，
+    #   重复上报覆盖后更无从追溯是哪一次被采纳 —— 完成度就无法机器判定。
+    #
+    # 设计：
+    #   · receipt_id 由 (part_name + room + 落盘文件 + 尺寸摘要) 派生，
+    #     同一零件同内容重复上报 → 同一个 id（幂等，便于去重）；
+    #     内容变了（重做后尺寸不同）→ 新 id（可追踪是新一版）。
+    #   · 同时写进 plan["prime_receipts"] 作为【只增不减】的回执台账。
+    import hashlib as _hl_rr
+    _seed = json.dumps({
+        "part_name": rec.get("part_name"),
+        "room": rec.get("room"),
+        "file": rec.get("file"),
+        "dims": rec.get("dims"),
+    }, ensure_ascii=False, sort_keys=True)
+    rec["receipt_id"] = "PR-" + _hl_rr.sha256(
+        _seed.encode("utf-8")).hexdigest()[:16].upper()
+
     # 同一零件重复上报 → 覆盖（保留最新），保证总理看到的是终态
     lst = [x for x in plan.get("prime_reports", [])
            if not (isinstance(x, dict) and x.get("part_name") == rec["part_name"])]
     lst.append(rec)
     plan["prime_reports"] = lst
+    # 回执台账：只追加不去重抹掉历史（同一 receipt_id 只记一次）
+    _rc = plan.get("prime_receipts")
+    if not isinstance(_rc, list):
+        _rc = []
+    if not any(isinstance(x, dict) and x.get("receipt_id") == rec["receipt_id"]
+               for x in _rc):
+        _rc.append({"receipt_id": rec["receipt_id"],
+                    "part_name": rec["part_name"], "room": rec["room"],
+                    "file": rec["file"], "at": rec["at"], "ts": rec["ts"]})
+    plan["prime_receipts"] = _rc
     save_plan(plan, work_dir)
     return {"ok": True, "part_name": rec["part_name"],
+            "receipt_id": rec["receipt_id"],
             "total_reports": len(lst),
-            "note": "已登记到总理子代理台账。"}
+            "total_receipts": len(_rc),
+            "note": ("已登记到总理子代理台账，回执号 %s。"
+                     "无回执的零件不计入完成。" % rec["receipt_id"])}
+
+
+def prime_receipts(work_dir=None):
+    """列出全部总理回执（S3 回执制）。无回执的零件不计入完成。"""
+    plan = load_plan(work_dir)
+    if plan.get("_load_error"):
+        return {"ok": False, "error": plan["_load_error"]}
+    _rc = plan.get("prime_receipts") or []
+    return {"ok": True, "count": len(_rc), "receipts": _rc}
+
+
+def check_part_receipted(part_name, work_dir=None):
+    """某零件是否已有回执（判"能否计入完成"的唯一依据）。"""
+    _n = str(part_name or "").strip()
+    if not _n:
+        return {"ok": False, "error": "缺少零件名"}
+    r = prime_receipts(work_dir)
+    if not r.get("ok"):
+        return r
+    hits = [x for x in r["receipts"] if str(x.get("part_name")) == _n]
+    return {"ok": True, "part": _n, "receipted": bool(hits),
+            "receipt_id": (hits[-1].get("receipt_id") if hits else None),
+            "count": len(hits)}
 
 
 def prime_reports(work_dir=None):

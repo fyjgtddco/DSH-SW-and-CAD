@@ -4366,6 +4366,119 @@ def _attach_origin_record(model_obj, target, out):
     return out
 
 
+# ======================================================================
+# 【P1-⑥ 修复】朝向声明 <零件>.SLDPRT.pr.json —— 保存后【强制】落盘
+# ======================================================================
+# 现场（回溯报告 7 P1 / 12.1）：
+#   小屋只能靠试错发现 "Top Plane 草图局部 y = 世界 -Z"、"cut() 默认切向 -Y"；
+#   零件建完只 save() 出 .SLDPRT，【没有任何朝向声明】；
+#   总装时无从断言"这个零件摆正了没有" —— 组件零旋转、坐标也对得上，
+#   但零件本身就是躺着的。
+# 测试员核查结论（核查报告 二 P1 / 三 第 6 行）：
+#   「未找到：没有 pr.json 相关代码」—— 当时只写在 SKILL.md 与提示词里。
+# 用户原则：「所有约束都要写在代码里强制执行，不能只写在提示词」。
+#
+# 因此：save() 与 save_as() 在【材料凭据 / origin 记录】之后，
+#   再落一份 pr.json。三者同基同目录，装配侧可直接读。
+#
+# 注意：写声明【绝不改变保存结果】—— 任何异常只记 warning（与 origin 同一纪律），
+#   否则"写声明失败"会把一个已经成功落盘的零件判成失败。
+def _attach_pr_record(model_obj, target, out):
+    """保存后写 <零件>.SLDPRT.pr.json（幂等；失败不阻断）。
+
+    取值优先级：
+      (1) 建模脚本显式声明的 self.set_part_pose(...) -> source="explicit"；
+      (2) 都没声明 -> 按全局约定（up=Z,+1）推断，但 source="inferred" 如实标注，
+          总装断言遇到 inferred 会降级为 WARNING（不假装它被确认过）。
+    bbox_mm 一并记上，供日后 validate_pr_record 做"声明 vs 几何"自洽检查。
+    """
+    try:
+        import part_pose as _pp
+    except Exception as e:
+        try:
+            out["pr_record"] = {"ok": False, "error": "part_pose 不可用: %r" % (e,)}
+        except Exception:
+            pass
+        return out
+    # 装配体不写朝向声明（与材料凭据同一判据：朝向声明是零件级的）
+    try:
+        if os.path.splitext(str(target))[1].lower() in (".sldasm",):
+            out["pr_record"] = {"skipped": "assembly",
+                                "note": "装配体不承载零件级朝向声明"}
+            return out
+    except Exception:
+        pass
+    try:
+        _decl = getattr(model_obj, "_part_pose", None) or {}
+        # 回读几何之前先确认"当前文档确实绑定在 target 上"。
+        # 实测依据（SW2025 rev 33.5）：SaveAs3 用 Options=2(Copy) 时
+        #   GetPathName 会是空串，文档并未绑到新路径；此时 body_box_mm()
+        #   读到的是【另一个文档】的包围盒，写进 pr.json 就是错的证据。
+        # 这里做一次核对：路径不一致就【不写 bbox】，并在返回里标明原因，
+        #   宁可少一个字段，也不写一条错的几何。
+        _path_ok = True
+        _path_note = None
+        try:
+            _mdl = getattr(model_obj, "model", None)
+            _gp = None
+            if _mdl is not None:
+                _gp = getattr(_mdl, "GetPathName", None)
+                if callable(_gp):
+                    _gp = _gp()
+            if _gp is not None and str(_gp).strip():
+                if os.path.normcase(os.path.abspath(str(_gp))) != \
+                        os.path.normcase(os.path.abspath(str(target))):
+                    _path_ok = False
+                    _path_note = ("当前文档绑定路径(%s)与目标(%s)不一致，"
+                                  "已跳过 bbox 回读以免写入别人的几何"
+                                  % (_gp, target))
+            # GetPathName 为空：说明文档未绑定（如用了 Copy 选项）-> 同样不采信
+            elif _mdl is not None and _gp is not None:
+                _path_ok = False
+                _path_note = ("当前文档 GetPathName 为空（很可能用了 "
+                              "SaveAsOptions_Copy=2），已跳过 bbox 回读")
+        except Exception as _e_p:
+            _path_note = "路径核对异常（不阻断）: %r" % (_e_p,)
+        _bbox = None
+        if _path_ok:
+            try:
+                _bbox = model_obj.body_box_mm()
+            except Exception:
+                _bbox = None
+        _res = _pp.write_pr_record(
+            target,
+            up_axis=_decl.get("up_axis"),
+            up_sign=_decl.get("up_sign", 1),
+            main_axis=_decl.get("main_axis"),
+            base_plane=_decl.get("base_plane"),
+            sketch_y_sign=_decl.get("sketch_y_sign"),
+            bbox_mm=_bbox,
+            source=("explicit" if _decl else "inferred"),
+            note=_decl.get("note"))
+        out["pr_record"] = {
+            "ok": bool(_res.get("ok")),
+            "file": _res.get("path"),
+            "source": (_res.get("record") or {}).get("source"),
+            "inferred": bool(_res.get("inferred")),
+            "bbox_read": bool(_path_ok),
+            "error": _res.get("error"),
+        }
+        if _path_note:
+            out["pr_record"]["path_note"] = _path_note
+        if not _res.get("ok"):
+            try:
+                model_obj._warn("写 pr.json 朝向声明失败（不阻断保存）: %s"
+                                % _res.get("error"))
+            except Exception:
+                pass
+    except Exception as e:
+        try:
+            out["pr_record"] = {"ok": False, "error": repr(e)}
+        except Exception:
+            pass
+    return out
+
+
 @contextlib.contextmanager
 def batch_mode(sw, label="建模批处理"):
     """【D4 配套】把一串 API 调用包进 ISldWorks::CommandInProgress。
@@ -4424,6 +4537,13 @@ def _stop_guard(action=""):
         raise
     except Exception:
         pass
+
+
+# == 【v2 回归复测 12.1】本进程创建过的【未命名】文档标题 ================
+# 用途见 new_part() 里的"文档身份锁"：只有自己建的未命名文档才允许关。
+# 这是一个进程级集合（同一 python 进程内有效）——正是需要的粒度：
+#   跨房间的隔离靠的是【不同 python 进程】，同进程内的新建归自己。
+_MY_UNNAMED_DOCS = set()
 
 
 def new_part(sw=None, material=None, density=None):
@@ -4488,6 +4608,20 @@ def new_part(sw=None, material=None, density=None):
             # 已命名的文档属于别的房间/别的轮次 —— 保留，不再往下关
             _kept.append(_title or _path)
             break
+        # == 【v2 回归复测 12.1 修复】未命名文档也要看【持有者是谁】=====
+        # 复测报告 v2 第5节现场：
+        #   B 的 new_part 对 A 的【未命名】文档调 CloseDoc，抛
+        #   AttributeError('<unknown>.CloseDoc')（被吞掉，只告警）。
+        #   A 这次侥幸保存成功，但结构上仍可能关掉别房间未保存的 doc。
+        # 判据：只有【本进程自己创建】的未命名文档才可以关。
+        #   怎么判断"是不是我建的"：
+        #     · 本模块在本进程里记了一个 _MY_UNNAMED_DOCS 集合（见下），
+        #       NewDocument 成功后把标题登记进去；
+        #     · 不在集合里 = 别人建的（可能是另一个房间正在建模的半成品）
+        #       -> 绝不关，记入 _kept 让调用方知道。
+        if _title and _title not in _MY_UNNAMED_DOCS:
+            _kept.append(_title + "（未命名但非本进程创建）")
+            break
         if not _title:
             # ── 【D3 修复】取不到标题就绝不用 "" 调 CloseDoc ──────────────
             # 官方语义：CloseDoc("") = 关掉【当前活动文档】。并发时会关错人。
@@ -4517,6 +4651,16 @@ def new_part(sw=None, material=None, density=None):
     if model is None:
         raise RuntimeError("NewDocument returned None")
     m = SWModel(sw, model)
+    # == 【v2 回归复测 12.1】把自己建的未命名文档登记下来 ==
+    # 这样后续 new_part 的清理循环只关【自己的】未命名文档，
+    # 不会误关别的房间正在建模的半成品（跨进程时集合为空 = 一律不关）。
+    try:
+        _t_new = getattr(model, "GetTitle", None)
+        _t_new = (_t_new() if callable(_t_new) else _t_new) or ""
+        if _t_new:
+            _MY_UNNAMED_DOCS.add(str(_t_new))
+    except Exception:
+        pass
     # ══ 【Bug-40 修复】新零件必须从干净的基准面上下文起步 ═════════════
     # 多零件单脚本场景下，上一个零件的面/草图 COM 上下文会残留在 SW
     #   进程里，导致本零件的第一次 begin_sketch 落到旧面、或首次 cut 失败
@@ -5681,8 +5825,23 @@ class SWModel:
             _mat_warn = "材质兜底赋值异常: %r" % (e,)
         before = _fingerprint(target)
         rc = None
+        # == 【P1-6 关键·本机实测修正】SaveAs3 的 Options 必须用 1(Silent) ==
+        # 子代理在 SW2025 rev 33.5.0.53 上实测四组 Options：
+        #   Options=2（swSaveAsOptions_Copy）：rc=0、文件确实落盘，
+        #     但 model.GetPathName 保持空串、GetTitle 仍是"零件N"
+        #     -- 文档并没有绑定到新路径，后续任何"按路径回读"都会错位；
+        #   Options=0/1/4：GetPathName 正常更新。
+        #
+        # 为什么这对本模块是致命的（不是洁癖）：
+        #   save() 成功之后紧接着要写 .material.json / .origin.json /
+        #   .pr.json 三份旁挂文件，还要调 body_box_mm() 回读真实几何。
+        #   若文档没绑定到 target，self.path 仍指向旧位置 --
+        #   于是 pr.json 的 bbox_mm 可能取自另一个文档，
+        #   而 .pr.json 声明的 part 字段与实际几何对不上。
+        #   这类"看着写成功了、其实张冠李戴"的缺陷最难查。
+        # 因此改用 Options=1（Silent：不弹"是否覆盖"对话框，但正常绑定路径）。
         try:
-            rc = self.model.SaveAs3(target, 0, 2)
+            rc = self.model.SaveAs3(target, 0, 1)
         except Exception as e:
             return {"ok": False, "path": target, "saved": False, "updated": False,
                     "rc": rc, "error": "SaveAs3 调用异常: %r" % (e,)}
@@ -5757,7 +5916,65 @@ class SWModel:
         # ── 【Bug⑪ 修复】同一落盘路径旁写【origin 约定】记录 ───────────────
         # 与材料凭据同目录、同命名基（<part>.origin.json），装配侧可直接读。
         _attach_origin_record(self, target, _out)
+        # ── 【P1-⑥ 修复】同一落盘路径旁写【朝向声明】<part>.pr.json ────────
+        # 与 .origin.json / .material.json 同基同目录；装配侧据此做 J2/J4/J5 断言。
+        _attach_pr_record(self, target, _out)
         return _out
+
+    def set_part_pose(self, up_axis="Z", up_sign=1, main_axis=None,
+                      base_plane=None, sketch_y_sign=None, note=None):
+        """【P1-⑥】显式声明本零件的【朝向】，保存时写进 <零件>.pr.json。
+
+        为什么需要它（回溯报告 §7 P1）：小屋建零件时靠【试错】发现坐标系语义 ——
+          Top Plane 草图局部 y = 世界 -Z；cut() 默认切向 -Y（沿 +Y 要 flip=True）。
+        这些知识若只留在提示词里，换个房间就重新踩一遍。现在要求小屋在建完
+        立刻【显式声明】自己用的是哪个基准面、上方向是谁，写进 pr.json，
+        总装侧就能做 J2/J4/J5 断言。
+
+        Args:
+            up_axis:       "X"/"Y"/"Z"：装好后"上"是哪个世界轴
+            up_sign:       +1 / -1
+            main_axis:     "X"/"Y"/"Z"：主轴（回转轴 / 最长方向）；缺省=up_axis
+            base_plane:    建模时选用的基准面名（如 "Top Plane"）
+            sketch_y_sign: +1 / -1：草图局部 y 与世界轴 的符号关系（ZSIGN）
+            note:          自由说明
+
+        Returns: {ok, pose, warning?}
+        """
+        _ax = str(up_axis or "").strip().upper()
+        if _ax not in ("X", "Y", "Z"):
+            return {"ok": False,
+                    "error": "up_axis 必须是 X/Y/Z（实际 %r）" % (up_axis,)}
+        try:
+            _sg = int(up_sign)
+        except Exception:
+            _sg = 0
+        if _sg not in (1, -1):
+            return {"ok": False, "error": "up_sign 只能是 +1/-1（实际 %r）" % (up_sign,)}
+        _mx = str(main_axis or _ax).strip().upper()
+        if _mx not in ("X", "Y", "Z"):
+            return {"ok": False,
+                    "error": "main_axis 必须是 X/Y/Z（实际 %r）" % (main_axis,)}
+        _sy = None
+        if sketch_y_sign is not None:
+            try:
+                _sy = int(sketch_y_sign)
+            except Exception:
+                _sy = None
+            if _sy not in (1, -1):
+                return {"ok": False,
+                        "error": "sketch_y_sign 只能是 +1/-1"}
+        self._part_pose = {
+            "up_axis": _ax, "up_sign": _sg, "main_axis": _mx,
+            "base_plane": (str(base_plane) if base_plane else None),
+            "sketch_y_sign": _sy, "note": (str(note) if note else None),
+        }
+        out = {"ok": True, "pose": dict(self._part_pose)}
+        if not base_plane:
+            out["warning"] = ("未声明 base_plane —— 坐标系语义仍不可审计；"
+                              "建议写清楚用的是哪个基准面。")
+            self._warn(out["warning"])
+        return out
 
     def set_origin_mode(self, origin_mode, note=None):
         """【Bug⑪】显式声明本零件的 origin（原点）约定，保存时写进 .origin.json。
@@ -6441,6 +6658,42 @@ class SWModel:
         d_before = dens_now()
         result["density_before_kg_m3"] = d_before
 
+        # ── 【R3 修复】记录"写入前"的真实材质，候选被拒后回滚 ──────────────
+        # 现场（2026-11-10 复检 · probe_material_readback）：
+        #   请求 40Cr，SW 库无 GB 牌号 → 候选链里的 DIN 1.2083/1.2311/1.2312
+        #   被【逐个真实写入】，读回不符后再 continue —— 但 SW 不会自己
+        #   恢复，零件最终停在【最后一个被拒的候选】1.2312 上：
+        #   函数返回 ok=false（防线也正确 BLOCK），可 .sldprt 属性栏里
+        #   却是一个精确得像真的错误牌号，拿去加工/打印会误导人。
+        # 修复：写入前记下 before 材质；任何候选被拒 → 立即回滚到 before。
+        #   配合下面的"先验后写"，模型不会被试错弄脏。
+        _before_mat = _read_back_material(self)
+        _restore_log = []
+
+        def _restore_before_material(reason=""):
+            _nm0 = str((_before_mat or {}).get("name") or "").strip()
+            if not _nm0:
+                _restore_log.append({"reason": reason, "ok": True,
+                                     "note": "写入前无材质，保持无材质"})
+                return {"ok": True, "restored_to": None, "reason": reason}
+            _ps = _nm0.split("|")
+            _db0 = _ps[0].strip() if len(_ps) >= 2 else ""
+            _mt0 = _ps[1].strip() if len(_ps) >= 3 else _nm0
+            try:
+                _com_get(self.model, "SetMaterialPropertyName2", "", _db0, _mt0)
+                time.sleep(0.15)
+                _rb0 = _read_back_material(self)
+                _okr = _material_names_match(_rb0.get("name"), _nm0)
+                _rec = {"reason": reason, "ok": bool(_okr), "restored_to": _nm0,
+                        "readback": _rb0.get("name")}
+                _restore_log.append(_rec)
+                return _rec
+            except Exception as _e_rs:
+                _rec = {"reason": reason, "ok": False, "restored_to": _nm0,
+                        "error": repr(_e_rs)}
+                _restore_log.append(_rec)
+                return _rec
+
         # ══ 主路径：【PartDoc.SetMaterialPropertyName2("", 库名, 材料名)】 ════
         # 这是实机（SW2025 Rev 33.5.0）验证唯一真正生效的调用方式。
         # 五组材料实测全部成功，密度与材质库定义完全一致：
@@ -6449,6 +6702,24 @@ class SWModel:
         for dbn in db_names:
             for mname in names_to_try:
                 for real, level in _resolve_material_names(dbn, mname, with_level=True):
+                    # ── 【R3 修复】候选【先验后写】：名字不符/跨标准的根本不下笔 ──
+                    # 原实现"先写再验"：每个候选都会真实改变零件材质，被拒后
+                    # 也不回滚 → 最后一次候选（1.2312）留在零件里（见上）。
+                    if not _material_names_match(real, name):
+                        tried.append("候选 %r 跳过：与请求名 %r 不匹配（未写入）"
+                                     % (real, name))
+                        result.setdefault("prefilter_rejected", []).append({
+                            "candidate": real, "database": dbn,
+                            "reason": "name_mismatch"})
+                        continue
+                    _cross_std0, _std_note0 = _detect_cross_standard(name, real)
+                    if _cross_std0 and not allow_cross_standard:
+                        tried.append("候选 %r 跳过：跨标准替代（%s，未写入）"
+                                     % (real, _std_note0 or "不同标准体系"))
+                        result.setdefault("cross_standard_rejected", []).append({
+                            "candidate": real, "database": dbn,
+                            "requested": name, "note": _std_note0})
+                        continue
                     try:
                         # 【R11 修复】SetMaterialPropertyName2 是【方法】（类型库
                         #   IPartDoc L47898，3 参：ConfigName/Database/Name），
@@ -6494,6 +6765,7 @@ class SWModel:
                                 "expected_family": _fam_expected,
                                 "expected_density_kg_m3": want_density,
                             })
+                            _restore_before_material("density/family rejected: %s" % real)
                             continue      # 关键：不接受，继续试下一个候选
                         # ══ 【R9 修复 · 2026-10-31】写入后【必须读回校验】══════
                         # 台账 BUG-30/55/56：实测 33/35 件
@@ -6528,6 +6800,8 @@ class SWModel:
                                 "sw_internal": _rb_name,
                                 "method": _readback.get("method"),
                             })
+                            _restore_before_material("readback mismatch: %s -> %s"
+                                                     % (real, _rb_name))
                             continue      # 关键：读回不符，绝不判成功
                         # ══ 【R9 修复·关键】跨标准替代必须【在判成功之前】拒绝 ══
                         # 顺序极其重要：如果把这段放在 result.update(ok=True)
@@ -6554,6 +6828,7 @@ class SWModel:
                                     "requested": name,
                                     "note": _std_note,
                                 })
+                            _restore_before_material("cross-standard: %s" % real)
                             continue      # 关键：跨标准不接受，绝不判成功
                         if _dchg or mid:
                             # ── 【MA-01 修复】成功即清除"曾被拒"标志 ──────────
@@ -6672,6 +6947,13 @@ class SWModel:
                                      % (cfg, dbn, real, e))
 
         # ── 6. 全部失败：给出可执行的诊断（绝不静默）─────────────────────
+        # 【R3 修复】全部候选被拒 → 最后再确保一次回滚：零件材质必须回到
+        #   调用前的状态，绝不能停在"最后一个被拒的候选"上。
+        _last_restore = _restore_before_material("all candidates rejected")
+        result["restored_material"] = _last_restore
+        if _restore_log:
+            result["material_restore_log"] = _restore_log[-10:]
+        result["material_left_unchanged"] = bool((_last_restore or {}).get("ok"))
         result["warnings"] = tried
         _rej = result.get("rejected_candidates") or []
         _xstd = result.get("cross_standard_rejected") or []
@@ -6824,6 +7106,15 @@ class SWModel:
                     "可先用 save_custom_material() 登记，或在 SW 中手工新建该材料。")
         except Exception as _e_b15:
             tried.append("Bug15 自定义降级异常: %r" % (_e_b15,))
+        # ── 【R3 修复·收尾】自定义降级路径也可能再次写脏模型 ────────────────
+        # 它会把请求名再写一次；若 SW 又静默替换，必须回到写入前的材质，
+        # 否则"函数失败、零件属性栏却是错误牌号"仍然成立（复检现场 1.2312）。
+        if not result.get("ok"):
+            _fin = _restore_before_material("final guard")
+            result["restored_material"] = _fin
+            result["material_left_unchanged"] = bool((_fin or {}).get("ok"))
+            if _restore_log:
+                result["material_restore_log"] = _restore_log[-10:]
         self._warn("set_material: " + result["error"])
         return result
 
@@ -12360,12 +12651,47 @@ class SWModel:
             out["error"] = "offset_mm 非法"
             return out
         out["offset_mm"] = off
+        # == 【v2 回归复测 P1 修复】选基准面前先彻底清空选择 + 退草稿 ==
+        # 现场（复测报告 v2 第4.2节）：helix_gear 分段放样走到【第 4 段】
+        #   就报「基准面 'Top Plane' 选不中，无法建偏移面」。
+        # 根因：前几段留下的残留选中对象/未退干净的草图上下文，
+        #   会让 SelectByID2 选基准面失败 —— 这是本项目反复踩过的
+        #   "状态依赖型选择错乱"（swapi 里多处 WARN 就是它）。
+        #   第 1~3 段能成、第 4 段不成，正是"残留累积到某个阈值"的表现。
+        # 修复：每次建偏移面前做一次强清场，并给选面两次机会。
         try:
-            if not self.select_plane(base_plane):
-                out["error"] = "基准面 %r 选不中，无法建偏移面" % (base_plane,)
-                return out
-        except Exception as e:
-            out["error"] = "选择基准面异常: %r" % (e,)
+            self.model.ClearSelection2(True)
+        except Exception:
+            pass
+        try:
+            # 若当前仍在草图内，先退出（不合并）
+            try:
+                self.exit_sketch(merge=False)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        try:
+            self.model.ClearSelection2(True)
+        except Exception:
+            pass
+        _plane_ok = False
+        for _attempt in range(2):
+            try:
+                if self.select_plane(base_plane):
+                    _plane_ok = True
+                    break
+            except Exception as e:
+                if _attempt == 1:
+                    out["error"] = "选择基准面异常: %r" % (e,)
+                    return out
+            try:
+                self.model.ClearSelection2(True)
+            except Exception:
+                pass
+        if not _plane_ok:
+            out["error"] = ("基准面 %r 选不中，无法建偏移面"
+                            "（已清空选择并重试 2 次）" % (base_plane,))
             return out
         _CONSTRAINT_DISTANCE = 8
         try:
@@ -12424,9 +12750,33 @@ class SWModel:
                 _ok = False
         if not _ok:
             raise RuntimeError("begin_sketch_on_feature: 无法选中特征 %r" % (label,))
-        self.skm.InsertSketch(True)
-        if self.skm.ActiveSketch is None:
-            raise RuntimeError("begin_sketch_on_feature: InsertSketch 后草图未激活")
+        # == 【v2 回归复测 P1 修复】InsertSketch 后必须【重试 + 等待激活】==
+        # 现场（复测报告 v2 第4.2节，修完选面后的下一层）：
+        #   helix_gear 分段放样报
+        #   「begin_sketch_on_feature: InsertSketch 后草图未激活」
+        # 原因：InsertSketch 是异步的 —— SW 需要一点时间把草图上下文建起来；
+        #   上一段刚 extrude 完就立刻建下一段草图，很容易拿到 ActiveSketch=None。
+        #   旧实现只调一次、立刻断言，第 4 段必挂（前面的段恰好赶上）。
+        # 现在：最多试 3 轮，每轮之间短暂等待，仍未激活才报错。
+        _active = None
+        for _try in range(3):
+            try:
+                self.skm.InsertSketch(True)
+            except Exception as _e_is:
+                if _try == 2:
+                    raise RuntimeError(
+                        "begin_sketch_on_feature: InsertSketch 异常 %r" % (_e_is,))
+            try:
+                _active = self.skm.ActiveSketch
+            except Exception:
+                _active = None
+            if _active is not None:
+                break
+            # 给 SW 一点时间建上下文（实测 50~150 ms 足够）
+            time.sleep(0.15 * (_try + 1))
+        if _active is None:
+            raise RuntimeError("begin_sketch_on_feature: InsertSketch 后草图未激活"
+                               "（已重试 3 次）")
         try:
             self._finalize_new_sketch(label)
         except Exception:
@@ -15791,6 +16141,14 @@ class SWModel:
             _attach_origin_record(self, path, _out)
         except Exception as _e_org:
             _out["origin_record"] = {"ok": False, "error": repr(_e_org)}
+        # ── 【P1-⑥ 修复】朝向声明同样必须跟着【最终落盘路径】走 ────────────
+        # 与 Bug-01（材料凭据）/ Bug⑪（origin）同一类缺陷：走
+        # save() -> save_as(最终路径) 时，若只写在 save() 里，
+        # pr.json 会留在中间路径旁，装配侧在真零件旁读不到声明。
+        try:
+            _attach_pr_record(self, path, _out)
+        except Exception as _e_pr:
+            _out["pr_record"] = {"ok": False, "error": repr(_e_pr)}
         return _out
 
     # ══ 【新-5 修复】OpenDoc6 统一封装 ═══════════════════════════════════

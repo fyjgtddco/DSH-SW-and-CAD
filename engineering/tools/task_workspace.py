@@ -203,12 +203,88 @@ def tidy(work_dir, dry_run=False):
                      "凭据与报告留在原处。")}
 
 
+def _is_good_artifact(work_dir, src):
+    """目标文件是否已是「已交付 / 已 PASS / 已冻结」的好件（【N1 修复】）。
+
+    三条独立证据，任一命中即视为好件：
+      ① 冻结台账：mode_state.json 里任一房间的 frozen.files 含本路径
+         （room-end 冻结 = 已经走完防线 + 自检 + 冻结只读，绝不能再挪）；
+      ② 三段自检 PASS：work_dir/reports、零件目录、零件父目录的 reports/
+         下有 <零件>.self_check.json 且 verdict=PASS + ok=true；
+      ③ 材料凭据：<零件>.SLDPRT.material.json 存在（走过了防线①）。
+    纯读、零副作用；异常一律按"不是好件"处理（宁可保守）。
+    """
+    try:
+        _b = os.path.basename(src)
+        _stem = os.path.splitext(_b)[0]
+        if not _stem:
+            return False
+    except Exception:
+        return False
+    # ① 冻结台账
+    try:
+        import _store as _st
+        _p = _st.state_path("mode_state.json")
+        if os.path.isfile(_p):
+            with open(_p, "r", encoding="utf-8-sig") as _f:
+                _ms = json.load(_f) or {}
+            _want = os.path.normcase(os.path.abspath(src))
+            for _rn, _rv in (_ms.get("rooms") or {}).items():
+                if not isinstance(_rv, dict):
+                    continue
+                _fr = _rv.get("frozen") or {}
+                for _it in (_fr.get("files") or []):
+                    _fp = _it.get("path") if isinstance(_it, dict) else _it
+                    if _fp and os.path.normcase(
+                            os.path.abspath(str(_fp))) == _want:
+                        return True
+    except Exception:
+        pass
+    # ② 三段自检 PASS（work_dir/reports 或零件附近的 reports/）
+    _src_dir = None
+    try:
+        _src_dir = os.path.dirname(os.path.abspath(src))
+    except Exception:
+        _src_dir = None
+    for _rd in (os.path.join(work_dir, "reports"),
+                os.path.join(_src_dir, "reports") if _src_dir else None,
+                os.path.join(_src_dir, "..", "reports") if _src_dir else None,
+                os.path.join(_src_dir, "..", "..", "reports") if _src_dir else None):
+        if not _rd:
+            continue
+        _f = os.path.join(_rd, _stem + ".self_check.json")
+        try:
+            if os.path.isfile(_f):
+                with open(_f, "r", encoding="utf-8-sig") as _fh:
+                    _sc = json.load(_fh)
+                if isinstance(_sc, dict) and _sc.get("ok") and \
+                        str(_sc.get("verdict") or "").upper() == "PASS":
+                    return True
+        except Exception:
+            continue
+    # ③ 材料凭据旁挂
+    try:
+        if os.path.isfile(src + ".material.json"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def reject_part(work_dir, path, reason=""):
     """把一个【建模失败/废弃】的零件搬进 parts_rejects/（收尾会被删掉）。
 
     用户要求：「假设建模失败的文件，直接不用保存即可」。
     —— 不直接 unlink，是因为失败件本身是排障证据；放进 rejects/ 让
       收尾统一清理，同时不会污染 parts/（那是交付目录）。
+
+    ── 【N1 修复】只挪"本次新建的失败产物" ────────────────────────────
+    现场（2026-11-10 复检 P3-a）：同名二次 save 失败（旧件被 room-end
+      冻结只读 + SW 占用 → SaveAs3 静默未写），失败处理把磁盘上的
+      【好件】（首版已 PASS 自检 + 看图 + 冻结）也移进了 parts_rejects/
+      —— 完成零件被误标废弃；若收尾自动清 rejects 会连好件一起删掉。
+    现在：目标若已是好件（冻结 / 自检 PASS / 带材料凭据）→ 拒绝挪走，
+      只把"本次失败尝试"记进 rejected.json（skipped_good=True 留痕）。
     """
     out = {"ok": False, "from": path}
     try:
@@ -217,6 +293,34 @@ def reject_part(work_dir, path, reason=""):
         if not os.path.exists(src):
             out["ok"] = True
             out["note"] = "文件本就不存在，无需处理"
+            return out
+        if _is_good_artifact(work_dir, src):
+            # 好件不动 —— 本次失败产物【根本没落盘】，旧件仍是有效交付物
+            try:
+                rec = {"at": _now(), "from": src, "to": None,
+                       "reason": str(reason or ""),
+                       "skipped_good": True,
+                       "note": "目标已是已交付/已 PASS/已冻结的好件，拒绝挪入 rejects"}
+                _rp = os.path.join(d["parts_rejects"], "rejected.json")
+                os.makedirs(d["parts_rejects"], exist_ok=True)
+                lst = []
+                if os.path.exists(_rp):
+                    try:
+                        with open(_rp, "r", encoding="utf-8") as f:
+                            lst = json.load(f) or []
+                    except Exception:
+                        lst = []
+                if not isinstance(lst, list):
+                    lst = []
+                lst.append(rec)
+                with open(_rp, "w", encoding="utf-8") as f:
+                    json.dump(lst[-200:], f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            out["ok"] = True
+            out["skipped_good"] = True
+            out["note"] = ("目标是已交付/已 PASS/已冻结的好件，未挪入 "
+                           "parts_rejects（本次失败产物未落盘，旧件保留）")
             return out
         os.makedirs(d["parts_rejects"], exist_ok=True)
         dst = os.path.join(d["parts_rejects"], os.path.basename(src))

@@ -302,7 +302,40 @@ def registry_path(work_dir=None):
             return os.path.join(wd, REGISTRY_FILENAME)
         return os.path.join(wd, LOAD_CASES_DIRNAME, REGISTRY_FILENAME)
 
+    # ── 【R2 修复】默认台账必须属于【当前任务】──────────────────────────
+    # 现场（2026-11-10 复检）：不设 DSH_PART_REGISTRY 时默认落到
+    #   <tools>/load_cases/part_registry.json（上一任务的台账）→
+    #   add_part 被 C8 的 TASK_ID_MISMATCH 正确拒绝 → "run 自动登记"
+    #   即使修好 R1 也写不进去。
+    # 修法：无显式 work_dir/环境变量时，从 workflow_state.json 取本任务
+    #   work_dir，台账落到 <work_dir>/load_cases/part_registry.json
+    #   （与显式 work_dir 的口径完全一致）。取不到才回退旧默认。
+    try:
+        _wd_cur = _current_work_dir()
+        if _wd_cur and os.path.isdir(_wd_cur):
+            return os.path.join(_wd_cur, LOAD_CASES_DIRNAME, REGISTRY_FILENAME)
+    except Exception:
+        pass
     return os.path.join(BASE_DIR, LOAD_CASES_DIRNAME, REGISTRY_FILENAME)
+
+
+def _current_work_dir():
+    """从 workflow_state.json 取【本任务】交付目录（只读、失败返回 None）。
+
+    与 _current_task_id 同源（_state_candidates），只是取 work_dir 字段。
+    """
+    for p in _state_candidates(None):
+        try:
+            if not os.path.isfile(p):
+                continue
+            with open(p, "r", encoding="utf-8-sig") as f:
+                d = json.load(f) or {}
+            wd = str(d.get("work_dir") or "").strip()
+            if wd:
+                return os.path.abspath(wd)
+        except Exception:
+            continue
+    return None
 
 
 def _fresh_registry():

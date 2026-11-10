@@ -101,7 +101,14 @@ def main():
         check("没有 pid 文件时 _sw_guard_alive() 返回 None",
               mg._sw_guard_alive() is None)
 
-        r1 = mg.ensure_sw_guard()
+        # ── 【真机实测·测试隔离】必须把阈值抬到"本机永远达不到"再测 ──────
+        # 现场：本机常驻内存 ~89%，而默认阈值 85% -> 看护第 1 个 tick 就
+        #   触发告警并 taskkill；若恰好 SW 在跑（前面用例留下的），
+        #   进程会走"真杀"分支。这条用例要验的是【幂等与存活】，
+        #   不该被本机真实内存水位与 SW 是否在跑来决定成败。
+        # 因此这里显式给一个不可能触发的阈值（cpu=1000/mem=1000），
+        #   让看护只做采样、绝不击杀，被测的性质才唯一。
+        r1 = mg.ensure_sw_guard(cpu_limit=1000.0, mem_limit=1000.0)
         check("首次 ensure_sw_guard 应真的启动（started=True）",
               r1.get("ok") and r1.get("started") is True, r1)
         _pid1 = r1.get("pid")
@@ -115,14 +122,14 @@ def main():
               mg._sw_guard_alive() == _pid1,
               "alive=%s expect=%s" % (mg._sw_guard_alive(), _pid1))
 
-        r2 = mg.ensure_sw_guard()
+        r2 = mg.ensure_sw_guard(cpu_limit=1000.0, mem_limit=1000.0)
         check("★ 第二次 ensure_sw_guard 必须 already_running=True（幂等）",
               r2.get("already_running") is True, r2)
         check("★ 第二次不得再启动新进程", r2.get("started") is False, r2)
         check("两次返回同一个 pid（没有泄漏进程）",
               r2.get("pid") == _pid1, "r1=%s r2=%s" % (_pid1, r2.get("pid")))
 
-        r3 = mg.ensure_sw_guard()
+        r3 = mg.ensure_sw_guard(cpu_limit=1000.0, mem_limit=1000.0)
         check("第三次仍幂等", r3.get("already_running") is True and
               r3.get("pid") == _pid1, r3)
 

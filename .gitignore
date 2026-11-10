@@ -94,3 +94,30 @@ _tmp_*/
 _*.txt
 _*.log
 *.tmp
+
+# ── 补充（2026-11-10）──────────────────────────────────────────────────
+# 以下文件历史上被误提交过，现已 git rm --cached；
+# 规则在这里补全，防止再次混入。
+engineering/tools/defense_bypass.json
+engineering/tools/violations.json
+engineering/tools/guard.json
+engineering/tools/persona.json
+engineering/tools/design_params.json
+engineering/tools/platform_status.json
+engineering/tools/build_windows.json
+engineering/tools/cmd_idempotency.json
+engineering/tools/compaction_engine.json
+engineering/tools/compaction_facts.json
+engineering/tools/concurrent_build_violations.json
+engineering/tools/sw_guard.log
+engineering/tools/sw_guard.pid
+engineering/tools/archive/
+engineering/tools/physics_runs/
+engineering/tools/mode_logs/
+engineering/tools/tmp/
+_dsh_*
+_prune_plan.json
+solidworks_live.png
+unnamed_*.png
+test_model_*.mjs
+test_model_chain.py

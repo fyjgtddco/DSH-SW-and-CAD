@@ -324,7 +324,7 @@ def _find_acad_exe():
                 ["powershell", "-NoProfile", "-Command",
                  "(Get-Process acad,acadlt -ErrorAction SilentlyContinue | "
                  "Select-Object -First 1).Path"],
-                capture_output=True, text=True, timeout=20)
+                capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=20)
             _p = (out.stdout or "").strip()
             if _p and _p.lower().endswith(".exe") and os.path.isfile(_p):
                 found = os.path.abspath(_p)
@@ -524,7 +524,7 @@ def _sw_process_list():
         o = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq SLDWORKS.EXE",
              "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=15)
         txt = (o.stdout or "").strip()
         if "SLDWORKS.EXE" in txt.upper():
             import csv
@@ -554,7 +554,7 @@ def _sw_process_list():
             ["powershell", "-NoProfile", "-Command",
              "Get-Process sldworks -ErrorAction SilentlyContinue | "
              "Select-Object Id,ProcessName | ConvertTo-Json -Compress"],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=20)
         txt = (o.stdout or "").strip()
         if txt:
             data = json.loads(txt)
@@ -674,7 +674,7 @@ def _acad_process_list():
     try:
         o = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq acad.exe", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=15)
         txt = (o.stdout or "").strip()
         if "acad.exe" in txt.lower():
             import csv
@@ -765,7 +765,7 @@ def _tasklist_match(keywords):
         import subprocess
         out = subprocess.run(
             ["tasklist", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=20,
             creationflags=(0x08000000 if sys.platform == "win32" else 0))
         for line in (out.stdout or "").splitlines():
             _l = line.strip()

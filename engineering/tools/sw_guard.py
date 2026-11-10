@@ -708,6 +708,45 @@ def _trim_alerts(alerts: List[Dict[str, Any]], limit: int = MAX_ALERTS) -> List[
 # ═══════════════════════════════════════════════════════════════════════════
 # 八、主循环
 # ═══════════════════════════════════════════════════════════════════════════
+def _active_modeling_rooms() -> List[str]:
+    """当前【正在建模】的房间列表（读门禁状态，零副作用）。
+
+    == 为什么需要（v2 回归复测 P0，报告第9.3节）==
+    现场：本机内存常年 86~88%，看护阈值 85%，于是每次取锁拉起看护后，
+      看护第 1 个 tick 就 taskkill 掉 SLDWORKS —— 而此时房间正在建模：
+        · 22:36 看护杀 SW，spur 第一次建模被腰斩、无产物；
+        · 22:45 又起（pid 25676），self-check 打开 SW 后又被杀 -> connected:false。
+      用户只能 Stop-Process 手杀看护才能继续。
+    看护的本意是"别让 SW 把本机拖死"，不是"建模到一半把它砍了"。
+    高内存是这台机器的【常态】而非异常尖峰，因此"超阈值即杀"这条策略
+    在建模进行中必须让位于"先把活干完"。
+
+    判据：读 mode_state.json 里 rooms，凡 active 且未 ended/failed 的即为在建模。
+    读不到/解析失败一律返回 []（宁可不拦，也不因为读状态失败而误杀）。
+    """
+    import json as _json
+    import os as _os
+    try:
+        _p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                           "mode_state.json")
+        if not _os.path.isfile(_p):
+            return []
+        with open(_p, "r", encoding="utf-8") as _f:
+            _st = _json.load(_f) or {}
+        _rooms = _st.get("rooms") or {}
+        out = []
+        for _n, _v in _rooms.items():
+            if not isinstance(_v, dict):
+                continue
+            if _v.get("ended_at") or _v.get("failed_at"):
+                continue
+            if _v.get("active"):
+                out.append(str(_n))
+        return sorted(out)
+    except Exception:
+        return []
+
+
 def run(interval: float = 10.0, cpu_limit: float = 85.0, mem_limit: float = 85.0,
         log_path: Optional[Any] = None, on_breach: Optional[Callable[[Dict[str, Any]], Any]] = None,
         max_ticks: Optional[int] = None, stop_after_kill: bool = True,
@@ -823,11 +862,32 @@ def run(interval: float = 10.0, cpu_limit: float = 85.0, mem_limit: float = 85.0
                 _utf8_out(message)
 
                 if kill_enabled:
-                    # 超阈值后**立即**关闭：这里不加任何 sleep，
-                    # 机器已经在换页抖动，每一秒的延迟都可能让 GUI 彻底失去响应。
-                    kill_result = kill_solidworks()
-                    if kill_result.get("ok") and kill_result.get("method") == "taskkill":
-                        killed = True  # 只有真的杀掉了才算 killed
+                    # == 【v2 回归复测 P0 修复】建模进行中【不杀】，只告警 ==
+                    # 现场见 _active_modeling_rooms() 的文档：
+                    #   本机内存常态 86~88% > 阈值 85%，导致每次建模都被
+                    #   看护在第 1 个 tick 腰斩（产物为空、self-check 中途断开）。
+                    # 策略：建模在跑 -> 本 tick 只告警留痕，不 taskkill；
+                    #   等房间 room-end/room-fail 之后恢复正常处置。
+                    #   这样"保护本机"与"别打断正在干活的建模"两个目标都不丢。
+                    _busy_rooms = _active_modeling_rooms()
+                    if _busy_rooms:
+                        kill_result = {
+                            "ok": True, "method": "deferred_modeling",
+                            "note": ("延迟处置：%d 个房间正在建模（%s），"
+                                     "本次只告警不杀 SW —— 等房间收尾后再判。"
+                                     % (len(_busy_rooms),
+                                        "、".join(_busy_rooms))),
+                            "active_rooms": _busy_rooms,
+                        }
+                        _utf8_out("[sw-guard][DEFER] 建模中（%s），"
+                                  "本次超阈值只告警不关闭 SW。"
+                                  % "、".join(_busy_rooms))
+                    else:
+                        # 超阈值后**立即**关闭：这里不加任何 sleep，
+                        # 机器已经在换页抖动，每一秒的延迟都可能让 GUI 彻底失去响应。
+                        kill_result = kill_solidworks()
+                        if kill_result.get("ok") and kill_result.get("method") == "taskkill":
+                            killed = True  # 只有真的杀掉了才算 killed
                 else:
                     kill_result = {"ok": True, "method": "skipped",
                                    "note": "演练模式：未执行 taskkill"}
@@ -872,15 +932,32 @@ def run(interval: float = 10.0, cpu_limit: float = 85.0, mem_limit: float = 85.0
                     # 现在只有 method == "taskkill"（确实执行了击杀）才退出；
                     #   SW 不在运行 / 击杀失败 / 未找到进程 → 继续守护，
                     #   等 SW 真的起来时仍然有人看着。
+                    # == 【真机实测·第三层】杀掉 SW 之后【也不退出】==
+                    # 现场（本轮实测，日志 pid=22220）：
+                    #   内存 92.6% -> 看护真的 taskkill 了 SLDWORKS.exe ->
+                    #   method="taskkill" -> killed=True -> 按老逻辑 break 退出。
+                    #   结果：用户把 SW 重新打开继续建模时，机器内存仍是 89%~92%
+                    #   （本机常态，非瞬时尖峰）—— 而守护进程已经不在了，
+                    #   pid 文件指向死进程 -> _sw_guard_alive() 恒 None ->
+                    #   下次 ensure 又起一个 -> 回归里 22220 -> 31656 的"泄漏"。
+                    # 语义上，看护的职责是【保护本机不被 SW 拖死】，不是
+                    #   "杀一次就下班"：SW 被杀掉后用户随时会再开，
+                    #   守护必须继续在位。杀过几次由 state.killed / alerts 记录，
+                    #   不靠"退出"来表达。
                     if killed:
-                        stopped_reason = "killed"
-                        break
-                    if tick >= 3:
-                        # 连续多次只在"没 SW 可杀"的情况下超阈值 → 说明是别的东西
-                        # 在吃资源（编译/浏览器等），继续空转没有意义，但必须
-                        # 明确标注原因，避免看起来像"守护正常结束"。
-                        stopped_reason = "breach_but_sw_not_running"
-                        break
+                        stopped_reason = "killed_continue"
+                        # 不 break：继续守护，等 SW 再被拉起时仍有人看着
+                    # == 【真机实测·第二层修复】超阈值但没 SW 可杀时，绝不退出 ==
+                    # 上一版在 tick>=3 时以 breach_but_sw_not_running 退出，理由是
+                    #   "继续空转没有意义"。真机实测推翻了这个判断：
+                    #   本机常驻内存 ~89%，而阈值 85% —— 也就是【每一次正常建模】
+                    #   都会立刻触发告警、并在第 3 个 tick（约 30 s）退出。
+                    #   后果与上一版注释里写的完全一样，只是触发条件更常见：
+                    #   用户真正开始建模时，守护进程早就不在了（保护在最需要的
+                    #   时刻缺席），而且 pid 文件指向死进程 →
+                    #   _sw_guard_alive() 恒 None → ensure 再起一个 → 进程泄漏。
+                    # 现在：只要没真的杀掉 SW，就一直守着；把"为什么一直在告警"
+                    #   如实记进 stopped_reason，由 status 暴露，而不是靠退出表达。
                     stopped_reason = "breach_sw_not_running_continue"
 
             # 每个 tick 都更新状态文件（含未告警的 tick），保证"存活可观测"

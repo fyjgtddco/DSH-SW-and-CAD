@@ -1,0 +1,10 @@
+# 统一行尾（2026-11-10）：避免 Windows CRLF 污染 .gitignore / 源码
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.sldprt binary
+*.sldasm binary
+*.slddrw binary
+*.dwg binary
+*.png binary
+*.zip binary

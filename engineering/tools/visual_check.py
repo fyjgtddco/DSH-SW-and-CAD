@@ -1442,6 +1442,30 @@ def normalize_expect(expect):
     norm = {"raw": expect, "note": expect.get("note"),
             "bbox_mm": None, "features": expect.get("features") or [],
             "tolerance_mm": None}
+    # ── 【P5 修复·必须在 bbox 提前返回之前解析】───────────────────────────
+    # 原实现在 bbox is None 时直接 return norm，于是 volume_mm3 /
+    #   feature_count 这些**后加的判据根本没被解析**：
+    #   调用方传了体积期望，却因为没传 bbox 而被静默忽略 ——
+    #   正是「不可用被折叠成通过」的同一类缺陷（本模块文档第 2 条纪律）。
+    #   因此这些字段必须在任何提前返回之前先校验并写进 norm。
+    _vol0 = expect.get("volume_mm3", expect.get("volume"))
+    if _vol0 is not None:
+        try:
+            norm["volume_mm3"] = float(_vol0)
+        except Exception:
+            return None, "volume_mm3 必须是数字"
+    _vt0 = expect.get("volume_tolerance_pct", expect.get("vol_tol_pct"))
+    if _vt0 is not None:
+        try:
+            norm["volume_tolerance_pct"] = max(0.0, float(_vt0))
+        except Exception:
+            return None, "volume_tolerance_pct 必须是数字"
+    _fc0 = expect.get("feature_count")
+    if _fc0 is not None:
+        try:
+            norm["feature_count"] = int(_fc0)
+        except Exception:
+            return None, "feature_count 必须是整数"
     bbox = expect.get("bbox_mm", expect.get("bbox"))
     if bbox is None:
         return norm, None          # 没有包围盒期望 → 只查特征存在性
@@ -1677,6 +1701,28 @@ def compare_features(actual_features, expect_features):
             "actual": have}
 
 
+def _vc_prop_or_call(obj, name):
+    """取 COM 成员，兼容属性/方法两种形态（与 part_verify._prop_or_call 同口径）。
+
+    真机实测：GetTypeName2 是属性（返回 str），加括号会 TypeError；
+    旧代码写死调用形式 -> 异常被吞 -> 特征 type 全 None。
+    """
+    try:
+        v = getattr(obj, name, None)
+    except Exception:
+        return None
+    if v is None:
+        return None
+    if isinstance(v, (str, int, float, bool)):
+        return v
+    if callable(v):
+        try:
+            return v()
+        except Exception:
+            return None
+    return v
+
+
 def _collect_document_features(m):
     """尽力从文档里取一份「特征名清单」（取不到就返回 None，不编造）。
 
@@ -1735,11 +1781,12 @@ def _collect_document_features(m):
         guard += 1
         try:
             nm = f.Name
-            tn = None
-            try:
-                tn = f.GetTypeName2()
-            except Exception:
-                pass
+            # == 真机实测修正（SW2025 late binding）==
+            #   GetTypeName2 是【属性】不是方法；写 f.GetTypeName2() 会抛
+            #   TypeError: 'str' object is not callable，被 bare except 吞掉
+            #   后所有特征 type 都成 None —— 特征校验整段静默失效。
+            #   （visual_check 与 part_verify 两处都要改，否则两边口径不一致）
+            tn = _vc_prop_or_call(f, "GetTypeName2")
             if nm:
                 out.append({"name": str(nm),
                             "type": (str(tn) if tn else None)})
@@ -1923,8 +1970,91 @@ def check_and_correct(part_path, expect, max_rounds=MAX_ROUNDS_DEFAULT,
             rec["tolerance_mm"] = None
             rec["note"] = "expect 未给 bbox_mm，本轮只做特征存在性检查"
 
+        # ── 【P5 修复】体积断言：抓「用简化体冒充」（无齿圆柱代齿轮）────────
+        # 回溯报告 7 P5：包围盒对 φda 圆盘与真齿齿轮几乎一样（齿顶圆就是
+        #   最大外径），所以「只验包围盒」必然放过无齿件；体积才抓得住。
+        # 判据：expect.volume_mm3（解析值或上轮实测）；容差默认 2%（报告
+        #   15.1 M1 对齿轮给出的判据就是「体积偏差 <= 2%」）。
+        _exp_vol = exp.get("volume_mm3")
+        if _exp_vol is not None:
+            _act_vol = None
+            try:
+                _mass = geo.get("mass") or {}
+                _v = _mass.get("volume_mm3")
+                if _v is not None:
+                    _act_vol = float(_v)
+            except Exception:
+                _act_vol = None
+            rec["volume_check"] = {
+                "expected_mm3": round(float(_exp_vol), 4),
+                "actual_mm3": (round(_act_vol, 4) if _act_vol is not None
+                               else None),
+            }
+            if _act_vol is None:
+                # 读不到体积 -> 不得判通过（P5 同源：不可用 != 通过）
+                cmp_ok = False
+                rec["volume_check"]["error"] = "体积回读失败，无法判定"
+                if rec["correction"] is None:
+                    rec["correction"] = {
+                        "axis": None, "delta_mm": None,
+                        "hint": ("体积回读失败（massprops 不可用）—— "
+                                 "无法证明零件几何正确，不得判通过。"),
+                        "stage": "volume"}
+            else:
+                _tolp = float(exp.get("volume_tolerance_pct") or 2.0)
+                _tolp = max(0.0, min(_tolp, 10.0))
+                _dev = ((_act_vol - float(_exp_vol)) / float(_exp_vol) * 100.0
+                        if float(_exp_vol) else 0.0)
+                rec["volume_check"].update({
+                    "deviation_pct": round(_dev, 4),
+                    "tolerance_pct": _tolp,
+                    "ok": abs(_dev) <= _tolp,
+                })
+                if abs(_dev) > _tolp:
+                    cmp_ok = False
+                    _hint = ("体积偏差 %.2f%%（容差 %.2f%%）：实测 %.1f mm3，"
+                             "期望 %.1f mm3。★这通常意味着「用简化体冒充」——"
+                             "例如把齿圈画成圆柱、把孔系漏掉。"
+                             % (_dev, _tolp, _act_vol, float(_exp_vol)))
+                    if rec["correction"] is None:
+                        rec["correction"] = {"axis": None, "delta_mm": None,
+                                             "hint": _hint, "stage": "volume"}
+                    else:
+                        rec["correction"].setdefault("volume_hint", _hint)
+
         feats = _collect_document_features(m)
         fcmp = compare_features(feats, exp["features"])
+        # ── 【P5 修复】用户特征计数断言 ───────────────────────────────────
+        _exp_cnt = exp.get("feature_count")
+        if _exp_cnt is not None:
+            _cls = None
+            try:
+                import part_verify as _pvx
+                _cls = _pvx.classify_features(feats)
+            except Exception:
+                _cls = None
+            _uc = (_cls or {}).get("user_count")
+            rec["feature_count_check"] = {
+                "expected": int(_exp_cnt), "actual": _uc,
+                "ok": (_uc == int(_exp_cnt)) if _uc is not None else None,
+            }
+            if _uc is None:
+                cmp_ok = False
+                rec["feature_count_check"]["error"] = "特征树读不到，无法计数"
+                if rec["correction"] is None:
+                    rec["correction"] = {
+                        "axis": None, "delta_mm": None,
+                        "hint": "特征树读取失败 —— 无法核对特征数，不得判通过。",
+                        "stage": "features"}
+            elif _uc != int(_exp_cnt):
+                cmp_ok = False
+                _h2 = ("用户特征数 %d != 期望 %d —— 特征没建全或建多了。"
+                       % (_uc, int(_exp_cnt)))
+                if rec["correction"] is None:
+                    rec["correction"] = {"axis": None, "delta_mm": None,
+                                         "hint": _h2, "stage": "features"}
+                else:
+                    rec["correction"].setdefault("count_hint", _h2)
         rec["feature_check"] = fcmp
         if fcmp["checked"] and not fcmp["matched"]:
             cmp_ok = False

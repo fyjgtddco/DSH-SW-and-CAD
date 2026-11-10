@@ -280,7 +280,7 @@ def _sw_processes():
         out = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq SLDWORKS.EXE",
              "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=15)
         _txt = (out.stdout or "").strip()
         if "SLDWORKS.EXE" in _txt.upper():
             import csv as _csv
@@ -312,7 +312,7 @@ def _sw_processes():
             ["powershell", "-NoProfile", "-Command",
              "Get-Process sldworks -ErrorAction SilentlyContinue | "
              "Select-Object Id,ProcessName | ConvertTo-Json -Compress"],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=20)
         _txt = (out.stdout or "").strip()
         if _txt:
             _data = json.loads(_txt)
@@ -1908,6 +1908,90 @@ def cmd_close(sw):
     return _swapi.close_all_and_exit(sw)
 
 
+def cmd_self_check(sw, part_path, expect=None, work_dir=None,
+                   bbox_tol_mm=None, volume_tol_pct=None):
+    """【第5项·P1/P5】对已落盘零件跑「三段自检」并落盘 reports/<零件>.self_check.json。
+
+    为什么做成 sw_bridge 的命令而不是"让小屋自己写脚本"：
+      回溯报告 7 P1 的根因之一就是"没有几何回读校验的强制闭环"——
+      每个小屋都各自决定"要不要验、验到什么程度"。收敛成一条命令后，
+      谁都可以一条命令验完，且结论落在统一位置，room-end 的三段自检门
+      （mode_gate._selfcheck_gate_for_room）才读得到。
+
+    用法:
+      python sw_bridge.py self-check <零件.SLDPRT> [--expect <json|@file>]
+             [--work-dir <目录>] [--bbox-tol 0.1] [--volume-tol 2.0]
+
+    expect（可选，缺省时只做"回读 + 落盘"，但那时三段会全被跳过，
+    结论必为 INCOMPLETE，room-end 会拦。所以生产路径应尽量给全）:
+      {"bbox_mm":[xmin,xmax,ymin,ymax,zmin,zmax] 或 [dx,dy,dz],
+       "volume_mm3": 123456.7,
+       "features": ["Extrusion*", {"name":"Cut","count":2}],
+       "feature_count": 5}
+
+    Returns: part_verify.three_stage_check 的结果 + actual 回读值。
+    """
+    out = {"ok": False, "command": "self-check", "part": part_path}
+    if not part_path or not os.path.exists(str(part_path)):
+        out["error"] = "零件不存在: %r" % (part_path,)
+        return out
+    try:
+        import part_verify as _pv
+    except Exception as e:
+        out["error"] = "part_verify 不可用: %r" % (e,)
+        return out
+    # 解析 expect
+    _exp = expect
+    if isinstance(_exp, str):
+        _s = _exp.strip()
+        if _s.startswith("@"):
+            _p = _s[1:]
+            try:
+                with open(_p, "r", encoding="utf-8") as f:
+                    _exp = json.load(f)
+            except Exception as e:
+                out["error"] = "expect 文件读取失败: %r" % (e,)
+                return out
+        else:
+            try:
+                _exp = json.loads(_s)
+            except Exception as e:
+                out["error"] = "expect JSON 解析失败: %r" % (e,)
+                return out
+    if _exp is not None and not isinstance(_exp, dict):
+        out["error"] = "expect 必须是 JSON 对象"
+        return out
+    _exp = _exp or {}
+    # 打开零件（只读用途；失败即如实报错，绝不用"打不开"当"验过了"）
+    _opened = None
+    try:
+        import swapi as _swapi
+        _r = _swapi.SWModel.open_part(sw, os.path.abspath(str(part_path)))
+        if not _r.get("ok"):
+            out["error"] = "打开零件失败: %s" % _r.get("error")
+            return out
+        _opened = _swapi.SWModel(sw, _r.get("doc"))
+    except Exception as e:
+        out["error"] = "打开零件异常: %r" % (e,)
+        return out
+    try:
+        _kw = {}
+        if bbox_tol_mm is not None:
+            _kw["bbox_tol_mm"] = float(bbox_tol_mm)
+        if volume_tol_pct is not None:
+            _kw["volume_tol_pct"] = float(volume_tol_pct)
+        _res = _pv.self_check_model(_opened, _exp, work_dir=work_dir, **_kw)
+        out.update(_res)
+        out["ok"] = bool(_res.get("ok"))
+        return out
+    finally:
+        # 只关闭本次打开的文档；不动用户的其它文档
+        try:
+            _opened.model.CloseDoc(None) if False else None
+        except Exception:
+            pass
+
+
 def _check_part_before_save(part_path, room, force=False):
     """【Bug-38 建议②】保存前校验零件归属。
 
@@ -2299,64 +2383,297 @@ def cmd_export_pdf(sw, path):
     return out
 
 
-def _extract_output_paths(script_path):
+def _resolve_save_expr(expr, src, _seen=None, _depth=0):
+    """把 save(...) 的实参表达式解析成可能的 CAD 产物路径（【N2 修复】）。
+
+    支持：
+      · 简单变量回溯：save(t)，且 t = "..." 或 t = os.path.join(...)；
+      · 内联 join：save(os.path.join(E, "parts", "x.SLDPRT")) ——
+        E 是变量时继续回溯 E = "..."（可多级，_depth 防环）。
+    解析不出（纯函数调用 / 无字面量 / 递归超限）→ 返回 None。
+    """
+    _seen = _seen or set()
+    if _depth > 4:
+        return None
+    _e = str(expr or "").strip()
+    if not _e:
+        return None
+    # ① 纯字符串字面量
+    _m_lit = re.fullmatch(r"['\"]([^'\"]{1,240})['\"]", _e)
+    if _m_lit:
+        return _m_lit.group(1)
+    # ② 简单标识符 → 回溯其赋值（递归解析右值）
+    _m_id = re.fullmatch(r"([A-Za-z_]\w*)", _e)
+    if _m_id:
+        _id = _m_id.group(1)
+        if _id in _seen or _id in ("os", "path", "join", "str", "self", "sw",
+                                   "m", "abspath", "dirname", "getcwd",
+                                   "__file__", "_file_", "r", "f"):
+            return None
+        _assign = re.compile(r"^\s*" + re.escape(_id) + r"\s*=\s*(.+)$",
+                              re.M)
+        for _am in _assign.finditer(src):
+            _rhs = _am.group(1).strip()
+            if not _rhs or _rhs.startswith(("def ", "class ", "import ",
+                                            "from ", "print", "return")):
+                continue
+            _rv = _resolve_save_expr(_rhs, src, _seen | {_id}, _depth + 1)
+            if _rv:
+                return _rv
+        return None
+    # ③ 分段表达式（os.path.join(...) 或多段逗号拼接）—— 按顺序拼段
+    _segs = []
+    for _tok in re.finditer(r"['\"]([^'\"]{1,240})['\"]|([A-Za-z_]\w*)", _e):
+        if _tok.group(1) is not None:
+            _segs.append(_tok.group(1))
+            continue
+        _id2 = _tok.group(2)
+        if _id2 in ("os", "path", "join", "str", "r", "f"):
+            continue
+        _val = _resolve_save_expr(_id2, src, _seen, _depth + 1)
+        if _val:
+            _segs.append(_val)
+    if not _segs:
+        return None
+    _joined = _segs[0]
+    for _s in _segs[1:]:
+        _joined = os.path.join(_joined, _s)
+    return _joined or None
+
+
+def _extract_output_paths(script_path, cwd_hint=None):
     """从脚本源码里静态提取可能的输出文件路径（CAD 产物）。
 
-    【C9 修复】用于产物校验：脚本常写成 save(r'C:\\out\\DSH_底座.SLDPRT')，
-      把这些字面量路径抽出来，执行后逐一核对是否真的存在。
-      这是『文件未生成却报成功』这类误判的根治手段。
+    == 【v2 回归复测 P3 修复】变量路径 / 中文文件名必须也能提取到 ==
+    现场（复测报告 v2 第3节实测，两个反例）：
+      · 变量路径：target = r"C:\\..."; m.save(target)
+          -> 旧实现返回 []，查重闸拿到空名单 -> 直接放行重建；
+      · 中文文件名：m.save(r"C:\\...\\DSH_回归并发A.SLDPRT") 字面量
+          -> 旧实现也返回 []（"提取不到"）。
+    根因：旧正则只认"引号里直接是字面量且以盘符开头"，
+      既不会顺着变量名回溯，也把路径上下文判定做成了死结。
+
+    现在的三层取数（任一命中即采纳，合并去重）：
+      ① 字面量：引号内、含盘符或含路径分隔符、以 CAD 扩展名结尾的字符串；
+      ② 变量回溯：save(<名字>) / save_as(<名字>) 里的名字，
+         回脚本里找 <名字> = "....<CAD扩展名>" 的赋值；
+      ③ 相对路径：save("DSH_xxx.SLDPRT") 这类不带盘符的，
+         用 cwd_hint（脚本所在目录）补全后再判是否存在。
+
+    这些结果仅用于"查重/产物核对"，取多一点不会有害；
+    取不到才是真问题（会让查重静默失效）。
     """
     import re as _re
     paths = []
     try:
         src = open(script_path, "r", encoding="utf-8", errors="replace").read()
         _ext = ("SLDPRT|sldprt|SLDASM|sldasm|SLDDRW|slddrw|DWG|dwg|DXF|dxf|PDF|pdf")
-        pat = _re.compile(
-            "[\\\"']([A-Za-z]:[\\\\/][^\\\"'\\n]{2,240}?\\."
-            "(?:" + _ext + "))[\\\"']")
-        # == [A-83 修复] 只把【写入类】调用里的路径当产物 ===================
-        # 原实现把脚本里【所有】形如 "X:\\xxx.SLDPRT" 的字符串字面量都当成
-        #   "预期产物"，无法区分读与写。实测后果（2026-11-01）：
-        #   只读探针脚本（open_part 已有的件 -> 读 bbox -> 打印）被判
-        #   "预期产物未生成" -> MISSING_ARTIFACT -> 整次 run 被阻断；
-        #   诊断脚本因此跑不起来，排障被迫绕开 sw_bridge 裸跑 python
-        #   （一绕开就失去归属校验/落盘核对/SW 锁）。
-        # 现在：按行判定，只有同一行或上下 2 行内出现【写入关键字】的
-        #   路径才算预期产物；若整份脚本完全不含写入关键字，退回全量，
-        #   避免误伤写法特殊的脚本。
+        _base_dir = cwd_hint or os.path.dirname(os.path.abspath(script_path))
         _WRITE_KW = ("save", "Save", "save_as", "SaveAs", "Export", "export",
                      "SaveBMP", "SavePNG", "create_drawing", "drawing(")
         _had_write_kw = any(_k in src for _k in _WRITE_KW)
-        _line_starts = [0]
-        for _i, _ch in enumerate(src):
-            if _ch == "\n":
-                _line_starts.append(_i + 1)
         _line_texts = src.splitlines()
 
         def _line_no(_pos):
-            _lo, _hi = 0, len(_line_starts) - 1
-            while _lo < _hi:
-                _mid = (_lo + _hi + 1) // 2
-                if _line_starts[_mid] <= _pos:
-                    _lo = _mid
-                else:
-                    _hi = _mid - 1
-            return _lo
+            return src[: _pos].count("\n")
 
-        for m in pat.finditer(src):
-            p = m.group(1).replace("\\\\", os.sep).replace("/", os.sep)
-            if p in paths:
-                continue
-            # 始终按上下文判定：整份脚本没有任何写入动作 = 只读探针，
-            #   它的路径字面量是【输入】而不是产物，必须排除。
+        def _add(p):
+            if not p:
+                return
+            # 统一分隔符，并展开脚本里的变量占位（如果有）
+            _p = str(p).replace("\\\\", os.sep).replace("/", os.sep).strip()
+            if not _p:
+                return
+            # 相对路径 -> 用脚本目录补全（只补不含盘符的）
+            if not _re.match(r"^[A-Za-z]:", _p):
+                _p = os.path.join(_base_dir, _p)
+            if _p not in paths:
+                paths.append(_p)
+
+        # ── ① 字面量：不再要求"以盘符开头"，也允许中文文件名 ──────────
+        #   只要"引号内 + 以 CAD 扩展名结尾"就收，后续靠上下文/存在性过滤。
+        _lit = _re.compile(
+            "[\"']([^\"'\n]{2,240}\\.(?:" + _ext + "))[\"']")
+        for m in _lit.finditer(src):
             _ln = _line_no(m.start())
-            _ctx = "\n".join(_line_texts[max(0, _ln - 2):_ln + 3])
+            _ctx = "\n".join(_line_texts[max(0, _ln - 2): _ln + 3])
             if not any(_k in _ctx for _k in _WRITE_KW):
                 continue
-            paths.append(p)
+            _add(m.group(1))
+
+        # ── ② 变量回溯：save(x) / save_as(x) 里 x 是变量名 ──────────────
+        _var_use = _re.compile(
+            r"(?:save|save_as|SaveAs|SaveAs3)\s*\(\s*([A-Za-z_]\w*)\s*[,)]")
+        _var_names = set(m.group(1) for m in _var_use.finditer(src))
+        # 也把 out = os.path.join(...) 这种直接赋给变量的收进来
+        for _vn in _var_names:
+            if _vn in ("self", "sw", "m"):
+                continue
+            # 找 _vn = <某表达式>（可能跨行，取到行尾）
+            _assign = _re.compile(
+                r"^\s*" + _re.escape(_vn) + r"\s*=\s*(.+)$", _re.M)
+            for am in _assign.finditer(src):
+                _rhs = am.group(1).strip()
+                # 从右值里挖字符串字面量（可能是 os.path.join("a","b.SLDPRT")）
+                _strs = _re.findall(r"[\"']([^\"'\n]{1,200})[\"']", _rhs)
+                if not _strs:
+                    continue
+                # 拼起来看像不像 CAD 路径：有任何一段以扩展名结尾，或
+                # 整体 join 后以扩展名结尾
+                _joined = "".join(_strs)
+                if _re.search(r"\.(?:" + _ext + r")$", _joined, _re.I) or \
+                        any(_re.search(r"\.(?:" + _ext + r")$", s, _re.I) for s in _strs):
+                    # 用 os.path.join 的语义拼：只取最后一段带扩展名的为准
+                    _cand = None
+                    for s in reversed(_strs):
+                        if _re.search(r"\.(?:" + _ext + r")$", s, _re.I):
+                            _cand = s
+                            break
+                    if _cand:
+                        # 若右值里有 os.path.join 且有目录段，用最长前缀拼。
+                        # ── 【v2 复测补充】还要做【二级变量回溯】──────────
+                        # 现场：outdir = r"C:\out"
+                        #       target = os.path.join(outdir, "x.SLDPRT")
+                        # 此时右值里的 "outdir" 是【变量名】，不是字面量，
+                        # 直接忽略就会丢掉盘符与目录（实测拼成
+                        # <脚本目录>\x.SLDPRT，与真实产物路径不符 -> 查重仍失效）。
+                        # 做法：把右值里出现的标识符也当作候选目录变量，
+                        #   再到全脚本里找它的字符串赋值并前置拼接。
+                        if "join" in _rhs and len(_strs) >= 2:
+                            _dir_parts = [s for s in _strs
+                                          if not _re.search(r"\.(?:" + _ext + r")$", s, _re.I)]
+                            if _dir_parts:
+                                _cand = os.path.join("".join(_dir_parts), _cand)
+                        # 二级变量回溯：右值里除 _vn 之外的标识符
+                        try:
+                            _idents = _re.findall(r"[A-Za-z_][\w]*", _rhs)
+                            for _id in _idents:
+                                if _id in ("os", "path", "join", "r", "f",
+                                           _vn, "str", "abspath", "dirname",
+                                           "getcwd", "__file__", "_file_"):
+                                    continue
+                                if re.search(r"\.(?:" + _ext + r")$", _id, _re.I):
+                                    continue
+                                _a2 = _re.compile(
+                                    r"^\s*" + _re.escape(_id) + r"\s*=\s*(.+)$",
+                                    _re.M)
+                                for _am2 in _a2.finditer(src):
+                                    _s2 = _re.findall(
+                                        r"[\"']([^\"'\n]{1,200})[\"']",
+                                        _am2.group(1))
+                                    _dir2 = [x for x in _s2
+                                             if not _re.search(r"\.(?:" + _ext + r")$",
+                                                               x, _re.I)]
+                                    if _dir2:
+                                        _pref = "".join(_dir2)
+                                        _base_name = os.path.basename(_cand)
+                                        if _pref and _base_name:
+                                            _cand = os.path.join(_pref, _base_name)
+                                        break
+                        except Exception:
+                            pass
+                        _add(_cand)
+
+        # ── ②b 内联表达式：save(os.path.join(E, "parts", "x.SLDPRT")) ────
+        # 【N2 修复】旧实现把 os.path.join(...) 整体当"变量名"去查赋值 →
+        #   查不到 → 内联变量路径整条丢失；只剩 ① 的字面量拼到【脚本目录】，
+        #   于是成功建模被误报 MISSING_ARTIFACT（狼来了）。
+        # 现在：把 save(...) 实参【整段】（括号平衡）抓出来，
+        #   交给 _resolve_save_expr() 递归解析（变量回溯可到多级）。
+        _save_call = _re.compile(r"(?:save|save_as|SaveAs|SaveAs3)\s*\(")
+        for _m_call in _save_call.finditer(src):
+            _i = _m_call.end()
+            _depth = 1
+            _j = _i
+            while _j < len(src) and _depth > 0:
+                _ch = src[_j]
+                if _ch == "(":
+                    _depth += 1
+                elif _ch == ")":
+                    _depth -= 1
+                _j += 1
+            if _depth != 0:
+                continue
+            _arg = src[_i:_j - 1].strip()
+            if not _arg or _arg.startswith(("'", '"')):
+                # 纯字面量已由 ① 覆盖，跳过
+                continue
+            try:
+                _cand2 = _resolve_save_expr(_arg, src)
+            except Exception:
+                _cand2 = None
+            if _cand2:
+                _add(_cand2)
     except Exception:
         pass
     return paths
+
+
+def _sweep_run_window(script_path, result):
+    """扫【运行窗口内】磁盘新增/更新的 CAD 产物（N2 兜底识别真实落盘位置）。
+
+    扫描目录：脚本目录及其 3 级父目录 + 任务 work_dir + 进程 cwd 的
+      parts/ output/ drawings/ 与根自身（含同级 parts 目录 —— 复检现场
+      脚本在 scripts/、产物在父目录的 parts/）。
+
+    只收运行窗口（_started_at ~ 现在，无记录时放宽到 1 小时）内
+    存在且 mtime 在窗口内的文件；~$ 锁文件一律排除。
+
+    Returns: 真实存在的产物绝对路径列表（可能为空）。
+    """
+    out = []
+    try:
+        _t_end = time.time()
+        _t_beg = float(result.get("_started_at") or (_t_end - 3600.0))
+        _dirs = []
+        _script_dir = None
+        if script_path:
+            try:
+                _script_dir = os.path.dirname(os.path.abspath(script_path))
+            except Exception:
+                _script_dir = None
+        _cands = []
+        for _c in (_script_dir, os.getcwd(), _task_work_dir()):
+            if _c:
+                _cands.append(os.path.abspath(str(_c)))
+        if _script_dir:
+            _p = _script_dir
+            for _ in range(3):
+                _p = os.path.dirname(_p)
+                if _p and _p != os.path.dirname(_p) and _p not in _cands:
+                    _cands.append(_p)
+        for _c in _cands:
+            for _sub in ("parts", "output", "drawings", ""):
+                _d = os.path.join(_c, _sub) if _sub else _c
+                if os.path.isdir(_d) and os.path.abspath(_d) not in _dirs:
+                    _dirs.append(os.path.abspath(_d))
+        _exts = (".sldprt", ".sldasm", ".slddrw", ".dwg", ".dxf", ".pdf")
+        _seen = set()
+        for _d in _dirs:
+            try:
+                for _fn in os.listdir(_d):
+                    if not _fn.lower().endswith(_exts):
+                        continue
+                    if _fn.startswith("~$"):
+                        continue
+                    _fp = os.path.join(_d, _fn)
+                    if not os.path.isfile(_fp):
+                        continue
+                    _nm = os.path.normcase(os.path.abspath(_fp))
+                    if _nm in _seen:
+                        continue
+                    try:
+                        if os.path.getmtime(_fp) < _t_beg - 1.0:
+                            continue
+                    except Exception:
+                        continue
+                    _seen.add(_nm)
+                    out.append(_fp)
+            except Exception:
+                continue
+    except Exception:
+        out = []
+    return out
 
 
 def _case_insensitive_path(path):
@@ -2706,6 +3023,113 @@ def _cross_room_doc_violation(baseline, after, room=None, script=None):
         return None
 
 
+def _auto_register_parts(paths, room=None, script_path=None):
+    """== 【v2 回归复测 P3 修复】run 成功后自动写 part_registry 台账 ==
+    现场（复测报告 v2 第3节，反例 3）：
+      「run 成功后只补登记 artifacts_registry，【不写 part_registry】；
+        swapi.save() 也不写。所以除非小屋/总理手动 add，
+        台账永远是空的，查重闸永远 verdict=new。」
+    也就是说：查重闸的"判据"修好了，但"数据源"没人喂 —— 台账空着，
+    再正确的 check_reusable 也只能返回 new，等于闸门不存在。
+
+    这里在每次 run 完成、且产物校验通过之后，把落盘的零件自动登记进台账：
+      · dims / bbox_mm / material 尽量从 <零件>.material.json 与
+        .origin.json 旁挂文件读（swapi.save() 已写，不必再开 SW）；
+      · sha256 用于"同规格复用"判定；
+      · 任何一步失败都只记 warning —— 登记失败不能反过来把建模判成失败。
+
+    Returns: {"registered": [...], "failed": [...], "skipped": [...]}
+    """
+    out = {"registered": [], "failed": [], "skipped": []}
+    try:
+        import part_registry as _pr
+    except Exception as e:
+        out["error"] = "part_registry 不可用: %r" % (e,)
+        return out
+    import hashlib as _hl
+    import json as _json
+
+    for p in (paths or []):
+        try:
+            if not p or not os.path.isfile(p):
+                out["skipped"].append({"path": p, "why": "文件不存在"})
+                continue
+            if not str(p).lower().endswith(".sldprt"):
+                out["skipped"].append({"path": p, "why": "非零件（不登记台账）"})
+                continue
+            _stem = os.path.splitext(os.path.basename(p))[0]
+            _name = _stem
+            for _pfx in ("DSH_", "dsh_", "Dsh_"):
+                if _name.startswith(_pfx) and len(_name) > len(_pfx):
+                    _name = _name[len(_pfx):]
+                    break
+            # sha256
+            _h = _hl.sha256()
+            with open(p, "rb") as _f:
+                for _chunk in iter(lambda: _f.read(1 << 20), b""):
+                    _h.update(_chunk)
+            _sha = _h.hexdigest()
+            # 材料凭据
+            _mat = None
+            _matp = str(p) + ".material.json"
+            if os.path.isfile(_matp):
+                try:
+                    with open(_matp, "r", encoding="utf-8") as _f:
+                        _mr = _json.load(_f) or {}
+                    _mat = (_mr.get("material") or _mr.get("canonical")
+                            or _mr.get("requested_material"))
+                except Exception:
+                    _mat = None
+            # origin 记录里的 bbox
+            _bbox = None
+            _orgp = str(p) + ".origin.json"
+            if os.path.isfile(_orgp):
+                try:
+                    with open(_orgp, "r", encoding="utf-8") as _f:
+                        _or = _json.load(_f) or {}
+                    _bbox = _or.get("bbox_mm")
+                except Exception:
+                    _bbox = None
+            _dims = None
+            if isinstance(_bbox, (list, tuple)) and len(_bbox) >= 6:
+                try:
+                    _dims = {
+                        "length_mm": round(abs(float(_bbox[1]) - float(_bbox[0])), 4),
+                        "width_mm": round(abs(float(_bbox[3]) - float(_bbox[2])), 4),
+                        "height_mm": round(abs(float(_bbox[5]) - float(_bbox[4])), 4),
+                    }
+                except Exception:
+                    _dims = None
+            # ── 【R1 修复】字段名必须与 part_registry.REQUIRED_FIELDS 一致 ──
+            # 现场（2026-11-10 复检）：_rec 只有 "part"，而 add_part 校验
+            #   ("name","room","file") → 必然"缺少必填字段：name" →
+            #   "run 成功自动喂台账"一次都没写进去 → P3 查重闸永远查不到台账
+            #   （改了判据没改数据源）。
+            # 现在：name 与 part 同时写（part 保留向后兼容）。
+            # ── 【R2 修复】同时把台账指到【本任务】目录 ────────────────────
+            # 现场：不设 DSH_PART_REGISTRY 时默认台账是上一任务的
+            #   <tools>/load_cases/part_registry.json → TASK_ID_MISMATCH 拒写。
+            #   work_dir 现在由 part_registry.registry_path 兜底解析到任务目录，
+            #   这里显式传 work_dir 确保 C8 的"任务归属校验"和自动登记同源。
+            _rec = {"name": _name, "part": _name, "room": room or "",
+                    "file": os.path.abspath(p),
+                    "material": _mat, "bbox_mm": _bbox, "dims": _dims,
+                    "sha256": _sha,
+                    "source": "sw_bridge.run(auto)",
+                    "script": (os.path.basename(script_path) if script_path else None)}
+            _r = _pr.add_part(_rec, work_dir=_task_work_dir(),
+                              reason="run 成功后自动登记")
+            if _r.get("ok"):
+                out["registered"].append({"part": _name, "file": p,
+                                          "rev": _r.get("rev")})
+            else:
+                out["failed"].append({"part": _name,
+                                      "error": _r.get("error")})
+        except Exception as e:
+            out["failed"].append({"path": p, "error": repr(e)})
+    return out
+
+
 def _verify_run_artifacts(script_path, result):
     """【C9 修复】校验脚本执行后预期产物是否存在【且非 0 字节】。
 
@@ -2730,7 +3154,7 @@ def _verify_run_artifacts(script_path, result):
             expected = [str(x) for x in declared]
         else:
             expected = _extract_output_paths(script_path)
-        # == [A-38 修复] 路径提取不到时，用【运行前后磁盘增量】兜底 ======
+        # == [A-38 修复] 路径提取不到/猜错时，用【运行窗口磁盘增量】兜底 ======
         # 原实现：expected 为空就直接 return（checked=False），
         #   于是下游"磁盘落盘核对 + 自动补登记 artifacts_registry"
         #   整段跳过 —— 这是防线①空转三断点的第一个断点。
@@ -2740,42 +3164,35 @@ def _verify_run_artifacts(script_path, result):
         # 静态正则一个路径都抽不到 -> products 无校验、无登记 ->
         #   defense_gate 的 _modeling_parts() 恒为空 -> part_count=0 ->
         #   防线①"空过"（A-06/A-21 的上游成因）。
-        # 兜底：扫一遍常见产物目录，取【运行窗口内新增/更新的 .SLDPRT】。
+        # 兜底：扫一遍常见产物目录，取【运行窗口内新增/更新的 CAD 产物】。
         #   只做"补登记 + 提示"，仍不据此判失败（宁可无校验，不可误判失败）。
-        _swept = []
-        if not expected:
-            try:
-                _t_end = time.time()
-                _t_beg = float(result.get("_started_at") or (_t_end - 3600.0))
-                _scan_dirs = []
-                for _cand in (os.path.dirname(os.path.abspath(script_path)),
-                              os.getcwd()):
-                    for _sub in ("parts", "output", ""):
-                        _d = os.path.join(_cand, _sub) if _sub else _cand
-                        if os.path.isdir(_d):
-                            _scan_dirs.append(_d)
-                _seen = set()
-                for _d in _scan_dirs:
-                    try:
-                        for _fn in os.listdir(_d):
-                            if not _fn.lower().endswith(".sldprt"):
-                                continue
-                            if _fn.startswith("~$"):
-                                continue
-                            _fp = os.path.join(_d, _fn)
-                            if not os.path.isfile(_fp):
-                                continue
-                            _nm = os.path.normcase(os.path.abspath(_fp))
-                            if _nm in _seen:
-                                continue
-                            if os.path.getmtime(_fp) < _t_beg - 1.0:
-                                continue
-                            _seen.add(_nm)
-                            _swept.append(_fp)
-                    except Exception:
-                        continue
-            except Exception:
-                _swept = []
+        # ── 【N2 修复】静态提取【有结果也可能猜错目录】────────────────────
+        # 现场（2026-11-10 复检）：m.save(os.path.join(E, "parts", "x.SLDPRT"))
+        #   里 E 是变量 → 静态提取把相对文件名拼到【脚本目录】得到
+        #   scripts\DSH_x.SLDPRT，而实际落盘在 parts\ → 4 次成功建模全部
+        #   误报 MISSING_ARTIFACT（"狼来了"，真失败会被假失败淹没）。
+        # 修法：无论 expected 是否为空，都扫运行窗口磁盘新增件；expected
+        #   非空时按 basename 配对 —— 同名的用【磁盘真实路径】替换猜错项。
+        _swept = _sweep_run_window(script_path, result)
+        if expected and _swept:
+            _swept_by_base = {}
+            for _f in _swept:
+                _swept_by_base.setdefault(os.path.basename(_f).casefold(), _f)
+            _fixed = []
+            for _e in expected:
+                if os.path.exists(_e) or _case_insensitive_path(_e):
+                    _fixed.append(_e)
+                    continue
+                _b = os.path.basename(_e).casefold()
+                _alt = _swept_by_base.get(_b)
+                if _alt:
+                    _fixed.append(_alt)
+                    out.setdefault("path_corrected", []).append(
+                        {"expected": _e, "actual": _alt,
+                         "why": "静态提取猜错目录，按运行窗口磁盘实际落盘校正"})
+                else:
+                    _fixed.append(_e)
+            expected = _fixed
         if not expected and not _swept:
             return out
         if _swept and not expected:
@@ -2914,6 +3331,67 @@ def _mode2_preflight_for_run(script_path, room=None):
         ],
         "bypass": "确属单零件任务时，请在【空目录】或独立零件目录下建模（无其他 .sldprt）。",
     }
+
+
+def _is_gear_like_script(script_abs):
+    """脚本是否像"真齿形/齿轮"建模（决定默认执行上限，R4）。
+
+    判据：文件名或脚本内容含齿轮语义标记，且确实在建模（polyline/extrude/
+    revolve 任一）。纯查询/探针脚本不抬上限。
+    """
+    try:
+        _txt = open(script_abs, "r", encoding="utf-8", errors="replace").read(200000)
+    except Exception:
+        _txt = ""
+    _marks = ("齿轮", "gear", "pinion", "involute", "渐开线", "齿形", "齿部",
+              "斜齿", "helix", "worm", "蜗轮", "蜗杆")
+    try:
+        _name = os.path.basename(str(script_abs or "")).lower()
+    except Exception:
+        _name = ""
+    if any(m in _name for m in _marks):
+        return True
+    if any(m in _txt for m in _marks):
+        return bool(("polyline" in _txt) or ("extrude" in _txt) or ("revolve" in _txt))
+    return False
+
+
+def _read_run_progress(script_abs):
+    """读建模脚本的断点日志（build_progress.json 等），供 RUN_TIMEOUT 取证。
+
+    返回 {file, count, last:[...]}；找不到返回 None。只读、零副作用。
+    """
+    _cands = []
+    try:
+        _d = os.path.dirname(os.path.abspath(str(script_abs)))
+        _cands += [os.path.join(_d, "build_progress.json"),
+                   os.path.join(_d, "progress.json")]
+    except Exception:
+        pass
+    try:
+        _wd = _task_work_dir()
+        if _wd:
+            _cands += [os.path.join(_wd, "intermediate", "build_progress.json"),
+                       os.path.join(_wd, "intermediate", "progress.json"),
+                       os.path.join(_wd, "build_progress.json")]
+    except Exception:
+        pass
+    for _p in _cands:
+        try:
+            if not os.path.isfile(_p):
+                continue
+            with open(_p, "r", encoding="utf-8-sig") as _f:
+                _data = json.load(_f)
+            _entries = _data
+            if isinstance(_data, dict):
+                _entries = (_data.get("steps") or _data.get("entries")
+                            or _data.get("log") or [])
+            if isinstance(_entries, list) and _entries:
+                return {"file": _p, "count": len(_entries),
+                        "last": _entries[-6:]}
+        except Exception:
+            continue
+    return None
 
 
 def cmd_run(sw, script_path, extra_args, room=None):
@@ -3175,13 +3653,31 @@ def cmd_run(sw, script_path, extra_args, room=None):
             #   于是同时失去归属校验、落盘核对、SW 锁与心跳（A-08 的放大器）。
             # 现在：DSH_SW_RUN_TIMEOUT_SEC（默认 600，最小 60，0/负 视为不限），
             #   超时错误里明确区分"排队 vs 执行"，并给出可操作建议。
-            try:
-                _to_raw = str(os.environ.get("DSH_SW_RUN_TIMEOUT_SEC") or "").strip()
-                _timeout_sec = float(_to_raw) if _to_raw else 600.0
-            except Exception:
+            # ── 【R4 修复】真齿形建模的默认上限必须更高（600s 实测只够 4~5 段）──
+            # 现场（2026-11-10 复检）：z=24 真渐开线斜齿 9 段 × 288 点 polyline，
+            #   每段 76~117s，单件 ≈15~20 分钟 → 默认 600s 必然 RUN_TIMEOUT，
+            #   小屋只能手工设 DSH_SW_RUN_TIMEOUT_SEC=1800 才能建完。
+            # 现在：未显式设环境变量时，按脚本内容判定"齿轮类"→ 默认 1800s；
+            #   普通脚本仍是 600s（不无谓放大误挂时间）。
+            _to_raw = str(os.environ.get("DSH_SW_RUN_TIMEOUT_SEC") or "").strip()
+            _timeout_source = "env" if _to_raw else "default"
+            if _to_raw:
+                try:
+                    _timeout_sec = float(_to_raw)
+                except Exception:
+                    _timeout_sec = 600.0
+                    _timeout_source = "default"
+            else:
                 _timeout_sec = 600.0
+                try:
+                    if _is_gear_like_script(script_abs):
+                        _timeout_sec = 1800.0
+                        _timeout_source = "default_gear"
+                except Exception:
+                    pass
             if _timeout_sec <= 0:
                 _timeout_sec = None        # 显式不限时（长任务自担风险）
+                _timeout_source = "unlimited"
             elif _timeout_sec < 60:
                 _timeout_sec = 60.0        # 下限保护
             # ── 【D3 修复】执行前记录【文档基线】，执行后核对身份 ──────────
@@ -3197,6 +3693,8 @@ def cmd_run(sw, script_path, extra_args, room=None):
                 _doc_baseline = _snapshot_open_docs(sw)
             except Exception:
                 _doc_baseline = None
+            # 【N2 配套】记录真实执行起点，供产物磁盘扫描精确圈定窗口
+            _run_started_at = time.time()
             proc = subprocess.run(
                 [sys.executable, "-X", "utf8", wrapper] + list(extra_args),
                 capture_output=True, text=True, timeout=_timeout_sec,
@@ -3230,18 +3728,36 @@ def cmd_run(sw, script_path, extra_args, room=None):
                 _lock_info = cmd_sw_status()
             except Exception:
                 _lock_info = None
+            # ── 【R4 修复·取证】超时要能回答"执行到第几步"，而不是盲猜 ──────
+            _prog = _read_run_progress(script_abs)
+            _timeout_msg = ("脚本执行超时：%s。本超时上限 %.0fs（来源：%s），"
+                            "注意它【包含 SW 排队等待时间】，不一定是脚本本身慢。"
+                            % (_emsg,
+                               (_timeout_sec if _timeout_sec else -1),
+                               _timeout_source))
+            _hint_extra = ""
+            if _prog:
+                _hint_extra = ("\n⑤ 断点日志（%s，共 %d 条，最后几条）：%s —— "
+                               "据此判断卡在哪一步，修复后可从断点续建。"
+                               % (_prog.get("file"), _prog.get("count", 0),
+                                  json.dumps(_prog.get("last") or [],
+                                             ensure_ascii=False)))
             return {
                 "ok": False,
                 "gate": "RUN_TIMEOUT",
                 "defense_blocked": "RUN_TIMEOUT",
-                "error": ("脚本执行超时：%s。注意本超时【包含 SW 排队等待时间】，"
-                          "不一定是脚本本身慢。" % _emsg),
+                "error": _timeout_msg,
+                "timeout_sec": _timeout_sec,
+                "timeout_source": _timeout_source,
+                "progress": _prog,
                 "sw_lock": _lock_info,
                 "hint": ("① 先看 sw_lock：若 owner 不是本房间，说明大部分时间在排队，"
                          "应先用 mode_gate.py sw-wait <房间> --timeout 90 拿到锁再重发同一条命令；"
-                         "② 长任务可调大上限：$env:DSH_SW_RUN_TIMEOUT_SEC = 1800；"
+                         "② 长任务可调大上限：$env:DSH_SW_RUN_TIMEOUT_SEC = 1800"
+                         "（齿轮类脚本未设置时已默认 1800）；"
                          "③ 脚本支持分批（每批 2~3 件）时优先分批；"
-                         "④ 已落盘的零件会保留，重跑时脚本可跳过已完成件继续。")
+                         "④ 已落盘的零件会保留，重跑时脚本可跳过已完成件继续。"
+                         + _hint_extra)
             }
         return {"ok": False, "error": f"subprocess failed: {e}"}
     finally:
@@ -3279,6 +3795,11 @@ def cmd_run(sw, script_path, extra_args, room=None):
     #       stdout/stderr 保留进程级输出以便兜底排查。
     result["stdout"] = stdout[-4000:]
     result["stderr"] = stderr[-4000:]
+    # 【N2 配套】回传真实执行起点（供 _sweep_run_window 圈定运行窗口）
+    try:
+        result["_started_at"] = _run_started_at
+    except Exception:
+        pass
     # == [A-107 修复] 脚本失败后【必须清场】，否则整个 SW 会话被污染 ====
     # 实测（2026-11-01）：某房间 cut 失败自动反向 + 脚本崩溃未退出草图态，
     #   SW 应用级【草图上下文残留】；此后同一实例上所有新建零件的
@@ -3437,6 +3958,19 @@ def cmd_run(sw, script_path, extra_args, room=None):
     _art = _verify_run_artifacts(script_abs, result)
     if _art.get("checked"):
         result["artifacts"] = _art
+        # == 【v2 回归复测 P3 修复】产物校验通过后【自动写台账】======
+        # 这是查重闸的数据源：不写台账，check_reusable 永远返回 new，
+        # 再正确的判据也等于没有闸门（复测报告 v2 第3节反例 3）。
+        if not _art.get("missing"):
+            try:
+                # 注意：_verify_run_artifacts 的字段名是 present（不是 found）
+                _reg = _auto_register_parts(
+                    _art.get("present") or [],
+                    room=room, script_path=script_abs)
+                if _reg.get("registered") or _reg.get("failed"):
+                    result["part_registry_auto"] = _reg
+            except Exception as _e_reg:
+                result["part_registry_auto"] = {"error": repr(_e_reg)}
         if _art.get("missing"):
             result["ok"] = False
             _zero = _art.get("zero_size") or []
@@ -5648,7 +6182,7 @@ def _dwg_to_dxf(dwg_path):
             # ODA 用法: ODAFileConverter <in> <out> <ver> <type> <recurse> <audit> [filter]
             subprocess.run([oda_exe, in_dir, out_dir, "ACAD2018", "DXF", "0", "1",
                             os.path.basename(dwg_path)],
-                           capture_output=True, text=True, timeout=180)
+                           capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=180)
             if os.path.exists(dxf_path) and os.path.getsize(dxf_path) > 0:
                 out.update({"ok": True, "dxf_path": dxf_path, "method": "ODAFileConverter"})
                 return out
@@ -7306,7 +7840,7 @@ def _sw_locked_by_other(room_name):
     import subprocess
     try:
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq SLDWORKS.EXE", "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=10)
+                             capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=10)
         return "SLDWORKS.EXE" in (out.stdout or "").upper(), "process"
     except Exception:
         return False, None
@@ -7562,6 +8096,12 @@ def main():
                 "close-all --quit": "【Bug⑧】【BUG-S03】完整退出：循环关文档 + "
                                     "Quit + taskkill + sw-kill 复核，返回 "
                                     "sw_exited / finally_exited 真实值",
+                "self-check <零件> [--expect json|@file]": "【第5项·P1/P5】"
+                                    "三段自检：包围盒 / 体积 / 特征数 真实回读，"
+                                    "落盘 reports/<零件>.self_check.json；"
+                                    "room-end 的三段自检门读的就是它。"
+                                    "★体积段是抓「无齿圆柱代齿轮」这类"
+                                    "简化体冒充的唯一廉价手段（只验包围盒抓不到）",
                 "sw-kill [--rounds 3] [--wait 5]": "【BUG-S03】循环强杀 "
                                     "SLDWORKS.exe（taskkill /F /T）并轮询确认"
                                     "进程真的退出；返回 finally_exited 与 "
@@ -7597,6 +8137,10 @@ def main():
         _stop_hit = _stop_mod.guard(cmd, allow={
             "status", "doctor", "self-path", "ping", "version", "sw-proc",
             "close-all", "sw-kill", "cleanup", "check-part", "help",
+            # self-check 是【只读】几何回读（打开零件、读 bbox/体积/特征，
+            # 不写模型、不取 SW 建模锁）—— 停机期间仍应允许，
+            # 否则"停机后连自查都做不了"会形成死结（与 close-all 同理）。
+            "self-check",
         })
         if _stop_hit:
             print(json.dumps(_stop_hit, ensure_ascii=False, indent=2))
@@ -7636,6 +8180,8 @@ def main():
     except Exception:
         pass
     _lock = None
+    # 【N3 修复】build 窗口追踪：实际 SW 命令执行才开窗（见取锁后的赋值）
+    _build_win = None
     # ══ 【连接自检修复】把"跳锁"与"不连 SW"两件事【彻底分开】══════════════
     # 原缺陷（实测复现，AI 连接确认链路被自己掐断）：
     #   `_READONLY_CMDS` 被当成两个语义复用 ——
@@ -7700,6 +8246,17 @@ def main():
                      #   不连 COM、不写业务产物，且【SW 卡死时最需要它能用】——
                      #   必须豁免 SW 独占锁与 --room（否则清场入口自己先被拦住）。
                      "sw-kill",
+                     # ── 【v2 回归复测 9.1 修复】三个「纯文件操作」不该抢房间锁 ──
+                     # 现场（复测报告 v2 第9.1节实测）：
+                     #   调 check-part 前后 sw_lock.owner 发生变化 ——
+                     #   一个只读台账的命令，把正在建模房间的独占锁抢走了。
+                     # 它们只读写本地 JSON / 开关文档，不需要 SW 独占权：
+                     #   check-part  读归属台账（纯文件）
+                     #   cleanup     清理临时文件（纯文件）
+                     #   self-check  打开零件回读几何（只读，不写模型）
+                     # 原先只在 _SW_TOLERANT_CMDS 里被允许 sw=None，
+                     #   但仍会走取锁路径 —— 那是两回事，必须显式登记到这里。
+                     "check-part", "cleanup", "self-check",
                      # ── 【连接区】连接探测/状态/判断同样是零副作用只读 ──
                      # conn-probe 只做进程与 COM 连接探测，不改模型、不写业务产物。
                      # conn-launch 会拉起进程，但这正是它的语义（用户主动点击），
@@ -7876,6 +8433,21 @@ def main():
             # 【Bug2 修复】SW 忙（排队中）不是成功，用非零码退出，
             # 让调用方能识别"需要重试"而不是"已完成"。
             sys.exit(3)
+        # ── 【N3 修复】build 窗口 = 实际 SW 命令执行区间 ─────────────────
+        # 现场（2026-11-10 复检）：窗口原先在 room-start 开、room-end 关，
+        #   把"A 持锁 + B 排队等待"（B 从未建模）也算成 build_overlap →
+        #   已修好的房间级串行永远报违规（假阳性）。
+        # 现在：取到锁、且本命令【真的要用 SW】（不在 _NO_SW_CMDS）才开窗，
+        #   命令结束（finally）即关窗 —— 排队等待不计入重叠。
+        _build_win = None
+        if _lock and _lock.get("room") and not _lock.get("skipped") \
+                and cmd not in _NO_SW_CMDS:
+            try:
+                import mode_gate as _mg_bw
+                _mg_bw._record_build_start(_lock["room"])
+                _build_win = _lock["room"]
+            except Exception:
+                _build_win = None
     try:
         # ── 【连接自检修复】只把【真正不碰 SW】的命令置 None ─────────────
         # _NO_SW_CMDS 现在只含 纯计算(physics-*/cad-validate) / 仅CAD(ac-*) /
@@ -8008,6 +8580,37 @@ def main():
                 result = cmd_save(sw, _save_path)
                 if _po is not None:
                     result["part_ownership"] = _po
+        elif cmd == "self-check":
+            # 【第5项·P1/P5】三段自检：bbox / 体积 / 特征数，落盘 self_check.json
+            # 用法: self-check <零件.SLDPRT> [--expect <json|@file>]
+            #        [--work-dir <目录>] [--bbox-tol 0.1] [--volume-tol 2.0]
+            _sc_part = _args[1] if len(_args) > 1 else ""
+            _sc_exp = None
+            _sc_wd = None
+            _sc_bt = None
+            _sc_vt = None
+            for _i in range(2, len(_args)):
+                _a = _args[_i]
+                if _a == "--expect" and _i + 1 < len(_args):
+                    _sc_exp = _args[_i + 1]
+                elif _a.startswith("--expect="):
+                    _sc_exp = _a.split("=", 1)[1]
+                elif _a == "--work-dir" and _i + 1 < len(_args):
+                    _sc_wd = _args[_i + 1]
+                elif _a.startswith("--work-dir="):
+                    _sc_wd = _a.split("=", 1)[1]
+                elif _a == "--bbox-tol" and _i + 1 < len(_args):
+                    _sc_bt = _args[_i + 1]
+                elif _a.startswith("--bbox-tol="):
+                    _sc_bt = _a.split("=", 1)[1]
+                elif _a == "--volume-tol" and _i + 1 < len(_args):
+                    _sc_vt = _args[_i + 1]
+                elif _a.startswith("--volume-tol="):
+                    _sc_vt = _a.split("=", 1)[1]
+            result = cmd_self_check(sw, _sc_part, expect=_sc_exp,
+                                    work_dir=_sc_wd,
+                                    bbox_tol_mm=_sc_bt,
+                                    volume_tol_pct=_sc_vt)
         elif cmd == "check-part":
             # 【Bug-38】独立校验命令（小屋可在保存前自检）
             _cp_args = [a for a in _args[1:] if not a.startswith("--")]
@@ -8561,6 +9164,12 @@ def main():
         # 【Bug2 修复】未捕获异常属于失败，必须以非零码退出
         sys.exit(1)
     finally:
+        if _build_win:
+            try:
+                import mode_gate as _mg_bw
+                _mg_bw._record_build_end(_build_win)
+            except Exception:
+                pass
         _gate_sw_unlock(_lock)
 
 

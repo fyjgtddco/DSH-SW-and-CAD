@@ -242,7 +242,7 @@ def _sw_running():
     """检测 SolidWorks 进程是否在运行（进程级检测，不依赖任何自觉）。"""
     try:
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq " + SW_EXE, "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=15,
+                             capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=15,
                              creationflags=CREATE_NO_WINDOW)
         return SW_EXE in (out.stdout or "").upper()
     except Exception:
@@ -253,7 +253,7 @@ def _sw_force_close():
     """强制关闭 SolidWorks 进程（仅用于残留进程兜底）。"""
     try:
         subprocess.run(["taskkill", "/IM", SW_EXE, "/F"],
-                       capture_output=True, text=True, timeout=20,
+                       capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=20,
                        creationflags=CREATE_NO_WINDOW)
         time.sleep(2)
     except Exception:
@@ -2773,6 +2773,33 @@ def _write_report_and_heartbeat(room, stage, detail=""):
     return rec
 
 
+def _release_sw_after_report(room, stage):
+    """建模房间上报终态后立刻释放 SW 队列占位（【R5 修复】）。
+
+    现场（2026-11-10 复检）：箱体房间已 report done，却仍占队首 15.7 分钟，
+    挡住队 2 —— 建模已结束，SW 使用权应立刻流转；room-end 还要补防线/自检，
+    可能再拖很久。
+    语义：只释放【本房间】的占位（owner 或 queue 里的自己），不碰别人。
+    留痕：返回体带 released / queue_removed / error，绝不静默。
+    """
+    _stage = str(stage or "").strip().lower()
+    if _stage not in ("done", "delivered", "part_done", "failed"):
+        return None
+    try:
+        st = load_state()
+        lk = _sw_lock(st)
+        if str(lk.get("owner") or "") == str(room):
+            _r = cmd_sw_release(str(room)) or {}
+            return {"released": True, "release": _r}
+        if str(room) in (lk.get("queue") or []):
+            lk["queue"] = [x for x in (lk.get("queue") or []) if x != str(room)]
+            save_state(st)
+            return {"released": False, "queue_removed": True}
+    except Exception as _e:
+        return {"released": False, "error": repr(_e)}
+    return None
+
+
 def cmd_room_report(room, stage, detail=""):
     """【bug6修复】小屋进度旁路上报：写文件，不走对话通道。
 
@@ -2871,6 +2898,8 @@ def cmd_room_report(room, stage, detail=""):
                 }
                 # 先把 done 写进去（如实记录），再追加缺口提示返回
                 _write_report_and_heartbeat(room, stage, detail)
+                # 【R5】建模已结束：即使防线未补，也把 SW 占位让给排队房间
+                _hint["sw_lock_released_on_report"] = _release_sw_after_report(room, stage)
                 return _hint
         except Exception:
             # 防线模块不可用时不阻断上报（room-end 会 fail-closed 拦截）
@@ -2899,8 +2928,13 @@ def cmd_room_report(room, stage, detail=""):
                        "via": "report"}, f)
     except Exception:
         pass
-    return {"ok": True, "room": room, "stage": stage, "reported_at": rec["time"],
+    # ── 【R5 修复】终态上报即释放 SW 队列占位（建模已结束，别挡队）──────
+    _rel = _release_sw_after_report(room, stage)
+    _out = {"ok": True, "room": room, "stage": stage, "reported_at": rec["time"],
             "hint": "已上报并刷新心跳"}
+    if _rel:
+        _out["sw_lock_released_on_report"] = _rel
+    return _out
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -3378,6 +3412,25 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
         board_state = "running" if _legacy == "running" else "idle"
     _safe, _block, _next = _board_guidance(board_state, name)
     _latest = st.get("latest_report") if isinstance(st.get("latest_report"), dict) else {}
+    # ── 【R8 修复】ended_at 粘滞：房间收尾后又上报了非终态阶段 ─────────────
+    # 现场（2026-11-10 复检）：总理房报告改成 validating 后，看板 state 仍是
+    #   done（ended_at 优先生效），state 与 report_stage 不一致，容易误判
+    #   "这屋已经完事"而漏掉它其实又在干活。这里不篡改终态（room-end 是真
+    #   结论），但必须把"终态之后还有活动"显式标出来。
+    _ended_stale = False
+    _ended_stale_note = None
+    if info.get("ended_at"):
+        try:
+            _its = float((_latest or {}).get("ts") or 0)
+            _istg = str((_latest or {}).get("stage") or "").strip().lower()
+            if (_its and _its > float(info.get("ended_at") or 0) + 1.0
+                    and _istg and _istg not in ("done", "delivered", "finished")):
+                _ended_stale = True
+                _ended_stale_note = ("★ 已收尾(ended_at)但之后又上报 stage=%r —— "
+                                     "state 保持 done，请核对是否有后续活动"
+                                     % _istg)
+        except Exception:
+            _ended_stale = False
     # ── 【R4 / B-28 修复】进展超时看门狗（详见 BOARD_NO_PROGRESS_SEC_DEFAULT）──
     # "多久没有任何可观察进展"：取【最近一次能证明它在动】的时间差——
     #   进度报告 mtime / 产物 mtime / 刚绑定的 subagent / 刚 room-start，
@@ -3499,6 +3552,8 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
         _detail_bits_extra.append(
             "归属上一轮任务(%s)，本轮=%s —— 不是活房间，可 room-fail 清理"
             % (_task_of_room, _cur_task))
+    if _ended_stale and _ended_stale_note:
+        _detail_bits_extra.append(_ended_stale_note)
     return {
         "room": name,
         "type": _type,
@@ -3514,6 +3569,8 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
         "platform_age_sec": st.get("platform_age_sec"),
         "report_stage": (_latest.get("stage") if isinstance(_latest, dict) else None),
         "report_age_sec": _report_age,
+        # ── 【R8】终态后仍有非终态上报（state 与 report_stage 不一致的显式标记）──
+        "ended_at_stale": _ended_stale,
         "artifact_newest": _art or None,
         "sw_queue_pos": _sw_pos,
         "sw_owner": _owner,
@@ -4234,6 +4291,14 @@ def _cmd_room_board_once(room=None, as_json=True):
         if os.path.exists(_vp):
             with open(_vp, "r", encoding="utf-8") as _vf:
                 _violations = (json.load(_vf) or {}).get("records") or []
+        # 【R6 修复】违规计数同样按本任务过滤（旧任务记录不再算进来）
+        try:
+            _tid_v = _current_workflow_task_id()
+            if _tid_v:
+                _violations = [v for v in _violations if isinstance(v, dict)
+                               and str(v.get("task_id") or "") == str(_tid_v)]
+        except Exception:
+            pass
     except Exception:
         _violations = []
     _alive_states = ("running", "starting", "waiting_sw", "idle", "unbound")
@@ -5189,15 +5254,34 @@ def _reclaim_lock(state, reason, requester=None):
     except Exception:
         fair_held = 0.0
 
+    # == 【v2 回归复测 P0 修复】房间级独占时，公平轮转【不参与】==========
+    # 现场（复测报告 v2 第2.1节，真实 D 流程复现）：
+    #   A(结构件) 正在建模、还没 save，B(轮系传动件) 一开始排队，
+    #   锁就立刻被拿走（sw-status: owner=轮系传动件, prev_owner=结构件）。
+    # 根因就在下面两个 elif：它们只判 has_waiter + cmds/fair_held，
+    #   【完全不看 hold_mode】。而 hold_mode="room" 的语义恰恰是
+    #   "这一整轮建模期间锁归本房间，中途不放" —— 一旦允许排队者轮转，
+    #   房间级独占就退化成命令级，A 的半成品文档随时会被 B 的操作踩到。
+    #
+    # 两个指标还都会被"陈旧值"放大：
+    #   · fair_start 泄漏（sw-release 原先不清它）→ fair_held 被算成几万秒；
+    #   · cmd_seq 在房间级模式下本来就该累计到几十上百。
+    # 所以在 room 模式下，这两个判据必须整体停用，只保留：
+    #   ① 持有者已死/失联；② 超过房间级兜底上限（_room_hold_limit，默认 6 h）。
+    _room_mode = _room_hold_enabled()
     if not alive:
         should_reclaim = True
         why = "持有者[%s]已无活动心跳/已非活动房间" % owner
-    elif has_waiter and cmds >= SW_FAIR_CMDS:
+    elif _room_mode and has_waiter:
+        # 房间级独占：观察得到排队，但【不让位】——等它自己 room-end。
+        # 不写 should_reclaim，只留下可审计的说明。
+        why = ""
+    elif (not _room_mode) and has_waiter and cmds >= SW_FAIR_CMDS:
         # 排队者已等候多时，且持有者已连跑满额命令 → 让位（防饥饿核心）
         should_reclaim = True
         why = ("公平轮转：持有者[%s]已连续执行 %d 条命令(上限%d)，"
                "队首[%s]等待中，强制让位" % (owner, cmds, SW_FAIR_CMDS, queue[0]))
-    elif has_waiter and fair_held > SW_FAIR_SECONDS:
+    elif (not _room_mode) and has_waiter and fair_held > SW_FAIR_SECONDS:
         should_reclaim = True
         why = ("公平轮转：持有者[%s]连续独占 %.0f 秒(上限%d)，"
                "队首[%s]等待中，强制让位" % (owner, fair_held, SW_FAIR_SECONDS, queue[0]))
@@ -5285,6 +5369,7 @@ def _record_build_start(room):
                 return w.get("start_ts")
         now = time.time()
         ws.append({"room": room, "start_ts": now, "end_ts": None,
+                   "task_id": _current_workflow_task_id(),
                    "hold_mode": "room" if _room_hold_enabled() else "command"})
         _save_build_windows(ws)
         return now
@@ -5317,7 +5402,22 @@ def _build_overlaps(windows=None):
     未闭合的区间以"此刻"为终点参与计算 —— 这样两个房间【正在】重叠时，
     room-board 立刻就能看到 build_overlap_count > 0，而不是等结束后才发现。
     """
-    ws = windows if windows is not None else _load_build_windows()
+    if windows is None:
+        ws = _load_build_windows()
+        # ── 【R6 修复】只统计【本任务】的构建窗口 ──────────────────────────
+        # 现场（2026-11-10 复检）：新任务 room-board 一开始就报
+        #   build_overlap_count=1 —— 那 432s 的重叠属于【上一任务】的
+        #   "回归室A/B"，没有按 task_id 过滤。历史窗口（无 task_id 或别的
+        #   任务）不应再计入本任务判据；显式传入 windows 时不过滤（测试用）。
+        try:
+            _tid = _current_workflow_task_id()
+            if _tid:
+                ws = [w for w in ws if isinstance(w, dict)
+                      and str(w.get("task_id") or "") == str(_tid)]
+        except Exception:
+            pass
+    else:
+        ws = windows
     now = time.time()
     segs = []
     for w in ws or []:
@@ -5365,6 +5465,7 @@ def _log_concurrent_build_violation(room, others, reason):
                 rec = []
         rec.append({"at": time.time(),
                     "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "task_id": _current_workflow_task_id(),
                     "room": room, "others": others, "reason": reason,
                     "pid": _lock_ident()})
         rec = rec[-100:]
@@ -5420,7 +5521,7 @@ def _sw_proc_list():
     """获取 SLDWORKS.EXE 进程列表（数量、PID列表）。"""
     try:
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq " + SW_EXE, "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=10,
+                             capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=10,
                              creationflags=CREATE_NO_WINDOW)
         pids = [x.strip(chr(34)).split(",")[1].strip()
                 for x in (out.stdout or "").splitlines()
@@ -5459,7 +5560,7 @@ def _monitor_alive():
     try:
         if sys.platform == "win32":
             out = subprocess.run(["tasklist", "/FI", "PID eq %d" % mpid, "/FO", "CSV", "/NH"],
-                                 capture_output=True, text=True, timeout=10,
+                                 capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=10,
                                  creationflags=CREATE_NO_WINDOW)
             if str(mpid) not in (out.stdout or ""):
                 try:
@@ -5718,7 +5819,7 @@ def _pid_alive(pid):
     # ② 兜底：tasklist 文本匹配（无 ctypes / 权限受限时）
     try:
         out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=15,
+                             capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=15,
                              creationflags=CREATE_NO_WINDOW)
         _txt = (out.stdout or "")
         # tasklist 找不到时会输出 "信息: 没有运行的任务匹配指定标准" 之类的提示，
@@ -5751,9 +5852,25 @@ def ensure_sw_guard(interval=None, cpu_limit=None, mem_limit=None, force=False):
          "interval":..., "cpu_limit":..., "mem_limit":..., "note":...}
     """
     if str(os.environ.get("DSH_SW_GUARD_OFF") or "").strip() in ("1", "true", "yes"):
+        # == 【v2 回归复测 P0 修复】OFF 必须【同时停掉已经在跑的看护】==
+        # 现场（报告第9.3节）：用户设了 DSH_SW_GUARD_OFF=1 想让它别再杀 SW，
+        #   结果它只是"不再新拉起"——已经在跑的那个看护照样每 10 s 杀一次，
+        #   建模仍被反复腰斩。用户只能 Stop-Process 手动杀掉。
+        # 语义上 OFF = "我不要看护"，那就应当连存量一起停，而不是只挡新的。
+        # 用 force=True 走停用路径（它会 kill 掉已存在的看护进程）。
+        _still = None
+        try:
+            _still = _sw_guard_alive()
+            if _still:
+                cmd_sw_guard_stop()
+        except Exception as _e_stop:
+            pass
         return {"ok": True, "started": False, "already_running": False, "pid": None,
                 "skipped": True,
-                "note": "DSH_SW_GUARD_OFF 已设：按用户显式要求跳过后台看护。"}
+                "stopped_existing": bool(_still),
+                "stopped_pid": _still,
+                "note": ("DSH_SW_GUARD_OFF 已设：按用户显式要求跳过后台看护"
+                         + ("；并已停掉在跑的看护（PID=%s）" % _still if _still else "。"))}
 
     _script = _sw_guard_path()
     if not os.path.exists(_script):
@@ -5772,14 +5889,68 @@ def ensure_sw_guard(interval=None, cpu_limit=None, mem_limit=None, force=False):
     _mem = float(mem_limit if mem_limit is not None else SW_GUARD_MEM_LIMIT)
     _log = os.path.join(STATE_DIR, "sw_guard.log")
     try:
+        # == 【真机实测·关键】看护进程必须与父进程的 stdio 彻底断开 ==
+        # 现场（本轮全量回归实测，单独跑却通过）：
+        #   run_regression.py 用 subprocess.run(capture_output=True) 跑每个用例，
+        #   于是用例进程的 stdout 是一根【管道】；ensure_sw_guard 起的看护进程
+        #   默认继承这根管道。runner 收完输出就关管道 ->
+        #   看护进程下一次 _utf8_out() 写 stdout 立刻 broken pipe / OSError ->
+        #   进程退出 -> pid 文件指向死进程 ->
+        #   _sw_guard_alive() 返回 None -> 下次又起一个（回归里 8440 -> 8496）。
+        # 这与报告 9-A-2「子代理禁止起后台进程、不许泄漏」是同一条纪律：
+        #   后台守护绝不能挂在调用方的管道上，否则调用方一退出它就死。
+        # 做法：stdin/stdout/stderr 全部 DETACHED（DEVNULL），
+        #   看护自身的留痕走 --log 文件（本来就有）。
+        _dn = subprocess.DEVNULL
         _proc = subprocess.Popen(
             [sys.executable, _script, "run",
              "--interval", str(_iv), "--cpu", str(_cpu), "--mem", str(_mem),
              "--log", _log],
+            stdin=_dn, stdout=_dn, stderr=_dn,
+            close_fds=True,
             creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0)
     except Exception as e:
         return {"ok": False, "started": False, "already_running": False, "pid": None,
                 "error": "启动 SW 健康看护失败: %r" % (e,)}
+    # == 【P2/S2 补】Popen 之后必须确认进程【真的活下来】再写 pid ==
+    # 现场（本轮全量回归实测）：ensure_sw_guard 起了一个看护进程，
+    #   立刻把 pid 写进 sw_guard.pid；但该进程因参数/环境原因秒退，
+    #   于是 pid 文件指向一个【死 pid】：
+    #     _sw_guard_alive() -> None  -> 下一次调用又起一个 -> 进程泄漏。
+    #   回归里表现为：第二次 ensure 报 started=True 且 pid 变了（32088 -> 29716），
+    #   而第三次又变成 already_running=True —— 完全符合"泄漏了一个"。
+    # 这与报告 9-A-2「子代理禁止起后台进程 / 不许泄漏」同一条纪律：
+    #   进程活没活下来，不能靠"Popen 没报错"来假设，必须实测。
+    _alive_ok = False
+    try:
+        for _i in range(20):          # 最多等 1.0 s（20 x 50 ms）
+            if _proc.poll() is None:
+                _alive_ok = True
+                break
+            time.sleep(0.05)
+    except Exception:
+        _alive_ok = (_proc.poll() is None)
+    if not _alive_ok:
+        _rc = None
+        try:
+            _rc = _proc.returncode
+        except Exception:
+            _rc = None
+        _tail = None
+        try:
+            if os.path.exists(_log):
+                with open(_log, "r", encoding="utf-8", errors="replace") as _f:
+                    _tail = "".join(_f.readlines()[-8:])
+        except Exception:
+            _tail = None
+        return {"ok": False, "started": False, "already_running": False,
+                "pid": None, "returncode": _rc,
+                "error": ("SW 健康看护【启动后立即退出】（returncode=%r），"
+                          "未写入 pid —— 否则会留下一个指向死进程的 pid 文件，"
+                          "下次调用又起一个，造成后台进程泄漏。" % (_rc,)),
+                "log_tail": _tail,
+                "hint": ("看 DSH_SW_GUARD_OFF 是否被误设、sw_guard.py 是否能独立运行："
+                         "python \"%s\" --help" % _script)}
     try:
         # 原子写 pid：避免别的进程读到半截内容
         _tmp = _SW_GUARD_PID_FILE + ".tmp.%d" % os.getpid()
@@ -5807,7 +5978,7 @@ def cmd_sw_guard_stop():
         return {"ok": True, "stopped": False, "note": "没有正在运行的 SW 健康看护。"}
     try:
         subprocess.run(["taskkill", "/F", "/PID", str(_pid)],
-                       capture_output=True, text=True, timeout=15,
+                       capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=15,
                        creationflags=CREATE_NO_WINDOW)
     except Exception as e:
         return {"ok": False, "error": "停止失败: %r" % (e,), "pid": _pid}
@@ -6168,7 +6339,13 @@ def cmd_room_start(name):
                 _room_lock_note = ("room-start 未能取得 SW 独占权（队列第 %s 位，"
                                    "持有者=%s）；首次建模命令会自动排队等待"
                                    % (_lk_res.get("position"), _lk_res.get("owner")))
-            _record_build_start(name)
+            # ── 【N3 修复】不再在 room-start 开构建窗口 ────────────────────
+            # 现场（2026-11-10 复检）：窗口从 room-start 开、room-end 关，
+            #   把"A 持锁 + B 排队等待"（B 从未建模）也统计成 build_overlap
+            #   → 已修好的并发防护永远报违规（假阳性）。
+            # 窗口现在只在【实际 SW 命令执行】时开合（sw_bridge 取锁后开、
+            #   命令结束即关），排队等待不计入 —— 见 sw_bridge.main() 的
+            #   _record_build_start/_record_build_end 调用。
         except Exception as _e_lk:
             _room_lock_note = "room-start 取锁异常（不阻断登记）：%r" % (_e_lk,)
     msg = "小屋 [%s] 已登记,可开始建模" % name
@@ -6980,6 +7157,392 @@ def _visual_gate_for_room(name):
     }
 
 
+def _pose_gate_for_room(name):
+    """【第5项·P1-6】总装房间下线前的「朝向声明齐全」强制核实。
+
+    返回 None 表示跳过，或返回拒绝 room-end 的响应体。
+
+    ── 为什么需要（回溯报告 7 P1 / 12.1 / 15.2 J1~J6）────────────
+      零件建完只 save() 出 .SLDPRT，没有任何朝向声明；
+      总装时组件零旋转、坐标也"对得上"，但零件本身就是躺着的。
+      报告把这类判据固化为 J1~J6，其中 J6 原文：
+        「缺 up_contract.json，或某零件缺 .pr.json -> 无声明 = 不可审计，
+          一律不通过」。
+
+    ── 这道门做什么 ───────────────────────────────────────────────
+      对【装配/总装类房间】登记的零件逐个读 <零件>.SLDPRT.pr.json：
+        · 缺声明          -> 拦（J6）
+        · 声明字段非法    -> 拦
+        · up_axis/up_sign 与任务级 up_contract.json 不一致 -> 拦（J1/J2）
+      注意：本函数【不读组件旋转矩阵】—— 那需要 SW 会话且属运行时断言，
+        由 part_pose.check_assembly_pose(rotation=...) 在建模/装配脚本里调。
+        这里只做「静态可判」的部分，避免在门禁里拉起 SW。
+
+    留痕：确需放行用 room-end --force。
+    """
+    _pp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "part_pose.py")
+    if not os.path.exists(_pp_path):
+        return None
+    try:
+        import part_pose as _pp  # noqa: F401
+    except Exception:
+        return None
+
+    # 只对装配 / 总装类房间生效
+    _ASSEMBLY_TYPES = ("assembly", "assemble", "final", "integration",
+                       "总装", "装配")
+    _rtype = None
+    _st = {}
+    try:
+        _st = load_state() or {}
+        for _rn, _rv in (_st.get("rooms") or {}).items():
+            if _rn == name and isinstance(_rv, dict):
+                _rtype = _rv.get("type")
+                break
+    except Exception:
+        _rtype = None
+    _is_asm = False
+    try:
+        if _rtype and str(_rtype).lower() in _ASSEMBLY_TYPES:
+            _is_asm = True
+    except Exception:
+        _is_asm = False
+    if not _is_asm:
+        # 也考虑房间名本身带"总装/装配"字样（模板常见）
+        try:
+            if any(k in str(name) for k in ("总装", "装配", "assembly")):
+                _is_asm = True
+        except Exception:
+            pass
+    if not _is_asm:
+        return None
+
+    _parts = []
+    try:
+        _rec = _load_artifact_registry().get(str(name))
+        if isinstance(_rec, list):
+            for _it in _rec:
+                if not isinstance(_it, dict):
+                    continue
+                _p = str(_it.get("path") or "")
+                if _p.lower().endswith((".sldprt", ".sldasm")) and os.path.exists(_p):
+                    _parts.append(_p)
+    except Exception:
+        _parts = []
+    if not _parts:
+        return None
+
+    # 任务级 up_contract.json（可选）：读得到就用来做 J1/J2
+    _contract = None
+    _roots = []
+    try:
+        _wd = _st.get("work_dir")
+        if _wd:
+            _roots.append(os.path.join(str(_wd), "scripts"))
+            _roots.append(str(_wd))
+    except Exception:
+        pass
+    # 【N4 同口径】work_dir 真正落点在 workflow_state.json，一并纳入
+    try:
+        _wd2 = _default_work_dir()
+        if _wd2 and str(_wd2).strip():
+            _roots.append(os.path.join(str(_wd2), "scripts"))
+            _roots.append(str(_wd2))
+    except Exception:
+        pass
+    _roots.append(os.getcwd())
+    for _d in _roots:
+        _f = os.path.join(_d, "up_contract.json")
+        if os.path.isfile(_f):
+            try:
+                with open(_f, "r", encoding="utf-8") as _fh:
+                    _contract = json.load(_fh)
+            except Exception:
+                _contract = None
+            break
+
+    _wup = "Z"
+    _wsg = 1
+    if isinstance(_contract, dict):
+        _wup = str(_contract.get("world_up") or "Z").upper()
+        try:
+            _wsg = int(_contract.get("world_up_sign") or 1)
+        except Exception:
+            _wsg = 1
+
+    _bad = []
+    for _p in _parts:
+        _rr = _pp.read_pr_record(_p)
+        if not _rr.get("ok"):
+            _bad.append("%s：缺朝向声明 .pr.json（J6 无声明=不可审计）"
+                        % os.path.basename(_p))
+            continue
+        _val = _pp.validate_pr_record(_rr["record"])
+        if not _val.get("ok"):
+            _bad.append("%s：pr.json 不合法（%s）"
+                        % (os.path.basename(_p),
+                           "；".join(_val.get("errors") or [])))
+            continue
+        if isinstance(_contract, dict):
+            _ra = str(_rr["record"].get("up_axis") or "").upper()
+            try:
+                _rs = int(_rr["record"].get("up_sign") or 1)
+            except Exception:
+                _rs = 1
+            if _ra and _ra != _wup:
+                _bad.append("%s：up_axis=%s 与契约世界 up=%s 冲突（J1/J2）"
+                            % (os.path.basename(_p), _ra, _wup))
+            elif _ra and _ra == _wup and _rs != _wsg:
+                _bad.append("%s：up_sign=%+d 与契约 %+d 冲突（J1）"
+                            % (os.path.basename(_p), _rs, _wsg))
+
+    if not _bad:
+        return None
+
+    _nl = chr(10)
+    return {
+        "ok": False,
+        "room": name,
+        "gate": "PART_POSE_REQUIRED",
+        "blockers": _bad,
+        "checked_parts": len(_parts),
+        "world_up": _wup,
+        "world_up_sign": _wsg,
+        "error": ("【第5项·朝向声明门】房间 [%s] 有 %d 个零件缺朝向声明或与契约"
+                  "冲突，拒绝 room-end。" % (name, len(_bad))),
+        "message": _nl.join([
+            "=== 【朝向声明门】拦截：总装房间 [%s] 的零件朝向不可审计 ===" % name,
+            "",
+            "为什么拦：回溯报告 15.2 J6 —— 无声明 = 不可审计，一律不通过。",
+            "现场：零件 +Z、总装 +Y、图纸 +Z 三处各自看都对，合起来整机错位 90 度。",
+            "",
+            "未通过的零件：",
+        ] + ["  x " + _b for _b in _bad] + [
+            "",
+            "补齐方式：",
+            "  1) 建模脚本里显式声明：m.set_part_pose(up_axis=..., up_sign=...,",
+            "     main_axis=..., base_plane=...)；save() 会自动落 .pr.json",
+            "  2) 或手工补：python part_pose.py write <零件> --up-axis Z --main-axis Z",
+            "  3) 校验：python part_pose.py validate <零件>",
+            "  4) 单件断言：python part_pose.py check-assembly <零件> --rotation ...", "",
+            "确需放行（会留痕）：python mode_gate.py room-end \"%s\" --force" % name,
+        ]),
+    }
+
+
+# ── 【P5 收口】齿轮类零件的判定标记（与 part_verify 的 gear 段配套）─────
+_GEAR_NAME_MARKS = ("齿轮", "gear", "pinion", "齿圈", "齿条", "蜗轮", "蜗杆",
+                    "链轮", "棘轮", "齿廓", "gearshaft", "gear_shaft",
+                    "齿轴", "小齿轮", "大齿轮")
+
+
+def _gear_class_part(name, room_type=None):
+    """零件是否属于「齿轮类」（P5 收口判据，缺段即 FAIL）。
+
+    两条独立判据，任一命中即按齿轮类对待：
+      ① 房间 type == transmission —— 传动房间的【全部】零件都要求真齿形断言
+         （防"把齿圈画成圆柱"这类整房替换，而不只是改文件名）；
+      ② 零件文件名含齿轮语义标记（齿轮 / gear / pinion / 蜗轮 / 蜗杆 /
+         链轮 / 棘轮 / 齿圈 / 齿条 …），大小写不敏感。
+
+    为何不信任 expect.gear：P5 的欺骗路径正是"小屋自己写 expect"——
+    只要允许小屋自证，它总能把圆柱期望写成 PASS。所以判据必须来自
+    零件身份（名字/房间类型），而不是来自小屋提供的期望。
+    """
+    try:
+        if room_type and str(room_type).strip().lower() == "transmission":
+            return True
+    except Exception:
+        pass
+    try:
+        _n = str(name or "").lower()
+        for _k in _GEAR_NAME_MARKS:
+            if _k in _n:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _selfcheck_gate_for_room(name):
+    """【第5项·P1/P5】房间下线前的「三段自检」强制核实。
+
+    返回 None 表示跳过（不该拦），或返回一个拒绝 room-end 的响应体。
+
+    ── 为什么需要这道门（回溯报告 7 P5，报告自评「最严重」）──────────
+      小齿轮轴与大齿轮两个房间都返回「建模完成、三道防线 PASS」，
+      但零件几何里【没有齿】：大齿轮是 revolve(360) 出来的圆盘，
+      小齿轮轴是阶梯轴 + phi53.587 圆柱段。
+      完成判据只有「文件存在 + 三道防线凭据 + 看图 PASS」，
+      【没有零件定义断言】；当时的 visual_check 只验包围盒，不验特征内容
+      -> 无齿零件照样 PASS。真实完成度因此从 8/27 缩水到 5/27。
+
+    ── 这道门检查什么（与 part_verify 三段一一对应）───────────────
+      第一段 bbox ：实测/期望包围盒逐面容差
+      第二段 体积 ：★抓「无齿圆柱代齿轮」这类几何替代件的唯一廉价手段
+      第三段 特征 ：用户特征计数 + 关键特征存在性
+
+    判据来源：reports/<零件>.self_check.json
+      （由 part_verify.py CLI 或 swapi 侧 self_check_model() 落盘）。
+    没有该文件 -> 拦（「没做自检」不等于「自检通过」）。
+
+    ── 刻意保守的跳过条件（避免误锁死流程）─────────────────────────
+      (1) part_verify.py 不存在 -> 跳过并留提示；
+      (2) 非建模房间（装配/出图/总理）-> 跳过；
+      (3) 本房间没有任何已登记零件 -> 跳过（早期阶段）。
+
+    留痕：确需放行用 room-end --force（会写 defense_bypass 台账）。
+    """
+    _pv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "part_verify.py")
+    if not os.path.exists(_pv_path):
+        return None
+    try:
+        import part_verify as _pv  # noqa: F401
+    except Exception:
+        return None
+
+    _MODELING_TYPES = ("structural", "transmission", "housing",
+                       "support", "spring", "thermal", "corrosion")
+    _rtype = None
+    _st = {}
+    try:
+        _st = load_state() or {}
+        for _rn, _rv in (_st.get("rooms") or {}).items():
+            if _rn == name and isinstance(_rv, dict):
+                _rtype = _rv.get("type")
+                break
+    except Exception:
+        _rtype = None
+    if _rtype and _rtype not in _MODELING_TYPES:
+        return None
+
+    _parts = []
+    try:
+        _rec = _load_artifact_registry().get(str(name))
+        if isinstance(_rec, list):
+            for _it in _rec:
+                if not isinstance(_it, dict):
+                    continue
+                _p = str(_it.get("path") or "")
+                if _p.lower().endswith(".sldprt") and os.path.exists(_p):
+                    _parts.append(_p)
+    except Exception:
+        _parts = []
+    if not _parts:
+        return None
+
+    _roots = []
+    # ── 【N4 修复】自检报告的 work_dir 取【门禁读根同源】，不再只认 cwd ──
+    # 现场（2026-11-10 复检）：mode_state.json【没有】work_dir 键 —— 该字段
+    #   由 workflow_gate 写在 workflow_state.json 里。于是本门只认 cwd\reports，
+    #   而小屋按提示把 self_check.json 落进【任务目录】reports\ 后被误拦
+    #   （"没有三段自检记录"，实际记录就在任务目录里）。
+    # 修法：与门禁其余读根一致 —— 委托 _default_work_dir()（mode_state →
+    #   workflow_state → settings.delivery_root() 逐级回退），两者都收进 _roots。
+    try:
+        _wd = _st.get("work_dir")
+        if _wd:
+            _roots.append(os.path.join(str(_wd), "reports"))
+    except Exception:
+        pass
+    try:
+        _wd2 = _default_work_dir()
+        if _wd2 and str(_wd2).strip():
+            _rp = os.path.join(str(_wd2), "reports")
+            if _rp not in _roots:
+                _roots.append(_rp)
+    except Exception:
+        pass
+    _roots.append(os.path.join(os.getcwd(), "reports"))
+
+    def _find_selfcheck(part_path):
+        _stem = os.path.splitext(os.path.basename(part_path or ""))[0]
+        for _d in _roots:
+            _f = os.path.join(_d, "%s.self_check.json" % _stem)
+            if os.path.isfile(_f):
+                return _f
+        return None
+
+    _bad = []
+    for _p in _parts:
+        _sf = _find_selfcheck(_p)
+        if not _sf:
+            _bad.append("%s：没有三段自检记录（未跑 part_verify）"
+                        % os.path.basename(_p))
+            continue
+        try:
+            with open(_sf, "r", encoding="utf-8") as _f:
+                _rec_s = json.load(_f)
+        except Exception as _e:
+            _bad.append("%s：自检记录损坏（%r）" % (os.path.basename(_p), _e))
+            continue
+        _vd = str(_rec_s.get("verdict") or "").upper()
+        if _vd == "PASS" and _rec_s.get("ok"):
+            # ── 【P5 收口】齿轮类零件必须带「真齿形断言」且通过 ─────────────
+            # 现场（2026-11-10 复检 P5-门2/门3）：小屋给无齿圆柱写【圆柱自己的
+            #   期望】、不带 gear 参数 → bbox/体积/特征 三段全 PASS → room-end
+            #   正常下线，"齿轮"再次被宣布完成。断言是 opt-in，欺骗路径原样
+            #   保留 —— 现在改为代码强制：
+            #   房间 type=transmission 或零件名含齿轮语义 → self_check.json
+            #   必须含 stages.gear 且 ok=true；缺段或未过 = 拦（fail-closed）。
+            if _gear_class_part(os.path.basename(_p), _rtype):
+                _gs = (_rec_s.get("stages") or {}).get("gear")
+                if not isinstance(_gs, dict) or not _gs.get("ok"):
+                    _bad.append(
+                        "%s：齿轮类零件缺少通过的真齿形断言（self_check 缺 "
+                        "stages.gear 或未过）—— P5 收口：缺段=FAIL，"
+                        "不许把无齿圆柱当齿轮下线" % os.path.basename(_p))
+                    continue
+            continue
+        _why = []
+        for _k in (_rec_s.get("failed") or []):
+            _why.append("段-%s 未过" % _k)
+        for _k in (_rec_s.get("skipped") or []):
+            _why.append("段-%s 被跳过（跳过不等于通过）" % _k)
+        if not _why:
+            _why.append("verdict=%s" % (_vd or "未说明"))
+        _bad.append("%s：三段自检未通过（%s）"
+                    % (os.path.basename(_p), "；".join(_why)))
+
+    if not _bad:
+        return None
+
+    _nl = chr(10)
+    _tips = [
+        "",
+        "补齐方式（对每个零件跑一次）：",
+        "  python part_verify.py check --bbox-actual <实测6元组> \\",
+        "      --bbox-expect <期望6元组或dx,dy,dz> \\",
+        "      --volume-actual <实测mm3> --volume-expect <期望mm3> \\",
+        "      --features-json <特征清单.json> --expect-features Extrusion*,Cut*",
+        "  或用 swapi 侧 self_check_model(model, expect, work_dir=...) 直接落盘。",
+        "  三段里任何一段被跳过都不算通过（跳过不等于通过）。",
+        "",
+        "确需放行（会留痕）：python mode_gate.py room-end \"%s\" --force" % name,
+    ]
+    return {
+        "ok": False,
+        "room": name,
+        "gate": "SELF_CHECK_REQUIRED",
+        "blockers": _bad,
+        "checked_parts": len(_parts),
+        "error": ("【第5项·三段自检门】房间 [%s] 有 %d 个零件未通过"
+                  " bbox/体积/特征 自检，拒绝 room-end。"
+                  % (name, len(_bad))),
+        "message": _nl.join([
+            "=== 【三段自检门】拦截：房间 [%s] 的零件没有通过几何自检 ===" % name,
+            "",
+            "为什么拦：回溯报告 P5 —— 没有齿的「齿轮」曾被宣布建模成功，",
+            "因为当时只验「文件在不在 + 凭据有没有 + 截图有没有」，",
+            "包围盒对圆盘和真齿轮几乎一样，抓不出来；体积与特征数才抓得住。",
+            "",
+            "未通过的零件：",
+        ] + ["  x " + _b for _b in _bad] + _tips),
+    }
+
+
 def _room_part_files(room):
     """本房间已登记且【真实存在】的零件/图纸路径列表（A-52 冻结用）。
 
@@ -7228,6 +7791,25 @@ def cmd_room_end(name, force=False, dry_run=False):
         _vg = _visual_gate_for_room(name)
         if _vg and not _vg.get("ok") and not _vg.get("skipped"):
             return _vg
+    # ══ 【第5项 · 代码强制】三段自检（bbox / 体积 / 特征数）═══════════════
+    # 回溯报告 7 P5 的事故：没有齿的「齿轮」被宣布建模成功。
+    #   当时只验「文件在 + 凭据 + 截图」，而包围盒对圆盘与真齿轮几乎一样，
+    #   抓不出来；体积与特征数才抓得住。详见 _selfcheck_gate_for_room 文档。
+    # 强制点：房间下线（不可逆）前，每个零件都必须有 PASS 的三段自检记录。
+    # 放行：与三大防线同一套绕行机制（--force / DSH_DEFENSE_BYPASS=1，均留痕）。
+    if not force:
+        _sc = _selfcheck_gate_for_room(name)
+        if _sc and not _sc.get("ok") and not _sc.get("skipped"):
+            return _sc
+    # ══ 【第5项 · 代码强制】总装房间：零件朝向声明齐全 + 与契约一致 ═══════
+    # 回溯报告 15.2 J6：「缺 up_contract.json，或某零件缺 .pr.json ->
+    #   无声明 = 不可审计，一律不通过」。
+    # 现场：零件 +Z、总装 +Y、图纸 +Z 三处各自看都对，合起来整机错位 90 度。
+    # 只做静态可判部分（读 pr.json），不在门禁里拉起 SW。
+    if not force:
+        _pg = _pose_gate_for_room(name)
+        if _pg and not _pg.get("ok") and not _pg.get("skipped"):
+            return _pg
     if not force:
         try:
             import defense_gate as _dg
@@ -7517,6 +8099,149 @@ def cmd_room_fail(name):
             "message": "房间 [%s] 已回退到待处理状态。重新调用 workflow_gate.py select 可再次获得该房间。" % name}
 
 
+def _parallel_mode_now(state=None):
+    """当前编排的并行策略，返回 "D"(部分并行) / "E"(单小屋串联) / None。
+
+    == 【v2 回归复测 P0 修复·关键】落盘值是 parallel/sequential，不是 D/E ==
+    现场（回归复测报告 v2 第2.2节，实测）：
+        _parallel_mode_now = None
+        _build_exclusive_strict = (False, 'unknown_parallel_mode')
+        get_parallel_mode = 'parallel'   (set E 之后是 'sequential')
+    也就是说：状态文件里写的是 _norm_pmode() 归一化后的英文串
+    （D -> "parallel"，E -> "sequential"），而本函数只认字面 "D"/"E"。
+    结果 -- 用户明确选了 E（串行），严格度判定却永远落到
+    "unknown_parallel_mode" -> 只观测不拦 -> E 模式的串行硬闸形同虚设。
+
+    这就是"读错了值"的典型：函数名写着"现在是什么模式"，实现却只认一种编码。
+
+    修复：一律走 _norm_pmode() 归一（它本来就是全仓唯一的事实源），
+    再把 parallel/sequential 映射回 D/E；同时兼容真实历史数据里可能出现的
+    中文/大小写变体。找不到任何值时返回 None（由调用方按"未知=只观测"处理，
+    保持向后兼容，不把老任务卡死）。
+    """
+    try:
+        st = state if isinstance(state, dict) else load_state()
+    except Exception:
+        return None
+    if not isinstance(st, dict):
+        return None
+
+    def _to_de(v):
+        if v is None or v == "":
+            return None
+        _n = _norm_pmode(v)
+        _s = str(_n).strip().upper()
+        if _s in ("D", "PARALLEL", "并行"):
+            return "D"
+        if _s in ("E", "SEQUENTIAL", "串行"):
+            return "E"
+        _raw = str(v).strip().upper()
+        if _raw in ("D", "PARALLEL", "并行"):
+            return "D"
+        if _raw in ("E", "SEQUENTIAL", "串行"):
+            return "E"
+        return None
+
+    # (1) 扁平字段（mode_state 的权威口径）
+    for k in ("parallel_mode", "parallel", "wave_mode", "mode_parallel",
+              "parallel_strategy"):
+        _de = _to_de(st.get(k))
+        if _de:
+            return _de
+    # (2) 嵌套结构（selection / plan 等）
+    for parent in ("selection", "plan", "mode_selection", "mode2"):
+        p = st.get(parent)
+        if isinstance(p, dict):
+            for k in ("parallel_mode", "parallel", "parallel_strategy",
+                      "wave_mode"):
+                _de = _to_de(p.get(k))
+                if _de:
+                    return _de
+    # (3) 回退：问权威读取器（它会自己对齐 workflow/mode_state 两份文件）
+    try:
+        _de = _to_de(get_parallel_mode())
+        if _de:
+            return _de
+    except Exception:
+        pass
+    return None
+
+
+def _build_exclusive_strict(state=None):
+    """是否把「房间级独占」升级为【拒绝】而不是"只观测"。
+
+    默认策略（对齐报告 9-B-2 原文「room-start 前置断言：active 房间数必须为 0，
+    否则拒绝」）：
+      · parallel_mode == E（用户明确要串行）-> 默认【严格拒绝】；
+      · parallel_mode == D（用户明确要并行）-> 默认只观测（否则 D 被代码废掉）；
+      · 未知 -> 只观测（向后兼容，避免把老任务卡死）。
+    环境变量 DSH_CONCURRENT_BUILD_STRICT 可双向覆盖（1=严格 / 0=只观测）。
+    """
+    _env = (os.environ.get("DSH_CONCURRENT_BUILD_STRICT") or "").strip().lower()
+    if _env in ("1", "true", "yes", "on"):
+        return True, "env"
+    if _env in ("0", "false", "no", "off"):
+        return False, "env"
+    _pm = _parallel_mode_now(state)
+    if _pm == "E":
+        return True, "parallel_mode=E"
+    if _pm == "D":
+        return False, "parallel_mode=D"
+    return False, "unknown_parallel_mode"
+
+
+def _require_build_exclusive(name, state=None):
+    """【A15 补】首次取 SW 使用权时，做【房间级独占】断言。
+
+    这正是 mode_gate.py:6029 注释里承诺、但代码里【从未实现】的函数
+    （全仓 grep 只能命中那一行注释）。
+    注释写了而代码没有 = 比不写更危险：读代码的人以为已经拦住了。
+
+    语义：
+      · 严格模式下，若还有别的房间在世（active 且未 end/fail）-> 拒绝取锁，
+        返回可直接回给用户的响应体；
+      · 非严格模式 -> 返回 None（放行），行为与改动前一致。
+
+    Returns: None（放行）或 dict（拒绝，含 gate="CONCURRENT_BUILD"）
+    """
+    try:
+        st = state if isinstance(state, dict) else load_state()
+    except Exception:
+        return None
+    try:
+        _strict, _why = _build_exclusive_strict(st)
+    except Exception:
+        return None
+    if not _strict:
+        return None
+    try:
+        _others = [r for r in _active_week_rooms(st) if r != name]
+    except Exception:
+        return None
+    if not _others:
+        return None
+    _reason = ("房间 [%s] 请求 SW 使用权被拒：仍有 %d 个房间在世（%s）。"
+               "串行策略要求同一时刻只有一个房间在建模。"
+               % (name, len(_others), "、".join(_others)))
+    try:
+        _log_concurrent_build_violation(name, _others, _reason)
+    except Exception:
+        pass
+    return {
+        "ok": False,
+        "room": name,
+        "gate": "CONCURRENT_BUILD",
+        "active_rooms": _others,
+        "strict_source": _why,
+        "hold_mode": "room" if _room_hold_enabled() else "command",
+        "error": "【CONCURRENT_BUILD 阻断】" + _reason,
+        "hint": ("(1) 等现有房间 room-end/room-fail 后再取 SW 使用权；"
+                 "(2) 串行(E) 才会有这道硬拦，并行(D) 只观测；"
+                 "(3) 临时放开：DSH_CONCURRENT_BUILD_STRICT=0；"
+                 "(4) 查看证据：python mode_gate.py room-board --json"),
+    }
+
+
 def cmd_sw_request(name):
     """排队/获取 SW 使用权。快路径直接获取；否则入队等待。"""
     state = load_state()
@@ -7524,6 +8249,15 @@ def cmd_sw_request(name):
     if not _lock_needed(state):
         save_state(state)
         return {"ok": True, "need_lock": False, "room": name}
+    # == 【A15 补·报告 9-B-2】房间级独占：首次取 SW 使用权前先断言 ==
+    # 这段就是 mode_gate.py:6029 注释里承诺、而代码里从未实现的
+    #   _require_build_exclusive —— 每 10 s 采样的守卫当初记了 12 次
+    #   CONCURRENT_BUILD=2~3，却没有任何一处在"要锁的时候"真的拦下来。
+    # 现在：串行策略(E) 下，若还有别的房间在世 -> 直接拒绝取锁并回传
+    #   结构化原因 + 证据入口；并行(D)/未知 -> 只观测，不改变用户可选策略。
+    _excl = _require_build_exclusive(name, state)
+    if _excl:
+        return _excl
     # 【Bug2 修复·饥饿根因】原实现在这里直接给持有者续期：
     #     if lk.get("owner") == name: return {"acquired": True}
     # 这等于让持有者无限次"插自己的队"，永远不会走到下面的公平检查，
@@ -7835,10 +8569,27 @@ def cmd_sw_release(name):
         lk["prev_owner"] = name
         lk["owner"] = None
         lk["acquired_at"] = None
+        # == 【v2 回归复测 P0 修复】释放时必须一并清 fair_start / cmd_seq ==
+        # 现场（复测报告 v2 第2.1节实测）：
+        #   A(结构件) 还在建模、尚未保存，sw-status 就显示
+        #   owner=轮系传动件, prev_owner=结构件 -- 锁提前易手，
+        #   而 mode_state.sw_lock.fair_start 仍是两小时前的陈旧时间戳。
+        # 根因链：
+        #   sw-release 只清 owner/acquired_at，【不清 fair_start】->
+        #   下一次某房间取锁时 _reclaim_lock 用 fair_start 算"已持锁多久"
+        #   -> 算成 8 万秒 -> 远大于 SW_FAIR_SECONDS(180) -> 判定"该让位"
+        #   -> 立即 reclaim 把锁抢走。
+        # 换句话说：fair_start 是"公平轮转的计时起点"，释放时不重置，
+        #   就等于给下一个持有者伪造了一个"我已经占了很久"的计时器。
+        # 因此这里必须与 owner 同时清零，三者是同一个语义单元。
+        lk["fair_start"] = None
+        lk["cmd_seq"] = 0
+        lk["released_at"] = time.time()
         save_state(state)
         nxt = lk.get("queue", [None])[0] if lk.get("queue") else None
         return {"ok": True, "released": name, "next_in_queue": nxt,
-                "message": "SW 使用权已释放，队列下一个: %s" % nxt}
+                "fair_reset": True,
+                "message": "SW 使用权已释放（含公平计时重置），队列下一个: %s" % nxt}
     # ── 【BUG-观察-7 修复】未持有锁时也要清残留的 prev_owner 标志 ──────────
     # 背景：_gate_sw_unlock()（在 finally 里）通常已经先把 owner 清成 null，
     #   于是小屋 close-all 之后调用的 sw-release 永远走这个"未持有锁"分支，
@@ -7968,7 +8719,7 @@ def cmd_sw_proc():
     pids = []
     try:
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq " + SW_EXE, "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=15,
+                             capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=15,
                              creationflags=CREATE_NO_WINDOW)
         for line in (out.stdout or "").splitlines():
             if SW_EXE in line.upper():

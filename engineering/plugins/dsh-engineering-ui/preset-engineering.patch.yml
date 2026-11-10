@@ -116,10 +116,19 @@
                 ③ 每个零件 save 后必须写 <零件>.SLDPRT.pr.json（与 .origin.json 同目录同基），至少含：
                   up_axis（"X"/"Y"/"Z"）、up_sign（+1/-1）、main_axis（主轴/回转轴）、base_plane（首个草图基准面）。
                   缺这份声明的零件不许进总装 —— 别人只能靠猜"上"是哪边。
+                  【代码已强制】swapi 的 save()/save_as() 自动落这份声明（_attach_pr_record）；
+                  显式声明：建模脚本里调 m.set_part_pose(up_axis="Z", main_axis="Z", base_plane="Top Plane")；
+                  校验：python part_pose.py validate <零件> | check-assembly <零件> --rotation ... | check-room <房间> --parts ...
                 ④ 总装前必须断言"组件旋转矩阵与 pr.json 声明朝向一致"，且【零旋转装配必须报警】：
                   声明 up_axis ≠ 世界 up 却读到单位阵（rotation_ok=true）→ 零件根本没摆正，判失败；
                   声明已对齐却偏离单位阵 → 姿态被别人改过，必须复核。
-                  已有工具：read_component_pose() 读回 {rotation, rotation_ok}、verify_assembly_placement() 判 assembly_ok。
+                  已有工具：read_component_pose() 读回 {rotation, rotation_ok}、verify_assembly_placement() 判 assembly_ok；
+                  以及 part_pose.check_assembly_pose()（J2/J4/J5 代码级判据，缺 pr.json 直接 FAIL）。
+                ④-b【代码已强制·三段自检】建模完成的判据不只是"文件在 + 凭据有 + 截图有"：
+                  bbox / 体积 / 特征数 三段都要真实回读并 PASS，落盘 reports/<零件>.self_check.json。
+                  ★体积段是抓「无齿圆柱代齿轮」这类简化体冒充的唯一廉价手段（只验包围盒抓不到）。
+                  跑法：python sw_bridge.py self-check <零件> --expect '{"bbox_mm":[...],"volume_mm3":...,"features":["Extrusion*"],"feature_count":N}'
+                  任何一段"被跳过"都不算通过（跳过≠通过）；room-end 会因缺 PASS 记录而拒绝下线。
                 ⑤ 🔴【上方向单点声明·跨房间共享】整个任务只允许【一个】"上"：
                   由总计子代理/总理子代理在开工时一次性写定（up_axis + up_sign + 原点约定），
                   然后原样下发进每个小屋的 prompt（建模、总装、出图三波共用同一份，不许各写一套）。

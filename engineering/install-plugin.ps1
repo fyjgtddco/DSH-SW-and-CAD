@@ -1,20 +1,23 @@
-# DSH 工程模式预设 — 一键安装脚本
+﻿# DSH 工程模式预设 — 一键安装脚本
 #   1. 【问题2 修复】不再注入自定义权限预设（SW单行模式已移除），
 #      改为清理历史残留，权限只保留 DSH 标准三档
-#   2. 把 dsh-engineering-ui 插件复制进 profile 的 node_modules
-#   3. 把插件登记进 profile 的 package.json（dependencies + dsh.profile.bundles）
+#   2. 把 dsh-engineering-ui 与 dsh-engineering-compaction 复制进 profile 的 node_modules
+#   3. 把插件登记进 profile 的 package.json
+#      （UI = dependencies + dsh.profile.bundles；compaction = 只登记 dependency）
 # 完成后必须【重启 DSH Web】才生效。
 
 $ErrorActionPreference = "Stop"
 
 $PresetRoot = Split-Path $MyInvocation.MyCommand.Path
 $PluginSrc  = Join-Path $PresetRoot "plugins\dsh-engineering-ui"
+$CompactSrc = Join-Path $PresetRoot "plugins\dsh-engineering-compaction"
 $DshHome    = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
 $WebProfile = Join-Path $DshHome "profiles\web"
 $WebModules = Join-Path $WebProfile "node_modules"
 $PatchFile  = Join-Path $WebProfile "cordis.patch.yml"
 $ProfilePkg = Join-Path $WebProfile "package.json"
 $PluginDst  = Join-Path $WebModules "dsh-engineering-ui"
+$CompactDst = Join-Path $WebModules "dsh-engineering-compaction"
 
 function Say($msg, $color) { Write-Host $msg -ForegroundColor $color }
 
@@ -55,16 +58,26 @@ if (Test-Path $PatchFile) {
   Say "      [X] cordis.patch.yml not found" Red
 }
 
-# 2. copy plugin
-Say "[2/3] Installing dsh-engineering-ui plugin ..." Yellow
+# 2. copy plugins
+Say "[2/3] Installing dsh-engineering-ui + dsh-engineering-compaction ..." Yellow
 if (-not (Test-Path $PluginSrc)) {
   Say "      [X] plugin source missing: $PluginSrc" Red
+  exit 1
+}
+if (-not (Test-Path $CompactSrc)) {
+  Say "      [X] compaction source missing: $CompactSrc" Red
   exit 1
 }
 if (Test-Path $PluginDst) { Remove-Item $PluginDst -Recurse -Force }
 New-Item -ItemType Directory -Path $PluginDst -Force | Out-Null
 Copy-Item (Join-Path $PluginSrc "*") -Destination $PluginDst -Recurse -Force
-Say "      copied to $PluginDst" Green
+Say "      copied UI  -> $PluginDst" Green
+# 压缩引擎只是 compaction 组的子项：复制文件 + 登记 dependency，
+#   绝不登记进 dsh.profile.bundles（宿主层重复注册 ctx.compaction 会被 loader 拒绝）。
+if (Test-Path $CompactDst) { Remove-Item $CompactDst -Recurse -Force }
+New-Item -ItemType Directory -Path $CompactDst -Force | Out-Null
+Copy-Item (Join-Path $CompactSrc "*") -Destination $CompactDst -Recurse -Force
+Say "      copied CMP -> $CompactDst" Green
 
 # 3. register in profile
 Say "[3/3] Registering plugin in profile package.json ..." Yellow
@@ -72,6 +85,7 @@ $pkg = Get-Content $ProfilePkg -Raw -Encoding UTF8 | ConvertFrom-Json
 $deps = [ordered]@{}
 foreach ($p in $pkg.dependencies.PSObject.Properties) { $deps[$p.Name] = $p.Value }
 $deps["dsh-engineering-ui"] = "file:./node_modules/dsh-engineering-ui"
+$deps["dsh-engineering-compaction"] = "file:./node_modules/dsh-engineering-compaction"
 $bundles = @()
 foreach ($b in $pkg.dsh.profile.bundles) { $bundles += $b }
 if ($bundles -notcontains "dsh-engineering-ui") {
