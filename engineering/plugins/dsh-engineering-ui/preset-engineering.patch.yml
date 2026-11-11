@@ -574,9 +574,42 @@
                   #   真实生效值请以 /dsh-engineering-ui/compaction-history 返回的
                   #   threshold{value, limiter:'ratio'|'budget'} 为准（那是按真实
                   #   contextWindow 现算的，不是抄 yml 的名义值）。
-                  thresholdRatio: 0.7
+                  #
+                  # ══ 【2026-11-11 修正·与官方默认平齐】0.7 → 0.8 ══════════════
+                  # 用户提问：「那个压缩的为啥一直都不压缩？按理来说官方的都会
+                  #   压缩几次，要不要把阈值往下调一点？和官方的压缩平齐会更好？」
+                  #
+                  # ── 先回答"为什么一直不压缩"（这不是配置问题）──────────────
+                  # 实测（验收会话 20261111_131815，9 个会话的 usage 字段逐个统计
+                  #   inputTokens + cacheReadTokens）：
+                  #     峰值上下文最高 384,522 token，窗口 1,000,000。
+                  #   阈值 0.7 → 700,000。384K 远达不到 700K，所以【零次压缩是
+                  #   预期行为，不是故障】。"官方都会压几次"的前提是窗口 200K 级别
+                  #   （跑 30 万 token 的会话自然要压好几次）；本机是 1M 窗口。
+                  #
+                  # ── 为什么是"往上"而不是"往下"调 ────────────────────────────
+                  # 原话里说"往下调一点"，但方向要反过来：
+                  #   阈值 = min(窗口×ratio, 窗口−reserved−headroom)
+                  #   往下调 ratio = 更早压缩 = 更频繁丢细节 + 每次重发长前缀，
+                  #   正是 A14 要治的病（历史上 200K 窗口在 100K 就压，白丢一半）。
+                  #   要"更容易触发压缩"，只能【抬高】ratio 或【减小】headroom。
+                  #
+                  # ── 与官方平齐（本次决定）──────────────────────────────────
+                  # 官方 @deepseek-ai/dsh-compaction-basic 的内置默认（从安装体
+                  #   lib/index.js 逐字核对）：
+                  #     DEFAULT_THRESHOLD_RATIO = 0.8
+                  #     headroomTokens 默认      = 65536
+                  #     DEFAULT_RETAIN_RATIO     = 0.16
+                  # 这里取【ratio 平齐官方 0.8】，但 headroom 保留工程模式更小的
+                  #   8000 —— 理由是机械设计会话单轮工具输出极大（整段 JSON /
+                  #   建模脚本），需要更多消息预算；headroom 只影响"预算项"是否
+                  #   成为瓶颈，取 8000 能让比例项稳定生效（1M 窗口 → 800K）。
+                  #   实测口径：1M 窗口下两者都得 800K，reserved=0 与 65536 同值，
+                  #   所以这条只是"更贴近官方语义"，不是"更激进"。
+                  # retainRatio 同步平齐官方 0.16（保留更多原文，少丢数值）。
+                  thresholdRatio: 0.8
                   headroomTokens: 8000
-                  retainRatio: 0.12
+                  retainRatio: 0.16
 
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'

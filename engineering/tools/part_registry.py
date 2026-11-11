@@ -948,7 +948,23 @@ def _parse_dims(value):
         for k, v in value.items():
             fv = _as_float(v)
             if fv is None:
-                return None, "dims 字段 %r 不是数值：%r" % (k, v)
+                # ══ 【2026-11-11 修复·报错可读性】══════════════════════════
+                # 现场（20261111_131815_580E38FA）：小屋把别的零件的整段
+                #   {"volume_mm3": 6300, "bbox_mm": [...]} 直接塞进 dims，
+                #   旧报错只说"'bbox_mm' 不是数值"，看不出"这是抄错了零件"。
+                #   这里点名它其实该走哪个字段，省掉一轮猜。
+                _hint = ""
+                if str(k) in ("bbox_mm", "bbox"):
+                    _hint = ("—— bbox_mm 是包围盒 6 元组，应当作为"
+                             "【同级字段 bbox_mm】传入，不能混进 dims；"
+                             "dims 只放 length_mm/width_mm/height_mm 这类标量。")
+                elif str(k) in ("volume_mm3", "volume"):
+                    _hint = ("—— volume_mm3 是体积，不属于外形尺寸；"
+                             "dims 只放长/宽/高，体积请单独放实际测量字段。")
+                return None, ("dims 字段 %r 不是数值：%r%s"
+                              "（若这是从别的零件整段复制的 dims，"
+                              "请核对是否抄错了零件）"
+                              % (k, v, _hint))
             if fv < 0:
                 return None, "dims 字段 %r 为负数（%s），尺寸不允许为负" % (k, _fmt_num(fv))
             out[str(k)] = fv
@@ -1659,6 +1675,79 @@ def add_part(record, work_dir=None, reason=None, allow_mismatch=False,
     bbox, err = _parse_bbox(record.get("bbox_mm"))
     if err:
         return {"ok": False, "error": err, "field": "bbox_mm", "part": name}
+
+    # ══ 【2026-11-11 修复·P3 台账上报值张冠李戴】══════════════════════════
+    # 现场（验收复跑 20261111_131815_580E38FA）：输出轴被上报成平键的尺寸 ——
+    #   `report_DSH_输出轴.json` 的 dims/bbox 与 `report_DSH_输出轴平键.json`
+    #   **逐字节相同**（volume 6300、bbox [-25,25,0,9,-7,7]）；
+    #   而输出轴磁盘上的真实包围盒是 [-109,64,-25,25,-25,25]
+    #   （见 parts\DSH_输出轴.SLDPRT.origin.json / .pr.json，
+    #    由 swapi 在 save() 时实测写入）。3 个平键的 dims 也完全相同、未区分。
+    # 总理子代理当场发现了它并拦下，但那是"靠人眼"，代码层没有判据。
+    #
+    # 这条缺陷为什么必须由代码拦：
+    #   · dims/bbox 是装配换算与相邻尺寸一致性的输入，错了会连带把
+    #     正确零件的核对结论一起带偏（假阴性：真冲突被掩盖）；
+    #   · 它是"复制上一件、忘改"的典型产物，靠自觉无法根治。
+    #
+    # 判据（只用磁盘上已有的事实，不依赖任何自报）：
+    #   若零件旁挂的 origin.json / pr.json 里记着【实测 bbox_mm】，
+    #   而本次上报的 bbox_mm 与它相差超过容差 → 记为 warning 并 escalate。
+    #   ⚠️ 只 WARN 不阻断：确有合法情形（先登记后建模、登记的是待加工毛坯），
+    #      那种场景需要人判断；但"两份数据对不上"这件事必须被看见。
+    _disk_bbox_note = None
+    try:
+        _disk_bbox = None
+        _disk_src = None
+        for _suf, _nm in ((ORIGIN_RECORD_SUFFIX, "origin.json"),
+                          (".pr.json", "pr.json")):
+            _p = str(file_path) + _suf
+            if not os.path.isfile(_p):
+                continue
+            try:
+                with open(_p, "r", encoding="utf-8-sig") as _f:
+                    _j = json.load(_f) or {}
+            except Exception:
+                continue
+            _b = _j.get("bbox_mm")
+            if isinstance(_b, (list, tuple)) and len(_b) == 6:
+                _disk_bbox, _disk_src = list(_b), _nm
+                break
+        if _disk_bbox is not None:
+            if bbox:
+                _d = max(abs(float(bbox[i]) - float(_disk_bbox[i]))
+                         for i in range(6))
+                if _d > 0.5:
+                    _disk_bbox_note = {
+                        "kind": "reported_bbox_vs_disk_mismatch",
+                        "part": name,
+                        "severity": "WARN",
+                        "escalate_to_parent": True,
+                        "reported_bbox_mm": list(bbox),
+                        "disk_bbox_mm": _disk_bbox,
+                        "disk_source": _disk_src,
+                        "max_delta_mm": round(_d, 4),
+                        "detail": ("%s 上报的 bbox_mm 与磁盘实测（%s）相差 %smm ——"
+                                   "上报值很可能抄错了零件（张冠李戴）。"
+                                   "以磁盘实测为准重新登记。"
+                                   % (name, _disk_src, _fmt_num(round(_d, 4)))),
+                    }
+            else:
+                # 没上报 bbox 时，顺手把磁盘实测结果算进警告，便于发现"漏报"
+                _disk_bbox_note = {
+                    "kind": "bbox_available_on_disk",
+                    "part": name,
+                    "severity": "INFO",
+                    "disk_bbox_mm": _disk_bbox,
+                    "disk_source": _disk_src,
+                    "detail": ("%s 未上报 bbox_mm，但磁盘 %s 里有实测包围盒 %s；"
+                               "建议按实测值登记，装配换算才不会偏。"
+                               % (name, _disk_src, _disk_bbox)),
+                }
+    except Exception as _e_bb:
+        _disk_bbox_note = None
+    if _disk_bbox_note:
+        warnings.append(_disk_bbox_note)
 
     if bbox and not dims:
         dims = _dims_from_bbox(bbox)

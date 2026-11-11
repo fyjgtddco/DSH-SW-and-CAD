@@ -3266,10 +3266,36 @@ def _early_reset_cache():
 # ==================== 版本相关枚举（自动适配） ====================
 
 def _get_midplane_enum(sw):
-    """两侧对称拉伸的枚举值：2022=6, 2018=5（版本相关）。"""
-    if _version_major(sw) and _version_major(sw) >= 28:   # 2020+
-        return 6
-    return 5
+    """两侧对称拉伸的枚举值 swEndCondMidPlane。
+
+    ══ 【枚举订正 · 2026-11-11】原实现按版本返回 2022=6 / 2018=5 ═══════
+    原实现（已删除）按主版本号分支：2020+ 给 6，更老的版本给
+    swEndCondOffsetFromSurface 的数值 —— 那个数值是"从曲面偏移"，
+    与"两侧对称"不是一回事（具体数值见下面的官方成员表）。
+
+    ── 判据从哪来（如实标注证据强度）────────────────────────────────────
+    ① 【官方文档·确定】swEndConditions_e 从 2018 到 2025 的成员表完全一致：
+         swEndCondBlind=0 / ThroughAll=1 / ThroughNext=2 / UpToVertex=3 /
+         UpToSurface=4 / OffsetFromSurface=5 / MidPlane=6 / UpToBody=7 /
+         ThroughAllBoth=9 / UpToSelection=10 / UpToNext=11
+       所以 5【不是】MidPlane，是 OffsetFromSurface（从曲面偏移）。
+       参考：https://help.solidworks.com/2018/English/api/swconst/
+             SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swEndConditions_e.html
+    ② 【推断·未真机验证】"老版本上 symmetric=True 生成的不是对称实体"
+       这一点【没有】实机复现记录 —— 本轮验收会话（20261111_131815）跑的是
+       SW2025（_version_major>=28，原实现照样给 6），从未进入老版本分支。
+       也就是说：这是"按官方表反推出的推断"，不是现场观测。
+       标注清楚是为了不把推断当证据用（本仓库的一贯要求）。
+
+    ── 为什么仍然改 ────────────────────────────────────────────────────
+    即使推断未经实测，"5 = 从曲面偏移"是官方事实：把它当对称用，只要该值
+    被 SW 接受，几何就是错的、而且【不会报错】—— 属于最危险的静默错误。
+    恒返 6 在所有版本上都与官方表一致，比"按版本猜"严格更优，且
+    2020+ 路径（返回 6）行为逐字节不变，无回归面。
+
+    保留 sw 形参：兼容 swapi.py:10012（extrude 的 symmetric 分支）等调用点。
+    """
+    return SW_END_MID_PLANE
 
 
 def _get_snap_prefs(sw):
@@ -3299,23 +3325,133 @@ def _disable_snapping(sw):
 # ── 【F 修复·第四轮】swEndConditions_e 完整枚举 ────────────────────────
 # 测试反馈：FeatureCut3 双向传 T1=SW_END_THROUGH 时只去料 1.96%，
 #   说明该枚举值【没有被识别为贯穿】，而是被当成了极小盲孔。
-# 根因：SolidWorks 的 swEndConditions_e 各版本取值不同，且
-#   "完全贯穿"与"双向贯穿"是两个不同枚举：
-#     swEndCondBlind            = 0  给定深度
-#     swEndCondThroughAll       = 1  完全贯穿（单向）
-#     swEndCondThroughAllBoth   = 2  完全贯穿-双向
+# 根因：SolidWorks 的 swEndConditions_e 里 "完全贯穿" 与 "双向贯穿" 是两个
+#   不同枚举（本段下方 2026-11-11 起以官方原文为准，此前"各版本取值不同"
+#   的猜测已被推翻 —— 官方 2018/2019/2025 的表完全一致）。
 #   原实现把 T1/T2 都设为 1，在需要"双向贯穿"的场合语义不符，
 #   部分版本会退化成盲孔。
-SW_END_BLIND = 0                # 给定深度
-SW_END_THROUGH = 1              # 完全贯穿（单向）
-SW_END_THROUGH_BOTH = 2         # 完全贯穿-双向（各版本通用取值）
-SW_END_UP_TO_NEXT = 3
-SW_END_UP_TO_VERTEX = 4
-SW_END_UP_TO_SURFACE = 5
-SW_END_OFFSET_FROM_SURFACE = 6
+#   ⚠️ 历史误值：本段曾写 swEndCondThroughAllBoth = 2，2 实为
+#      swEndCondThroughNext（切到下一面就停）—— 详见下方 SW_END_* 块。
+# ══ 【枚举订正 · 2026-11-11】按官方 swEndConditions_e 原文重写 ═══════════
+# 现场现象：cut(through=True) 在双环辐板（DSH_大齿轮）上孔【不贯穿】，体积
+#   实测 1214042.68 mm³ vs 期望 809621.02 mm³（偏差 49.95%），self_check FAIL。
+#   证据：C:\Users\j1877\Desktop\test\20261111_131815_580E38FA\reports\
+#         DSH_大齿轮.self_check.json
+# 根因：本块原把「双向贯穿」写成 2，而官方 2 是 swEndCondThroughNext
+#   （沿方向切到【下一个面】就停）。辐板是双环薄壁，"到下一面就停"正好
+#   停在环间空腔，于是孔只切掉一小段 —— 结构上完全解释得通。
+#   同时原表把 UpToNext/UpToVertex/UpToSurface/OffsetFromSurface 整体错位
+#   一位（3/4/5/6 实际分别是 UpToVertex/UpToSurface/OffsetFromSurface/
+#   MidPlane），属于同一处凭猜测填表的连带错误。
+# 修复判据（官方原文，多份 swEndConditions_e 文档一致，2018/2019/2025 同表）：
+#   swEndCondBlind=0 / swEndCondThroughAll=1 / swEndCondThroughNext=2 /
+#   swEndCondUpToVertex=3 / swEndCondUpToSurface=4 / swEndCondOffsetFromSurface=5 /
+#   swEndCondMidPlane=6 / swEndCondUpToBody=7 / swEndCondThroughAllBoth=9 /
+#   swEndCondUpToSelection=10 / swEndCondUpToNext=11
+#   参考：https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swEndConditions_e.html
+# 注意：官方另注 UpToVertex(3)/UpToSurface(4) 已 "Do not use，superseded by
+#   swEndCondUpToSelection"；这里仍按原值保留，仅为让枚举表可读、可排错。
+SW_END_BLIND = 0                # swEndCondBlind          给定深度
+SW_END_THROUGH = 1              # swEndCondThroughAll     完全贯穿（单向）
+SW_END_THROUGH_BOTH = 9         # swEndCondThroughAllBoth 完全贯穿-双向
+# ↑ 旧值 2 = swEndCondThroughNext（切到下一面就停），曾被误用导致孔不贯穿；
+#   见本块顶部 2026-11-11 证据。千万别再改回 2。
+SW_END_THROUGH_NEXT = 2         # swEndCondThroughNext    切到下一面
+SW_END_UP_TO_VERTEX = 3         # swEndCondUpToVertex     到顶点（官方标注 Do not use）
+SW_END_UP_TO_SURFACE = 4        # swEndCondUpToSurface    到曲面（官方标注 Do not use）
+SW_END_OFFSET_FROM_SURFACE = 5  # swEndCondOffsetFromSurface 从曲面偏移
+SW_END_MID_PLANE = 6            # swEndCondMidPlane       两侧对称（到中面）
+SW_END_UP_TO_BODY = 7           # swEndCondUpToBody       到实体
+SW_END_UP_TO_SELECTION = 10     # swEndCondUpToSelection  到选中项（官方推荐替代 3/4）
+SW_END_UP_TO_NEXT = 11          # swEndCondUpToNext       到下一个面（顶点式）
 # 贯穿兜底深度（mm）：当贯穿枚举不生效时，用极大的盲孔深度模拟贯穿。
 #   这是测试部建议的兜底策略 —— 比依赖枚举值更可靠、跨版本一致。
 THROUGH_FALLBACK_DEPTH_MM = 9999.0
+
+# ══ 【save_as Options 修复 · 2026-11-11】官方 swSaveAsOptions_e 位掩码 ═════
+# 官方原文（Bitmask）：
+#   swSaveAsOptions_Silent            = 1 or 0x1
+#   swSaveAsOptions_Copy              = 2 or 0x2  存副本并【继续编辑当前文档】
+#   swSaveAsOptions_SaveReferenced    = 4 or 0x4  连带保存组件/外部参考
+#   swSaveAsOptions_AvoidRebuildOnSave= 8 or 0x8
+#   其余：UpdateInactiveViews=0x10 / OverrideSaveEmodel=0x20 /
+#         IgnoreBiography=0x100 / CopyAndOpen=0x200 / IncludeVirtualSubAsmComps=0x400 /
+#         ExportTo2DPdfFromInspection=0x800 / PropagateVisualProperties=0x1000
+#   参考：https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swSaveAsOptions_e.html
+# 现场现象：装配体 save_as 返回 ok:false、v2/v3 均未落盘
+#   （intermediate\assemble_result.json 第 144-148 行）；零件侧另有 3 条
+#   「SaveAs3 未抛异常但目标文件完全未变化」（parts_rejects\rejected.json）。
+# 根因：原实现 Options=2 是 Copy —— 只把内容写成副本，文档【不绑定】到新路径
+#   （GetPathName 仍为空），对装配体尤其容易不落盘；且与 save() 的 Options=1
+#   口径不一致。Copy 不是"覆盖保存"，从来不是本方法想要的语义。
+SW_SAVE_AS_SILENT = 1
+SW_SAVE_AS_COPY = 2
+SW_SAVE_AS_SAVE_REFERENCED = 4
+SW_SAVE_AS_AVOID_REBUILD_ON_SAVE = 8
+# 主路径选项 = Silent|SaveReferenced。用位或显式表达"位掩码"，不用魔数。
+SW_SAVE_AS_OPTIONS_PRIMARY = SW_SAVE_AS_SILENT | SW_SAVE_AS_SAVE_REFERENCED   # 5
+# 回退路径选项 = Silent（绝不用 Copy=2：见上）。
+SW_SAVE_AS_OPTIONS_FALLBACK = SW_SAVE_AS_SILENT                               # 1
+
+# swFileSaveError_e 位掩码 → 中文可读（官方原文节选，用于 error 文案点名）。
+# 参考：https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swconst.swFileSaveError_e.html
+_SW_FILE_SAVE_ERROR_BITS = (
+    (0x1, "swGenericSaveError", "通用保存错误"),
+    (0x2, "swReadOnlySaveError", "文档只读，无法写入"),
+    (0x4, "swFileNameEmpty", "文件名为空"),
+    (0x8, "swFileNameContainsAtSign", "文件名不能含 @"),
+    (0x10, "swFileLockError", "文件被锁（被杀毒/同步盘/另一进程占用）"),
+    (0x20, "swFileSaveFormatNotAvailable", "目标另存类型不可用"),
+    (0x80, "swFileSaveAsDoNotOverwrite", "目标已存在且选择了不覆盖"),
+    (0x100, "swFileSaveAsInvalidFileExtension", "扩展名与文档类型不符"),
+    (0x200, "swFileSaveAsNoSelection", "另存仅选中实体：不是 SaveAs 的合法选项"),
+    (0x400, "swFileSaveAsBadEDrawingsVersion", "eDrawings 版本不匹配"),
+    (0x800, "swFileSaveAsNameExceedsMaxPathLength", "路径/文件名超过 255 字符"),
+    (0x1000, "swFileSaveAsNotSupported", "该另存操作不被支持（如 SW 处于隐藏态）"),
+    (0x2000, "swFileSaveRequiresSavingReferences", "装配体改名后必须先保存引用"),
+    (0x4000, "swFileSaveAsDetachedDrawingsNotSupported", "不支持另存为分离工程图"),
+    (0x8000, "swFileSaveDoNotUpgradeError", "启用了不升级策略，版本跨度过大"),
+    (0x10000, "swFileSaveIncompatibleItemsError", "存为旧版本时有特性不兼容"),
+)
+# 出现这些位时，即使 SW 返回"成功"也必须按失败处理（磁盘指纹之外的硬证据）。
+_SW_FILE_SAVE_FATAL_BITS = 0x10 | 0x100 | 0x2000 | 0x1 | 0x2 | 0x1000
+
+
+def _decode_sw_save_mask(value):
+    """把 swFileSaveError_e / swFileSaveWarning_e 位掩码拆成结构化条目。
+
+    返回 [{"bit": int, "hex": "0x10", "name": "...", "text": "..."}]；
+    value 为 None / 0 / 非整数一律返回 []（"没有错误位"与"读不到"由调用方
+    用 mask 字段区分，绝不把读不到当没错误）。
+    """
+    try:
+        _v = int(value)
+    except Exception:
+        return []
+    if _v == 0:
+        return []
+    out = []
+    for _bit, _name, _text in _SW_FILE_SAVE_ERROR_BITS:
+        if _v & _bit:
+            out.append({"bit": _bit, "hex": hex(_bit),
+                        "name": _name, "text": _text})
+    return out
+
+
+def _sw_save_error_hint(value):
+    """把错误位掩码变成一句可直接排障的中文提示（空掩码返回 ""）。"""
+    _bits = _decode_sw_save_mask(value)
+    if not _bits:
+        return ""
+    # 常见三码优先点名，便于在小屋日志里一眼看到
+    _common = {0x10: "0x10 文件被锁", 0x100: "0x100 扩展名与文档类型不符",
+               0x2000: "0x2000 装配体改名后需先保存引用"}
+    _hit = [_common[b["bit"]] for b in _bits if b["bit"] in _common]
+    _all = "；".join("%s %s" % (b["hex"], b["text"]) for b in _bits)
+    if _hit:
+        return ("常见码命中：%s。全部命中位：%s"
+                % ("，".join(_hit), _all))
+    return "全部命中位：%s" % _all
 SW_START_SKETCHPLANE = 0    # 起始: 草图基准面
 SW_REV_BLIND = 0            # 旋转到给定角度
 # 圆角 Options
@@ -11676,7 +11812,8 @@ class SWModel:
         #   说明"贯穿枚举"在本版 FeatureCut3 的该参数位上不被识别。
         #
         # 修复策略（测试部建议）：
-        #   · 贯穿优先用【双向贯穿枚举 SW_END_THROUGH_BOTH=2】；
+        #   · 贯穿优先用【双向贯穿枚举 SW_END_THROUGH_BOTH=9】（2026-11-11 订正：
+        #     旧注释写的 2 是 swEndCondThroughNext，属误值）；
         #   · 同时把深度设为【极大值】(9999mm)，即使枚举被忽略，
         #     大深度盲孔也能实际切穿整个零件 —— 这是最稳的兜底；
         #   · 两者叠加，无论 SW 认哪个，结果都是贯穿。
@@ -12047,22 +12184,30 @@ class SWModel:
         # 修复：贯穿时【同样填入 9999mm】。
         #   理由：贯穿枚举生效时 SW 会忽略深度（无害）；枚举不生效时，
         #   超大深度还能作为盲孔把零件切穿（有用）。两种情况都受益。
+        # ══ 【Sd 位修复 · 2026-11-11】候选链补第 6 元 sd ══════════════════
+        # 现场现象/根因/判据见 _cut_args() 文档串「Sd 位修复 · 2026-11-11」。
+        # 要点：双向贯穿必须 Sd=False（双端），否则 SW 只按单端解释 T1，T2
+        #   被忽略 → 双环辐板上孔不贯穿（DSH_大齿轮 体积偏差 49.95%）。
+        # 因此候选链改为 6 元组 (label, T1, T2, d1, d2, sd)：
+        #   · 贯穿类候选：through_both → Sd=False（真双向）；否则 Sd=True；
+        #   · (c) 大深度盲孔语义保留 Sd=True，行为与修复前完全一致（兜底不变）。
         _cands = []
         if through:
+            _sd_both = not bool(through_both)      # 双向贯穿 → 双端(Sd=False)
             # (a) 贯穿枚举 + 大深度（双保险：枚举优先，深度兜底）
             _cands.append(("贯穿枚举+大深度", SW_END_THROUGH,
                            SW_END_THROUGH_BOTH if through_both else 0,
-                           _big, _big if through_both else 0.0))
+                           _big, _big if through_both else 0.0, _sd_both))
             # (b) 纯贯穿枚举（深度 0，最贴近官方用法）
             _cands.append(("贯穿枚举", SW_END_THROUGH,
                            SW_END_THROUGH_BOTH if through_both else 0,
-                           0.0, 0.0))
-            # (c) 大深度盲孔语义：完全绕开贯穿枚举
+                           0.0, 0.0, _sd_both))
+            # (c) 大深度盲孔语义：完全绕开贯穿枚举（Sd 保持 True，不动兜底）
             _cands.append(("大深度盲孔", SW_END_BLIND,
                            SW_END_BLIND if through_both else 0,
-                           _big, _big if through_both else 0.0))
+                           _big, _big if through_both else 0.0, True))
         else:
-            _cands.append(("盲孔", SW_END_BLIND, SW_END_BLIND, d1, d2))
+            _cands.append(("盲孔", SW_END_BLIND, SW_END_BLIND, d1, d2, True))
 
         # ══ 【真机实测修复·SW2025】API 优先级：Cut3（可用）-> Cut4（回退）═══
         # 决定性真机对照实验（_t_api.py，SW2025 SP5.0，长方体 70x80x320 端面
@@ -12102,7 +12247,7 @@ class SWModel:
         #   AssemblyFeatureScope, AutoSelectComponents, PropagateFeatureToParts,
         #   T0, StartOffset, FlipStartOffset [, OptimizeGeometry ← 仅 Cut4]
         def _cut_args(api, dir_pass=False, t1=SW_END_BLIND, t2=SW_END_BLIND,
-                      dd1=0.0, dd2=0.0, flip_side=False):
+                      dd1=0.0, dd2=0.0, flip_side=False, sd=True):
             """按【官方形参顺序】生成 FeatureCut3/4 的位置参数元组。
 
             ── 【R5 修复】两处语义纠正（此前都接错线）────────────────────
@@ -12118,9 +12263,26 @@ class SWModel:
             （gen_py 缓存 L22427，26 参）与 FeatureCut4（L22446，27 参）。
             另：形参名表见模块级 CUT_PARAM_NAMES / CUT_PARAM_NAMES_4，
             顺序一旦漂移 _args_in_official_order 会当场抛错，不再静默错位。
+
+            ── 【Sd 位修复 · 2026-11-11】第 1 位 Sd 不能恒 True ──────────
+            现场现象：双环辐板（DSH_大齿轮）上 cut(through=True) 孔不贯穿，
+              体积偏差 49.95%（1214042.68 vs 期望 809621.02 mm³），
+              self_check FAIL。证据：
+              test/20261111_131815_580E38FA/reports/DSH_大齿轮.self_check.json
+            根因：官方 Sd 语义是「True = 单端切除，False = 双端切除」。
+              本函数此前恒传 True，于是 SW 按【单端】解释 T1/D1，
+              T2/D2（含双向贯穿）被整体忽略 —— 双向贯穿在物理上不可能生效，
+              与实际观测的"只切掉一段"完全吻合。
+            修复判据：
+              · through and through_both → Sd=False, T1=T2=THROUGH_BOTH(9)
+                （双端，两端都完全贯穿；此时深度被忽略，d1/d2 给 0）
+              · through and not through_both → Sd=True, T1=THROUGH(1)
+                （单端贯穿，语义与官方一致）
+              · 非贯穿 → 沿用原 Sd=True 盲孔行为，不动既有防御链。
+            默认 sd=True 保持向后兼容：所有既有调用点不传 sd 时行为不变。
             """
             _base = (
-                True,            # Sd
+                bool(sd),        # Sd      True=单端 / False=双端（见上方 2026-11-11）
                 bool(flip_side), # Flip  ← 反转切除侧（切轮廓外侧），默认 False
                 bool(dir_pass),  # Dir   ← 反转方向（方向重试走这一位）
                 t1,              # T1
@@ -12174,11 +12336,11 @@ class SWModel:
             _dir_passes.append(True)
         for _dir_pass in _dir_passes:
             for _api in _apis:
-                for _label, _t1, _t2, _dd1, _dd2 in _cands:
+                for _label, _t1, _t2, _dd1, _dd2, _sd in _cands:
                     _f, _why = _try_cut(_api, _cut_args(
                         _api, dir_pass=_dir_pass, t1=_t1, t2=_t2,
                         dd1=_dd1, dd2=_dd2,
-                        flip_side=bool(flip_side_to_cut)))
+                        flip_side=bool(flip_side_to_cut), sd=_sd))
                     if _why == "":
                         _exit_sketch_editing()
                         # 【Bug T1 修复】把本草图标记为"已被消费"，
@@ -12271,11 +12433,12 @@ class SWModel:
                             # 重跑两轮【方向】尝试（R5：方向只走 Dir，不走 Flip）
                             for _dir_pass in (False, True):
                                 for _api in _apis:
-                                    for _label, _t1, _t2, _dd1, _dd2 in _cands:
+                                    for _label, _t1, _t2, _dd1, _dd2, _sd in _cands:
                                         _f, _why = _try_cut(_api, _cut_args(
                                             _api, dir_pass=_dir_pass,
                                             t1=_t1, t2=_t2, dd1=_dd1, dd2=_dd2,
-                                            flip_side=bool(flip_side_to_cut)))
+                                            flip_side=bool(flip_side_to_cut),
+                                            sd=_sd))
                                         if _why == "":
                                             _exit_sketch_editing()
                                             self._mark_sketch_consumed()
@@ -12305,11 +12468,11 @@ class SWModel:
             _notes.append("已执行 Bug-40 上下文重置，重试一轮候选签名")
             for _dir_pass in (bool(flip), not bool(flip), True):
                 for _api in _apis:
-                    for _label, _t1, _t2, _dd1, _dd2 in _cands:
+                    for _label, _t1, _t2, _dd1, _dd2, _sd in _cands:
                         _f, _why = _try_cut(_api, _cut_args(
                             _api, dir_pass=_dir_pass, t1=_t1, t2=_t2,
                             dd1=_dd1, dd2=_dd2,
-                            flip_side=bool(flip_side_to_cut)))
+                            flip_side=bool(flip_side_to_cut), sd=_sd))
                         if _why == "":
                             _exit_sketch_editing()
                             self._mark_sketch_consumed()
@@ -13276,6 +13439,61 @@ class SWModel:
                                   "TransformComponent，Bug-44 修复路径）。")
         return out
 
+    def _resolve_component_by_name(self, name):
+        """把【组件名字符串】解析成 IComponent2（解析不到返回 (None, 原因)）。
+
+        ── 【P1 修复 · 2026-11-11】read_component_pose 字符串入参归一 ──────
+        现场现象：总装脚本传 str(cid)（"<COMObject <unknown>>"）进
+          read_component_pose → 12 件全 ok=false → 上层误判"假装配"。
+          证据：test/20261111_131815_580E38FA/scripts/assemble_减速机_v2.py:68
+        根因：该方法原先只接受 IComponent2，没有"名字 → 对象"的入口，
+          与 verify_assembly_placement（本就接受名字）口径不一致。
+        修复判据：先 model.GetComponentByName(name)（官方单参数 API，最快），
+          失败再遍历 GetComponents(False) 按 Name2 精确匹配，最后退到
+          Name 属性与【唯一前缀】匹配（"DSH_底座" → "DSH_底座-1"）。
+          仍找不到就返回 (None, 原因) —— 由调用方给出结构化失败，绝不抛。
+        Returns: (component|None, how:str)
+        """
+        _want = str(name or "").strip()
+        if not _want:
+            return None, "空名字"
+        # ① 官方单参数 API（最快，且精确匹配 Name2）
+        try:
+            _c = self.model.GetComponentByName(_want)
+            if _c is not None:
+                return _c, "GetComponentByName"
+        except Exception:
+            pass
+        # ② 遍历组件按 Name2 / Name 精确匹配，再退化到唯一前缀匹配
+        _names = []
+        try:
+            _comps = self.model.GetComponents(False) or []
+        except Exception:
+            _comps = []
+        try:
+            _list = list(_comps) if isinstance(_comps, tuple) else (
+                [_comps] if _comps else [])
+        except Exception:
+            _list = []
+        for _c in _list:
+            _n = self._component_display_name(_c)
+            if _n is None:
+                continue
+            _names.append(_n)
+            if _n == _want:
+                return _c, "GetComponents/Name2"
+        _pref = [(_n, _c) for _n, _c in
+                 ((self._component_display_name(_c), _c) for _c in _list)
+                 if _n and _n.startswith(_want)]
+        if len(_pref) == 1:
+            return _pref[0][1], "GetComponents/唯一前缀"
+        if len(_pref) > 1:
+            # 歧义必须明说，不许随便挑一个（挑错等于把验收判到别人头上）
+            return None, ("前缀匹配到 %d 个组件（%s），请给完整 Name2"
+                          % (len(_pref), "、".join(n for n, _ in _pref[:5])))
+        return None, ("GetComponentByName 与 GetComponents 都找不到该名字；"
+                      "现有组件: %s" % ("、".join(_names[:8]) or "无"))
+
     def verify_component_position(self, comp, expect_mm, tol_mm=0.5, units="mm"):
         """【Bug-44 修复】坐标验收自测：读回组件位置并与期望比对。
 
@@ -13414,19 +13632,66 @@ class SWModel:
         且 position_mm=None —— 调用方【不得】把它当成通过。
 
         Args:
-            comp: IComponent2
+            comp: IComponent2，或【组件名字符串】（也接受 {"name": ...} /
+                {"component": ...} 这类字典，便于总装脚本直传配置项）。
             units: "mm"（默认）或 "m"
             tol_mm: 位置容差；不传则用类常量 ASSEMBLY_POS_TOL_MM
         Returns:
-            {ok, verified, position_mm, rotation, rotation_ok, source, error?}
+            {ok, verified, position_mm, rotation, rotation_ok, source,
+             resolved_by?, error?, hint?}
         """
         tol = float(self.ASSEMBLY_POS_TOL_MM if tol_mm is None else tol_mm)
         out = {"ok": False, "verified": False, "position_mm": None,
                "rotation": None, "rotation_ok": None, "source": None,
-               "tol_mm": tol, "name": self._component_display_name(comp)}
+               "tol_mm": tol, "name": None}
+        # ══ 【P1 修复 · 2026-11-11】参数归一：接受组件名字符串 ══════════════
+        # 现场现象：总装脚本把 str(cid) 传进来（cid 是 IComponent2，str() 得到
+        #   "<COMObject <unknown>>"），于是下面 GetTotalTransform / Transform2
+        #   两个分支全部抛异常 → 12 件【全 ok=false】→ 上层误判成"假装配/
+        #   组件全堆在原点"，把一次正常的装配判死。
+        #   证据：test\20261111_131815_580E38FA\scripts\assemble_减速机_v2.py:68
+        # 根因：read_component_pose 的形参只接受 IComponent2 对象，对字符串
+        #   直接去调 COM 方法，必然 AttributeError/类型不匹配；而本库别处
+        #   （verify_assembly_placement 的 expectations）本来就允许"组件名或
+        #   组件对象"，两处口径不一致。
+        # 修复判据：入口处做一次归一 —— 字符串/字典先用 GetComponentByName
+        #   解析，解析不到再在 GetComponents 里按 Name2 匹配，仍拿不到就返回
+        #   【结构化失败】（ok:false + error + hint），绝不抛异常、绝不猜。
+        #   ⚠️ 矩阵索引 9/10/11 是对的（_position_from_transform_mm, 5136），
+        #      本次不动。
+        if isinstance(comp, dict):
+            _spec = comp.get("component", comp.get("name"))
+            if _spec is None:
+                out["error"] = "组件字典缺少 component/name 字段"
+                out["hint"] = "传 {'component': 'DSH_底座-1'} 或直接用组件名。"
+                return out
+            comp = _spec
+        if isinstance(comp, str):
+            _want = comp.strip()
+            out["requested_name"] = _want
+            # 防呆：str(IComponent2) 得到的是 "<COMObject ...>"，永远匹配不到
+            if (not _want) or _want.startswith("<") or "COMObject" in _want:
+                out["error"] = ("传入的是对象字符串化结果（%r），不是组件名 —— "
+                                "无法解析" % (_want[:60],))
+                out["hint"] = ("请传 IComponent2 对象，或传 cid.Name2；"
+                               "不要传 str(cid)。")
+                return out
+            _resolved, _how = self._resolve_component_by_name(_want)
+            if _resolved is None:
+                out["error"] = "按名称找不到组件: %s" % _want
+                out["hint"] = ("用 list_components() 查看可用组件名；"
+                               "组件名通常是 'DSH_底座-1' 这样的 Name2。"
+                               "解析明细：%s" % (_how,))
+                out["name"] = _want
+                return out
+            comp = _resolved
+            out["resolved_by"] = _how
+            out["name"] = _want
         if comp is None:
             out["error"] = "组件对象为空"
             return out
+        if out.get("name") is None:
+            out["name"] = self._component_display_name(comp)
         _k = 0.001 if str(units).lower() == "mm" else 1.0
         # 两条读回路径：① GetTotalTransform(True)（类型库确认，优先）
         #               ② Transform2 属性（类型库确认可读）
@@ -13880,7 +14145,11 @@ class SWModel:
                 out["mate_name"] = mate.Name
             except Exception:
                 pass
-            self.rebuild()
+            # ══ 【配合卡死修复 · 2026-11-11】此处同样【不再】rebuild() ═══════
+            # 现场现象：place_component_by_mate 连续摆 30+ 件时偶发 600s 卡死。
+            # 根因：每建一个配合就全量重建一次装配体，重建代价随组件数超线性增长。
+            # 修复判据：配合链路不主动重建；需要时由调用方显式 rebuild()。
+            out["rebuild_skipped"] = "配合链路不主动重建（防 600s 卡死）"
             return out
         except Exception as e:
             out["error"] = "place_component_by_mate 异常: %r" % (e,)
@@ -14431,7 +14700,9 @@ class SWModel:
           1) 专用 API（子任务 A 实测：签名最简单、命中率最高）
              · 同心 → AddConcentricMateWithTolerance(Align, 0, False, 0.0)
              · 距离 → AddDistanceMate(Align, Flip, Distance, 0, 0, 0, 0)
-          2) 通用 AddMate5（报告 3.3 的 14+1 参数全给具体值，浮点绝不传 None）
+          2) 通用 AddMate5（官方 15 参，末位 ByRef ErrorStatus，浮点绝不传 None）
+             2026-11-11 订正：旧实现先试 14 参（漏 ErrorStatus）再"补"15 参，
+             两轮里 14 参那轮必然编组失败；现只发 15 参并检查错误码。
           3) CreateMate(None)（报告 3.2：新版仅 1 参数，传 IMateData；
              注意 IMateData 接口类【不在该 tlb 里导出】，不能去构造它，
              只能传 None 或 CreateMateData() 的返回对象）
@@ -14490,12 +14761,39 @@ class SWModel:
                         _errs.append("%s/AddDistanceMate: %r" % (_hname, _e2))
                         break
 
-        # ── ② 通用 AddMate5（报告 3.3 参数顺序，浮点全给具体值）────────
-        #    (MateType, Align, Flip, Distance, DistAbsUpper, DistAbsLower,
-        #     GearRatioN, GearRatioD, Angle, AngleAbsUpper, AngleAbsLower,
-        #     ForPositioningOnly, LockRotation, WidthMateOption[, ErrorStatus])
+        # ── ② 通用 AddMate5（官方 15 参，ErrorStatus 必须 byref 并检查）────
+        # ══ 【配合参数修复 · 2026-11-11】统一为官方 15 参 ══════════════════
+        # 现场现象：配合反复失败并伴随长时间卡死（600s 量级），日志里
+        #   AddMate5 各种 "类型不匹配/参数个数不对"；小屋报"配合建不起来"。
+        # 根因：官方签名是 15 参 ——
+        #   AddMate5(MateType, Align, Flip, Distance, DistAbsUpper, DistAbsLower,
+        #     GearRatioNumerator, GearRatioDenominator, Angle, AngleAbsUpper,
+        #     AngleAbsLower, ForPositioningOnly, LockRotation, WidthMateOption,
+        #     ByRef ErrorStatus) -> Mate2
+        #   参考：https://help.solidworks.com/2025/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IAssemblyDoc~AddMate5.html
+        #   而原实现先试 14 参（漏 ErrorStatus，byref 出参缺失 → 编组阶段报
+        #   "类型不匹配"），晚期回退链又用 8 参 / 12 参，全部与签名不符 ——
+        #   每一轮都在"猜参数个数"，只能靠异常收场，正是卡死的诱因之一。
+        # 修复判据：
+        #   · 只发 15 参，ErrorStatus = VARIANT(VT_BYREF|VT_I4, 0)，调用后读出；
+        #   · swAddMateError_e：0=ErrorUnknown(失败)、1=NoError(成功)、
+        #     2=IncorrectMateType / 3=IncorrectAlignment / 4=IncorrectSelections /
+        #     5=OverDefinedAssembly / 6=IncorrectGearRatios；
+        #   · 即使 Mate2 非 None，ErrorStatus 若既不是 0 也不是 1 也判失败并把
+        #     错误码写进返回体（绝不"拿到对象就算成功"）。
+        #   · 不在失败重试链里调 rebuild()/ForceRebuild3() —— 大型装配体上
+        #     一次全量重建就可能挂几分钟，加重试等于把卡死放大。
         _am5 = [_mt, int(align), bool(flip), _d, _du, _dl, _gn, _gd,
                 _a, _au, _al, False, False, 0]
+        _ERROR_STATUS_LEGEND = {
+            0: "swAddMateError_ErrorUnknown（未知错误）",
+            1: "swAddMateError_NoError（成功）",
+            2: "swAddMateError_IncorrectMateType（配合类型不对）",
+            3: "swAddMateError_IncorrectAlignment（对齐方式不对）",
+            4: "swAddMateError_IncorrectSelections（选择集不对）",
+            5: "swAddMateError_OverDefinedAssembly（过定义）",
+            6: "swAddMateError_IncorrectGearRatios（齿轮比不对）",
+        }
         for _hname, _h in _holders:
             try:
                 _fn = getattr(_h, "AddMate5", None)
@@ -14503,21 +14801,39 @@ class SWModel:
                 _fn = None
             if _fn is None:
                 continue
-            # 先 14 参（ErrorStatus 走默认 Missing），再 15 参（显式 byref）
-            for _form in ("14", "15byref"):
-                try:
-                    if _form == "14":
-                        _m = _fn(*_am5)
-                    else:
-                        _es = win32com.client.VARIANT(
-                            pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                        _m = _fn(*(_am5 + [_es]))
-                    if _m is not None:
-                        return (_m, "%s/AddMate5(%s)" % (_hname, _form), None)
-                except Exception as _e3:
-                    _errs.append("%s/AddMate5(%s): %r" % (_hname, _form, _e3))
-                    continue
-        # 老版本才有的 AddMate3（11 参 + ForPositioningOnly）
+            _es = None
+            try:
+                _es = win32com.client.VARIANT(
+                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                _m = _fn(*(_am5 + [_es]))
+            except Exception as _e3:
+                _errs.append("%s/AddMate5(15): %r" % (_hname, _e3))
+                continue
+            _esv = None
+            try:
+                _esv = int(_es.value)
+            except Exception:
+                _esv = None
+            if _m is not None and _esv in (0, 1):
+                self._last_mate_error_status = {
+                    "value": _esv,
+                    "text": _ERROR_STATUS_LEGEND.get(_esv, "未知")}
+                return (_m, "%s/AddMate5(15, ErrorStatus=%d)"
+                        % (_hname, _esv if _esv is not None else -1), None)
+            _errs.append("%s/AddMate5(15): 返回 %s，ErrorStatus=%s（%s）"
+                         % (_hname, "None" if _m is None else "Mate2",
+                            _esv,
+                            _ERROR_STATUS_LEGEND.get(_esv, "未读到错误码")))
+            # 有明确错误码就记进实例字段，供上层返回体读取
+            try:
+                self._last_mate_error_status = {
+                    "value": _esv,
+                    "text": _ERROR_STATUS_LEGEND.get(_esv, "未知")}
+            except Exception:
+                pass
+        # 老版本才有的 AddMate3（官方 14 参：... ForPositioningOnly,
+        #   LockRotation, ByRef ErrorStatus）；原实现只传 12 参，同样漏
+        #   ErrorStatus —— 一并订正。
         for _hname, _h in _holders:
             try:
                 _fn = getattr(_h, "AddMate3", None)
@@ -14526,12 +14842,22 @@ class SWModel:
             if _fn is None:
                 continue
             try:
+                _es3 = win32com.client.VARIANT(
+                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
                 _m = _fn(_mt, int(align), bool(flip), _d, _du, _dl,
-                         _gn, _gd, _a, _au, _al, False)
-                if _m is not None:
-                    return _m, "%s/AddMate3" % (_hname,), None
+                         _gn, _gd, _a, _au, _al, False, False, _es3)
+                _esv3 = None
+                try:
+                    _esv3 = int(_es3.value)
+                except Exception:
+                    _esv3 = None
+                if _m is not None and _esv3 in (0, 1):
+                    return (_m, "%s/AddMate3(14, ErrorStatus=%d)"
+                            % (_hname, _esv3 if _esv3 is not None else -1), None)
+                _errs.append("%s/AddMate3(14): 返回 %s，ErrorStatus=%s"
+                             % (_hname, "None" if _m is None else "Mate2", _esv3))
             except Exception as _e4:
-                _errs.append("%s/AddMate3: %r" % (_hname, _e4))
+                _errs.append("%s/AddMate3(14): %r" % (_hname, _e4))
 
         # ── ③ CreateMate（报告 3.2：新版仅 1 参数 IMateData）────────────
         #    ⚠️ 只传 None：IMateData 接口类不在该 tlb 里导出，
@@ -14654,28 +14980,73 @@ class SWModel:
                     out["mate_name"] = _mate.Name
                 except Exception:
                     pass
-                try:
-                    self.rebuild()
-                except Exception:
-                    pass
+                # ══ 【配合卡死修复 · 2026-11-11】此处【不再】调 rebuild() ══════
+                # 现场现象：配合环节多次出现 600s 级卡死（小屋被迫整轮重跑）。
+                # 根因：create_mate 成功后无条件 self.rebuild()，而大型装配体上
+                #   一次全量重建可能挂几分钟；配合本身由 SW 自动求解，
+                #   调用方需要重建时自会显式 rebuild()。
+                # 修复判据：配合链路（含失败重试链）一律不主动 rebuild/
+                #   ForceRebuild3 —— 只报事实（mate_name/used_api），重建交给上层。
+                out["rebuild_skipped"] = "配合链路不主动重建（防 600s 卡死）"
                 return out
             # ── 晚期回退：老机器（SW2018~2024）上继续用旧签名 ───────────
+            # ══ 【配合参数修复 · 2026-11-11】回退链必须是官方 15 参 ═══════
+            # 现场现象：原回退链发 AddMate5(8 参) / AddMate3(8 参)，与官方签名
+            #   （15 参 / 14 参，末位都是 ByRef ErrorStatus）都不符，
+            #   必然报"类型不匹配/参数个数不对"，随后上层反复重试 → 卡死。
+            # 根因：这是"猜参数个数"的历史残留（原注释还写着 14+1）。
+            # 修复判据：统一 15 参 + VARIANT(VT_BYREF|VT_I4) ErrorStatus，
+            #   并检查错误码（0=ErrorUnknown 失败、1=NoError 成功、其它=具体原因）。
+            # 参考：https://help.solidworks.com/2025/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IAssemblyDoc~AddMate5.html
             _d2, _du2, _dl2, _gn2, _gd2, _a2, _au2, _al2 = self._mate_value_args(
                 _mt, distance_mm, angle_deg)
-            for _sig, _nargs in (("AddMate5", 8), ("AddMate3", 8)):
+            _late_errs = []
+            try:
+                _fn5 = getattr(self.model, "AddMate5", None)
+            except Exception:
+                _fn5 = None
+            if _fn5 is not None:
                 try:
-                    _fn = getattr(self.model, _sig, None)
-                    if _fn is None:
-                        continue
-                    _m = _fn(_mt, 0, False, False, False, _d2, _a2, "")
-                    if _m is not None:
+                    _es_l = win32com.client.VARIANT(
+                        pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                    _m = _fn5(_mt, 0, False, _d2, _du2, _dl2, _gn2, _gd2,
+                              _a2, _au2, _al2, False, False, 0, _es_l)
+                    _esv_l = int(getattr(_es_l, "value", -1))
+                    if _m is not None and _esv_l in (0, 1):
                         out["ok"] = True
-                        out["used_api"] = "late/%s(legacy)" % _sig
+                        out["used_api"] = "late/AddMate5(15, ErrorStatus=%d)" % _esv_l
                         out["fallback"] = True
                         return out
-                except Exception:
-                    continue
-            out["error"] = "配合创建失败：%s" % (_err,)
+                    _late_errs.append("AddMate5(15): mate=%s ErrorStatus=%s"
+                                      % ("None" if _m is None else "ok", _esv_l))
+                except Exception as _e_l5:
+                    _late_errs.append("AddMate5(15): %r" % (_e_l5,))
+            try:
+                _fn3 = getattr(self.model, "AddMate3", None)
+            except Exception:
+                _fn3 = None
+            if _fn3 is not None:
+                try:
+                    _es_l3 = win32com.client.VARIANT(
+                        pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                    _m = _fn3(_mt, 0, False, _d2, _du2, _dl2, _gn2, _gd2,
+                              _a2, _au2, _al2, False, False, _es_l3)
+                    _esv_l3 = int(getattr(_es_l3, "value", -1))
+                    if _m is not None and _esv_l3 in (0, 1):
+                        out["ok"] = True
+                        out["used_api"] = "late/AddMate3(14, ErrorStatus=%d)" % _esv_l3
+                        out["fallback"] = True
+                        return out
+                    _late_errs.append("AddMate3(14): mate=%s ErrorStatus=%s"
+                                      % ("None" if _m is None else "ok", _esv_l3))
+                except Exception as _e_l3:
+                    _late_errs.append("AddMate3(14): %r" % (_e_l3,))
+            _es_txt = getattr(self, "_last_mate_error_status", None)
+            if _es_txt:
+                out["mate_error_status"] = _es_txt
+            out["error"] = ("配合创建失败：%s%s"
+                            % (_err, ("｜晚期回退：%s" % "；".join(_late_errs))
+                               if _late_errs else ""))
             out["hint"] = ("① 确认两个参考对象都被选中（看 selections/selected_count）；"
                            "② 早期绑定不可用时本方法会自动回退，仍失败说明本版 "
                            "SolidWorks 的配合 API 与预期不同，请附 used_api 报告。")
@@ -16029,10 +16400,20 @@ class SWModel:
           · Extension.SaveAs(path, 2, 1, None, errs, warns) -> 装配体 类型不匹配
           · model.SaveAs3(path, 0, 2)                        -> 装配体/零件 均 rc=0、文件落盘 ✅
           · model.SaveAs2(...)                              -> 装配体 类型不匹配
-        结论：本机【必须】用 model.SaveAs3（带版本标志 2=覆盖/另存）+ 由扩展名
-        自动推断格式枚举。故本方法改为优先 SaveAs3，失败再回退 Extension.SaveAs。
+        历史结论是"本机必须用 SaveAs3(Options=2)"。
 
-        Returns: {ok, path, updated, size, sw_error_code, error?, hint?}
+        ══ 【save_as Options 修复 · 2026-11-11】推翻上面的 Options=2 结论 ══
+        官方原文：Options 是 swSaveAsOptions_e 位掩码，2 = swSaveAsOptions_Copy
+        =「存副本并继续编辑当前文档」—— 文档【不绑定】新路径。上述"实测落盘"
+        只是写出了副本，装配体侧随即出现 ok:false / v2/v3 均未落盘
+        （intermediate\assemble_result.json:144-148）。
+        现在：主路径 Extension.SaveAs(Options=Silent|SaveReferenced=5)，
+        回退 SaveAs3(Options=Silent=1)；磁盘指纹仍是唯一真相。
+
+        Returns: {ok, path, updated, size, ret,
+                  sw_errors:[{bit,hex,name,text}], sw_warnings:[...],
+                  sw_error_mask, sw_warning_mask, sw_used_api, prep{...},
+                  error?, hint?}
         """
         def _fp(p):
             try:
@@ -16051,39 +16432,145 @@ class SWModel:
         }
         _fmt = _EXT_FMT.get(str(path).lower()[-6:] if str(path).lower().endswith((".sldprt",".sldasm",".slddrw")) else os.path.splitext(path)[1].lower(), 0)
 
+        # ══ 【save_as Options 修复 · 2026-11-11】主路径改用 Extension.SaveAs ══
+        # 现场现象：装配体 save_as ok:false、v2/v3 均未落盘
+        #   （intermediate\assemble_result.json:144-148）；
+        #   零件侧 3 条「SaveAs3 未抛异常但文件完全未变化」
+        #   （parts_rejects\rejected.json）。
+        # 根因（官方原文核对）：
+        #   ① 原主路径 self.model.SaveAs3(path, 0, 2) 的 Options=2 是
+        #      swSaveAsOptions_Copy =「存个副本、继续编辑当前文档」——
+        #      文档【不会绑定】到新路径（GetPathName 仍为空），装配体尤其容易
+        #      不落盘。而 save()（swapi.py:5844 附近）用的是 Options=1(Silent)，
+        #      两处口径根本不一致。
+        #   ② IModelDoc2::SaveAs3/4 官方已标 Obsolete，返回 int 错误码而非
+        #      bool，原文说 Options 是 swSaveAsOptions_e 位掩码；
+        #      官方推荐 IModelDocExtension::SaveAs(Name, Version, Options,
+        #      ExportData, Errors, Warnings) → bool，且 Errors/Warnings 是
+        #      byref int（swFileSaveError_e / swFileSaveWarning_e 位掩码）。
+        # 修复判据：
+        #   · 主路径 = Extension.SaveAs(path, 0, Silent|SaveReferenced=5, None,
+        #     errs, warns)，把 Errors/Warnings 真值读进返回体（结构化）；
+        #   · 回退 = model.SaveAs3(path, 0, 1)（Options=1，绝不是 2）；
+        #   · 磁盘指纹 before/after（size+mtime）判定【原样保留】—— 那才是真相；
+        #   · 装配体前置：切回本文档 → 退出编辑态 → SaveAll(True)，失败不阻断。
+        # 参考：
+        #   https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swSaveAsOptions_e.html
+        #   https://help.solidworks.com/2025/english/api/swconst/SolidWorks.Interop.swconst~SolidWorks.Interop.swFileSaveError_e.html
+        _prep = {}
+        # ── 装配体前置（仅当 self.model 是装配体；全部 best-effort）──────────
+        # 为什么需要：装配体另存落盘的前提是组件已保存、且文档处于非编辑态；
+        #   否则 SW 会在 SaveAs 时因"引用未保存"静默跳过（正是 rejected.json
+        #   里那批"未抛异常但文件没变"的形态）。
+        # 为什么失败不阻断：这些是【提高成功率的前置】，不是成功判据；
+        #   真正的判据始终是磁盘指纹。所以只把过程记进 _prep，绝不提前 return。
+        try:
+            _is_asm = False
+            try:
+                _is_asm = (int(self.model.GetType()) == 2)   # swDocASSEMBLY
+            except Exception:
+                _is_asm = str(path).lower().endswith(".sldasm")
+            if _is_asm:
+                _prep["is_assembly"] = True
+                # ① 先确认活动文档就是本装配体（否则 SaveAs 会作用到别的文档）
+                _act = {"ok": False}
+                try:
+                    _title = self.model.GetTitle
+                except Exception:
+                    _title = None
+                try:
+                    if _title:
+                        _act["ok"] = bool(self.sw.ActivateDoc3(_title, False, 0, 0))
+                        _act["api"] = "ActivateDoc3"
+                except Exception as _e_a3:
+                    _act["error_ActivateDoc3"] = repr(_e_a3)
+                if not _act.get("ok") and _title:
+                    try:
+                        _act["ok"] = bool(self.sw.ActivateDoc2(_title, False, 0))
+                        _act["api"] = "ActivateDoc2"
+                    except Exception as _e_a2:
+                        _act["error_ActivateDoc2"] = repr(_e_a2)
+                _prep["activate"] = _act
+                # ② 退出编辑态（仍在零件/装配编辑模式时 SaveAs 易失败）
+                try:
+                    self.model.EditAssembly()
+                    _prep["edit_assembly"] = "called"
+                except Exception as _e_ea:
+                    _prep["edit_assembly"] = repr(_e_ea)
+                # ③ 先保存组件的未存改动（装配体落盘的关键前置）
+                try:
+                    _sa = self.model.SaveAll(True)   # True = 连同引用一起存
+                    _prep["save_all"] = repr(_sa)
+                except Exception as _e_sa:
+                    _prep["save_all"] = repr(_e_sa)
+        except Exception as _e_prep:
+            _prep["error"] = repr(_e_prep)
+
         before = _fp(path)
         ret = None
         errs = None
+        warns = None
+        _used_api = None
         _last_err = None
-        # ① 首选 SaveAs3（本机 SW2025 实测可用）
+
+        # ① 主路径：Extension.SaveAs(path, 0, Silent|SaveReferenced, None, errs, warns)
         try:
-            ret = self.model.SaveAs3(path, 0, 2)
+            _e_var = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            _w_var = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            ret = self.model.Extension.SaveAs(
+                path, 0, SW_SAVE_AS_OPTIONS_PRIMARY, None, _e_var, _w_var)
+            _used_api = "Extension.SaveAs"
             try:
-                errs = int(ret) if isinstance(ret, (int, float)) else None
+                errs = int(_e_var.value)
             except Exception:
                 errs = None
+            try:
+                warns = int(_w_var.value)
+            except Exception:
+                warns = None
         except Exception as e:
             _last_err = e
-            # ② 回退 Extension.SaveAs（带格式枚举）
+            # ② 回退：model.SaveAs3 —— Options 必须是 1(Silent)。
+            #    ⚠️ 历史误值 2 = swSaveAsOptions_Copy：只存副本、不绑定路径，
+            #    装配体常因此"看起来成功但没落盘"。已订正为 1。
             try:
-                _errs = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                _warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                ret = self.model.Extension.SaveAs(path, _fmt, 1, None, _errs, _warns)
+                ret = self.model.SaveAs3(path, 0, SW_SAVE_AS_OPTIONS_FALLBACK)
+                _used_api = "IModelDoc2.SaveAs3(Options=Silent)"
                 try:
-                    errs = _errs.value
+                    errs = int(ret) if isinstance(ret, (int, float)) else None
                 except Exception:
                     errs = None
             except Exception as e2:
                 return {"ok": False, "path": path, "updated": False,
-                        "error": "SaveAs 调用异常(SaveAs3:%r; Extension.SaveAs:%r)"
-                                % (e, e2)}
+                        "prep": _prep, "sw_used_api": None,
+                        "sw_errors": [], "sw_warnings": [],
+                        "sw_error_mask": None, "sw_warning_mask": None,
+                        "error": "SaveAs 调用异常(Extension.SaveAs:%r; SaveAs3:%r)"
+                                 % (e, e2),
+                        "hint": ("两套 API 都抛异常，通常是文档不是活动文档或 "
+                                 "SW 处于隐藏/忙碌态；先 ActivateDoc 再重试。")}
+
+        _sw_errors = _decode_sw_save_mask(errs)
+        _sw_warnings = _decode_sw_save_mask(warns)
+        _field = {"prep": _prep, "sw_used_api": _used_api,
+                  "sw_errors": _sw_errors, "sw_warnings": _sw_warnings,
+                  "sw_error_mask": errs, "sw_warning_mask": warns,
+                  "sw_error_hex": (hex(int(errs)) if isinstance(errs, int) else None),
+                  "sw_warning_hex": (hex(int(warns)) if isinstance(warns, int) else None),
+                  # sw_error_code 保留为【兼容字段】（旧调用方仍在读），但不再是
+                  #   唯一证据 —— 结构化 sw_errors 才是。
+                  "sw_error_code": errs}
 
         after = _fp(path)
         if after is None:
             _bad = {"ok": False, "path": path, "updated": False,
-                    "ret": bool(ret), "sw_error_code": errs,
+                    "ret": bool(ret), "size": None, **_field,
                     "error": "SaveAs 返回后目标文件不存在，保存未生效。",
                     "hint": "检查路径可写性与目录是否存在。"}
+            _hint = _sw_save_error_hint(errs)
+            if _hint:
+                _bad["hint"] = _hint + "。" + _bad["hint"]
+                _bad["error"] += "（SW 错误位：%s）" % _hint
             _reject_failed_part(path, _bad, stage="save_as")
             return _bad
 
@@ -16094,17 +16581,37 @@ class SWModel:
         updated = (before is None) or (after != before)
         if not updated:
             _bad = {"ok": False, "path": path, "updated": False,
-                    "ret": bool(ret), "sw_error_code": errs,
-                    "size": after[0],
+                    "ret": bool(ret), "size": after[0], **_field,
                     "error": ("SaveAs 未报错，但目标文件【完全未变化】"
                               "（大小与 mtime 全同）—— 保存被静默忽略。"),
                     "hint": "先关闭占用该文件的程序；同名零件若已打开，建议 close-all 后重试。"}
+            _hint = _sw_save_error_hint(errs)
+            if _hint:
+                _bad["hint"] = _hint + "。" + _bad["hint"]
             _reject_failed_part(path, _bad, stage="save_as-silent-ignore")
             return _bad
 
         _out = {"ok": True, "path": path, "updated": True,
                 "content_same_unknown": False,
-                "ret": bool(ret), "sw_error_code": errs, "size": after[0]}
+                "ret": bool(ret), "size": after[0], **_field}
+        # ── 【save_as 错误位复核 · 2026-11-11】指纹变了也必须看错误位 ──────
+        # 有些致命位（0x10 文件锁 / 0x100 扩展名不符 / 0x2000 需先存引用）
+        #   会让 SW 只写出"半个文件"或旧内容副本 —— 指纹（size/mtime）照样会变，
+        #   于是旧实现会判成功。这里把错误位作为【独立证据】：命中致命位即失败，
+        #   并把具体位写进 error，绝不让它悄悄过关。
+        if isinstance(errs, int) and (errs & _SW_FILE_SAVE_FATAL_BITS):
+            _bad = dict(_out)
+            _bad["ok"] = False
+            _bad["verified"] = False
+            _bad["error"] = ("SaveAs 目标文件已变化，但 SW 报告致命错误位 —— "
+                             "落盘内容不可信。")
+            _bad["hint"] = _sw_save_error_hint(errs) or "检查文件锁与扩展名。"
+            _reject_failed_part(path, _bad, stage="save_as-error-bits")
+            return _bad
+        if _sw_warnings:
+            self._warn("save_as: SW 返回告警位 %s（%s）"
+                       % (_out.get("sw_warning_hex"),
+                          "；".join(w["text"] for w in _sw_warnings)))
         # ══ 【Bug-01 修复】save_as 后【必须】把材料凭据写到【最终落盘路径】旁 ══
         # 原实现只有 save() 写凭据：小屋若走 save() → save_as(最终路径)，
         #   凭据留在中间路径旁；直接调 save_as() 则完全不产生凭据 ——

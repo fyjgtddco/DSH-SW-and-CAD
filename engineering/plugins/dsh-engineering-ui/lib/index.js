@@ -93,7 +93,7 @@ import { installWebots } from './webots.js';
 //   表现为整个工程模式装配失败。
 //   ⚠️ 必须写成【单行 import】：多处测试用 /^import .*$/gm 剥掉 import 头，
 //      多行写法会留下残缺的收尾行，导致 vm 里 SyntaxError。
-import { memGuardEnabled, maxActiveSubagents, reclaimThresholdPct, reclaimIntervalMs, evaluateConcurrency, memorySnapshot, createReclaimer, setMemGuardOverrides, memGuardOverrides } from './mem-guard.js';
+import { memGuardEnabled, maxActiveSubagents, reclaimThresholdPct, reclaimIntervalMs, evaluateConcurrency, countOccupiedChildren, memorySnapshot, createReclaimer, setMemGuardOverrides, memGuardOverrides } from './mem-guard.js';
 
 // 纯本地兜底：最后一次 agent-preset/selected，否则 header.agentPreset。
 function resolvePresetFallback(header, events) {
@@ -2277,11 +2277,60 @@ export function apply(ctx) {
     const out = { thresholdRatio: COMPACTION_THRESHOLD_RATIO, headroomTokens: 48000,
                   retainRatio: 0.12, source: 'default', file: null };
     try {
+      // ══ 【2026-11-11 修复·P1 preset 探测路径错】══════════════════════════
+      // 现场（验收复跑 20261111_131815_580E38FA）：面板显示的 limiter /
+      //   limitBudgetTokens 恒按 headroomTokens=48000 算，而真实 preset 写的是
+      //   8000（preset-engineering.patch.yml:578）→ 预算项被低估 40K，
+      //   "被哪一项压住"的结论一半是错的。
+      //
+      // 根因：旧实现只探测一处 `<state_dir>/../preset-engineering.patch.yml`。
+      //   实测该路径【不存在】—— 安装副本的 .agent-presets/engineering 下只有
+      //   preset.yml（元数据），真正的 preset-engineering.patch.yml 是作为
+      //   插件包的一部分装进 profile 的 node_modules 的：
+      //     <profile>/node_modules/dsh-engineering-ui/preset-engineering.patch.yml
+      //   探测失败 → source 恒 'default' → headroom 恒 48000。
+      //
+      // 修复：按「离本插件越近越权威」的顺序多路探测，全部命中不了才回落默认。
+      //   ① 本插件包根（lib/..）—— 与运行时真正加载的那份同一出处，最权威；
+      //   ② state_dir 的上一级（历史布局，保留兼容）；
+      //   ③ <state_dir>/.. 之上一级（某些安装把 engineering 当独立目录）。
       const dir = findToolsDir();
       const cands = [];
+      // ① 插件包根：本文件是 <pkg>/lib/index.js → 包根 = lib 的上一级。
+      //
+      // ⚠️ 【2026-11-11 踩坑】这里【不能写 import.meta.url】：
+      //    本插件有多处测试（test/webots-host.test.mjs、compiler-wiring 等）
+      //    把 lib/index.js 丢进 node:vm 的 CommonJS 上下文里求值，
+      //    `import.meta` 在那种上下文是【语法错误】，会让整块求值直接抛
+      //    "Cannot use 'import.meta' outside a module" —— 插件测试全红。
+      //    所以只用"运行时存在的全局量"兜：__dirname（vm/CJS）→ process.cwd()。
+      //    cwd 命不中时会落到下面的 findToolsDir 分支，功能不因此丢失。
+      try {
+        const _here = (typeof __dirname === 'string' && __dirname)
+          ? __dirname
+          : null;
+        if (_here) {
+          cands.push(path.join(_here, '..', 'preset-engineering.patch.yml'));
+        }
+      } catch (e) {}
+      // ①b 从 cwd 起多探两级（进程一般在 DSH 安装目录或 profile 目录启动）
+      try {
+        const _cwd = process.cwd();
+        cands.push(path.join(_cwd, 'preset-engineering.patch.yml'));
+        cands.push(path.join(_cwd, 'node_modules', 'dsh-engineering-ui',
+                             'preset-engineering.patch.yml'));
+        cands.push(path.join(_cwd, '..', 'node_modules', 'dsh-engineering-ui',
+                             'preset-engineering.patch.yml'));
+      } catch (e) {}
       if (dir) {
-        // preset yml 通常装在安装副本的 .agent-presets/engineering 下
+        // ② 历史布局：<state_dir>/../preset-engineering.patch.yml
         cands.push(path.join(dir, '..', 'preset-engineering.patch.yml'));
+        // ③ 再上一级（engineering/ 独立目录布局）
+        cands.push(path.join(dir, '..', '..', 'preset-engineering.patch.yml'));
+        // ④ 安装副本里 preset 随插件包进 node_modules —— 与 ① 同义，
+        //    但 findToolsDir 到不了插件目录时（自定义 DSH_STATE_DIR）靠这条兜底。
+        cands.push(path.join(dir, '..', 'node_modules',
+                             'dsh-engineering-ui', 'preset-engineering.patch.yml'));
       }
       for (const p of cands) {
         let raw;
@@ -5774,15 +5823,47 @@ export function apply(ctx) {
     }
   }
 
-  /** 构造"并发超限"的工具错误结果（与 job-wait-guard 同一形状）。 */
+  /**
+   * 构造"并发超限"的 pre-execute 决策。
+   *
+   * ══ 【2026-11-11 修复·P0 闸门静默失效】════════════════════════════════
+   * 现场（验收复跑 20261111_131815_580E38FA，日志实锤）：
+   *   峰值并发 4 个子代理，出现 3 个越限窗口（13:30:21–14:27:12、
+   *   15:01:29–15:05:03、15:21:23–15:34:26）；9 个日志文件里
+   *   `SUBAGENT_LIMIT_REACHED` 一次都没有真正拦下过 fork —— 主会话
+   *   :345/:353 甚至自己记下"第 4 个 fork 竟然成功"。用户要求的上限 3
+   *   等于完全不存在。
+   *
+   * 根因（契约不匹配，不是逻辑错）：
+   *   `tools/pre-execute` 是 **waterfall**，宿主签名见
+   *   dsh-tools/lib/types/pipeline.js（api-catalog 逐字记录）：
+   *     'tools/pre-execute'(exec, next: () => Promise<PreToolDecision>)
+   *   `PreToolDecision` 只认 `{ kind: 'allow' | 'deny' | 'cancel' | 'ask' }`：
+   *     · pipeline-types.js:143  `waterfall(..., () => ({ kind: 'allow' }))`
+   *     · :154  `decision.kind === 'allow' ? checkGuards(exec) : decision.reason`
+   *     · :155  `decision.kind === 'deny' ? decision.info : undefined`
+   *   旧实现返回的是**工具结果形状**（`{content, isError, error}`）——
+   *   那是 execute 之后才能用的东西。`decision.kind` 因此是 undefined：
+   *   不等于 'allow' 也不等于 'deny' → `denialReason = decision.reason`
+   *   = undefined → 宿主的 `if (denialReason !== undefined)` 不成立 →
+   *   **既不拦也不报错，直接放行**。这就是"闸门看起来装了、实际没拦"。
+   *
+   * 修复：返回宿主真正认的 `{kind:'deny', reason, info}`。
+   *   `reason` 会被拼进 `Error: ${reason}` 交给模型（pipeline-types.js:161），
+   *   `info` 在 :155 被取出作为结构化错误信息。两处都用上，模型才能
+   *   拿到"当前 4 / 上限 3"并知道下一步该干什么。
+   *
+   * ⚠️ 不要再改回 `{content, isError}` 形状 —— 那样会静默回到"不拦"。
+   */
   function subagentLimitResult(gate) {
-    const msg = 'SUBAGENT_LIMIT_REACHED: ' + gate.message;
     return {
-      content: [{ type: 'text', text: 'Error: ' + gate.message }],
-      isError: true,
-      error: {
-        message: msg,
-        info: { name: 'SubagentLimitError', code: 'SUBAGENT_LIMIT_REACHED', active: gate.active, max: gate.max },
+      kind: 'deny',
+      reason: gate.message,
+      info: {
+        name: 'SubagentLimitError',
+        code: 'SUBAGENT_LIMIT_REACHED',
+        active: gate.active,
+        max: gate.max,
       },
     };
   }
@@ -5812,6 +5893,10 @@ export function apply(ctx) {
           rows = await hostCtx.subagents.listDescendants(String(rootId));
         } catch (e) {
           // 读不到名册（旧宿主 / 服务缺失）→ 宁可放行，也不能因为闸门把流程锁死
+          // 【2026-11-11 补】但【仍要登记批次】：否则这条路径下 fork 出去的子代理
+          //   永远不会被 pollBatches 观察到 → 整批收工后的内存回收永不触发，
+          //   正是用户问的"主对话有没有释放运行内存"。放行 ≠ 不记账。
+          trackBatch(rootId);
           return next();
         }
         const gate = evaluateConcurrency(rows, rootId, agent.id, maxActiveSubagents());
@@ -5842,14 +5927,67 @@ export function apply(ctx) {
   let maybeReclaim = function () { return { ok: false, skipped: 'unavailable' }; };
   try { maybeReclaim = createReclaimer(); } catch (e) { /* 保持空实现 */ }
 
+  // ══ 【2026-11-11 修复·回收不可观测】════════════════════════════════════
+  // 现场问题（用户提问「主对话在子代理完成任务后释放内存，有没有生效？」）：
+  //   旧实现 scheduleReclaim() 里 `try { maybeReclaim(...) } catch (e) {}` ——
+  //   【结果直接丢掉】，只在 console.warn 打一句"已排程一次内存回收"。
+  //   于是"排程了"和"真回收了"在外部看起来一模一样：
+  //     · 真回收成功 → 内存下降（但没人记账，事后无从证明它跑过）；
+  //     · 被 85% 阈值挡掉（skipped）→ 跟成功长得一样；
+  //     · createReclaimer 构造失败（skipped:'unavailable'）→ 也一样。
+  //   用户这次问"有没有生效"，我只能靠翻进程和手工跑一次来回答 ——
+  //   这本身就是缺陷：一个声称"会清理内存"的功能，必须能自证跑过。
+  //
+  // 修复：把最近 N 次回收的【真实结果】留在内存里（不写盘，避免污染运行时
+  //   状态目录），并在 /dsh-engineering-ui/mem-guard 的 GET 里返回，
+  //   设置页与排查脚本都能直接看到"哪一次、什么时候、回收了几个进程、
+  //   省了多少 MB / 为什么跳过"。
+  const RECLAIM_LOG_MAX = 20;
+  const reclaimLog = [];
+  let reclaimCount = 0;
+  let lastReclaimResult = null;
+
+  /** 记一条回收结果（含失败/跳过），供状态接口回显。 */
+  function noteReclaim(trigger, result) {
+    try {
+      const rec = {
+        at: new Date().toISOString(),
+        trigger: String(trigger || 'unknown'),   // batch-complete / manual / config
+        result: (result && typeof result === 'object') ? result : { ok: false, error: String(result) },
+      };
+      reclaimCount += 1;
+      lastReclaimResult = rec;
+      reclaimLog.push(rec);
+      if (reclaimLog.length > RECLAIM_LOG_MAX) reclaimLog.shift();
+      // 真正回收成功才值得打一行日志；跳过/失败降为 debug 级别噪音
+      try {
+        const r = rec.result;
+        if (r && r.ok && !r.skipped) {
+          console.warn('[dsh-engineering-ui] 内存回收：' + (rec.trigger)
+            + '，已回收 ' + String(r.reclaimed || 0) + ' 个进程'
+            + (r.before && r.after
+              ? ('，可用内存 ' + r.before.free_mb + 'MB → ' + r.after.free_mb + 'MB')
+              : ''));
+        }
+      } catch (e) {}
+    } catch (e) {}
+  }
+
   /** 非阻塞地排一次回收（绝不让 PowerShell 卡住 agent loop）。 */
-  function scheduleReclaim(force) {
+  function scheduleReclaim(force, trigger) {
     try {
       const t = setTimeout(() => {
-        try { maybeReclaim({ force: !!force }); } catch (e) {}
+        let r = { ok: false, error: 'not-run' };
+        try { r = maybeReclaim({ force: !!force }); } catch (e) {
+          r = { ok: false, error: String((e && e.message) || e) };
+        }
+        // 【关键】结果不再丢弃 —— 必须记账，否则无法回答"到底生效没有"。
+        noteReclaim(trigger || (force ? 'batch-complete' : 'throttled'), r);
       }, 1200);
       if (t && typeof t.unref === 'function') t.unref();
-    } catch (e) {}
+    } catch (e) {
+      noteReclaim(trigger || 'schedule-error', { ok: false, error: String((e && e.message) || e) });
+    }
   }
 
   // ══ 【回收时机】只在"这一批子代理全部收工"后回收一次 ═══════════════════
@@ -5897,6 +6035,28 @@ export function apply(ctx) {
   /**
    * 轮询所有待观察批次：名下活跃子代理归零 → 回收一次内存并注销。
    * 任何异常都只影响本次轮询，绝不冒泡。
+   *
+   * ══ 【2026-11-11 修复·P0 回收时机被提前】══════════════════════════════
+   * 设计语义（用户原话）：「每三个子代理都干完了，然后主对话自己清理的」。
+   * 所以唯一合法的回收时机 = 本 root 名下【活跃子代理归零】。
+   *
+   * 旧实现有两个叠加缺陷，导致回收被提前到 fork 后 ~15 秒：
+   *   ① `countOccupiedChildren` 在文件头 import 里【漏了】（mem-guard.js
+   *      确实导出了它，但 index.js:96 的白名单没带上）→ 每次调用必抛
+   *      ReferenceError → 被 catch 吞掉 → `known=false`；
+   *   ② `if (active === 0 || !known || timedOut)` —— `!known` 被当成
+   *      "这批没了，直接收尾"，于是【名册读失败 = 立刻回收】。
+   *      这与"整批收工"恰好相反：本该最不该回收的时刻（读不到状态）
+   *      反而立刻回收，而且刚 fork 完的子代理内存正要用，被刷掉最亏。
+   *
+   * 修复：
+   *   ① 补上 import（见文件头）；
+   *   ② 把"读不到名册"从【收尾】改成【本次跳过、下轮再试】——
+   *      只有 `active === 0`（真归零）或 4h 超时兜底才回收；
+   *   ③ 回收改成 `force: true`：走到这里已经满足"整批收工"，若再让
+   *      85% 阈值把回收挡掉，就等于"时机对了但不干活"（实测多数空跑）。
+   *      阈值仍由 reclaimWorkingSets 的 force 分支负责：force 只跳过
+   *      阈值/节流判断，不做任何破坏性操作（EmptyWorkingSet 本身安全）。
    */
   async function pollBatches() {
     if (!batchRoots.size) { stopBatchWatcher(); return; }
@@ -5910,17 +6070,21 @@ export function apply(ctx) {
           known = true;
           active = countOccupiedChildren(rows, String(rootId)).ids.length;
         } catch (e) {
-          // 名册读不到（root 已销毁 / 服务缺失）→ 当作"这批没了"，直接收尾
+          // 【2026-11-11】名册读不到 ≠ 收工。本轮跳过，下轮再试；
+          //   只有 4h 超时兜底才允许在 known=false 时收尾（见 timedOut）。
           known = false;
         }
         const timedOut = (now - (info.since || now)) > BATCH_MAX_WAIT_MS;
-        if (active === 0 || !known || timedOut) {
+        // 真归零才算收工；读不到名册时只有超时兜底才收（不再"读不到就收"）。
+        const finished = (known && active === 0) || timedOut;
+        if (finished) {
           batchRoots.delete(rootId);
-          // 整批（≤3 个）收工 → 主对话这一侧回收一次
-          scheduleReclaim(false);
+          // 整批（≤3 个）收工 → 主对话这一侧回收一次（force：时机已对，别再被阈值挡掉）
+          scheduleReclaim(true, 'batch-complete');
           try {
             console.warn('[dsh-engineering-ui] 子代理批次收工（root=' + rootId
-              + (timedOut ? '，超时兜底' : '') + '），已排程一次内存回收');
+              + (timedOut ? '，超时兜底' : ('，活跃归零 active=' + active))
+              + '），已排程一次内存回收');
           } catch (e) {}
         }
       } catch (e) { /* 单批失败不影响其他批 */ }
@@ -6038,6 +6202,10 @@ export function apply(ctx) {
             reclaim_on: 'batch-complete',
             batch_poll_interval_ms: BATCH_POLL_MS,
             pending_batches: pending,
+            // 【2026-11-11】回收记账：证明"到底跑过没有、跑了几次、省了多少"
+            reclaim_count: reclaimCount,
+            last_reclaim: lastReclaimResult,
+            recent_reclaims: reclaimLog.slice().reverse(),
             memory: snap,
           });
         }
@@ -6064,10 +6232,13 @@ export function apply(ctx) {
           });
         }
         const r = maybeReclaim({ force: payload && payload.force === true });
+        // 【2026-11-11】手动回收同样记账，面板/排查脚本能看到这一笔。
+        noteReclaim('manual', r);
         return send(res, 200, {
           ok: !!(r && r.ok),
           max_subagents: maxActiveSubagents(),
           result: r,
+          reclaim_count: reclaimCount,
         });
       } catch (error) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });

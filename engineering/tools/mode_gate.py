@@ -1411,6 +1411,15 @@ def cmd_rooms_reset(keep_pmode=True):
                         pass
         except Exception:
             pass
+    # ══ 【2026-11-11 修复·P2 残留进程】清场同时收掉后台监控 ═══════════════
+    # rooms-reset 的语义是"回到干净起点"。旧实现只清状态文件，后台
+    #   `_monitor_bg_impl` 进程照跑（实测跨任务累积到 4 个）。这里一并清掉；
+    #   失败只留痕，不影响 reset 本身的结论。
+    _mon_cleanup = None
+    try:
+        _mon_cleanup = _stop_sw_monitor(quiet=True)
+    except Exception as _e_mon:
+        _mon_cleanup = {"ok": False, "error": repr(_e_mon)}
     return {"ok": True,
             # ── 【B8】reset 前归档到哪里（事后复盘用）──────────────────────
             "archived_to": _arch,
@@ -1420,6 +1429,7 @@ def cmd_rooms_reset(keep_pmode=True):
                 "subagents": _before_subs,
                 "subagent_history_count": _before_hist,
             },
+            "monitor_cleanup": _mon_cleanup,
             "message": ("房间/子代理对账/SW锁/僵尸历史已清空，"
                         "心跳与进度报告已清理(%d个文件)" % len(cleared))}
 
@@ -5536,13 +5546,168 @@ def cmd_sw_monitor_start():
     return {"ok": True, "note": "请在模式2激活时调用 sw-monitor-bg 启动真正监控"}
 
 
-def cmd_sw_monitor_stop():
-    """停止监控（清理 PID 文件）。"""
+def _stop_sw_monitor(quiet=True):
+    """【2026-11-11 修复】真正【结束】SW 后台监控进程，而不只是删 PID 文件。
+
+    ── 现场（验收复跑 20261111_131815_580E38FA，磁盘实锤）────────────
+    `_monitor_bg_impl` 进程 4 个并存（PID 28804 / 14092 / 31040 / 15796，跨两个
+    任务），init 与 room-end 均未终止它们。即使任务收工、SW 早已关闭，这些
+    进程仍在每 3 秒 tasklist 一次，直到用户手工结束。
+
+    ── 根因（三条叠加，缺一不可）──────────────────────────────────────
+      ① 旧的 cmd_sw_monitor_stop() 只 `os.remove(pid 文件)`，【从不杀进程】——
+         而 _sw_monitor_loop 是 `while True`，PID 文件一删就再也没人能找到它；
+      ② cmd_sw_monitor_bg() 的幂等判活用 `os.kill(old_pid, 0)`，而本文件
+         `_pid_alive()` 的注释已经写明：这个调用在本机 Windows + Python 3.13
+         上是【假阴性】（对确实活着的进程抛 OSError(22)）→ 每次都判"没在跑"
+         → 每次 select 都新起一个（workflow_gate.py:4525 在 parallel 模式下
+         Popen 一次）；
+      ③ 没有任何清理挂点：room-end / close-all / rooms-reset 都不理它。
+
+    本函数是三条的公共出口：按 pid 真杀 + 清 PID 文件。任何异常都只写进返回体，
+    绝不阻断调用方（收尾路径上失败也比分不掉强）。
+
+    Args:
+        quiet: True 表示"没有在跑"不算失败（收尾场景的常态）。
+    Returns: {ok, stopped, pid, error?}
+    """
+    out = {"ok": True, "stopped": False, "pid": None}
+    try:
+        with open(_SW_MONITOR_PID_FILE, "r", encoding="utf-8") as f:
+            mpid = int((f.read() or "").strip())
+    except Exception:
+        # 没有 PID 文件：可能本来就没起过，也可能文件被旧实现删了但进程还活着
+        # （正是旧 stop 的坑）。这里做一次尽力而为的孤儿清理。
+        out["stopped"] = bool(_purge_orphan_monitors())
+        out["note"] = ("无 PID 文件；已按命令行特征清理孤儿监控进程"
+                       if out["stopped"] else "无 PID 文件（未发现孤儿监控）")
+        return out
+    out["pid"] = mpid
+    if not _pid_alive(mpid):
+        try:
+            os.remove(_SW_MONITOR_PID_FILE)
+        except Exception:
+            pass
+        out["note"] = "PID 文件指向的进程已不存在（仅清理文件）"
+        return out
+    try:
+        subprocess.run(["taskkill", "/F", "/PID", str(mpid)],
+                       capture_output=True, text=True, encoding="mbcs",
+                       errors="replace", timeout=15,
+                       creationflags=CREATE_NO_WINDOW)
+    except Exception as e:
+        out["ok"] = False
+        out["error"] = "taskkill 失败: %r" % (e,)
+        return out
+    # taskkill 是异步信号 → 必须轮询确认真的退了，不能只看返回码。
+    for _ in range(20):        # 最多 2.0s
+        if not _pid_alive(mpid):
+            break
+        time.sleep(0.1)
+    out["stopped"] = not _pid_alive(mpid)
+    if not out["stopped"]:
+        out["ok"] = False
+        out["error"] = "taskkill 已发出但进程仍未退出（PID=%d）" % mpid
+        return out
     try:
         os.remove(_SW_MONITOR_PID_FILE)
     except Exception:
         pass
-    return {"ok": True}
+    return out
+
+
+def _list_python_procs_with_cmdline():
+    """列出所有 python 进程的 (pid, CommandLine)，供孤儿识别用。
+
+    ── 【2026-11-11 实测坑】不能用 wmic ─────────────────────────────────
+    本机（Windows 11 + Python 3.13）实测 `wmic` 【已不存在】：
+        'wmic' is not recognized as an internal or external command
+    wmic 自 Windows 10 21H1 起被标记弃用、新装 Win11 默认不再预装。
+    第一版实现用 wmic 取命令行，结果 _purge_orphan_monitors() 恒返回 []
+    —— 也就是说"孤儿清理"这一路是【静默失效】的（写起来像对，实际什么都不做）。
+    这正是本仓库反复强调的"看着修了、其实没生效"，故改用 PowerShell
+    Get-CimInstance（Win11 上必在），并保留 tasklist 作为最粗的兜底。
+
+    Returns: [(pid, cmdline_str), ...]；取不到就返回 []（调用方按"没找到"处理）
+    """
+    out = []
+    # ① 首选：PowerShell Get-CimInstance（能拿到 CommandLine）
+    try:
+        _ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
+               "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress")
+        _r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _ps],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30,
+            creationflags=CREATE_NO_WINDOW)
+        _txt = (_r.stdout or "").strip()
+        if _txt:
+            try:
+                _data = json.loads(_txt)
+            except Exception:
+                _data = None
+            if isinstance(_data, dict):
+                _data = [_data]
+            for _it in (_data or []):
+                try:
+                    _pid = int(_it.get("ProcessId"))
+                except Exception:
+                    continue
+                out.append((_pid, str(_it.get("CommandLine") or "")))
+            if out:
+                return out
+    except Exception:
+        pass
+    # ② 兜底：tasklist（拿不到命令行，只能给出"有这些 python 进程"）
+    try:
+        _r2 = subprocess.run(["tasklist", "/FI", "IMAGENAME eq python.exe",
+                              "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True, encoding="mbcs",
+                             errors="replace", timeout=15,
+                             creationflags=CREATE_NO_WINDOW)
+        for _line in (_r2.stdout or "").splitlines():
+            _cols = [c.strip().strip('"') for c in _line.split(",")]
+            if len(_cols) < 2 or _cols[0].lower() != "python.exe":
+                continue
+            try:
+                out.append((int(_cols[1]), ""))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def _purge_orphan_monitors():
+    """按命令行特征找出并结束【孤儿】_monitor_bg_impl 进程（不含自己）。
+
+    只在 _stop_sw_monitor 拿不到 PID 文件时兜底用 —— 旧实现删文件不杀进程，
+    已经泄漏的那批只能靠命令行特征认回来。取不到就返回空，绝不影响主流程。
+
+    ⚠️ 只杀命令行里【确实含 _monitor_bg_impl】的进程。拿不到命令行时
+       （tasklist 兜底那条路）【绝不猜】—— 猜错会杀掉别的房间的建模进程。
+    """
+    killed = []
+    for _pid, _cmd in _list_python_procs_with_cmdline():
+        if _pid <= 0 or _pid == os.getpid():
+            continue
+        # 命令行必须明确含特征串；空命令行（tasklist 兜底）一律跳过，绝不误杀
+        if "_monitor_bg_impl" not in (_cmd or ""):
+            continue
+        try:
+            subprocess.run(["taskkill", "/F", "/PID", str(_pid)],
+                           capture_output=True, text=True, encoding="mbcs",
+                           errors="replace", timeout=10,
+                           creationflags=CREATE_NO_WINDOW)
+            killed.append(_pid)
+        except Exception:
+            continue
+    return killed
+
+
+def cmd_sw_monitor_stop():
+    """停止监控（【2026-11-11 修复】真正结束进程 + 清理 PID 文件）。"""
+    return _stop_sw_monitor(quiet=True)
 
 
 def _monitor_alive():
@@ -5722,16 +5887,35 @@ def _sw_monitor_loop():
 
 
 def cmd_sw_monitor_bg():
-    """在子进程中启动 SW 监控。"""
+    """在子进程中启动 SW 监控（幂等）。
+
+    ── 【2026-11-11 修复】幂等判活不能用 os.kill(pid, 0) ────────────────
+    现场（验收复跑 20261111_131815_580E38FA）：`_monitor_bg_impl` 残留 4 个
+    （PID 28804 / 14092 / 31040 / 15796），跨两个任务。
+
+    根因：旧实现用 `os.kill(old_pid, 0)` 判"已在运行"，而本文件 `_pid_alive()`
+    的注释（约 :5786）早已写明——该调用在本机 Windows + Python 3.13 上对
+    **确实活着的** python 进程会抛 `OSError(22, '参数错误')`，即【假阴性】。
+    于是幂等判定恒为 False → 每次 select（workflow_gate.py:4525 在 parallel
+    模式 Popen 一次）都新起一个，越积越多。
+
+    修复：改用与看护（sw_guard）同款的 `_pid_alive()`（OpenProcess 优先，
+    失败退回 tasklist 文本匹配），并在"发现旧进程已死"时顺手清掉 PID 文件。
+    """
     import subprocess as sp
     # 检查是否已在运行
     if os.path.exists(_SW_MONITOR_PID_FILE):
         try:
-            with open(_SW_MONITOR_PID_FILE, "r") as f:
-                old_pid = int(f.read().strip())
-            import signal
-            os.kill(old_pid, 0)
+            with open(_SW_MONITOR_PID_FILE, "r", encoding="utf-8") as f:
+                old_pid = int((f.read() or "").strip())
+        except Exception:
+            old_pid = None
+        # 【2026-11-11】os.kill(pid,0) 在本机是假阴性 → 统一走 _pid_alive()
+        if old_pid and _pid_alive(old_pid):
             return {"ok": True, "already_running": True, "pid": old_pid}
+        # 旧进程已死：清掉陈旧 PID 文件，避免它挡住下一次启动
+        try:
+            os.remove(_SW_MONITOR_PID_FILE)
         except Exception:
             pass
     script = os.path.abspath(__file__)
@@ -6659,8 +6843,25 @@ def _maybe_advance_workflow_finished(reason="room-end"):
                           f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+        # ══ 【2026-11-11 修复·P2 残留进程】任务收尾时一并清掉后台监控 ═══════
+        # 现场（验收复跑 20261111_131815_580E38FA）：任务 18:07 全部房间 done、
+        #   SW 已关闭，但 `_monitor_bg_impl` 仍有 4 个进程（PID 28804/14092/
+        #   31040/15796）在跑，且跨两个任务累积。
+        # 根因：sw-monitor 只在【select 且 parallel 模式】时由 workflow_gate
+        #   Popen 一次（workflow_gate.py:4525），而 init / room-end / close-all /
+        #   rooms-reset 【没有任何一处】负责收掉它 —— 唯一的 stop 命令只删
+        #   PID 文件、不杀进程（旧实现），于是 PID 文件一删就再也找不到它。
+        # 修复：把"任务级收尾"作为清理挂点（这里是 workflow 自动置 finished
+        #   的唯一出口，等价于"整个任务真的完事了"）。失败只留痕，不影响收尾
+        #   结论 —— 收尾正确性不该被清场失败拖累。
+        _mon_cleanup = None
+        try:
+            _mon_cleanup = _stop_sw_monitor(quiet=True)
+        except Exception as _e_mon:
+            _mon_cleanup = {"ok": False, "error": repr(_e_mon)}
         return {"advanced": True, "from_step": step, "to_step": "finished",
-                "rooms": sorted(_expect), "reason": reason}
+                "rooms": sorted(_expect), "reason": reason,
+                "monitor_cleanup": _mon_cleanup}
     except Exception as e:
         return {"advanced": False, "error": repr(e)}
 
@@ -8711,6 +8912,15 @@ def cmd_close_all(quit=False):
     except Exception as e:
         out["steps"].append({"step": "verify_exited", "ok": False,
                              "error": repr(e)})
+    # ══ 【2026-11-11 修复·P2】--quit（完整退出）时一并收掉后台监控 ═══════
+    # 语义耦合：--quit 表示"这台 SW 相关的后台代理都该停"。默认保活模式
+    #   （quit=False）【不动】监控 —— 那时别的房间还要用它刷新 sw_state。
+    # 只收 SW 监控，不动 sw_guard（看护随 SW 关闭/任务结束自行退出，另有命令）。
+    if quit:
+        try:
+            out["monitor_cleanup"] = _stop_sw_monitor(quiet=True)
+        except Exception as _e_mon:
+            out["monitor_cleanup"] = {"ok": False, "error": repr(_e_mon)}
     return out
 
 
