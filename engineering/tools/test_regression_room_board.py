@@ -136,8 +136,11 @@ print("\n=== ② 平台 running + 在 SW 队列里 → waiting_sw（正常排队
 write_json("mode_state.json", fresh_mode_state(
     rooms={ROOM_B: {"active": True, "started_at": time.time() - 300}},
     subs={ROOM_B: {"id": "sid-bbbb-0002", "assigned_at": time.time() - 200}},
+    # 【监控器接入】owner/queue 现在必须标明来源：只有 source=sw_monitor
+    #   且 available=True 的镜像才被当作真实占用（见 _sw_lock_snapshot）。
+    #   旧进程内锁的残留行会被视为"不存在占用"。
     sw={"owner": ROOM_A, "queue": [ROOM_B], "acquired_at": time.time() - 8,
-        "prev_owner": ROOM_A, "sw_by_room": True}))
+        "source": "sw_monitor", "available": True}))
 write_json("platform_agents.json", platform_registry([{
     "id": "sid-bbbb-0002",
     "label": "传动机构房间",

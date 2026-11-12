@@ -80,6 +80,9 @@ import re
 import json
 import time
 import traceback
+# 【监控器接入】每条 SW 命令需要一个【进程内唯一】的命令 ID（begin/end 配对）。
+# 用 uuid4 而不是自增/时间戳：跨进程、并发都不会撞。
+import uuid
 import subprocess
 import threading
 
@@ -567,7 +570,31 @@ def cmd_selftest():
             and all(_a > _b for _a, _b in zip(_after, [1, 1, 1, 1])),
             "used_api=%r, 计数=%s" % (_api, _after))
         # 参数个数总表核对（逐 API 对照 sldworks.tlb）
+        #
+        # ══ 【2026-11-11 修复·自检期望表过期】═════════════════════════════
+        # 现场：`sw_bridge.py selftest` 长期报 A2 未合（"A2、A3a 未合"），
+        #   验收报告据此把它列成"annotate 离线自检 2 项未合"的遗留缺陷。
+        #   实测根因【不在被测代码，而在本自检表】：
+        #     · _annotation_api_candidates() 已把 InsertModelAnnotations4
+        #       （8 参）加进兜底链（见 swapi.py:5490 的注释与官方签名），
+        #     · 但这里 _sig_exp 漏登记它 → 每次遍历都判"不符 (8,)" ，
+        #       A2 恒 FAIL；
+        #     · A3a 的期望顺序也还停在"...3 在首位"的旧编排，
+        #       而真实首选顺序已改为 InsertModelDimensions 打头，
+        #       同时链里含 ...4，与期望列表对不上 → A3a 恒 FAIL。
+        #   也就是说：这两条是【测试自己过期】，不是功能坏了。
+        #   官方签名核对（2024 FCS / Rev 32，2025、2027 页一致）：
+        #     InsertModelAnnotations4(Option, Types, AllViews, DuplicateDims,
+        #       HiddenFeatureDims, UsePlacementInSketch, InsertAllAnnotations,
+        #       InsertAllReferenceGeometry) —— 8 参
+        #     https://help.solidworks.com/2025/english/api/sldworksapi/
+        #       SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.
+        #       IDrawingDoc~InsertModelAnnotations4.html
+        #   修法：把 ...4 补进期望表；A3a 改为【从真实链推导期望】，
+        #   不再硬编码一份会漂移的顺序（顺序契约由 _annotation_api_candidates
+        #   的文档说明与 A1 的"首选是否是 InsertModelDimensions"共同保证）。
         _sig_exp = {"InsertModelDimensions": (1,),
+                    "InsertModelAnnotations4": (8,),
                     "InsertModelAnnotations3": (6,),
                     "InsertModelAnnotations2": (6,),
                     "InsertModelAnnotations": (4,),
@@ -583,11 +610,25 @@ def cmd_selftest():
         for _a, _args in _annotation_api_candidates(None):
             if _a not in _seen:
                 _seen.append(_a)
-        _ck("A3a", "首选顺序 = InsertModelDimensions → ...3 → ...2 → ... → AutoDimension",
-            _seen == ["InsertModelDimensions", "InsertModelAnnotations3",
-                      "InsertModelAnnotations2", "InsertModelAnnotations",
-                      "AutoDimension"],
-            "实际=%s" % (_seen,))
+        # 【2026-11-11】不再硬编码一份会漂移的完整顺序表。
+        # 真正必须守住的顺序契约只有三条，且都是"业务语义"而非具体编排：
+        #   ① 首位必须是 InsertModelDimensions（专用于"插入模型尺寸"，
+        #      最贴合本工程"自动标注关键尺寸"的诉求）；
+        #   ② 其余 InsertModelAnnotations* 必须按【版本从新到旧】排列
+        #      （4 → 3 → 2 → 无后缀），老版本 SW 缺方法时才能逐级安全回退；
+        #   ③ AutoDimension 必须垫底（它是"整视图自动标注"，最不可控）。
+        # 用断言守住这三条，比抄一份完整列表更抗漂移（抄的那份已经过期过一次）。
+        _ann_order = [a for a in _seen if a.startswith("InsertModelAnnotations")]
+        _expect_ann = ["InsertModelAnnotations4", "InsertModelAnnotations3",
+                       "InsertModelAnnotations2", "InsertModelAnnotations"]
+        _order_ok = (
+            bool(_seen)
+            and _seen[0] == "InsertModelDimensions"
+            and _ann_order == [a for a in _expect_ann if a in _ann_order]
+            and (_seen[-1] == "AutoDimension" if "AutoDimension" in _seen else True)
+        )
+        _ck("A3a", "首选顺序 = InsertModelDimensions 打头 → ...4→...3→...2→...（新到旧）→ AutoDimension 垫底",
+            _order_ok, "实际=%s" % (_seen,))
     except Exception as _e:
         _ck("A1", "annotate 首选路径自检", False, "异常: %r" % (_e,))
 
@@ -1551,6 +1592,13 @@ def _open_doc6(sw, path, doc_type, options=1):
     return _doc, _info
 
 
+# ══ 【BUG-9】配合门禁用的常见配合名前缀（FeatureByName 探测用）════════════
+# 为什么放模块级：门禁（_assembly_mate_gate）与验收命令（cmd_asm_verify）必须
+# 用【同一份】清单，否则会出现"门禁说没有、验收说有一堆"的自相矛盾。
+MATE_NAME_BASES = ("重合", "同心", "平行", "垂直", "相切", "距离", "角度",
+                   "锁定", "齿轮", "螺旋", "宽度", "凸轮")
+
+
 def _interference_count(mgr):
     """容错取干涉数：先按【属性】取值（SW2025），失败再按【方法】调用（旧版）。
 
@@ -1940,6 +1988,30 @@ def cmd_self_check(sw, part_path, expect=None, work_dir=None,
     except Exception as e:
         out["error"] = "part_verify 不可用: %r" % (e,)
         return out
+    # ── 【2026-11-12 修复·BUG-5】work_dir 缺省时与会话门禁读根对齐 ──────────
+    # 现场（减速器任务 20261111_224045_56A62E32）：
+    #   传动件小屋跑了三段自检、结果 PASS，但 `reports/<零件>.self_check.json`
+    #   **没有落盘**（任务目录 reports/ 里只有箱体件那 6 份）。小屋自己发现
+    #   "self_check.json 未落盘，需显式指定 --work-dir 重跑"，最后由总理子代理
+    #   补跑才补上 —— 白白多跑一遍，还差点让 room-end 被拦。
+    #
+    # 根因：part_verify.self_check_model 的落盘条件是 `if work_dir:`，而
+    #   sw_bridge 这边 work_dir 的缺省值是 None。于是**不写 --work-dir 就等于
+    #   "跑了个寂寞"**：算得全对、结论也在 stdout 里，但磁盘上一个字都没有。
+    #   而读取侧（mode_gate._selfcheck_gate_for_room）用的是
+    #   `_default_work_dir()`（mode_state.work_dir → workflow_state.work_dir
+    #   → settings.delivery_root() 逐级回退）。
+    #   写侧默认不落地、读侧却有固定检索根 —— 两侧口径不一致，必然对不上。
+    #
+    # 修法：写侧默认复用读侧同一套解析（导入 mode_gate 的 _default_work_dir），
+    #   两边从此同源。显式传 --work-dir 仍然优先，保留覆盖能力。
+    if work_dir is None:
+        try:
+            import mode_gate as _mg
+            work_dir = _mg._default_work_dir() if hasattr(_mg, "_default_work_dir") else None
+        except Exception:
+            work_dir = None
+    out["work_dir"] = (str(work_dir) if work_dir else None)
     # 解析 expect
     _exp = expect
     if isinstance(_exp, str):
@@ -1983,6 +2055,29 @@ def cmd_self_check(sw, part_path, expect=None, work_dir=None,
         _res = _pv.self_check_model(_opened, _exp, work_dir=work_dir, **_kw)
         out.update(_res)
         out["ok"] = bool(_res.get("ok"))
+        # ── 【BUG-5】落盘结果必须显式回传，不能让"没落盘"看起来和"落盘了"一样 ──
+        # 旧行为：work_dir=None 时 part_verify 静默跳过写盘，命令仍返回 ok=true，
+        #   调用方（小屋）以为"自检已留证"，直到 room-end 报"没有三段自检记录"
+        #   才发现。这里把落盘槽位明写出来：
+        #   · evidence_file 有值 → 确实写盘了，回传绝对路径；
+        #   · evidence_error  有值 → 写盘失败，如实报出；
+        #   · 两者都没有        → 根本没写盘，给出可执行的补正命令（fail-closed）。
+        _ev = _res.get("evidence_file")
+        _everr = _res.get("evidence_error")
+        if _ev:
+            out["evidence_file"] = os.path.abspath(str(_ev))
+        elif _everr:
+            out["evidence_file"] = None
+            out["warn"] = ("自检结果未能落盘（%s）—— room-end 的三段自检门会判"
+                           "「没有三段自检记录」，请用 --work-dir 指定任务目录后重跑" % _everr)
+        else:
+            out["evidence_file"] = None
+            out["warn"] = ("自检结果【未落盘】：当前无法解析任务 work_dir。"
+                           "room-end 会因「没有三段自检记录」拒绝下线 —— "
+                           "请显式指定 --work-dir \"<任务目录>\" 重跑本命令。")
+            # 未落盘不算通过：这里把 ok 降级，避免"跑过了"被当成"验过了"
+            out["ok"] = False
+            out["blocked_by"] = "SELF_CHECK_NOT_PERSISTED"
         return out
     finally:
         # 只关闭本次打开的文档；不动用户的其它文档
@@ -3752,7 +3847,7 @@ def cmd_run(sw, script_path, extra_args, room=None):
                 "progress": _prog,
                 "sw_lock": _lock_info,
                 "hint": ("① 先看 sw_lock：若 owner 不是本房间，说明大部分时间在排队，"
-                         "应先用 mode_gate.py sw-wait <房间> --timeout 90 拿到锁再重发同一条命令；"
+                         "应先用 job_output 等 sw_busy 返回里的 job_id 自然结束，再重发同一条命令；"
                          "② 长任务可调大上限：$env:DSH_SW_RUN_TIMEOUT_SEC = 1800"
                          "（齿轮类脚本未设置时已默认 1800）；"
                          "③ 脚本支持分批（每批 2~3 件）时优先分批；"
@@ -3956,6 +4051,44 @@ def cmd_run(sw, script_path, extra_args, room=None):
     # 脚本声称成功、但文件没生成（或只是 0 字节 / 只是上一轮的旧文件）
     #   → 必须判失败。这是"脚本跑了、零件没变却返回 ok:true"的最后一道闸。
     _art = _verify_run_artifacts(script_abs, result)
+    # ══ 逐零件上报给监控器（教程 4：图二看板的唯一数据源）════════════════
+    # 为什么在这里报、而不是让模型"记得上报"：
+    #   旧实现靠总理子代理收 prime-report，模型忘了报 → 看板永远"未开始"，
+    #   而零件其实已经建好。现在由工具在【产物校验通过之后】自动报，
+    #   带的是磁盘上真实存在、非 0 字节的文件路径 —— 模型无法伪造。
+    # 注意 order：先 part-start（开工）在这次 run 之前已由调用方发过（如果有），
+    #   这里只负责"建成/失败"两个终态；没报过开工的零件监控器会以
+    #   PART_NOT_STARTED 拒绝，这是有意的（顺序即契约）。
+    try:
+        # cmd_run 不直接持有 _lock（锁在 main() 里），因此命令 ID 通过
+        #   环境变量传进来 —— 这是同一个进程内的传递，模型无法伪造
+        #   （它拿不到 DSH_SW_COMMAND_ID 的具体值，伪造也会被监控器按
+        #    "unknown command" 拒绝）。
+        _cmd_id = os.environ.get("DSH_SW_COMMAND_ID") or None
+        if _cmd_id and room:
+            import mode_gate as _mg_parts
+            _present = (_art.get("present") or []) if _art.get("checked") else []
+            _missing = (_art.get("missing") or []) if _art.get("checked") else []
+            _ev = []
+            for _f in _present:
+                _pn = os.path.splitext(os.path.basename(str(_f)))[0]
+                _ev.append({"part": _pn, "event": "part-saved", "file": str(_f),
+                            "result": _mg_parts.monitor_part_event(
+                                "part-saved", room, _pn, _cmd_id,
+                                file_path=str(_f))})
+            for _f in _missing:
+                _pn = os.path.splitext(os.path.basename(str(_f)))[0]
+                _ev.append({"part": _pn, "event": "part-failed",
+                            "result": _mg_parts.monitor_part_event(
+                                "part-failed", room, _pn, _cmd_id,
+                                reason="脚本执行完毕但产物未生成或为 0 字节")})
+            if _ev:
+                result["monitor_events"] = _ev
+    except Exception as _e_ev:
+        # 上报失败不能把成功的建模判成失败（文件已在磁盘上），但必须留痕：
+        #   看板会因此显示"待验收"而不是"完成"——这是正确的降级。
+        result.setdefault("warnings_list", []).append(
+            "监控器逐零件上报失败: %r（看板不会显示完成，请重跑或手工 review）" % (_e_ev,))
     if _art.get("checked"):
         result["artifacts"] = _art
         # == 【v2 回归复测 P3 修复】产物校验通过后【自动写台账】======
@@ -4332,6 +4465,136 @@ def _find_drawing_template(sw, paper_name=None):
     return candidates[0] if candidates else None
 
 
+def _mate_gate_verdict(found_names, *, verified=True, bypassed=False,
+                       open_error=None):
+    """【BUG-9】配合门禁的纯函数判据（可单测，不碰 COM）。
+
+    把"查到的配合名 → 该拦还是该放 / 该怎么措辞"的决策从 COM 代码里抽出来，
+    这样没有 SolidWorks 的机器也能验证门禁语义没有被改松。
+
+    三态（绝不混同）：
+      · verified=False  → 未能校验（打不开装配体/API 缺失）：不拦截，但必须
+                          如实标注"未校验"，不能显示成"通过"。
+      · found 非空      → 通过（有配合）。
+      · found 为空      → 违规，blocked=True；若已显式绕行则放行但标注降级。
+
+    Returns: dict {ok, blocked, verified, state, note, degraded}
+      state ∈ {"unverified", "pass", "violation", "violation_bypassed"}
+    """
+    _found = [str(x) for x in (found_names or [])
+              if x is not None and str(x).strip()]
+    if not verified:
+        return {"ok": True, "blocked": False, "verified": False,
+                "state": "unverified", "degraded": False,
+                "note": ("未能校验配合（%s）—— 本次不据此拦截，但"
+                         "【不能视为已通过配合门禁】。"
+                         % (open_error or "打不开装配体或 API 不可用"))}
+    if _found:
+        return {"ok": True, "blocked": False, "verified": True,
+                "state": "pass", "degraded": False,
+                "note": ("装配配合门禁通过：查到 %d 个配合（%s）。"
+                         % (len(_found), "、".join(_found[:10])))}
+    if bypassed:
+        return {"ok": True, "blocked": False, "verified": True,
+                "state": "violation_bypassed", "degraded": True,
+                "note": ("⚠️ 该装配体【未查到任何配合】，已按 --force-mate / "
+                         "DSH_ASSEMBLY_MATE_BYPASS 放行。"
+                         "【配合并未真正建立】：本次装配仅由 add_component "
+                         "摆位 + 位姿断言 + 干涉验证支撑，交付说明里必须写明"
+                         "这一点，并在交付前人工补建关键配合。")}
+    return {"ok": False, "blocked": True, "verified": True,
+            "state": "violation", "degraded": True, "note": None}
+
+
+def _degraded_mate_evidence(sw, asm_path):
+    """【BUG-9】配合缺失时的降级证据：位姿断言 + SW 原生干涉验证。
+
+    ══ 为什么要它 ══════════════════════════════════════════════════════════
+    BUG-9 的现场事实是：SW2025 晚期绑定下 `AddMate5/CreateMate` 可能整条
+    不可用，装配只能退化成"add_component 摆位 + 位姿断言 + SW 原生干涉验证"。
+    此时门禁如果只是"报了绕过"，交付方就失去了唯一能证明"装配没散"的证据。
+    本函数把这两块证据一次性取回来，写进 bypass 台账与 run 返回体 ——
+    **同时明确说明配合未真正建立**，绝不把降级伪装成通过。
+
+    实现要点：
+      · 位姿断言走 `swapi.SWModel.verify_assembly_placement`？—— 需要期望
+        坐标，门禁这里拿不到（那是建模脚本才知道的）。因此改用更弱的
+        "组件确实存在且位置可读回"探针（read_component_pose），
+        如实标注 strength="weak"。
+      · 干涉验证走 `swapi.SWModel.check_interference()`，它内部已切到
+        `InterferenceDetectionManager`（BUG-9 修复）；这里只搬运结论，
+        并把 `trustworthy/approx` 原样透传 —— 近似结果绝不冒充原生结论。
+
+    Returns: dict {ok, strength, components, poses, interference, note}
+      【绝不抛异常】—— 证据采集失败要如实回写，不能让门禁自己崩。
+    """
+    out = {"ok": False, "strength": "weak", "components": 0,
+           "poses": [], "interference": None,
+           "note": "未采集到降级证据"}
+    try:
+        import swapi as _swapi
+        _op = _swapi.SWModel.open_part(sw, asm_path, doc_type=2)
+        _doc = _op.get("doc") if isinstance(_op, dict) else _op
+        if _doc is None:
+            out["note"] = "降级证据不可用：装配体打不开（%r）" % (_op,)
+            return out
+        m = _swapi.SWModel(sw, _doc)
+        out["ok"] = True
+        _lc = None
+        try:
+            _lc = m.list_components()
+        except Exception:
+            _lc = None
+        if isinstance(_lc, list):
+            out["components"] = len(_lc)
+            for _c in _lc[:40]:
+                if not isinstance(_c, dict):
+                    continue
+                _nm = _c.get("name")
+                _rec = {"name": _nm}
+                try:
+                    _p = m.read_component_pose(_nm)
+                    _rec["verified"] = bool(_p.get("ok"))
+                    _rec["position_mm"] = _p.get("position_mm")
+                    _rec["rotation_ok"] = _p.get("rotation_ok")
+                    if not _p.get("ok"):
+                        _rec["error"] = _p.get("error")
+                except Exception as _e_p:
+                    _rec["verified"] = False
+                    _rec["error"] = repr(_e_p)
+                out["poses"].append(_rec)
+        # 干涉验证：内部已用 InterferenceDetectionManager（见 swapi BUG-9 修复）
+        try:
+            _inter = m.check_interference(include_multibody=True,
+                                          treat_coincident=False)
+        except Exception as _e_i:
+            _inter = {"ok": False, "available": False,
+                      "error": repr(_e_i)}
+        out["interference"] = {
+            "ok": _inter.get("ok"),
+            "available": _inter.get("available"),
+            "count": _inter.get("count"),
+            "trustworthy": _inter.get("trustworthy"),
+            "approx": _inter.get("approx"),
+            "api": _inter.get("api"),
+            "error": _inter.get("error"),
+        }
+        _n_unread = sum(1 for x in out["poses"] if not x.get("verified"))
+        out["poses_unreadable"] = _n_unread
+        out["note"] = (
+            "降级证据（strength=weak）：%d 个组件中 %d 个位姿可读回；"
+            "干涉检查 api=%s count=%s trustworthy=%s。"
+            "【配合未真正建立】—— 交付前请人工补建关键配合。"
+            % (out["components"], len(out["poses"]) - _n_unread,
+               out["interference"].get("api"),
+               out["interference"].get("count"),
+               out["interference"].get("trustworthy")))
+        return out
+    except Exception as e:
+        out["note"] = "降级证据采集异常（未影响门禁判定）: %r" % (e,)
+        return out
+
+
 def _assembly_mate_gate(sw, asm_path, result=None, room=None):
     """【装配强制门禁】装配体落盘后校验"是否真的用配合装配"。
 
@@ -4349,33 +4612,92 @@ def _assembly_mate_gate(sw, asm_path, result=None, room=None):
       ② 一个都没查到 → 判定"该装配体没有任何配合"= 违反强制路径；
       ③ 命中即通过，并把查到的配合名回传（可审计）。
 
+    ══ 【BUG-9】SW2025 的降级现实 ════════════════════════════════════════
+    SW2025 晚期绑定下 `AddMate5/CreateMate` 可能整条不可用（ByRef 参数、
+    SelectByID2 的 Callout、GetSelectedObjectCount2 的 Mark 语义三重坑），
+    此时装配只能退化为 "add_component 摆位 + 位姿断言 + SW 原生干涉验证"。
+    因此本门禁在【显式绕行】时不再只写一句"已豁免"，而是：
+      · 仍然留痕到 reports/defense_bypass.json（不可静默）；
+      · 额外采集降级证据（位姿可读回数 + 原生干涉结论）；
+      · 在返回体与日志里**明确说明"配合未真正建立，仅摆位+干涉验证"**，
+        避免交付总结把它渲染成"配合齐全"。
+
     ⚠️ 只对 **.sldasm** 生效；零件（.sldprt）不受影响。
     ⚠️ 与三道防线一样保留合法绕行：`DSH_ASSEMBLY_MATE_BYPASS=1`
        或给 run 传 `--force-mate`，且**必定留痕**（reports/defense_bypass.json）。
 
-    Returns: dict（ok / applies / mate_names / blocked / ...）
+    Returns: dict（ok / applies / mate_names / blocked / state / degraded / ...）
     """
     out = {"ok": True, "applies": False, "mate_names": [], "blocked": False}
     try:
         if not str(asm_path or "").lower().endswith(".sldasm"):
             return out
         out["applies"] = True
-        # ── 合法绕行：显式豁免（留痕，绝不静默）──────────────────────────
+        # ── 合法绕行：显式豁免（留痕 + 降级证据，绝不静默）────────────────
         _bypass = str(os.environ.get("DSH_ASSEMBLY_MATE_BYPASS") or "").strip().lower()
         _bypass = _bypass in ("1", "true", "yes", "on")
-        if _bypass or "--force-mate" in (result or {}).get("_extra_args", []):
+        _cli_bypass = "--force-mate" in (result or {}).get("_extra_args", [])
+        if _bypass or _cli_bypass:
             out["bypassed"] = True
+            out["bypass_source"] = "DSH_ASSEMBLY_MATE_BYPASS=1" if _bypass \
+                else "--force-mate"
+            # 【BUG-9】绕行也必须先把"到底有没有配合"查清楚，再采证据 ——
+            #  否则"绕行"会掩盖"其实配合建得好好的"或"其实一个都没有"。
+            _found = []
+            _probe_n = 0
+            _doc = None
+            try:
+                import swapi as _swapi
+                _op = _swapi.SWModel.open_part(sw, asm_path, doc_type=2)
+                _doc = _op.get("doc") if isinstance(_op, dict) else _op
+            except Exception as _e_open:
+                out["open_error"] = repr(_e_open)
+            if _doc is not None:
+                _probe = ["%s%d" % (_b, _i)
+                          for _b in MATE_NAME_BASES for _i in range(1, 21)]
+                _probe_n = len(_probe)
+                for _nm in _probe:
+                    try:
+                        if _doc.FeatureByName(str(_nm)) is not None:
+                            _found.append(str(_nm))
+                    except Exception:
+                        continue
+            out["mate_names"] = _found
+            out["checked_probe_count"] = _probe_n
+            _ev = None
+            if _doc is not None:
+                try:
+                    _ev = _degraded_mate_evidence(sw, asm_path)
+                except Exception as _e_ev:
+                    _ev = {"ok": False, "note": "降级证据异常: %r" % (_e_ev,)}
+            out["degraded_evidence"] = _ev
+            _has_mates = bool(_found)
+            out["degraded"] = not _has_mates
             try:
                 import defense_gate as _dg
                 _dg.log_bypass(
-                    "sw_bridge.run.assembly_mate_gate",
-                    reason=("DSH_ASSEMBLY_MATE_BYPASS=1" if _bypass
-                            else "--force-mate"),
-                    by=("env" if _bypass else "cli"))
+                    "sw_bridge.run.assembly_mate_gate:mate",
+                    reason=("%s；已查证配合数=%d；%s"
+                            % (out["bypass_source"], len(_found),
+                               ("【配合未真正建立】仅靠摆位+干涉验证"
+                                if not _has_mates else "该装配体确有配合"))),
+                    by=("env" if _bypass else "cli"),
+                    scope="mate")
             except Exception:
                 pass
-            out["note"] = ("已显式豁免装配配合门禁（留痕到 reports/defense_bypass.json）。"
-                           "注意：文档核心结论是装配定位必须走 CreateMate 配合。")
+            if _has_mates:
+                out["note"] = ("已显式豁免装配配合门禁（留痕）。"
+                               "查证到 %d 个配合（%s）。"
+                               % (len(_found), "、".join(_found[:10])))
+            else:
+                out["note"] = (
+                    "⚠️ 已显式豁免装配配合门禁（留痕到 "
+                    "reports/defense_bypass.json）。【配合未真正建立】："
+                    "本次装配仅由 add_component 摆位 + 位姿断言 + 干涉验证支撑。"
+                    "交付说明里必须写明这一点，并在交付前人工补建关键配合"
+                    "（箱盖-底座分型面重合 / 两轴-箱体轴承孔同心 / "
+                    "大齿轮-输出轴毂孔同心 / 端盖-箱体止口同心）。")
+                out["degraded_delivery_warning"] = out["note"]
             return out
 
         # ── 打开装配体，按文档 §10.1 用 FeatureByName 查证 ────────────────
@@ -4388,15 +4710,14 @@ def _assembly_mate_gate(sw, asm_path, result=None, room=None):
             out["open_error"] = repr(e)
         if _doc is None:
             # 打不开装配体 → 不误判为"无配合"，如实标注"未能校验"
-            out["verified"] = False
-            out["note"] = ("无法打开装配体做配合校验（%s）—— 本次不据此拦截，"
-                           "但请确认装配体确实是用 CreateMate 配合装配的。"
-                           % (out.get("open_error") or "open failed"))
+            _v = _mate_gate_verdict([], verified=False,
+                                    open_error=(out.get("open_error")
+                                                or "open failed"))
+            out.update(_v)
             return out
 
-        _base = ["重合", "同心", "平行", "垂直", "相切", "距离", "角度",
-                 "锁定", "齿轮", "螺旋", "宽度", "凸轮"]
-        _probe = ["%s%d" % (_b, _i) for _b in _base for _i in range(1, 21)]
+        _probe = ["%s%d" % (_b, _i) for _b in MATE_NAME_BASES
+                  for _i in range(1, 21)]
         _found = []
         for _nm in _probe:
             try:
@@ -4408,44 +4729,67 @@ def _assembly_mate_gate(sw, asm_path, result=None, room=None):
         out["checked_probe_count"] = len(_probe)
         out["verified"] = True
 
-        if not _found:
-            out["ok"] = False
-            out["blocked"] = True
-            out["error"] = (
-                "【装配强制路径】装配体 [%s] 用 FeatureByName 逐个查证"
-                "【未发现任何配合】（探测 %d 个常见配合名）。\n"
-                "文档核心结论：装配定位必须走 IAssemblyDoc::CreateMate 配合；"
-                "坐标硬设（SetTransform2/SetXform/TranslateComponent）在 SW 上"
-                "全部不可用或必崩。\n"
-                # == [A-93 修复] 提示必须只教【真实存在】的 API =============
-                # 原提示教的三个函数在 swapi 里【根本不存在】（全库 grep 0 命中）：
-                #   _pick_faces_of_component / verify_assembly_mates / mate_count
-                # 这是"求救提示"——模型照着做仍然 AttributeError，等于把人带进死胡同。
-                # 实测存在且可用的（swapi.py 行号）：
-                #   create_mate :12603   add_component :11043
-                #   verify_component_position :11328   add_components_batch :11661
-                "正确做法（只用 swapi 里真实存在的方法）：\n"
-                "  ① asm.ClearSelection2(True)\n"
-                "  ② 选两个配合面：IFace2.Select2(True, 1)，面须用 mod.IFace2(face._oleobj_) 重包\n"
-                "  ③ 确认 asm.GetSelectedObjectCount2(-1) >= 2\n"
-                "  ④ m.create_mate(\"coincident\"|\"distance\", (e1, e2), distance_mm=...)：EntitiesToMate 传 VARIANT(VT_ARRAY|VT_DISPATCH, (e1, e2))，AddMate5 必须 15 参\n"
-                "  ⑤ 验收判据：CreateMate 非 None 且 GetFeatureCount(False) 递增（errStatus != 0 不算失败）\n"
-                "  ⑥ 复核：python sw_bridge.py asm-verify <装配体.sldasm>\n"
-                "注：mate_count() / verify_mate() / verify_assembly_mates() / "
-                "_pick_faces_of_component() 【均不存在】，不要调用。"
-                "确需放行：设 DSH_ASSEMBLY_MATE_BYPASS=1 或给 run 传 --force-mate"
-                "（会留痕）。" % (os.path.basename(str(asm_path)), len(_probe)))
-            out["hint"] = ("可直接用：python sw_bridge.py asm-verify \"<装配体.sldasm>\" "
-                           "复核配合清单。")
-        else:
-            out["note"] = ("装配配合门禁通过：查到 %d 个配合（%s）。"
-                           % (len(_found), "、".join(_found[:10])))
+        _v = _mate_gate_verdict(_found, verified=True)
+        out["state"] = _v["state"]
+        if not _v["blocked"]:
+            out["ok"] = True
+            out["note"] = _v["note"]
+            return out
+
+        out["ok"] = False
+        out["blocked"] = True
+        out["degraded"] = True
+        out["error"] = (
+            "【装配强制路径】装配体 [%s] 用 FeatureByName 逐个查证"
+            "【未发现任何配合】（探测 %d 个常见配合名）。\n"
+            "文档核心结论：装配定位必须走 IAssemblyDoc::CreateMate 配合；"
+            "坐标硬设（SetTransform2/SetXform/TranslateComponent）在 SW 上"
+            "全部不可用或必崩。\n"
+            # == [A-93 修复] 提示必须只教【真实存在】的 API =============
+            # 原提示教的三个函数在 swapi 里【根本不存在】（全库 grep 0 命中）：
+            #   _pick_faces_of_component / verify_assembly_mates / mate_count
+            # 这是"求救提示"——模型照着做仍然 AttributeError，等于把人带进死胡同。
+            # 实测存在且可用的（swapi.py 行号）：
+            #   create_mate / add_mate / add_component
+            #   verify_component_position / add_components_batch
+            #
+            # == [BUG-9 修复] 提示里的两处 API 事实必须与官方一致 ==========
+            #  · 计数一律 GetSelectedObjectCount2(-1)：0 的语义是"只数没有 mark
+            #    的选择"，配合实体 mark 都是 1 → 用 0 必然读回 0（误判没选中）；
+            #  · 验收判据不是 "errStatus != 0 不算失败" —— 官方
+            #    swAddMateError_e 的 NoError 是 **1**（0 是 ErrorUnknown），
+            #    所以判据是 "Mate2 非 None 且 errStatus == 1"，或 CreateMate
+            #    返回非 None 且 GetFeatureCount(False) 递增。
+            "正确做法（只用 swapi 里真实存在的方法）：\n"
+            "  ① asm.ClearSelection2(True)\n"
+            "  ② 选两个配合面：装配体里名字格式是 "
+            "'<实体名>@<零部件实例名>@<装配体名>'（实例名带 -1/-2 后缀）；"
+            "两个实体 mark 都用 1\n"
+            "  ③ 确认 asm.SelectionManager.GetSelectedObjectCount2(-1) >= 2"
+            "（必须 -1）\n"
+            "  ④ m.create_mate(\"coincident\"|\"distance\", (e1, e2), distance_mm=...)\n"
+            "     —— 内部主路径是 CreateMateData(type) → CreateMate(md)；\n"
+            "        AddMate5 兜底必须是 15 参，末位 ErrorStatus 用 "
+            "win32com.client.VARIANT(pythoncom.VT_BYREF|VT_I4, 0)\n"
+            "  ⑤ 验收判据：CreateMate/AddMate5 返回非 None 且 "
+            "ErrorStatus == 1（swAddMateError_NoError），"
+            "或 GetFeatureCount(False) 递增\n"
+            "  ⑥ 复核：python sw_bridge.py asm-verify <装配体.sldasm>\n"
+            "注：mate_count() / verify_mate() / verify_assembly_mates() / "
+            "_pick_faces_of_component() 【均不存在】，不要调用。"
+            "确需放行：设 DSH_ASSEMBLY_MATE_BYPASS=1 或给 run 传 --force-mate"
+            "（会留痕，并明确标注【配合未真正建立，仅摆位+干涉验证】）。"
+            % (os.path.basename(str(asm_path)), len(_probe)))
+        out["hint"] = ("可直接用：python sw_bridge.py asm-verify \"<装配体.sldasm>\" "
+                       "复核配合清单。")
         return out
     except Exception as e:
         # 门禁自身异常：如实标注"未校验"，不静默假装通过
         out["verified"] = False
+        out["state"] = "unverified"
         out["error"] = "装配配合门禁异常（未校验）: %r" % (e,)
         return out
+
 
 
 def cmd_asm_verify(sw, asm_path):
@@ -4473,9 +4817,9 @@ def cmd_asm_verify(sw, asm_path):
             return out
         m = _swapi.SWModel(sw, _doc)
         # 文档 §10.1 判据：FeatureByName 逐个查证
-        _base = ["重合", "同心", "平行", "垂直", "相切", "距离", "角度",
-                 "锁定", "齿轮", "螺旋", "宽度", "凸轮"]
-        _probe = ["%s%d" % (_b, _i) for _b in _base for _i in range(1, 21)]
+        # 【BUG-9】清单与门禁共用 MATE_NAME_BASES，避免两处口径漂移。
+        _probe = ["%s%d" % (_b, _i) for _b in MATE_NAME_BASES
+                  for _i in range(1, 21)]
         _found = []
         for _nm in _probe:
             try:
@@ -4485,6 +4829,27 @@ def cmd_asm_verify(sw, asm_path):
                 continue
         out["mate_names"] = _found
         out["mate_count_by_name"] = len(_found)
+        # ── 【BUG-9】干涉验证：asm-verify 不只是"数配合"，还要给原生干涉结论 ──
+        # 用户要求装配验收 = "配合 + 位姿 + 干涉" 三件套；这里补上第三件，
+        # 且内部走 InterferenceDetectionManager（不再是会误报无干涉的
+        # ToolsCheckInterference2）。结果原样透传 trustworthy/approx，
+        # 近似值绝不冒充原生结论。
+        try:
+            _inter = m.check_interference(include_multibody=True,
+                                          treat_coincident=False)
+            out["interference"] = {
+                "ok": _inter.get("ok"),
+                "available": _inter.get("available"),
+                "count": _inter.get("count"),
+                "trustworthy": _inter.get("trustworthy"),
+                "approx": _inter.get("approx"),
+                "api": _inter.get("api"),
+                "done_called": _inter.get("done_called"),
+                "error": _inter.get("error"),
+                "interferences": (_inter.get("interferences") or [])[:20],
+            }
+        except Exception as _e_inter:
+            out["interference"] = {"ok": False, "error": repr(_e_inter)}
         # 交叉参考：mate_count（可能因 FirstFeature 失效返回 0，仅作参考）
         _mc = m.mate_count()
         out["mate_count_report"] = {
@@ -4567,6 +4932,20 @@ def cmd_asm_verify(sw, asm_path):
         if not _found:
             out["warning"] = ("未查到任何配合 —— 该装配体可能是【坐标硬设摆位】"
                               "而非 CreateMate 配合装配，违反文档核心结论。")
+            # ── 【BUG-9】SW2025 的降级现实必须写进验收结论 ──────────────
+            # 若配合 API 整条不可用，装配只能"摆位 + 位姿 + 干涉验证"交付。
+            # 这种情况下 asm-verify 必须明确说"配合未真正建立"，
+            # 而不是只给一句模糊的 warning，否则交付总结会把它写成交付合格。
+            out["degraded"] = True
+            out["degraded_delivery_note"] = (
+                "【配合未真正建立】本装配体没有任何配合特征。若本机 SW2025 的 "
+                "AddMate5/CreateMate 确实不可用（见 create_mate 返回体的 layers），"
+                "则本次交付只能以「add_component 摆位 + 位姿断言 + SW 原生干涉验证」"
+                "成立，交付说明必须写明这一点，并在交付前人工补建关键配合"
+                "（箱盖-底座分型面重合 / 两轴-箱体轴承孔同心 / "
+                "大齿轮-输出轴毂孔同心 / 端盖-箱体止口同心）。")
+        else:
+            out["state"] = "pass"
         return out
     except Exception as e:
         out["error"] = "asm-verify 异常: %r" % (e,)
@@ -7204,7 +7583,7 @@ def cmd_close_all(sw, quit=False):
                 "method": None, "docs_closed": None,
                 "error": "SW 未连接（sw=None）—— 无法执行 CloseAllDocuments。",
                 "hint": ("SW 进程可能根本没启动。若只是想释放使用权，"
-                         "用 python mode_gate.py sw-release <房间名>；"
+                         "用 python sw_bridge.py close-all（它会向监控器归还使用权）；"
                          "若确认有僵尸进程，用 python sw_bridge.py close-all --quit。")}
     # ── 【BUG-S02 修复】默认路径改为【循环关闭直到 docs_after==0】──────────
     # 现场缺陷：旧实现只调一次 swapi.close_all_documents()（单次
@@ -7881,58 +8260,67 @@ def _room_heartbeat(room, phase="modeling"):
         return False
 
 
-def _gate_sw_lock(room):
-    """获取 SW 使用权（进程级窗口）。
-
-    快路径立即获取；忙碌时短暂等待后返回 {"busy": True}，
-    由小屋稍后重试同一命令（队列位置已保留，FIFO 先到先用）。
-    锁随小屋生命周期保持，由 mode_gate room-end 统一释放并确保 SW 进程完全关闭。
-    """
-    if os.environ.get("DSH_SW_LOCK_OFF"):
-        return {"skipped": True}
-    # ── 【Bug#4 修复】取锁成功即写心跳：证明小屋确实在干活 ──────────────
-    _room_heartbeat(room, "acquired")
-    gate = _get_mode_gate_path()
-    if not os.path.exists(gate):
-        return {"skipped": True}
+def _monitor_client():
+    """惰性导入监控器客户端（缺失时返回 None，由调用方给可执行的失败）。"""
     try:
-        out = subprocess.run([sys.executable, gate, "sw-request", room],
-                             capture_output=True, text=True, encoding="utf-8", timeout=30)
-        info = json.loads(out.stdout or "{}")
+        import sw_monitor_client as _c
+        return _c
     except Exception:
-        return {"skipped": True}
-    if not info.get("need_lock"):
-        # ── 【第4项 · 代码强制】无需排队也照样起看护 ──────────────────────
-        # 真实拿到使用权（need_lock=False 表示本模式不需要互斥）也意味着
-        # "马上要开始用 SW 建模"，看护必须已经在跑。
+        return None
+
+
+def _gate_sw_lock(room, command=None):
+    """为一条 SW 命令向外部监控器取【一次性许可】。
+
+    ── 与旧实现的根本差别 ────────────────────────────────────────────────
+    旧实现（已删除）做三件事：往 mode_state.sw_lock 里排个队、轮询
+    mode_gate sw-wait、拿不到就返回 sw_busy 让子代理 sleep 后重试。
+    结果是「等锁」必须一直占着回合（图一），而且"SW 进程没在跑"会被当成
+    锁空闲，两个房间能同时拿到使用权（2026-11-11 实测 8 对构建重叠）。
+
+    新实现只有一句：把 room + 命令 ID 交给宿主，由宿主向监控器申请。
+      · 拿到 → {"room":…, "command":…, "permit": True}，可以动 COM 了；
+      · 排队 → {"busy": True, job_id:…}，调用方【直接返回 job id】，
+        不 sleep、不重试、不占回合（等待在 DSH 后台任务里发生）；
+      · 拒绝 → {"denied": True, …}，命令不得执行。
+
+    ⚠️ 没有 DSH_SW_LOCK_OFF 旁路了。那个开关的语义是"跳过取锁"，
+       在接管模式下等于绕过唯一权威 —— 教程 3.1 明令关闭这类旁路。
+    """
+    client = _monitor_client()
+    if client is None:
+        return {"denied": True, "code": "MONITOR_CLIENT_MISSING",
+                "error": "缺少 sw_monitor_client.py（监控器接入模块未部署）。",
+                "hint": "SW 使用权必须由外部监控器发放，没有本地回退路径。"}
+    try:
+        client.require_ready()
+    except Exception as e:
+        return {"denied": True, "code": getattr(e, "code", "MONITOR_NOT_CONFIGURED"),
+                "error": str(e), "hint": getattr(e, "extra", {}).get("hint")}
+    cmd_id = "%s:%s:%s" % (room or "-", os.getpid(), uuid.uuid4().hex[:12])
+    _room_heartbeat(room, "acquired")
+    try:
+        out = client.permit(room, cmd_id, part=None)
+    except Exception as e:
+        code = getattr(e, "code", "MONITOR_ERROR")
+        extra = getattr(e, "extra", {}) or {}
+        if extra.get("queued"):
+            # 排队中：把 job id 原样交给上层，绝不在这里 sleep。
+            return {"busy": True, "room": room, "command": cmd_id,
+                    "job_id": extra.get("job_id"),
+                    "position": extra.get("position"),
+                    "owner": extra.get("owner"),
+                    "error": str(e), "hint": extra.get("hint")}
+        return {"denied": True, "room": room, "command": cmd_id,
+                "code": code, "error": str(e),
+                "hint": (extra.get("hint")
+                         or "监控器拒绝了本次 SW 命令许可，命令未执行。")}
+    # ★ 拿到许可 = 即将动 COM → 看护必须在跑（不依赖模型是否记得启动）
+    try:
         _ensure_guard_quiet(room)
-        return {"skipped": True}
-    if info.get("acquired"):
-        # ★【第4项】拿到锁 = 即将建模 → 立刻确保健康看护在跑。
-        #   这是"代码强制"：不依赖模型是否记得启动，任何取锁路径都会走到这里。
-        _ensure_guard_quiet(room)
-        return {"room": room, "skipped": False}
-    # 忙碌: 最多再等 ~24 秒（短等待避免 pwsh 工具超时），仍拿不到则返回 busy
-    deadline = __import__("time").time() + 24
-    last = {}
-    while __import__("time").time() < deadline:
-        try:
-            out = subprocess.run([sys.executable, gate, "sw-wait", room, "8"],
-                                 capture_output=True, text=True, encoding="utf-8", timeout=30)
-            r = json.loads(out.stdout or "{}")
-            last = r
-            if r.get("acquired"):
-                # ★【第4项】等待后拿到锁，同样要起看护
-                _ensure_guard_quiet(room)
-                return {"room": room, "skipped": False}
-        except Exception:
-            pass
-        __import__("time").sleep(1)
-    return {"busy": True, "room": room,
-            "position": last.get("position") or info.get("position"),
-            "owner": last.get("owner") or info.get("owner"),
-            "error": (last.get("error") or info.get("wait_hint")
-                      or "SW 正被其他小屋使用，请稍后重试同一命令。")}
+    except Exception:
+        pass
+    return {"room": room, "skipped": False, "command": cmd_id, "permit": True}
 
 
 def _ensure_guard_quiet(room):
@@ -7976,56 +8364,56 @@ def _ensure_guard_quiet(room):
 
 
 def _gate_sw_unlock(lock):
-    """房间级锁：命令结束【默认不释放】，整轮建模由 room-start 持有、room-end 释放。
+    """命令结束：向监控器记账 end（并按需归还使用权）。
 
-    ── 历史与本轮反转（A15）──────────────────────────────────────────────
-    最初是房间级（只在 room-end 释放）；
-    【Bug4 修复】改成了单命令级 —— 理由写成"某小屋需要用户交互确认时，
-    其他小屋被无限阻塞"。但这个理由在 2026-11-07 的会话里被证伪：
-      · 240 次 room-board 读取中 waiting_sw 出现 0 次；
-      · 跨房间 sw_bridge run 实测 **8 对时间重叠**（最长 216 s）；
-      · 13:59:59 有 4 个房间同时在世，同一 SW 实例被多脚本操作，
-        ActiveDoc 是进程级全局状态 —— 文档串写/半成品丢失的结构性风险。
-    也就是说"命令级释放"带来的不是并发收益，而是把房间级串行废掉了。
-    真正解决"交互确认时阻塞别家"的正确做法是 room-fail/room-end 让锁，
-    而不是让锁在每个命令之间漏一次。
+    ── 这一版只做"记账"，不再决定"谁持有 SW" ────────────────────────────
+    旧实现有三种语义在打架（房间级 / 命令级 / DSH_SW_UNLOCK_ON_EXIT 覆盖），
+    互相矛盾的注释叠了四层，最后谁也没把握。根本原因是在"进程内锁"模型下，
+    释放时机同时承担了三个职责：还资源、算公平、给出死判据。
 
-    ── 现在的语义 ────────────────────────────────────────────────────────
-      · 默认：**保持锁**（房间级）。room-start 取得，room-end/room-fail 释放。
-      · DSH_SW_UNLOCK_ON_EXIT=1 → 命令结束立即释放（退回旧的单命令级语义）。
-      · DSH_SW_ROOM_HOLD=0      → 全局退回单命令级（与 mode_gate 同一开关）。
+    监控器模型把这三件事拆开了：
+      · 还资源       → end（本命令结束）；release 只在房间 SW 阶段结束时调；
+      · 公平         → 监控器的 FIFO 票据队列，与"放了没放"无关；
+      · 死活         → 宿主心跳 + 票据状态，不看进程。
+
+    于是这里只剩一件事：告诉监控器"这条命令结束了"。
+    end 失败【不影响建模结果】—— 命令已经跑完、文件已经落盘；失败只留痕，
+    让监控器在宿主恢复后按在途命令处理（教程 3.3 允许"留在在途状态"）。
     """
     try:
-        if not lock or lock.get("skipped") or lock.get("busy"):
+        if not lock or lock.get("skipped") or lock.get("busy") or lock.get("denied"):
             return
-        # ── 【Bug#4 修复】命令结束也写一次心跳 ────────────────────────────
-        #   run 可能耗时数分钟，取锁时跳的那一次到结束时可能已经"过期"，
-        #   这里补一次，确保收尾阶段房间状态仍是新鲜的（不会刚干完活就被判 stale）。
+        cmd_id = lock.get("command")
+        if not cmd_id:
+            return
         _room_heartbeat(lock.get("room"), "released")
-        # ══ 【A15 修复】默认改为【房间级】：命令结束不再释放 SW 使用权 ══════
-        # 现场（2026-11-07 会话）：旧实现在这里每条命令结束就 sw-release，
-        #   于是 hold_mode 永远是 command —— 240 次 room-board 里 waiting_sw
-        #   出现 0 次，却实测到 8 对跨房间构建区间重叠（最长 216 s）。
-        #   根因就是这一行：锁在"命令之间"释放，等于没有房间级串行。
-        # 现在：默认保持房间级独占（room-start 取得、room-end/room-fail 释放）。
-        #   需要退回旧的单命令级语义时，设 DSH_SW_UNLOCK_ON_EXIT=1。
-        # 环境变量优先级（高 → 低）：
-        #   DSH_SW_UNLOCK_ON_EXIT=1  → 立刻释放（单命令级，旧行为）
-        #   DSH_SW_UNLOCK_ON_EXIT=0  → 保持（房间级，同新默认）
-        #   未设置                   → 保持（房间级）
-        _unlock_env = (os.environ.get("DSH_SW_UNLOCK_ON_EXIT") or "").strip().lower()
-        _room_hold_env = (os.environ.get("DSH_SW_ROOM_HOLD") or "").strip().lower()
-        _room_hold_off = _room_hold_env in ("0", "false", "no", "off")
-        _immediate = _unlock_env in ("1", "true", "yes", "on") or _room_hold_off
-        if not _immediate:
+        client = _monitor_client()
+        if client is None:
             return
-        gate = _get_mode_gate_path()
-        if not gate or not os.path.exists(gate):
-            return
-        subprocess.run([sys.executable, gate, "sw-release", lock.get("room", "")],
-                       capture_output=True, text=True, encoding="utf-8", timeout=30)
+        # 房间 SW 阶段是否结束由调用方决定；这里只 end 本条命令，
+        # release 交给 room-end（见 mode_gate.cmd_room_end）。
+        client.done(lock.get("room") or "", cmd_id, release=False)
     except Exception:
+        # 记账失败不能反过来把成功的建模判成失败（文件已在磁盘上）。
         pass
+
+
+def _gate_sw_release(room):
+    """房间 SW 阶段结束：归还使用权（drained 由宿主核实后声明）。
+
+    单独成一个函数，因为 release 的语义和 end 不同：
+      · end     = 这条命令跑完了；
+      · release = 这个房间不再需要用 SW 了（后续是纯文件工作：验签、报告、出图除外）。
+    教程 3.3 明确要求 release 必须带 drained —— 宿主确认 worker / 子进程已退出。
+    """
+    try:
+        client = _monitor_client()
+        if client is None:
+            return {"ok": False, "error": "缺少监控器客户端"}
+        return client.release(str(room or ""), drained=True)
+    except Exception as e:
+        return {"ok": False, "error": str(e),
+                "code": getattr(e, "code", "MONITOR_ERROR")}
 
 
 def main():
@@ -8418,20 +8806,42 @@ def main():
             # 【Bug2 修复】--room 缺失属于"调用错误"，必须以非零码退出。
             # 原来裸 return 使 exitCode=0，自动化脚本无法据此判定失败。
             sys.exit(2)
-        _lock = _gate_sw_lock(_room_id)
-        if _lock.get("timeout") or _lock.get("busy"):
-            print(json.dumps({"ok": False, "sw_busy": True,
-                              "position": _lock.get("position"), "owner": _lock.get("owner"),
-                              "error": _lock.get("error"),
-                              "hint": ("SW 使用窗口排队中（FIFO 先到先用）。请用阻塞式等待把锁等回来："
-                                        "python mode_gate.py sw-wait <房间> --timeout 90"
-                                        "（等价写法 python mode_gate.py sw-wait <房间> 90；"
-                                        "或 wait-rooms <房间> --timeout 90），再重试同一条命令（带 --room 房间名），队列位置已保留。"
-                                        "禁止用 Start-Sleep + job_output wait:true 长阻塞轮询："
-                                        "静默数十秒会让用户以为 DSH 卡死（2026-10-31 事故根因）。")},
-                             ensure_ascii=False, indent=2))
-            # 【Bug2 修复】SW 忙（排队中）不是成功，用非零码退出，
-            # 让调用方能识别"需要重试"而不是"已完成"。
+        # ══ 每条 SW 命令都必须先拿到监控器的一次性许可 ════════════════════
+        # 教程 3.3：begin 成功之前不得创建实际 CAD worker。
+        # 排队时【直接返回 job id】—— 不 sleep、不重试、不占回合（图一的根因）。
+        _lock = _gate_sw_lock(_room_id, command=cmd)
+        # 把本次命令 ID 传给同进程内的 cmd_run，用于逐零件上报（教程 4）。
+        # 用环境变量而不是参数，是因为 cmd_run 的签名被多个入口复用；
+        # 它只在本进程生命周期内有效，子进程会继承 —— 这正是我们要的
+        # （wrapper 子进程也属于这条命令）。
+        try:
+            if isinstance(_lock, dict) and _lock.get("command"):
+                os.environ["DSH_SW_COMMAND_ID"] = str(_lock["command"])
+        except Exception:
+            pass
+        if _lock.get("denied"):
+            print(json.dumps({
+                "ok": False, "code": _lock.get("code") or "MONITOR_DENIED",
+                "error": _lock.get("error"),
+                "hint": _lock.get("hint"),
+                "room": _room_id, "command": cmd,
+            }, ensure_ascii=False, indent=2))
+            # 被监控器拒绝 = 命令没有执行，用非零码退出。
+            sys.exit(4)
+        if _lock.get("busy"):
+            print(json.dumps({
+                "ok": False, "sw_busy": True,
+                "job_id": _lock.get("job_id"),
+                "position": _lock.get("position"), "owner": _lock.get("owner"),
+                "error": _lock.get("error"),
+                "hint": ("SW 使用权在排队（FIFO 先到先用）。已为你挂好后台等待任务 "
+                         "job_id=%s：用 job_output 等它【自然结束】即可，"
+                         "结束后重试同一条命令（带 --room %s）。"
+                         "禁止 sleep 轮询 / 禁止反复重试同一条命令："
+                         "等待由 DSH 后台任务承担，不占回合。"
+                         % (_lock.get("job_id") or "<未取得>", _room_id)),
+            }, ensure_ascii=False, indent=2))
+            # 排队不是失败，但命令确实没执行 → 用专门的退出码 3。
             sys.exit(3)
         # ── 【N3 修复】build 窗口 = 实际 SW 命令执行区间 ─────────────────
         # 现场（2026-11-10 复检）：窗口原先在 room-start 开、room-end 关，
@@ -8524,14 +8934,16 @@ def main():
             result = cmd_close_all(sw, quit=_quit)
             # 小屋完成 SW 任务 → 立即释放 SW 锁（不等 room-end），
             # 让队列里下一个排队的房间马上获得使用权（用户需求）
+            # 归还使用权：走监控器（旧 mode_gate sw-release 子进程已删除）。
+            # close-all 的语义就是"本房间不再用 SW"，所以在这里 release 是对的；
+            # drained=True 成立，因为这一行之前已经确认过文档关闭/进程退出。
             try:
-                _gate = _get_mode_gate_path()
                 _rid = _detect_gate_room(args)
-                if _gate and _rid:
-                    subprocess.run([sys.executable, _gate, "sw-release", _rid],
-                                   capture_output=True, text=True, encoding="utf-8", timeout=30)
+                if _rid:
+                    _rel = _gate_sw_release(_rid)
                     if isinstance(result, dict):
-                        result["sw_lock_released"] = True
+                        result["sw_released"] = bool(_rel.get("ok"))
+                        result["sw_release_detail"] = _rel
             except Exception:
                 pass
         # ── 【BUG-S03 修复】sw-kill：循环强杀 SLDWORKS.exe 并确认退出 ──────

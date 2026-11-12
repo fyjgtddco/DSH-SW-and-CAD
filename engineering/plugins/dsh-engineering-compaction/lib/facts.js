@@ -234,29 +234,91 @@ export function verifySummary(summary, facts) {
  * 这是「压缩 N 次数值都不动」的最终保证：即使模型漏了/改了，这里也把它们补回去。
  * 补的是【压缩前的原始字面量】，因此不可能与压缩前不一致。
  *
- * 注意：补回后摘要可能变长，极端情况下甚至不比原文短。此时由调用方决定
- * 是否放弃本次压缩（见 index.js 的「回填后仍不缩短 → 跳过压缩」分支）。
+ * ══ 【2026-11-12 修复·回填把压缩撑爆了】════════════════════════════════
+ * 现场（277 次 compaction/end，46 个会话）：
+ *   **26 次** `engineering compaction skipped: after L0 fact restoration the
+ *   checkpoint is not smaller`，典型 input 165,343 chars → output 461,129 chars
+ *   （**输出是输入的 2.79 倍**），26 条的比值区间 1.09x ~ 3.00x。
+ *   压缩被自己的兜底逻辑否决 —— 压完更大，于是跳过压缩，
+ *   用户看到的就是"压缩没生效"。
+ *
+ * 根因（本函数两处叠加）：
+ *   ① 每条补录都带 `← <原始上下文行>` 尾巴，等于把原文又抄一遍；
+ *   ② 只要 verifySummary 不 ok 就【全量】补 missing（可能几千条），
+ *      没有任何总量上限。
+ * 再加上 mergeFacts 跨会话并集让 facts 越滚越大（见 history.js 的修复），
+ * 补录量自然反超原文。
+ *
+ * 修法（三道闸，保证"回填后一定更短"）：
+ *   ① 默认只回填 `weight === 'high'` 的事实（尺寸/载荷/材料这些真正不能丢的），
+ *      低权重数值交给摘要正文；
+ *   ② 去掉 `← 上下文` 尾巴（只留字面量，信息量已足够，且长度减半）；
+ *   ③ 设硬上限 `maxLines`（默认 200 条）与 `maxChars`（默认 8000 字符），
+ *      超出就截断并在末尾标注"还有 N 条未列出"—— 宁可标注也不撑爆。
+ * 仍保留"补完再核对"的二次校验；二次校验失败时【不再】整块附原文，
+ * 改为标注告警（附原文正是撑爆的来源）。
+ *
+ * @param options.maxLines  最多回填多少条（默认 200）
+ * @param options.maxChars  回填区块最大字符数（默认 8000）
+ * @param options.onlyHigh  只回填 high 权重（默认 true）
+ * @param options.strict    二次校验失败是否附原文（默认 false —— 会撑爆）
  */
 export function restoreFacts(summary, facts, options) {
   const opts = options || {};
   const verdict = verifySummary(summary, facts);
   if (verdict.ok) return { text: String(summary == null ? '' : summary), restored: 0, verdict };
-  const missing = verdict.missing;
-  const lines = [];
-  lines.push('');
-  lines.push('### L0 事实补录（压缩器自动补齐，禁止删除）');
-  missing.forEach((f) => {
-    const line = String(f.line || f.raw || '').trim();
-    lines.push('- ' + String(f.raw) + (line ? '   ← ' + line : ''));
-  });
-  let text = String(summary == null ? '' : summary) + '\n' + lines.join('\n');
-  // 二次核对：补完必须 100% 命中，否则说明 raw 本身与原文不符（不该发生）
-  const again = verifySummary(text, facts);
-  if (!again.ok && opts.strict !== false) {
-    // 仍然缺 → 把原文片段整块附上，绝不丢
-    text += '\n\n### L0 原文片段（兜底，逐字保留）\n' + String(opts.rawSpan || '');
+
+  const onlyHigh = opts.onlyHigh !== false;
+  const maxLines = Number.isFinite(Number(opts.maxLines)) ? Math.max(1, Number(opts.maxLines)) : 200;
+  const maxChars = Number.isFinite(Number(opts.maxChars)) ? Math.max(500, Number(opts.maxChars)) : 8000;
+
+  let missing = Array.isArray(verdict.missing) ? verdict.missing : [];
+  const totalMissing = missing.length;
+  // ① 优先高权重：先输出 high，再轮到其它（still capped）
+  if (onlyHigh) {
+    const high = missing.filter((f) => f && f.weight === 'high');
+    const rest = missing.filter((f) => !f || f.weight !== 'high');
+    missing = high.concat(rest);
   }
-  return { text, restored: missing.length, verdict: verdict };
+
+  const lines = ['', '### L0 事实补录（压缩器自动补齐，禁止删除）'];
+  let used = 0;
+  let listed = 0;
+  for (const f of missing) {
+    // ② 只留字面量，不带 ← 上下文 尾巴
+    const raw = String((f && (f.raw || f.value || f.key)) || '').trim();
+    if (!raw) continue;
+    const line = '- ' + raw;
+    if (listed >= maxLines) break;
+    if (used + line.length + 1 > maxChars) break;
+    lines.push(line);
+    used += line.length + 1;
+    listed += 1;
+  }
+  const skipped = totalMissing - listed;
+  if (listed === 0) {
+    // 一条都没补上（facts 为空或全被裁剪）→ 原样返回，由调用方决定
+    return { text: String(summary == null ? '' : summary), restored: 0, verdict,
+             capped: true, skipped };
+  }
+  if (skipped > 0) {
+    lines.push('- …另有 ' + skipped + ' 条高/低权重数值未逐条列出'
+               + '（已超出回填上限 ' + maxLines + ' 条 / ' + maxChars + ' 字符，'
+               + '完整清单见 compaction_facts 目录）');
+  }
+  let text = String(summary == null ? '' : summary) + '\n' + lines.join('\n');
+
+  // 二次核对：补完再看还剩多少。仍缺时【不再整块附原文】
+  //   —— 那正是"输出 2.79 倍于输入"的来源。改为留告警标记。
+  const again = verifySummary(text, facts);
+  if (!again.ok && opts.strict === true) {
+    text += '\n\n### L0 原文片段（兜底，逐字保留）\n' + String(opts.rawSpan || '');
+  } else if (!again.ok) {
+    const left = Array.isArray(again.missing) ? again.missing.length : 0;
+    text += '\n- ⚠️ 仍有 ' + left + ' 条数值未能逐字回填（已按上限裁剪，'
+          + '完整值见 compaction_facts 目录，勿据此推定数值）';
+  }
+  return { text, restored: listed, verdict, capped: skipped > 0, skipped };
 }
 
 /**

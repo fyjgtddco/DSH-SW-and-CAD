@@ -114,9 +114,11 @@ def main():
         row = (b.get("rooms") or [{}])[0]
         check("room 行含 activity_age_sec 字段", "activity_age_sec" in row, sorted(row.keys()))
         check("room 行含 holds_sw 字段", "holds_sw" in row, sorted(row.keys()))
-        check("甲 正持锁 → holds_sw=True", row.get("holds_sw") is True, row.get("holds_sw"))
-        check("持锁房间不得被判停滞", row.get("progress_stalled") is False,
-              row.get("progress_stalled"))
+        # 【监控器接入】room-start 不再预取 SW 使用权（使用权按命令发放），
+        #   所以刚登记完的房间 holds_sw 必然是 False。原断言"正持锁=True"
+        #   测的是已删除的房间级独占锁，留着就会永久红。
+        check("room-start 后不再预取使用权（holds_sw=False）",
+              row.get("holds_sw") is False, row.get("holds_sw"))
 
         # ── B3：room-lease 真的在续心跳 ───────────────────────────────────
         print("\n=== B3 · room-lease 持续刷新心跳 ===")
@@ -150,9 +152,10 @@ def main():
                            capture_output=True, text=True, env=env, timeout=120)
             subprocess.run([PY, os.path.join(HERE, "mode_gate.py"), "room-start", "乙"],
                            capture_output=True, text=True, env=env, timeout=120)
-            # 让房间不再持锁（模拟"活着但确实不动"），再等 1 秒
-            subprocess.run([PY, os.path.join(HERE, "mode_gate.py"), "sw-release", "乙"],
-                           capture_output=True, text=True, env=env, timeout=120)
+            # 房间不持锁 = 没有在途 SW 命令。监控器接管后 holds_sw 直接由
+            #   sw_lock 镜像（source=sw_monitor）决定，未知来源一律视为不持锁，
+            #   所以这里【不需要】再调一条释放命令（sw-release 现在要连监控器，
+            #   在隔离环境里必然失败）。
             time.sleep(2.5)
             bp = subprocess.run(
                 [PY, os.path.join(HERE, "mode_gate.py"), "room-board", "--room", "乙",

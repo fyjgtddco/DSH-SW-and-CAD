@@ -204,16 +204,22 @@ test('⑤ 接线：init 建骨架 / finish 清理 / 保存失败进 rejects / �
 
   const m2 = readFileSync(path.join(TOOLS, 'mode2_flow.py'), 'utf8');
   assert.ok(m2.includes('def parts_board('), 'mode2_flow 必须有 parts_board');
-  // 状态常量 → 状态码的映射必须齐全（用户要求的五种）
-  for (const st of ['done', 'building', 'rebuilding', 'failed', 'not_started']) {
-    assert.ok(m2.includes('"' + st + '"'),
-      '零件状态表必须包含状态码 ' + st);
+  // ── 状态码来源变了：parts-board 现在【转发监控器 board】 ──────────────
+  //   状态字符串与中文标签由监控器给出（LABELS 表在 sw_monitor/monitor.py），
+  //   mode2_flow 只做字段映射，不再自己定义 PART_STATE_* 常量。
+  //   因此断言改为：契约字段被透传 + 监控器那份标签表齐全。
+  for (const field of ['"generation"', '"label"', '"checks"', '"has_report"',
+                       '"safe_to_restart"', 'sw_monitor']) {
+    assert.ok(m2.includes(field),
+      'parts-board 必须透传监控器字段 ' + field);
   }
-  for (const constName of ['PART_STATE_DONE', 'PART_STATE_BUILDING', 'PART_STATE_REBUILDING',
-                           'PART_STATE_FAILED', 'PART_STATE_TODO']) {
-    assert.ok(m2.includes(constName + ' ='), '缺少状态常量 ' + constName);
+  const mon = readFileSync(path.join(TOOLS, 'sw_monitor', 'monitor.py'), 'utf8');
+  // 教程 4.3 要求前端能渲染 queued / validating / blocked / disconnected / stale
+  for (const st of ['not_started', 'queued', 'building', 'validating', 'done',
+                    'rebuilding', 'failed', 'blocked', 'disconnected', 'stale']) {
+    assert.ok(mon.includes(st + '=') || mon.includes('"' + st + '"') || mon.includes("'" + st + "'"),
+      '监控器状态机必须包含状态 ' + st);
   }
-  assert.ok(m2.includes('PART_STATE_LABEL'), '必须有状态中文标签表');
 
   const host = readFileSync(path.join(HERE, '..', 'lib', 'index.js'), 'utf8');
   assert.ok(host.includes("PREFIX + '/parts-board'"), '宿主必须有 /parts-board 路由');

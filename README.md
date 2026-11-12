@@ -61,7 +61,7 @@ DSH 的插件分三个平面，**放错位置会互相连坐**：
 | 疲劳与寿命校核 | Basquin S-N + Marin 修正 + Miner 累积损伤，默认 30 年设计寿命 |
 | 出工程图 | 三视图 + 等轴测 → `.SLDDRW` / `.DWG` / `.DXF` / `.PDF`，GB/T 排版规范 |
 | 图纸几何校验 | CADX 七项检查（图层 / 图幅 / 线型 / 重叠 / 尺寸链 …） |
-| 多零件协作 | 拆分「房间」，子代理串行或并行建模，SW 进程级 FIFO 锁 |
+| 多零件协作 | 拆分「房间」，子代理串行或并行建模；SW 使用权由外部监控器发许可并 FIFO 排队 |
 | 判断能不能交付 | 材料 / 物理 / 领域 **三大防线** + 看图证据 + 台账一致性 |
 
 ### 三种任务类型（AI 自判，不打扰你）
@@ -215,7 +215,7 @@ python "<根>\tools\workflow_gate.py" mode2 ask "使用场合是什么" --stage 
 |------|--------|------|
 | **主对话（大屋）** | 问答、编排、建小屋、收尾 | 不自己跑十阶段；只能调根会话命令 |
 | **总计子代理** | `analyst-bind` 后跑十阶段分析、按需提问、决定房间编制 | 只有它能写阶段与编制 |
-| **建模小屋 + 总理子代理** | 各自建模；总理同波监工、收上报、校验相邻尺寸 | 只做本房间 |
+| **建模小屋** | 各自建模、验证并上报进度 | 只做本房间 |
 
 房间数量**不再固定 3 个**：由总计子代理按分析结论登记（1 ~ 24 个），
 每个房间必须写清 `parts`（负责哪些零件）与 `why`（为什么需要它）。
@@ -225,18 +225,26 @@ python "<根>\tools\workflow_gate.py" mode2 ask "使用场合是什么" --stage 
 
 | 波次 | 房间 | 干什么 |
 |------|------|--------|
-| **第 1 波** | 建模小屋 1..N + 总理子代理 | 并行建模；总理与建模**同波启动**，长生命周期监工 |
+| **第 1 波** | 建模小屋 1..N | 并行建模（SW 使用权由监控器排队） |
 | **第 2 波** | 总装与验证 | 只有第 1 波**全部** `room-end` 后才允许开始 |
 | **第 3 波** | 工程图输出 | 总装完成后出三视图 / 剖视 / 标注 |
 
-### SW 是单实例，所以有一个进程级 FIFO 锁
+### SW 是单实例，所以由【外部监控器】统一发使用权
+
+> SolidWorks 的独占权由独立服务 **DSH-SW-Monitor**（`engineering/tools/sw_monitor/`）管理。
+> 工程模式里的进程内锁已**整体删除** —— 它靠"SW 进程在不在"猜锁空闲，
+> 实测导致两个房间同时驱动同一个 SW 实例（8 对构建区间重叠，最长 216 秒）。
 
 | 机制 | 行为 |
 |------|------|
-| 排队 | 谁先请求谁先用，队列保留；返回 `sw_busy` 就等 90 秒重试**同一条命令** |
-| 公平轮转 | 有人排队时，单房间最多连续 3 条命令或独占 180 秒，超出强制让位（防饿死） |
-| 心跳 | 子代理每 60 秒续一次，但**已降级为辅助证据** |
+| 许可 | 每条 `sw_bridge` 命令执行前向监控器要一次性许可；没拿到就**不执行** |
+| 排队 | 忙时返回 `sw_busy` + **`job_id`** → 用 `job_output` 等它自然结束，再重试同一条命令 |
+| 顺序 | 监控器的 FIFO 票据（按 epoch/task/room/session 绑定），不再有"公平轮转"这种本地猜测 |
+| 归还 | 命令结束 `end` 记账；房间 SW 阶段结束 `release`；`close-all` 也会归还 |
 | 清场 | 每波开始前 `close-all`，确认没有残留的 `SLDWORKS.EXE` |
+
+等待**不占回合**：图一那种 `wait-rooms --timeout 900` 的命令型阻塞已经换成宿主后台 job，
+模型拿到的是 job id，可以随时结束回合做别的事（或按 `[WAITING]` 收尾）。
 
 ### 判活只认看板，不认心跳
 
@@ -250,7 +258,7 @@ python "<根>\tools\mode_gate.py" room-board --json
 |------|------|-----------|
 | `starting` | 刚建，宽限期内 | 否 |
 | `running` | 正常干活中 —— **不许说"没反应"** | 否 |
-| `waiting_sw` | 在 SW 队列里正常等锁，**不是死了** | **否（严禁判死）** |
+| `waiting_sw` | 在监控器队列里等使用权，**不是死了** | **否（严禁判死）** |
 | `idle` | 平台侧活着，当前没有可观察动作 | 否 |
 | `unbound` | 平台侧活着但忘了 `subagent-assign` | 否，**补绑定即可，禁止 reset** |
 | `done` / `failed` | 已收工 / 已失败 | 按需 `recover` |
@@ -489,26 +497,27 @@ python "$T\_root.py"            # 不确定根目录？先跑这个自检
 | `check-part` / `verify-ownership` | 零件归属校验 / 总装前去重核对 |
 | `status` / `gate-summary` / `check` | 状态 / 总览 / 是否允许建模 |
 | `recover` / `restart <房间>` / `reset` | 恢复卡住 / 重做房间 / 清空重来 |
-| `mode2 <子命令>` | 十阶段契约：`begin-stage` / `ask` / `prime-report` / `prime-verify` … |
+| `mode2 <子命令>` | 十阶段契约：`begin-stage` / `ask` / `set-subagent-plan` / `parts-board` … |
 | `stage-status` / `pre-delivery` | 阶段进度 / 交付前总闸 |
 
 > 除 `status` / `gate-summary` 这类只读命令外，**只许根会话调用**；
 > 子代理调 `init` / `select` / `reset` 会拿到 `ROOT_SESSION_REQUIRED`。
 
-### `mode_gate.py` — 房间状态机 + SW 锁
+### `mode_gate.py` — 房间状态机 + 监控器运维
 
 | 类别 | 子命令 |
 |------|--------|
 | **看板（权威）** | `room-board [--room X] [--json]` — 八态 + `safe_to_restart` + `next_action` |
 | 房间 | `room-start` / `room-end` / `room-fail` / `room-status` / `room-report` / `room-report-read` |
-| SW 锁 | `sw-request` / `sw-wait` / `sw-release` / `sw-status` / `sw-proc` / `lock-doctor` / `close-all` |
+| SW 使用权 | `sw-status`（只读）/ `sw-release`（房间归还）/ `sw-proc` / `close-all` |
+| **外部监控器** | `sw-monitor status` / `attach --drained` / `recover --reason` / `plan` |
 | 子代理 | `subagent-assign`（**每次 fork 后必做**） / `subagent-free` / `subagent-status` / `whoami` |
 | 心跳 | `room-heartbeat`（辅助证据） / `room-heartbeat-check` |
 | 授权 | `confirm-part <房间> <零件>`（C 模式） / `room-artifact` |
 | 看护 | `sw-guard-start` / `sw-guard-stop` / `sw-guard-status`（CPU / 内存 > 85% 立刻关 SW） |
 | 维护 | `doctor` / `rooms-reset` / `stale-artifacts` / `residue-check` / `platform-refresh` |
 
-### `mode2_flow.py` — 十阶段 / 编制 / 总理
+### `mode2_flow.py` — 十阶段 / 编制 / 逐零件看板
 
 | 子命令 | 用途 |
 |--------|------|
@@ -516,8 +525,8 @@ python "$T\_root.py"            # 不确定根目录？先跑这个自检
 | `begin-stage` / `mark-stage-done` | 按序推进阶段 / 登记产物（只认总计子代理身份） |
 | `ask` / `answer-question` / `refresh-stage` | 按需提问 / 落盘答复 / 重做过期阶段 |
 | `set-subagent-plan --rooms-json ... --decided-by 总计子代理` | 登记本轮房间编制 |
-| `prime-board` / `prime-report` / `check-consistency` | 监工看板 / 收上报 / 相邻尺寸一致性 |
-| `prime-verify` / `export-docx` / `pre-delivery` | 统一核实 / 汇总 docx / 交付前总闸 |
+| `parts-board` | 逐零件进度表（**数据源 = 监控器 board**，右侧面板读的就是它） |
+| `export-docx` / `check-docx` / `pre-delivery` | 汇总 docx / 核实 docx / 交付前总闸（含监控器 `verify-task`） |
 
 ### 其他脚本
 
@@ -559,7 +568,7 @@ DSH-SW-and-CAD-main/
 │   │   └── webots-simulation/    # Webots 仿真（可选，见 docs/webots-mcp）
 │   ├── tools/                    # ★ Python 工具链
 │   │   ├── workflow_gate.py      # 门禁大脑
-│   │   ├── mode_gate.py          # 房间状态机 + SW 锁 + room-board
+│   │   ├── mode_gate.py          # 房间状态机 + room-board + sw-monitor 运维
 │   │   ├── mode2_flow.py         # 十阶段契约 / 编制 / 总理
 │   │   ├── defense_gate.py       # 三大防线
 │   │   ├── sw_bridge.py          # SW 桥接执行器
@@ -614,7 +623,7 @@ Mode 1/2/3 判定 → 门禁 → 建模 → 三大防线 → 出图
 | 入口 | 用法 |
 |---|---|
 | **自检（先跑这个）** | `python "<根>\tools\webots_env.py" --json` → 看 `sim_available` / `blocking` |
-| **桥接命令** | `sw_bridge.py sim-status` / `sim-env` / `sim-list` / `sim-report`（**不连 SW、不取 SW 锁**） |
+| **桥接命令** | `sw_bridge.py sim-status` / `sim-env` / `sim-list` / `sim-report`（**不连 SW、不申请使用权**） |
 | **MCP 工具** | `mcp__webots__sim_status` / `sim_launch` / `sim_job` / `sim_report` / `sim_evidence` …（需 `DSH_WEBOTS_ENABLE=1`） |
 
 宿主侧新开了 4 条**只读** GET 路由（`webots-context` / `-report` / `-evidence` / `-attribute`），
@@ -697,9 +706,9 @@ python -m venv $env:USERPROFILE\.dsh\engineering-webots\venv
 这句把"轮询"写成了等待的第一选择，实测被照抄成**单轮 477 次 `sleep(30)`、轮询 4 小时 02 分**
 （占墙钟 66%），期间零产物。现已改写为：
 
-- **禁止**用 `time.sleep` / `Start-Sleep` 轮询等子代理、等房间、等 SW 锁；
+- **禁止**用 `time.sleep` / `Start-Sleep` 轮询等子代理、等房间、等 SW 使用权；
 - 只准用**阻塞原语**：`mode_gate.py wait-rooms "<房间>" --timeout 900` /
-  `mode_gate.py room-board --wait 900` / `mode_gate.py sw-wait <房间> --timeout 90`；
+`mode_gate.py room-board --wait 900` / `job_output` 等 `sw_busy` 返回的 `job_id`；
 - 确实没有原语时（如等一个 `sw_bridge run` 的后台 job 收尾）才允许短 sleep，
   且**同一等待目标连续不得超过 3 次**；
 - 等待期间**允许结束回合**，格式固定为 `[WAITING] 在等：…；判据：room-board state=…；唤醒条件：…`
@@ -712,6 +721,88 @@ python -m venv $env:USERPROFILE\.dsh\engineering-webots\venv
 必须补上 `$env:PYTHONIOENCODING='utf-8'; $env:PYTHONUTF8='1'` 重跑，
 或用 read 工具直接读磁盘原文核对（磁盘上的 .json/.md 不经控制台代码页）。
 注入式根治在插件 `lib/index.js` 的宿主半，人设层只做流程约束。
+
+---
+
+## 🔌 外部监控器（DSH-SW-Monitor）
+
+> **SolidWorks 使用权只有一个权威：外部服务。** 工程模式里的进程内 SW 锁
+> （`sw-request` / `sw-wait` / `lock-doctor` / 公平轮转 / 孤儿锁回收，共约 700 行）
+> 已**整体删除**。原因不是它写得不好，而是它有两个结构性问题：
+>
+> ① **「SW 进程没在跑」被当成「锁空闲」** —— 房间刚取到锁、SW 还没冷启动时，
+>    第二个房间同样能拿到使用权。2026-11-11 验收复跑实测 **8 对构建区间重叠**，
+>    最长 216 秒；两个脚本同时驱动同一个 SW 实例写不同零件。
+> ② **「等锁」必须占着回合** —— 忙时只能返回 `sw_busy` 让子代理 sleep 后重试，
+>    于是主对话挂在 `wait-rooms --timeout 900` 上一动不动（图一）。
+
+### 它做什么
+
+| 能力 | 实现 |
+|------|------|
+| **命令级许可** | 每条 `sw_bridge` 命令执行前向监控器要一次性许可；没有许可**不得启动 CAD worker** |
+| **FIFO 票据** | 票据按 `epoch + task + room + session` 绑定，队首预留 45 秒；已领取的使用权**不会自动过期** |
+| **后台等待** | 排队时命令立刻返回 **`job_id`**，等锁由 DSH 后台 job 承担 —— 不 sleep、不重试、不占回合 |
+| **逐零件看板** | `part-start` / `part-saved` / `part-failed` 事件驱动；右侧面板「零件」区读的就是它 |
+| **逐件验收** | `review-part` 核材料/物理/领域凭据（哈希 + run_id + 同房间）；`verify-task` 核台账/邻接/冲突 |
+| **持久化** | SQLite 状态机；宿主失联 → 冻结已领取票，**不发下一把锁** |
+
+### 怎么开
+
+```powershell
+# ① 起监控器（独立 Python 进程，无第三方依赖）
+python -B engineering\tools\sw_monitor\monitor.py --data <运行数据目录> --workspace-root <交付根上一级> --dsh-tools <工程模式 tools 目录>
+
+# ② 写接入配置（enabled=true 才算接管）
+#    <tools>\sw_monitor.json :
+#    {"enabled": true, "url": "http://127.0.0.1:18779",
+#     "tokenFile": "<运行数据目录>\host.token"}
+
+# ③ 首次接管：确认旧命令树 / COM 调用 / SW 文档操作已清空
+python "<根>\tools\mode_gate.py" sw-monitor attach --drained
+
+# 只读查看状态（谁在用 / 谁在排队 / 心跳）
+python "<根>\tools\mode_gate.py" sw-monitor status
+```
+
+> ⚠️ **端口：不要写死，也不要依赖 `DSH_WEB_PORT`。**
+> DSH 的 Web GUI 端口**每次启动都变**，且 `DSH_WEB_PORT` 在真实会话里
+> 根本不会被注入。Python 侧按 `DSH_WEB_URL`（宿主注入的真实 GUI 地址）
+> 解析宿主桥，`sw-monitor status` 的 `bridge_source` 会告诉你用的是哪个来源：
+>
+> ```
+> "bridge": "http://127.0.0.1:57496/dsh-engineering-ui/sw-monitor-op",
+> "bridge_source": "env:DSH_WEB_URL"     ← 正确
+> "bridge_source": "fallback"            ← 回落到固定端口，八成连不上
+> ```
+>
+> 端口不对时显式指定：`$env:DSH_WEB_URL = "http://127.0.0.1:<实际端口>"`。
+
+> 📋 **任务/编制会自动登记。** `workflow_gate.py select` 落盘后会把
+> `task_id` + 房间编制自动 `plan` 进监控器（房间表定型的唯一时刻）。
+> 返回体里的 `monitor_plan` 说明是否成功：
+> `MONITOR_NOT_CONFIGURED` = 没接入；`TASK_UNKNOWN` = 没登记成功。
+> 需要手动补登记时：
+> `python mode_gate.py sw-monitor plan --rooms-json <rooms.json>`
+> （支持内联 JSON / 裸路径 / `@路径`）。
+
+**没有接入会怎样**：建模命令一律返回 `MONITOR_NOT_CONFIGURED` 并拒绝执行。
+这是有意的 fail-closed —— 旧锁已删除，**不存在「退回进程内队列」这条路**（双权威）。
+
+### 故障恢复（顺序不能乱）
+
+1. 停止发送新 SW 命令 —— 先看真实 `job_list`、子进程、SolidWorks 文档/进程；
+2. 确认旧命令与所有 CAD 子进程**已彻底排空**后，执行
+   `python mode_gate.py sw-monitor recover --reason "<原因>"`（必须写原因）；
+3. 连接失败 / 任务目录对不上 / 凭据不可读 / 出现重复 worker → **保持暂停**，
+   不要删 SQLite 来「清锁」；
+4. 回滚要先排空监控模式的所有工作，再停宿主入口 —— **禁止双轨同时放行**。
+
+### 契约文档
+
+- [engineering/tools/sw_monitor/docs/DeepSeek接入教程.md](engineering/tools/sw_monitor/docs/DeepSeek接入教程.md) —— 接入顺序、每条路由、示例
+- [engineering/tools/sw_monitor/docs/覆盖验收.md](engineering/tools/sw_monitor/docs/覆盖验收.md) —— 去重场景矩阵 + 99% 真实任务判据
+- 本地自检：`python -B engineering\tools\sw_monitor\selfcheck.py`（5/5）
 
 ---
 
@@ -733,6 +824,7 @@ python -m venv $env:USERPROFILE\.dsh\engineering-webots\venv
 
 | 提交 / 日期 | 说明 |
 |-------------|------|
+| 2026-11-12 | **外部监控器接管 SW 使用权**（进程内锁整体删除 ~700 行）+ **总理子代理整体删除** + 后台等待任务（`job_id`）+ 逐零件看板换数据源 + 交付总闸改问 `verify-task`。回归 72/72、插件 37 文件、monitor 自检 5/5 |
 | 2026-10-28 | **总计子代理真实化**（`analyst-bind` + 身份校验）+ 总理子代理同波启动与监工 + `room-board` 状态可信化（`waiting_sw` / `unbound`）+ 子代理禁令（`ROOT_SESSION_REQUIRED`）+ 插件自动平台登记 |
 | `e12d665` | 为移动端 DSH Go 做适配性调整 |
 | `fe671a3` | mode2_flow 与防御门控完善，新增回归测试与物理运行记录 |

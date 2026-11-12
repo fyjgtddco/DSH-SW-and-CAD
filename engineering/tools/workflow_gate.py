@@ -71,7 +71,7 @@ except Exception:  # 模块缺失时降级为"不强制"，绝不锁死流程
 #   · 按需提问（必须先分析到该阶段 + 必须写理由，禁止一股脑全问）
 #   · 十阶段按序推进
 #   · 子代理编制只能由【总计子代理】决定（取消固定 3 个）
-#   · 总理子代理上报必填（三道防线凭据/尺寸/名称/相邻配合件）
+#   · 零件验收：监控器逐件核验（材料/物理/领域凭据 + 哈希 + run_id）
 #   · 相邻尺寸不一致 → 必须升级父代理
 #   · 交付前总闸
 #
@@ -225,12 +225,13 @@ ROOM_TYPE_ALIAS = {
     "drawings": "drafting",
     "draft": "drafting",
     "assembly_verify": "assembly",
-    "prime": "assembly",
+    # "prime" 已随总理子代理一起删除；历史状态里的 prime 若还出现，
+    # normalize_room_type 会原样返回，由房间类型自检报"非规范类型"。
 }
 
 # 纯出图 / 协调类房间类型：不产出零件级 FEA，豁免物理校核（与 defense_gate 同源）
 NON_PART_ROOM_TYPES = ("drafting", "drawing_export", "assembly",
-                       "assembly_verify", "prime", "coordination")
+                       "assembly_verify", "coordination")
 
 
 def normalize_room_type(rtype):
@@ -245,7 +246,7 @@ def room_type_is_modeling(rtype):
     """房间类型是否属【建模类】（含零件 → 第一波 / 需物理校核）。
 
     Bug⑥：所有含零件的类型（含 drivetrain/sensor 等历史别名）都算建模类；
-      只对纯出图/协调类（drafting/assembly/prime）豁免。
+      只对纯出图/协调类（drafting/assembly）豁免。
       空类型按"建模类"处理（fail-closed，legacy 快照不得被静默豁免）。
     """
     _t = normalize_room_type(rtype)
@@ -424,6 +425,29 @@ def _extract_load_n(text):
     _NEGATIVE_AFTER = _re.compile(
         r"^\s*(?:[·*x×.]?\s*(?:m|mm|cm|m2|mm2|米|毫米)|/\s*(?:mm2|mm²|m2|米))",
         flags=_re.IGNORECASE)
+    # ── 【2026-11-12 修复·BUG-6】公式符号不得当成单位 ────────────────────
+    # 现场（减速器任务 20261111_224045_56A62E32）：
+    #   confirm-load "按 3kW / 1000rpm（扭矩 T=9550×3/1000=28.65 N·m；
+    #                  小齿轮 d1=50mm 切向力 Ft=2T/d1=1146 N）"
+    #   → 解析出 19613.3 N（= 2 × 9806.65，正好是 **2 吨**）。
+    #   与 3kW 工况完全对不上（差了 17 倍），须改写成 "1146N（...）" 才对。
+    #
+    # 根因：吨的模式 `(\d+)\s*(?:t|吨)` 里的 `t` 是**大小写不敏感**的，
+    #   于是工程公式里最常见的符号 `2T`（2 倍扭矩）、`1t`（时间变量）、
+    #   `3T`（3 倍转矩）全被当成"吨"。这类误读极其危险：
+    #   它把 1146N 的真实切向力替换成 19613N（≈2000kgf），
+    #   后续所有强度校核都按错量级算，报告看起来还很"专业"。
+    #
+    # 修复（两道闸）：
+    #   ① 吨单位必须严格小写 `t`，且后面不能紧跟 `/`、`*`、`·`、`=`、字母
+    #      —— 这些符号说明它是公式里的变量而不是单位；
+    #   ② 逐条命中后再做「公式语境」排除：命中位置前后若出现 `=`、`/`、`×`、
+    #      `*`、`d`、`D` 等运算/符号特征，或命中串是"数字+单字母且该字母在
+    #      同一段里作为变量出现过"，则丢弃该命中。
+    _TON_PAT = r"(\d+(?:\.\d+)?)\s*(?:(?-i:t)|吨)(?![a-z0-9/\*·×=\u4e00-\u9fa5])"
+    # 公式语境：命中串紧邻的前/后一段里出现运算符号，或命中串形如 "2T" 这种
+    # "数字+大写单字母"（工程里 T=扭矩、t=时间、F=力），一律不认。
+    _FORMULA_AROUND = _re.compile(r"[=/×*·+\-]")
     _PATTERNS = (
         (r"(\d+(?:\.\d+)?)\s*(?:kn|千牛)", 1000.0),
         (r"(\d+(?:\.\d+)?)\s*(?:kgf|千克力|公斤力)", 9.80665),
@@ -431,7 +455,7 @@ def _extract_load_n(text):
         # (?![a-z0-9]) 保证 "n" 后面不是字母/数字；但 ".m" 这类符号需另行排除
         (r"(\d+(?:\.\d+)?)\s*(?:n|牛顿)(?![a-z0-9])", 1.0),
         (r"(\d+(?:\.\d+)?)\s*(?:kg|公斤|千克)", 9.80665),
-        (r"(\d+(?:\.\d+)?)\s*(?:t|吨)(?![a-z0-9])", 9806.65),
+        (_TON_PAT, 9806.65),
     )
     best = None
     for pat, k in _PATTERNS:
@@ -439,6 +463,27 @@ def _extract_load_n(text):
             # 量纲排除：紧邻其后若出现力矩/压强记号，则不是纯力载荷
             if _NEGATIVE_AFTER.match(s[m.end():m.end() + 6]):
                 continue
+            # ── 【BUG-6】公式语境排除：**只对"吨"生效** ────────────────────
+            # 为什么只对吨：只有 "t/T" 在工程文本里有双重身份
+            #   （吨 = 单位；T/t = 扭矩/时间的变量符号），`2T` 才会被误读成 2 吨。
+            #   N / kN / kg / lbf 没有这种歧义，不该被"前面是 = 就丢"的规则
+            #   误伤 —— 实测 `力=1146N`、`Ft=2T/d1=1146 N` 里的 1146N 正是
+            #   【结果值】，丢它等于把唯一正确的答案扔了（修复时踩过这个坑）。
+            if k == 9806.65:
+                _unit = _re.sub(r"^[\d.\s]+", "", m.group(0)).strip()
+                _unit = _unit.strip("（）()，,。.；;、：: \t")
+                if _unit in ("t", "T", "吨", ""):
+                    _ctx = s[max(0, m.start() - 8):m.end() + 8]
+                    _sym_before = s[max(0, m.start() - 1):m.start()]
+                    # 数字紧跟大写字母 + 上下文有运算符 → 扭矩变量，不是吨
+                    if (m.group(0).strip()[-1:].isupper()
+                            and _FORMULA_AROUND.search(_ctx)):
+                        continue
+                    if _sym_before in ("=", "/", "×", "*", "·", "+", "-"):
+                        continue
+                    # 后面紧跟 "/" 或字母（如 "2t/d1"、"2t·m"）→ 变量
+                    if s[m.end():m.end() + 1] in ("/", "*", "·", "×"):
+                        continue
             try:
                 v = float(m.group(1)) * k
             except Exception:
@@ -846,7 +891,6 @@ _GENERIC_ROOM_SCOPE = {
     "spring": "弹簧等弹性元件",
     "thermal": "耐热/隔热部件",
     "corrosion": "防腐处理件",
-    "prime": "不建模：统一关键尺寸、收各屋上报、相邻尺寸一致性校验、汇总 docx",
 }
 
 
@@ -3608,7 +3652,7 @@ def cmd_provide_context(context_text):
                 "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
                 "     数量不再固定为 3 —— 由它按分析结论决定。",
                 "",
-                "  5) 固定增设【总理子代理】（统一尺寸、校验相邻一致性、汇总 docx），"
+                "  5) 零件验收由监控器逐件核验（无需任何汇总代理），"
                 "与建模小屋同波同时启动、持续盯 room-board。",
                 "",
                 "查看进度：python workflow_gate.py stage-status",
@@ -3814,7 +3858,7 @@ def _archive_finished(state, done_count, total, message):
         # ══ 【模式二新流程 · 交付前总闸】══════════════════════════════════
         # 用户要求「所有改动都要写在代码里强制执行」。因此把原先只写在
         #   SKILL.md 里的流程要求（十阶段走完 / 题数达标 / 编制由总计子代理
-        #   决定 / 总理子代理收到全部上报 / 相邻尺寸一致）升级为**总闸**：
+        #   编制由总计子代理决定 / 监控器逐件验收 / 邻接尺寸一致）升级为**总闸**：
         #   任一不满足 → 拒绝归档（拒绝宣告完成）。
         #
         # 这是"不可逆终态"前的最后一道强制点，与下面的三道防线并列。
@@ -3833,7 +3877,7 @@ def _archive_finished(state, done_count, total, message):
                         "  ① 十阶段分析走完（mode2_flow.py stage-status 查看缺哪些）；",
                         "  ② 按需提问且题数达标（强 10~50 / 弱 5~10）；",
                         "  ③ 由总计子代理登记子代理编制（set-subagent-plan）；",
-                        "  ④ 每个零件向总理子代理上报（prime-report，含三道防线凭据/尺寸/相邻件）；",
+                        "  ④ 每个零件保存后由监控器记账（part-saved），验收时核对三大防线凭据；",
                         "  ⑤ 跑相邻尺寸一致性（check-consistency）；不一致必须交父代理干涉。",
                         "",
                         "（确需放行：设 DSH_DEFENSE_BYPASS=1，会留痕到 reports/defense_bypass.json）",
@@ -4093,7 +4137,7 @@ def _parse_choice_args(raw_args):
 
 # ══ 【F-03 修复 · 2026-10-31】select --brief：大配置改文件引用 ═══════════
 # 实测缺陷：select 回包把 subagent_config / subagent_plan / part_ownership /
-#   prime_report_contract 等【全量内联】，主体十几 KB（实测 grep brief 零匹配，
+#   monitor_contract 等【全量内联】，主体十几 KB（实测 grep brief 零匹配，
 #   即根本没有 brief 通道）。后果：
 #     · 每次 select 都把十几 KB 灌进主对话上下文，多波次时上下文被反复挤占；
 #     · 其中绝大部分是"配置详情"，主对话真正需要的只是
@@ -4108,7 +4152,7 @@ _BRIEF_KEEP_KEYS = (
     "pending_rooms", "wave_rooms", "all_pending_rooms", "all_pending_count",
     "pending_rooms_note", "completed_count", "total_rooms", "wave", "wave_name",
     # 一致性 / 门禁自检结论
-    "sync", "assembly_confirmed", "subagent_plan_required", "prime_room",
+    "sync", "assembly_confirmed", "subagent_plan_required",
     "workflow_advanced", "unproven_rooms", "note",
 )
 # 这些键在 brief 模式下【改成文件引用】
@@ -4116,7 +4160,7 @@ _BRIEF_TO_FILE = {
     "subagent_config": "select_subagent_config.json",
     "subagent_plan": "select_subagent_plan.json",
     "part_ownership": "select_part_ownership.json",
-    "prime_report_contract": "select_prime_report_contract.json",
+    "monitor_contract": "select_monitor_contract.json",
 }
 
 
@@ -4141,7 +4185,7 @@ def _select_brief(full):
     """【F-03】把全量 select 回包瘦身成 brief（大对象 → 文件引用）。
 
     保留：门禁结论 / 房间调度 / 一致性自检 / 下一步提示（见 _BRIEF_KEEP_KEYS）。
-    转文件：subagent_config、subagent_plan、part_ownership、prime_report_contract
+    转文件：subagent_config、subagent_plan、part_ownership、monitor_contract
             —— 这四个是体积大头，且主对话通常只需知道"去哪读"。
 
     设计约束：
@@ -4472,18 +4516,59 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
             "question_report": _q_report,
             "subagent_plan_error": (None if _sp.get("ok") else _sp.get("error")),
             "authority": _m2mod.SUBPLAN_AUTHORITY,
-            "prime_room": _m2mod.PRIME_ROOM_NAME,
             "stages": [s[0] for s in _m2mod.STAGES],
             "rule": ("子代理数量不再固定为 3 —— 必须由【真实的 %s 子代理】先走十阶段分析，"
-                     "再调 mode2_flow.py set-subagent-plan 登记编制；"
-                     "另有一个固定角色【%s】与建模小屋同波同时启动，"
-                     "负责统一尺寸、校验相邻一致性、盯住所有建模小屋、汇总 docx。"
+                     "再调 mode2_flow.py set-subagent-plan 登记编制。"
+                     "零件验收不再由任何代理「上报」，而是由外部监控器按"
+                     "part-saved 事件 + 三大防线逐件核验；"
                      "总计子代理未创建（未 analyst-bind）或未登记编制前，"
                      "都不得创建任何建模小屋。"
-                     % (_m2mod.SUBPLAN_AUTHORITY, _m2mod.PRIME_ROOM_NAME)),
+                     % (_m2mod.SUBPLAN_AUTHORITY,)),
         }
     save_state(state)
     _sync_mode_gate(choice, parallel)
+    # ══ 把本轮任务与编制【登记进外部监控器】（教程第 2 步）══════════════════
+    # 为什么放在 select：这是"房间表最终定型"的唯一时刻 —— 编制已由总计子代理
+    #   登记，收尾房间也已补齐。放在别处（比如 init）会登记到不完整/不存在的编制。
+    # 为什么必须自动化：监控器对未知 task 一律 TASK_UNKNOWN，不登记就什么都做不了。
+    #   2026-11-12 真机测试的现场就是：装好了、attach 成功了，但因为没有登记，
+    #   逐零件看板与许可全被 fail-closed 拒绝，看起来像"没导入成功"。
+    # 失败【不阻断】select：监控器没接入时本就要能走完门禁；结果如实回传，
+    #   让调用方知道"这一轮没有监控器权威"。
+    _monitor_plan = None
+    try:
+        import sw_monitor_client as _mc_sel
+        if _mc_sel.enabled():
+            _mc_sel.require_ready()
+            _sp_rooms = None
+            try:
+                _sp = (_m2mod.get_subagent_plan(_m2_work_dir(state))
+                       if _m2mod is not None else {}) or {}
+                _sp_rooms = _sp.get("rooms") or None
+            except Exception:
+                _sp_rooms = None
+            if not _sp_rooms:
+                _sp_rooms = [{"name": n, "type": t, "parts": []}
+                             for n, t in (state["subagent_config"].get("rooms") or [])]
+            _monitor_plan = _mc_sel.call("plan", {
+                "task": state.get("task_id"),
+                "root": _m2_work_dir(state) or state.get(WORKDIR_STATE_KEY),
+                "simulation_required": False,
+                "rooms": _sp_rooms,
+            })
+            _monitor_plan = {"ok": True, "rooms": len(_sp_rooms)}
+        else:
+            _monitor_plan = {"ok": False, "code": "MONITOR_NOT_CONFIGURED",
+                             "hint": "未接入外部监控器：本轮没有 SW 使用权权威，"
+                                     "建模命令会被拒绝。"}
+    except Exception as _e_mp:
+        _monitor_plan = {"ok": False, "code": getattr(_e_mp, "code", "MONITOR_ERROR"),
+                         "error": str(_e_mp)}
+    try:
+        state["monitor_plan"] = _monitor_plan
+        save_state(state)
+    except Exception:
+        pass
     # ── 【BUG-观察-1 修复】把【权威保存目录】注入 subagent_config ──────────
     # 这样生成小屋 prompt 时能拿到绝对路径，不必让模型自己猜"工作目录"。
     # 竞速小车任务的教训：门禁给的 work_dir 与零件实际落盘处不一致，
@@ -4518,24 +4603,21 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
     save_state(state)
     _sync_mode_gate(choice, parallel)
 
-    # 并行模式：自动启动 SW 后台监控进程
-    if _pmode == "parallel":
-        import subprocess as _sp
-        try:
-            _sp.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode_gate.py"), "sw-monitor-bg"],
-                    creationflags=0x08000000 if sys.platform == "win32" else 0)
-        except Exception as _e:
-            pass
+    # 并行模式：不再启动"SW 后台监控进程"。
+    #   旧实现为每个并行任务 spawn 一个常驻 python 进程写 sw_state.json
+    #   （只记录 SLDWORKS.EXE 在不在），实测跨任务累积到 4 个泄漏进程。
+    #   "谁在用 SW"现在由监控器票据状态机回答，"SW 在不在跑"由 sw-status
+    #   现查 tasklist —— 都不需要常驻进程。
 
     rooms = state["subagent_config"]["rooms"]
     # ══ 【模式二新流程 · 取消固定 3 个子代理】══════════════════════════════
     # 用户要求：「取消在第二段多个子代理固定三个，第二次该建多少个子代理
-    #           交由总计子代理分析应该开多少个子代理，同时再固定开一个总理子代理」。
+    #           交由总计子代理分析应该开多少个。」（总理子代理已删除）
     #
     # 代码强制点：
     #   · 若【总计子代理】已登记编制 → **用编制里的房间表覆盖**代码默认表；
     #     数量完全由它决定（1~24 都合法），不再固定 3 个。
-    #   · 总理子代理是**固定角色**，无论编制如何都追加一个，且不可被编制覆盖。
+    #   · 不再追加任何固定角色：房间表完全等于编制。
     #   · 未登记编制时 → 下面的返回值会带 `subagent_plan_required`，
     #     由主对话先跑总计子代理（十阶段分析）再回来 select。
     _prime_room = None
@@ -4554,19 +4636,17 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
                     # 每个房间的零件范围也以编制为准（覆盖硬编码的 _room_parts_scope）
                     state["subagent_config"]["room_parts"] = {
                         r["name"]: r.get("parts") or [] for r in _planned}
-                # ── 总理子代理：固定追加，不可被编制顶掉 ──────────────────
-                _pr = _m2mod.prime_room_definition(_m2_work_dir(state))
-                _prime_room = {"name": _pr["name"], "type": _pr["type"],
-                               "why": _pr["why"], "duties": _pr["duties"]}
-                if not any(n == _pr["name"] for n, _t in rooms):
-                    rooms = list(rooms) + [(_pr["name"], _pr["type"])]
-                    state["subagent_config"]["rooms"] = rooms
-                    state["subagent_config"]["total_rooms"] = len(rooms)
-                state["subagent_config"]["prime_room"] = _prime_room
+                # ── 总理子代理：已整体移除 ──────────────────────────────
+                # 原实现无论编制如何都固定追加一个"总理子代理"，理由是"建模小屋
+                # 要向它上报三道防线凭据/尺寸/相邻件，再由它统一核实"。
+                # 用户要求取消：零件级的验收已由外部监控器的 part-saved 事件 +
+                # 三大防线逐件核验承担，台账/邻接/冲突由 verify-task 一次算完。
+                # 追加一个只会重复轮询看板的模型角色，既慢又让"做完了吗"多一个
+                # 可以自说自话的判定点。
+                _prime_room = None
                 # ── 【Bug③ 修复】把【最终生效的】房间表回写 plan 快照 ────────
-                # 说明：set-subagent-plan 写的是"编制"快照（不含固定追加的总理
-                #   子代理）；此处 select 追加总理后，必须把最终表回写，
-                #   否则 mode2_plan 快照与 workflow_state 永远差一个房间，
+                # 说明：set-subagent-plan 写的是"编制"快照；select 落盘后必须把
+                #   最终表回写，否则 mode2_plan 快照与 workflow_state 可能差房间，
                 #   三处一致性自检会给出假告警、掩盖真不一致。
                 #   同时把本任务 task_id 写进 plan，避免跨任务污染。
                 try:
@@ -4605,12 +4685,11 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
 
     if pmode == "sequential":
         done = _get_done_rooms()
-        # ── 【2026-10-28 重构】串行顺序：建模 → 总理（核数据）→ 总装 → 出图 ──
-        # select 会把固定的总理子代理追加到表尾；串行模式下它若排到最后，
-        # 就永远没机会在总装前核对零件数据。这里按类型显式定序。
+        # ── 串行顺序：建模 → 总装 → 出图 ────────────────────────────────────
+        # 零件验收发生在房间收尾时（监控器），不占一个串行位次。
         _SEQ_ORDER = {"structural": 0, "transmission": 0, "housing": 0,
                       "support": 0, "spring": 0, "thermal": 0, "corrosion": 0,
-                      "prime": 1, "assembly": 2, "drafting": 3}
+                      "assembly": 2, "drafting": 3}
         pending = sorted([r for r in rooms if r[0] not in done],
                          key=lambda r: _SEQ_ORDER.get(r[1], 4))
         if not pending:
@@ -4658,18 +4737,15 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
     else:
         # ===== 并行模式：三波式推进（波内同时启动，波间必须等上一波全部完成）=====
         done = _get_done_rooms()
-        # ── 【2026-10-28 重构】总理子代理与建模小屋【同波同时启动】──────────
-        # 原实现里 prime 类型不在任何一波 → 总理子代理永远不会被创建。
-        # 现在放进 wave1，但它是【长生命周期监工】：一旦 room-start 过就不再
-        # 阻塞波次推进（否则 wave1 要等总理收尾，建模反而被卡住）。
         waves = [
             (1, "独立爆发期", ["structural", "transmission", "housing", "support",
-                               "spring", "thermal", "corrosion", "prime"]),
+                               "spring", "thermal", "corrosion"]),
             (2, "收敛汇合期", ["assembly"]),
             (3, "出图期", ["drafting"]),
         ]
-        #: 长生命周期房间类型：参加启动，但不参与"本波完成"判定
-        _LONG_LIVED_TYPES = ("prime",)
+        # 长生命周期房间类型（总理子代理已删除，此集合不再有成员）。
+        # 保留变量名是因为下面多处引用；清空它等价于"所有房间都要等本波完成"。
+        _LONG_LIVED_TYPES = ()
         # ── 【Bug#19 修复】判 finished 前必须确认总装/出图波次"确实存在且已完成" ──
         # 测试反馈：三房间 completed 后门禁直接 step=finished，跳过总装与出图，
         #   导致磁盘总装仍是上一轮的遗留（带未修正 K=0.24 FAIL）、本轮 0 张新图纸。
@@ -4728,17 +4804,8 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
             for r in wave_rooms:
                 _rn = r[0]
                 _info = _rooms_detail().get(_rn) or {}
-                # ── 【2026-10-28 重构】长生命周期监工（总理子代理）──────────
-                # 它必须在本波被创建，但创建后不再"阻塞"本波完成：
-                #   已登记/已结束/已失败 → 视为已就位，跳过；
-                #   完全没有登记 → 放进 pending，逼主对话本波把它 fork 出来。
-                if r[1] in _LONG_LIVED_TYPES:
-                    _started = bool(_info.get("active") or _info.get("ended_at")
-                                    or _info.get("failed_at") or (_rn in done))
-                    if _started:
-                        continue
-                    pending.append(r)
-                    continue
+                # 长生命周期房间（总理子代理）已删除，这里不再有"参加启动但不
+                # 阻塞完成"的特例：每个房间都必须真正 room-end 才算本波完成。
                 # ══ 【C8 修复】failed_at 不算完成 ══════════════════════════════
                 # 原实现把 failed_at 也当成"波次已完成"，于是 room-fail 之后
                 #   select 不回收失败房间：它被跳过、从没重做，交付里少了该有的零件。
@@ -4777,28 +4844,30 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
                         "每一步完成后都要调 mode_gate.py room-end <房间名>。",
                     ]),
                 }
-            # ── 【2026-10-28 重构】总理子代理必须收尾（它不阻塞波次，但不能不关）──
-            _prime_names = [r[0] for r in rooms if r[1] == "prime"]
-            _prime_open = [n for n in _prime_names
-                           if n not in done
-                           and not ((_rooms_detail().get(n) or {}).get("ended_at"))]
-            if _prime_open:
+            # ── 监控器总核实（原"总理子代理必须收尾"的位置）──────────────
+            # 旧实现在这里拦截"还有总理子代理没 room-end"。该角色删除后，
+            # 同一件事由监控器 verify-task 判定：所有建模/外购房间必须已验收
+            # 并 close-room，逐件凭据哈希与台账必须仍然一致。
+            # 判据直接问监控器（不读本地缓存），避免"验收过但文件后来被改"仍放行。
+            try:
+                import sw_monitor_client as _mc_wg
+                _vt = _mc_wg.call("verify-task", {})
+            except Exception as _e_vt:
+                _vt = {"passed": False, "blockers": [str(_e_vt)]}
+            if _vt.get("passed") is not True:
                 return {
                     "ok": False,
-                    "gate": "PRIME_ROOM_NOT_CLOSED",
-                    "prime_rooms": _prime_open,
+                    "gate": "MONITOR_NOT_VERIFIED",
                     "completed_rooms": sorted(done),
-                    "error": ("总理子代理尚未 room-end：%s —— 它必须完成统一核实"
-                              "（prime-verify）与 docx 汇总后才能收尾。"
-                              % "、".join(_prime_open)),
+                    "blockers": _vt.get("blockers"),
+                    "error": "监控器统一核实未通过 —— 不允许收尾归档。",
                     "message": nl.join([
-                        "=== 收尾前拦截：总理子代理还没关 ===", "",
-                        "  1) 确认所有零件已 prime-report（mode2_flow.py prime-board 看缺口）",
-                        "  2) 跑 check-consistency + prime-verify（必须 verified=true）",
-                        "  3) 导出 docx（export-docx）",
-                        '  4) python mode_gate.py room-end "%s"' % _prime_open[0],
-                        "  5) 再调 select 收尾。",
-                    ]),
+                        "=== 收尾前拦截：监控器还没通过 verify-task ===", "",
+                        "  1) 确认每个建模房间的零件都已 part-saved 并通过 review-part",
+                        "  2) 外购房间调 review-room（BOM 清单）",
+                        "  3) 房间正常收尾后调 close-room",
+                        "  4) 再调 select 收尾（或 python mode_gate.py sw-monitor status 看缺口）",
+                    ] + ["  · " + str(b) for b in (_vt.get("blockers") or [])[:8]]),
                 }
             return _archive_finished(state, len(done), len(rooms),
                                      "所有 %d 个房间已全部完成！汇总交付，执行收尾协议（只做一遍）。"
@@ -4813,14 +4882,12 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
                 "--- 每个房间的零件范围（小屋 prompt 必须写明，严禁越界）---",
             ] + [("  [%s] 只做: %s" % (
                     r[0],
-                    ("不建模：统一尺寸/收上报/一致性校验/docx 汇总，并持续盯 room-board"
-                     if r[1] == "prime" else
-                     _room_parts_scope(state.get("task", ""), state.get("context")).get(r[1], "按房间名含义判断"))
+                    _room_parts_scope(state.get("task", ""), state.get("context")).get(r[1], "按房间名含义判断")
                  )) for r in pending] + [
                 "--- 执行步骤 ---",
                 "  步骤1: 对每个房间分别调用 mode_gate.py room-start <房间名>",
                 "  步骤2: 在同一条回复里连续调用 subagent_fork 一次性创建本波全部小屋"
-                "（建模小屋 + 总理子代理，一个都不能少）！",
+                "（本波房间一个都不能少，禁止只建一个）！",
                 "  ★ 步骤2.5【必做】每 fork 一个就立刻绑定，否则平台侧无法把 id 对到房间：",
                 "       python mode_gate.py subagent-assign <房间名> <subagent_fork 返回的 id>",
                 "       漏做 = room-status 显示 unbound（不是死），但会挡住一切状态核对。",
@@ -4830,20 +4897,19 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
                 "init/provide_context/select、禁止 mode2 阶段命令；门禁已在主对话完成』",
                 "       + 进度上报协议: 关键节点调 mode_gate.py room-report <房间名> <阶段> <详情>",
                 "         (阶段: registered/params_shown/params_confirmed/modeling/part_done/validating/done/failed)",
-                "  ★ 总理子代理 prompt 必须写明：与建模同波启动、长生命周期；",
-                "     每轮读 python mode_gate.py room-board --json 盯住所有建模小屋，",
-                "     并调 python mode2_flow.py prime-board 看上报缺口；",
+                "  ★ 小屋 prompt 必须写明：your room 的零件清单 + 禁止越界 + 进度上报协议；",
                 "     state=waiting_sw/running/idle/starting 都算活着，严禁判死；",
                 "     只有 dead 才上报父代理走 recover/restart；unbound 让父代理补 assign。",
                 "  ⚠️ 严禁只创建一个小屋！本波房间一个都不能少，必须同时启动！",
-                "  ⚠️ 各小屋的 SW 调用自带互斥锁自动排队（FIFO 先到先用），无需人工协调",
+                "  ⚠️ 各小屋的 SW 调用由外部监控器发许可（FIFO 先到先用）；排队时命令返回 job_id，",
+                "     用 job_output 等它自然结束即可，禁止 sleep 轮询",
                 "  ⚠️ 小屋允许调用的 mode_gate.py 命令仅限: room-report / room-heartbeat（进度上报通道）；",
                 "     room-start / room-end / sw-* / declare / check 等编排命令由大屋独占，小屋禁止调用。",
                 "  🚫 禁止用 parts 目录有没有文件、或 tasklist 里 SW 是否在跑来判断小屋死活；",
                 "     唯一判据是 mode_gate.py room-board 的 state / safe_to_restart / next_action。",
 
                 "  ⚠️ 小屋内建模必须写单个脚本用 sw_bridge.py run 一次性执行多步操作（一次调用规划多步）",
-                "  步骤3: 每个小屋完成后调用 mode_gate.py room-end <房间名>（会自动释放SW锁）",
+                "  步骤3: 每个小屋完成后调用 mode_gate.py room-end <房间名>（断开时自动归还 SW 使用权）",
                 "  步骤4: 本波全部 room-end 后，重新调用 select %s %s 获取下一波" % (choice, parallel),
             ])
         elif wnum == 2:
@@ -4912,7 +4978,7 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
 
     # ══ ★【强制点】未登记子代理编制 → 拒绝放行创建小屋 ═══════════════════════
     # 用户要求：「取消在第二段多个子代理固定三个，第二次该建多少个子代理
-    #           交由总计子代理分析应该开多少个」+「固定开一个总理子代理」。
+    #           交由总计子代理分析应该开多少个」。（总理子代理已删除）
     # 若此处放行，就会用**代码默认房间表**（旧的 5 房间）继续，
     #   总计子代理永远不启动 —— 实测就是"总计子代理没用出来"。
     # 因此编制必须成为【前置条件】：没登记就拒绝，并给出可执行的下一步。
@@ -5069,7 +5135,7 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
                 "3) 分析完登记编制（decided_by 必须是『总计子代理』）：",
                 "     python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
                 "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
-                "4) 再回来执行 select（会自动追加固定的【总理子代理】）。",
+                "4) 再回来执行 select（房间表完全按编制生成，不再追加固定角色）。",
             ],
             "plan_file": _m2_block.get("plan_file"),
             "next_command": ("完成上述 1~3 步后，重新执行：\n"
@@ -5155,12 +5221,12 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
             "【Bug-38】每个小屋只允许产出本房间 keywords 命中的零件；"
             "保存前用 sw_bridge.py check-part <文件> --room <房间名> 自检；"
             "总装前用 workflow_gate.py verify-ownership 去重核对。"),
-        # ══ 【模式二新流程】编制来源 + 总理子代理职责（代码强制，非提示词）══
+        # ══ 【模式二新流程】编制来源 + 验收职责（代码强制，非提示词）══════════
         # 用户要求：
         #   · 子代理数量不再固定 3 个 → 由总计子代理决定；
-        #   · 固定再开一个【总理子代理】统一规划尺寸、校验相邻一致性、
+        #   · 零件验收与邻接尺寸校验由外部监控器完成（无汇总代理）；
         #     汇总 docx；不一致交父代理干涉；
-        #   · 建模小屋必须向总理上报三道防线凭据链接/尺寸/名称/相邻配合件。
+        #   · 建模小屋保存后由 sw_bridge 自动向监控器报 part-saved（含文件路径）。
         "subagent_plan": _m2_block,
         # ══ ★【实测缺陷修复 · 2026-10-13】未登记编制必须【真正拒绝】═══════
         # 原实现只把 subagent_plan_required 置 true，注释写着"不阻断第一波，
@@ -5176,17 +5242,16 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
         #   强制路径才真正成立。交付总闸的检查保留为第二道保险。
         "subagent_plan_required": bool(
             _m2_block and not _m2_block.get("subagent_plan_ready")),
-        "prime_room": _prime_room,
-        "prime_report_contract": ({
-            "required_fields": list(_m2mod.REQUIRED_REPORT_FIELDS),
-            "required_credential_keys": list(_m2mod.REQUIRED_CREDENTIAL_KEYS),
-            "how": ("每个建模小屋在 save() 之后必须调：\n"
-                    "  python mode2_flow.py prime-report --json @<上报.json>\n"
-                    "缺任何字段都会被拒绝登记（三道防线凭据 / 尺寸 / 名称 / 相邻配合件）。"),
-            "consistency": ("总理子代理调 python mode2_flow.py check-consistency；"
-                            "发现不一致会返回 escalate_to_parent=true，"
-                            "必须交父代理做干涉处理。"),
-            "final_docx": ("全部完成后总理子代理汇总导出 docx 交主对话"
+        # 本轮任务/编制是否已登记进监控器（失败时看 code：MONITOR_NOT_CONFIGURED
+        #   = 没接入；TASK_UNKNOWN = 没登记成功。别把它当成"导入失败"）。
+        "monitor_plan": _monitor_plan,
+        "monitor_contract": ({
+            "parts": ("零件是否建成由监控器判定：sw_bridge 在保存后自动发 part-saved，"
+                      "不需要任何代理「上报」。"),
+            "review": ("验收 = 监控器 review-part（材料/物理/领域凭据逐件核验）；"
+                       "房间收尾后调用 review-room / close-room。"),
+            "task_verify": "全部房间收尾后由监控器 verify-task 做总核实（台账+邻接+冲突）。",
+            "final_docx": ("全部完成后导出 docx 交主对话"
                            "（part_registry.py export-docx）。"),
         }) if (_m2_block and _m2mod is not None) else None,
         "ready_to_build": True
@@ -5548,6 +5613,41 @@ def cmd_confirm_load(answer_text):
                           "拒绝把\"已复核\"这种空话当作确认。"),
                 "answer": raw}
     old_n = m.get("nominal_load_n")
+    # ── 【2026-11-12 修复·BUG-6】解析结果必须与文本里其他数值自洽 ──────────
+    # 现场：从 "…Ft=2T/d1=1146 N）" 里解析出 19613.3 N（= 2 吨），
+    #   量级差 17 倍，但命令照样 ok=true 写回了门禁 —— 后续全部校核都按错
+    #   量级算，报告还很"专业"。单位误读（2T 当 2 吨）已在 _extract_load_n
+    #   里修掉，但【同类误读会以别的形式再来】，所以这里再加一道自洽校验：
+    #   · 文本里另外给了明确的 N 值时，解析结果与其数量级差 >5 倍 → 告警；
+    #   · 解析值偏离力学估算超过 100 倍 → 告警（多半是把别的量当载荷了）；
+    #   · 告警不阻断（避免把正常的大载荷任务卡死），但会写进返回体
+    #     与 load_case 备注，让主对话必须复核，而不是默默接受。
+    _warn = []
+    try:
+        import re as _re2
+        _explicit_n = [float(x) for x in
+                       _re2.findall(r"(\d+(?:\.\d+)?)\s*(?:n|牛顿)(?![a-z0-9])",
+                                    raw, flags=_re2.IGNORECASE)]
+        _others = [x for x in _explicit_n if abs(x - n) > 1e-6 and x > 0]
+        if _others:
+            _near = min(_others, key=lambda x: abs(x - n))
+            if abs(_near - n) > 5.0 * max(1.0, min(abs(_near), abs(n))):
+                _warn.append(
+                    "答复里还写着 %s N，与解析出的 %.1f N 数量级对不上（差 %.1f 倍）；"
+                    "请确认哪个才是额定载荷，必要时直接写 \"<数值>N\" 重跑。"
+                    % (_near, n, max(abs(_near), n) / max(1.0, min(abs(_near), n))))
+    except Exception:
+        pass
+    try:
+        if old_n and float(old_n) > 0:
+            _ratio = n / float(old_n)
+            if _ratio > 100.0 or _ratio < 0.01:
+                _warn.append(
+                    "解析值 %.1f N 是门禁估算值 %.1f N 的 %.1f 倍，偏离过大 —— "
+                    "常见原因是把扭矩/转速/功率当成了载荷，或单位写错。"
+                    % (n, float(old_n), _ratio))
+    except Exception:
+        pass
     state["load_confirmed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     state["load_confirmed_answer"] = raw
     state["load_is_estimate"] = False
@@ -5555,6 +5655,8 @@ def cmd_confirm_load(answer_text):
     m["nominal_load_n"] = n
     m["design_load_n"] = round(n * float(m.get("impact_factor") or 1.0), 3)
     m["load_source"] = "用户复核: %s" % raw[:60]
+    if _warn:
+        m["load_parse_warnings"] = list(_warn)
     state["mechanics_result"] = m
     save_state(state)
     # 同步刷新落盘的载荷工况文件，保证 physics 与门禁同源
@@ -5562,13 +5664,20 @@ def cmd_confirm_load(answer_text):
         _lc = write_load_case_file(state, m)
     except Exception as e:
         _lc = {"ok": False, "error": repr(e)}
-    return {"ok": True,
+    _out = {"ok": True,
             "confirmed_nominal_load_n": n,
             "previous_estimate_n": old_n,
             "design_load_n": m["design_load_n"],
             "load_case_file": _lc.get("path"),
             "message": ("载荷已按用户答复复核为 %s N（原估算 %s N）。"
                         "现在可以继续 select。" % (n, old_n))}
+    if _warn:
+        _out["warn"] = "；".join(_warn)
+        _out["load_parse_warnings"] = list(_warn)
+        _out["message"] += ("\n⚠️ 解析结果可疑：" + "；".join(_warn)
+                            + "\n  → 复核无误可忽略；若不对，用 "
+                              "confirm-load \"<数值>N\" 重跑覆盖。")
+    return _out
 
 
 def cmd_check_part(part_name, room):
@@ -6405,7 +6514,7 @@ def _main_body():
                               "mode2 <子命令>": "【模式二强制契约】透传 mode2_flow.py："
                                                 "set-depth / begin-stage / mark-stage-done / "
                                                 "ask / questions / set-subagent-plan / "
-                                                "prime-report / check-consistency 等；"
+                                                "（总理子代理相关子命令已删除）；"
                                                 "python %s mode2 --help 查看全部" % _me,
                               "stage-status": "【模式二】查看十阶段推进情况："
                                               "python %s stage-status" % _me,

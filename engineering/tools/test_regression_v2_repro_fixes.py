@@ -91,23 +91,22 @@ def main():
               (r or {}).get("gate") == "CONCURRENT_BUILD", r)
 
         # ---------------- B. 锁释放 / 公平轮转 ----------------
-        section("B. P0-2 锁释放清 fair_start；room 模式不参与轮转")
-        # 源码级断言：cmd_sw_release 里必须有 fair_start 清零
+        # ---------------- B. 锁释放 / 公平轮转 —— 实现已删除 ----------------
+        section("B. P0-2 锁释放 / 公平轮转（已由监控器取代，改为逆向断言）")
+        # 这里原本断言 cmd_sw_release 会清 fair_start / cmd_seq、_reclaim_lock
+        # 有 room 模式分支。那些实现已随"进程内锁"一起删除：
+        #   · 没有"公平轮转" —— 监控器的 FIFO 票据本来就保证顺序；
+        #   · 没有"陈旧计时器" —— 不存在本地计时器；
+        #   · 没有"让位" —— 已领取的使用权不会自动过期。
+        # 断言改成【它们必须不存在】：有人把旧实现加回来必须被当场发现。
         _src = open(os.path.join(HERE, "mode_gate.py"), encoding="utf-8").read()
-        _m = re.search(r"def cmd_sw_release\(.*?\n(?=def )", _src, re.S)
-        _body = _m.group(0) if _m else ""
-        check("B1 sw-release 清 fair_start",
-              'lk["fair_start"] = None' in _body, "未清零 = 陈旧计时器导致抢锁")
-        check("B2 sw-release 清 cmd_seq", 'lk["cmd_seq"] = 0' in _body)
-        # _reclaim_lock 里 room 模式不参与公平轮转
-        _m2 = re.search(r"def _reclaim_lock\(.*?\n(?=def )", _src, re.S)
-        _b2 = _m2.group(0) if _m2 else ""
-        check("B3 _reclaim_lock 有 room 模式分支",
-              "_room_mode" in _b2, "缺分支 = 排队即抢锁")
-        check("B4 room 模式下公平轮转被排除",
-              "(not _room_mode) and has_waiter" in _b2, _b2[:300])
-
-        # ---------------- C. 看护 ----------------
+        import mode_gate as _mg_v2
+        for _gone in ("_reclaim_lock", "_lock_owner_alive", "_purge_orphan_lock",
+                      "SW_FAIR_CMDS", "SW_FAIR_SECONDS", "SW_MAX_HOLD",
+                      "SW_CMD_HOLD", "SW_STALE_KILL"):
+            check("B %s 已删除" % _gone, not hasattr(_mg_v2, _gone), _gone)
+        check("B sw-release 仍存在（归还使用权的唯一入口）",
+              "def cmd_sw_release(" in _src)
         section("C. P0-3 看护不得杀建模中的 SW")
         check("C1 _active_modeling_rooms 存在",
               callable(getattr(sg, "_active_modeling_rooms", None)))
@@ -205,41 +204,20 @@ def main():
               "_MY_UNNAMED_DOCS.add(" in _ssrc)
 
         # ---------------- H. 回执制 ----------------
-        section("H. 总理回执 receipt_id")
-        _plan_dir = os.path.join(tmp, "plan")
-        os.makedirs(_plan_dir, exist_ok=True)
-        _report = {
-            "part_name": "DSH_测试件", "room": "结构件",
-            "file": os.path.join(tmp, "DSH_测试件.SLDPRT"),
-            "dims": {"length_mm": 100, "width_mm": 50, "height_mm": 10},
-            "material": "45",
-            "credentials": {"material": "a.json", "physics": "b.json", "domain": "c.json"},
-            "adjacent": [],
-        }
-        try:
-            r1 = m2.record_prime_report(_report, work_dir=_plan_dir)
-        except Exception as e:
-            r1 = {"ok": False, "error": repr(e)}
-        check("H1 上报成功", r1.get("ok") is True, r1)
-        check("H2 ★返回 receipt_id", bool(r1.get("receipt_id")), r1)
-        check("H3 receipt_id 形如 PR-",
-              str(r1.get("receipt_id", "")).startswith("PR-"), r1)
-        # 幂等：同内容重复上报 -> 同一 id
-        r2 = m2.record_prime_report(_report, work_dir=_plan_dir)
-        check("H4 同内容重复上报 -> 同一 receipt_id",
-              r2.get("receipt_id") == r1.get("receipt_id"), (r1, r2))
-        # 内容变化 -> 新 id
-        _report2 = dict(_report, dims={"length_mm": 200, "width_mm": 50, "height_mm": 10})
-        r3 = m2.record_prime_report(_report2, work_dir=_plan_dir)
-        check("H5 尺寸变化 -> 新 receipt_id",
-              r3.get("receipt_id") != r1.get("receipt_id"), (r1, r3))
-        check("H6 prime_receipts 可查",
-              callable(getattr(m2, "prime_receipts", None)))
-        _rc = m2.prime_receipts(work_dir=_plan_dir)
-        check("H7 回执台账有记录", _rc.get("count", 0) >= 2, _rc)
-        _ck = m2.check_part_receipted("DSH_测试件", work_dir=_plan_dir)
-        check("H8 零件回执判定可用", _ck.get("receipted") is True, _ck)
-
+        section("H. 回执制 —— prime-report 已删除；改由监控器 part-saved 记账")
+        # 这一节原本断言 record_prime_report 返回 PR-xxxx 回执、幂等、
+        # 尺寸变化产生新回执。整套上报机制随总理子代理一起删除：
+        # 零件回执现在是监控器的 part-saved 事件（带文件指纹与 generation）；
+        # 对同一 generation 重复保存会被 STALE_GENERATION 拒绝 ——
+        # 这比"内容哈希产生新回执"更硬，因为它绑定的是磁盘上的真实文件。
+        for _gone in ("record_prime_report", "prime_receipts",
+                      "check_part_receipted", "prime_reports", "prime_board"):
+            check("H %s 已删除" % _gone, not hasattr(m2, _gone), _gone)
+        import sw_monitor_client as _mc_v2
+        check("H 监控器客户端提供 part-saved 记账",
+              callable(getattr(_mc_v2, "part_saved", None)))
+        check("H 监控器客户端提供 part-failed 记账",
+              callable(getattr(_mc_v2, "part_failed", None)))
         section("汇总")
         print("  PASS=%d  FAIL=%d" % (PASS, FAIL))
         if FAILS:

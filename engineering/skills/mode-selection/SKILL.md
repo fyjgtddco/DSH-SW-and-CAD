@@ -18,7 +18,7 @@ provider: filesystem
 
 | 你的身份 | 允许做什么 | 禁止做什么 |
 |---|---|---|
-| **建模小屋 / 总理子代理** | 本房间建模、验证、`room-report`、`room-artifact`、`prime-report`（总理） | `init` / `provide_context` / `select` / `confirm-assembly` / `begin-stage` 等门禁命令 —— 门禁已在主对话完成 |
+| **建模小屋** | 本房间建模、验证、`room-report`、`room-artifact` | `init` / `provide_context` / `select` / `confirm-assembly` / `begin-stage` 等门禁命令 —— 门禁已在主对话完成 |
 | **总计子代理** | 只调 `mode2_flow.py` 的阶段/提问/编制命令 + `ask_user.py` | `init` / `provide_context` / `select`（那是主对话的活） |
 
 > 实测教训（会话 `session-31c56a28`）：三个建模小屋各自加载本技能后又跑了一遍
@@ -295,7 +295,7 @@ python "<工程模式根目录>\tools\workflow_gate.py" select <A|B|C>,<D|E>
   或子代理自己调阶段命令被 **`ANALYST_ACTOR_REQUIRED`** 拒。
   **看到 `MODE2_ANALYST_REQUIRED` 就说明第 3.6 步没做**（八成是主对话自己把十阶段跑了）：
     → spawn 总计子代理（§3.6）→ 让它 `analyst-bind` 并补齐缺的阶段 → 再 `select`。
-- 🔴 **`select` 返回的 `wave1` = 编制里的【全部建模房间】+【总理子代理】。**
+- 🔴 **`select` 返回的 `wave1` = 编制里的【全部建模房间】。**
   房间数与细分**由总计子代理决定**，主对话**不得**改用固定表（旧固定 3 房间 / 5 房间已废弃）。
 
 ### 第 3.5 步：★ 模式二新流程（全部为【代码强制】，不是提示词约定）
@@ -365,7 +365,7 @@ python "<根>\tools\mode2_flow.py" rooms-template --out rooms.json   # 直接落
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `name` | ✅ | 房间名，唯一、中文可读 |
-| `type` | ✅ | **必须是规范类型之一**（可写同义词，会被归一化）：`structural` / `transmission` / `housing` / `support` / `spring` / `thermal` / `corrosion` / `assembly` / `drafting`（`prime` 由代码追加，不要写） |
+| `type` | ✅ | **必须是规范类型之一**（可写同义词，会被归一化）：`structural` / `transmission` / `housing` / `support` / `spring` / `thermal` / `corrosion` / `assembly` / `drafting`（`prime` 已随总理子代理删除，写了会被当成非法类型） |
 | `parts` | ✅ | 本屋负责的零件名清单；**非建模屋也要写占位名**（装配体名/图纸名），空数组会被拒 |
 | `why` | ✅ | 为什么需要这个子代理（可审计的存在理由，空字符串会被拒） |
 | `depends_on` | ✅（可空数组） | 依赖的房间名；指向不存在的房间会被拒 |
@@ -392,39 +392,32 @@ python "<根>\tools\workflow_gate.py" mode2 set-subagent-plan `
   `DSH_SESSION_ID` 与 `analyst-bind` 落盘的 analyst（也可显式 `--actor`），
   **主对话直接调 → `ANALYST_ACTOR_REQUIRED`**；`select` 也会校验 analyst，缺失 → `MODE2_ANALYST_REQUIRED`。
 - 🔴 **编制 = 全系统房间表的唯一来源。** `select` 的 `wave1` 直接取编制里的全部建模房间
-  （+ 代码固定追加的「总理子代理」）。**旧的代码默认房间表已废弃，不得作为兜底**；
+  **旧的代码默认房间表已废弃，不得作为兜底**；
   房间数量与细分由总计子代理按功能分解决定（可能是 2 个，也可能是 7 个）。
-- 「总理子代理」（`type=prime`，`fixed=True`）由代码自动追加，**不要写进编制 JSON**。
+- 房间表完全等于编制：`select` **不再追加任何固定房间**（原「总理子代理」已删除）。
 
-#### 3.5.5 固定增设「总理子代理」（不可被编制顶掉）
+#### 3.5.5 零件验收：外部监控器逐件核验（无「总理子代理」）
 
-房间名常量 `总理子代理`，类型 `prime`，`fixed=True`。职责（代码化）：
+> 🔴 **2026-11-12 起，「总理子代理」已整体删除。**
+> 它原本负责"收各屋上报 → 校验相邻尺寸 → 统一核实 → 汇总 docx"。
+> 这四件事现在全部由外部服务 **DSH-SW-Monitor** 以代码方式完成：
+> 不需要一个额外的模型会话去重复确认同一批事实（那既慢又多一个可以自说自话的判定点）。
 
-1. 统一规划关键尺寸，给各建模小屋下发同一套尺寸口径；
-2. 接收各建模小屋上报（**缺字段即拒绝**）：
-   三道防线凭据链接 / 尺寸 / 名称 / 直接接触配合的零件；
-3. 校验相邻零件尺寸一致性；不一致 → `escalate_to_parent=true`，交父代理干涉；
-4. 持久维护零件数据台账，支持按零件反查关联；
-5. 全部完成后汇总导出 docx 交主对话。
-
-```powershell
-# 建模小屋 save() 之后必须上报（缺任一字段都会被拒）
-python "<根>\tools\workflow_gate.py" mode2 prime-report --json "@report.json"
-# 总理子代理做一致性校验
-python "<根>\tools\workflow_gate.py" mode2 check-consistency
-```
-
-#### 3.5.5.1 ★★ 总理子代理必须【统一核实】数据后才能结束
-
-用户要求：「总理子代理要统一核实过数据没有错误了，才能结束」
-　　　　　「其总理子代理也要核实的相关数据是否一致，必须要保证真实」
+| 原先总理子代理做什么 | 现在谁做 | 怎么判 |
+|---|---|---|
+| 收「零件已建好」的上报 | `sw_bridge` 保存后自动发 `part-saved` | 带文件路径 + 文件指纹 + generation |
+| 校验三道防线凭据 | 监控器 `review-part` | 材料/物理/领域逐件核对哈希、run_id、同房间 |
+| 校验相邻零件尺寸 | 监控器 `verify-task` | 调 `part_registry` 审计台账与邻接表 |
+| 汇总 docx | 仍然需要，但由谁导出都行 | 交付总闸核实磁盘上真的有一份合法 docx |
 
 ```powershell
-python "<根>\tools\workflow_gate.py" mode2 prime-verify          # 统一核实
-python "<根>\tools\workflow_gate.py" mode2 prime-verify-status   # 读回结论
+# 只读：看当前任务每个零件到了哪一步（状态来自监控器）
+python "<根>\tools\mode2_flow.py" parts-board
+# 验收一个零件（receipts 省略时取 <任务>/reports/<房间>.physics.json / .domain.json）
+python "<根>\tools\mode_gate.py" sw-monitor status     # 先确认监控器接上了
 ```
 
-**"核实"不是自我声明**（谁都能写 `verified=True`），而是代码从磁盘重算：
+**"核实"不是自我声明**，而是监控器 `verify-task` 从磁盘重算：
 
 | 核实项 | 判据 |
 |---|---|
@@ -498,19 +491,19 @@ python "<根>\tools\workflow_gate.py" pre-delivery
 ```
 
 任一不满足即**拒绝宣告完成**（拒绝归档）：十阶段未走完 / 题数不达标 /
-编制缺失或非总计子代理决定 / 有零件未上报总理 / 存在未处理的相邻尺寸不一致。
+编制缺失或非总计子代理决定 / 监控器 `verify-task` 未通过 / 存在未处理的相邻尺寸不一致。
 
 ### 第 6 步：创建子代理小屋（房间表由总计子代理决定！）
 
-> 🔴 **【2026-10-28】** 房间表 = `select` 返回的 `wave1` = **编制里的全部建模房间 + 总理子代理**。
+> 🔴 **房间表 = `select` 返回的 `wave1` = 编制里的全部建模房间。**
 > **数量与细分由总计子代理决定** —— 不要写死旧的固定五房间表
 > （结构件 / 传动机构 / 壳体机架 / 总装与验证 / 工程图输出），
 > 也不要写死「第1波 = 结构件 + 传动机构 + 壳体机架」这种固定三房间说法。
 
-**并行模式 D —— 三波式（总理与建模同波一起开）：**
+**并行模式 D —— 三波式：**
 
 ```
-wave1 = select.wave1 = 全部建模房间 + 总理子代理   ← 同时 fork
+wave1 = select.wave1 = 全部建模房间   ← 同时 fork
 wave2 = 总装与验证（等 wave1 全部 room-end）
 wave3 = 工程图输出（等 wave2 room-end）
 ```
@@ -518,9 +511,9 @@ wave3 = 工程图输出（等 wave2 room-end）
 **wave1 执行顺序（不可打乱）：**
 1. **先**对每个房间 `python "<根>\tools\mode_gate.py" room-start <房间名>`
    （登记，**BEFORE** 创建 subagent；未 room-start 的房间 `subagent-assign` 会报 `ROOM_NOT_REGISTERED`）
-2. **再**在同一条回复里**一次性 `subagent_fork` 该批全部房间**（含总理子代理）——
+2. **再**在同一条回复里**一次性 `subagent_fork` 该批全部房间**——
    ⚠️ 严禁只开一个、严禁分多条回复慢慢开：**同批房间必须同时启动**。
-   ⚠️ **每批最多 3 个**（含总理子代理）：宿主对同一 root 的子代理有名额上限，
+   ⚠️ **每批最多 3 个**：宿主对同一 root 的子代理有名额上限，
       插件在 `tools/pre-execute` 做了硬闸门，第 4 个会直接返回
       `SUBAGENT_LIMIT_REACHED`。编制超过 3 个房间就**分批**：本批全部
       `room-end`（名额释放）后再开下一批，不要原样重试被拒的那次调用。
@@ -530,17 +523,11 @@ wave3 = 工程图输出（等 wave2 room-end）
    ```
 4. 建模小屋 prompt 必须写「只做本房间零件」，并带上 `select` 返回的 `part_ownership` keywords。
 
-**总理子代理（与 wave1 同时启动，长生命周期的监工）：**
-- 开工：`python "<根>\tools\mode2_flow.py" prime-board` 看全局，`prime-room` 看职责。
-- **循环**：每轮读 `python "<根>\tools\mode_gate.py" room-board --json`，**只看每个房间的 `state`**：
-  - `running` / `starting` / `idle` → 正常在干活，**不许催、不许判死**；
-  - `waiting_sw` → **在等 SW 锁，属正常等待**，只能等，**禁止判死、禁止 reset**；
-  - `unbound` → 平台 alive 但没 `subagent-assign`，**提示父代理补 assign**（不是死亡）；
-  - `dead` → **只有这个才允许报**，并建议父代理 `recover` / `restart`；
-  - `done` → 收报告。
-- 收件：建模小屋 `save()` 后 `prime-report`；总理做 `check-consistency` → `prime-verify`。
-- 结束：wave3 出图完成后 `python "<根>\tools\mode_gate.py" room-end 总理子代理`。
-- **prime 房间不计入 wave 完成判定**（长生命周期），但**收尾前必须 room-end**。
+**监控器接替「总理」的验收职责（不需要额外的模型会话）：**
+- 零件建成 = 监控器收到 `part-saved`（sw_bridge 保存后自动发，带文件指纹与 generation）；
+- 逐件验收 = 监控器 `review-part`（材料/物理/领域凭据核对哈希、run_id、同房间）；
+- 房间收尾 = `review-room` → `close-room`；全任务总核实 = `verify-task`；
+- 只读进度：`python "<根>\tools\mode2_flow.py" parts-board`（数据源就是监控器 board）；
 
 **串行模式 E 严格顺序（不可打乱）：**
 1. **先**调 `mode_gate.py room-start <房间名>`（登记， BEFORE 创建 subagent）
@@ -632,11 +619,11 @@ python "<工程模式根>\tools\webots_env.py" --json # AI 读 blocking 字段
     answer-question / refresh-stage / set-subagent-plan）**只能由总计子代理调**。
   · 旧规则「门禁每一步都在主对话完成、不进子代理」**已废除（deprecated）** —— 它与
     "spawn 总计子代理"直接矛盾，实测导致主对话自演十阶段、总计子代理从未创建。
-- 🔴 **等房间/等锁禁止 sleep 轮询（【A1-①】）**：用阻塞原语
-  `room-board --wait 900` / `wait-rooms "<房间>" --timeout 900` / `sw-wait <房间> --timeout 90`，
-  一次调用拿到结论；确实无原语时同目标短 sleep 连续 ≤3 次；判据只读 `state`，不看"等了多久"。
+- 🔴 **等房间/等锁禁止 sleep 轮询（【A1-①】）**：用一次性接口
+  `room-board --wait 900` / `wait-rooms "<房间>" --timeout 20`（返回 `job_required=true` 时改挂宿主后台 job）；
+  等 SW 使用权则用 `job_output` 等 sw_busy 返回的 `job_id`。判据只读 `state`，不看"等了多久"。
 - 🔴 **子代理死活只看 `python "<根>\tools\mode_gate.py" room-board --json` 的 `state`**：
-  · `waiting_sw`（在排 SW 锁）/ `running` / `starting` / `idle` = **正常，禁止判死**；
+  · `waiting_sw`（在等监控器发使用权）/ `running` / `starting` / `idle` = **正常，禁止判死**；
   · `unbound` = 平台 alive 但没 `subagent-assign` → **补 assign**（不是僵尸）；
   · `dead` = 才允许 `recover` / `restart`，且先看 `safe_to_restart`；
   · **禁止对 `running` / `waiting_sw` / `idle` 的房间 `reset`**（会把还在干活的小屋清掉）。
@@ -678,10 +665,10 @@ AI must（门禁命令在主对话；十阶段在**总计子代理**里）：
 6. 主对话 `wait_agent` / `list_agents` 等它结束，再执行
    `... provide_context "<全部提问的答案>"` → 力学估算 + 落盘 `tools/load_cases/gate_load_case.json`
 7. 问 A/B/C 与 D/E → 执行 `... workflow_gate.py select C,E`
-   → `wave1` = 编制里的**全部建模房间 + 总理子代理**（数量由总计子代理决定）
+   → `wave1` = 编制里的**全部建模房间**（数量由总计子代理决定）
    → 返回 **`MODE2_ANALYST_REQUIRED`** = 第 5 步没做（没 spawn 总计子代理）
-8. **wave1 一次性 fork 全部**（建模房间 + 总理子代理写在同一条回复里）；
+8. **wave1 一次性 fork 全部建模房间**（写进同一条回复）；
    每个 fork 后立刻 `python "<根>\tools\mode_gate.py" subagent-assign <房间> <id>`
-9. 总理子代理持续 `mode_gate.py room-board --json` 盯各房间 `state`
+9. 每个小屋开工先 `mode_gate.py room-board --json` 确认自己是 running
    （`waiting_sw` 只是排队，不许判死）；wave2 = 总装、wave3 = 出图；
-   收尾前 `room-end 总理子代理`。
+   零件验收由监控器逐件完成，**没有总理子代理需要收尾**。

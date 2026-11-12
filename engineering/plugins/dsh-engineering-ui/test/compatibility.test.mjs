@@ -211,8 +211,13 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
     // ── 【Webots 接入】+4 → 【内存守卫】+1(mem-guard) → 【零件进度表】+1(parts-board) -1(划词详情已删) = 32 ──────────────────────────────
     //   /webots-context / -report / -evidence / -attribute（全部只读 GET）
     // ── 【2026-11-07 压缩历史】+1(compaction-history) = 33 ────────────────
-    //   /compaction-history（只读 GET，读 append-only 账本，供左列压缩历史面板）
-    assert.equal(h.routes.size, 33, '路由数量应为 33（含 Webots 4 条 + 压缩历史 1 条）');
+    // ── 【外部监控器】+3 = 36 ────────────────────────────────────────────
+    //   /sw-monitor-op      宿主桥：把 Python 的 board/verify/attach 转发给监控器
+    //   /sw-monitor-permit  每条 SW 命令的一次性许可（排队→job id 在这里产生）
+    //   /sw-monitor-done    命令收尾记账（end / release）
+    // 这三条是"锁权威切换"的落点，少一条就等于回到了进程内锁。
+    assert.equal(h.routes.size, 36,
+      '路由数量应为 36（33 + 监控器 3 条）');
     // ── 清单必须与 lib/index.js 的 ctx.webServer.register 一一对应 ──────
     // 漏写一条 → 路由存在但没被这条断言保护；多写一条 → 直接失败。
     for (const p of [
@@ -224,6 +229,9 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/answer', '/dsh-engineering-ui/verify-subagent',
       '/dsh-engineering-ui/notify-room',
       '/dsh-engineering-ui/sw-guard-job',
+      '/dsh-engineering-ui/sw-monitor-op',
+      '/dsh-engineering-ui/sw-monitor-permit',
+      '/dsh-engineering-ui/sw-monitor-done',
       '/dsh-engineering-ui/defense/sign', '/dsh-engineering-ui/defense/verify',
       '/dsh-engineering-ui/defense/verify-gate',
       '/dsh-engineering-ui/defense/info', '/dsh-engineering-ui/defense/judge',
@@ -249,6 +257,9 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/pending-child', '/dsh-engineering-ui/result-child',
       '/dsh-engineering-ui/answer', '/dsh-engineering-ui/verify-subagent',
       '/dsh-engineering-ui/notify-room', '/dsh-engineering-ui/sw-guard-job',
+      '/dsh-engineering-ui/sw-monitor-op',
+      '/dsh-engineering-ui/sw-monitor-permit',
+      '/dsh-engineering-ui/sw-monitor-done',
       '/dsh-engineering-ui/defense/sign', '/dsh-engineering-ui/defense/verify',
       '/dsh-engineering-ui/defense/verify-gate',
       '/dsh-engineering-ui/defense/info', '/dsh-engineering-ui/defense/judge',

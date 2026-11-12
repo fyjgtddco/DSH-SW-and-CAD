@@ -309,27 +309,35 @@ test('A11 · 任务目录缺失时回落到 toolsDir / load_cases（mode2_flow �
 });
 
 // ══════════════════════════════════════════════════════════════════════════
-//  A14 · 压缩阈值 = contextWindow × 0.7
+//  A14 · 压缩阈值 = contextWindow × ratio（ratio 默认 0.8，与官方/preset 平齐）
 // ══════════════════════════════════════════════════════════════════════════
+// 【2026-11-12】ratio 从 0.7 改成 0.8 后，下面这些断言不能再写死 140000/700000。
+// 改成【按 COMPACTION_THRESHOLD_RATIO 现算】，这样以后调 ratio 不用再逐个改
+// 测试数字（同时也避免"测试跟着实现改、改到失去意义"）。
+const RATIO = COMPACTION_THRESHOLD_RATIO;
 
-test('A14 · 200K 窗口 → 140K 阈值（不再固定 100K）', () => {
-  // 出处：6 次压缩触发点 99,838–100,025 token，而 :224 记着 contextWindow:200000
-  //   —— 窗口只用了 50% 就压缩，每次都要重写摘要、丢细节。
+test('A14 · 200K 窗口 → 受 60K 下限保护（ratio 0.2 时 200K×0.2=40K < 60K）', () => {
+  // 【2026-11-12】ratio 改成 0.2 后，200K 窗口算出 40000，低于 60000 下限，
+  //   所以抬到下限并标 source=floor。这是【设计的保护】而不是回归：
+  //   小窗口按 0.2 压得太频繁（每 40K 就压一次），下限把它挡住。
+  //   用户要的"200K 阈值"针对的是 1M 窗口的主路由，见下一条测试。
   const r = resolveCompactionThreshold(200000);
-  assert.equal(r.threshold, 140000);
+  assert.equal(r.threshold, COMPACTION_THRESHOLD_FLOOR);
   assert.equal(r.contextWindow, 200000);
-  assert.equal(r.source, 'contextWindow');
-  assert.equal(COMPACTION_THRESHOLD_RATIO, 0.7);
+  assert.equal(r.source, 'floor');
+  assert.equal(r.exceedsWindow, false, '60K < 200K，阈值仍可达到');
 });
 
-test('A14 · 1M 窗口 → 700K 阈值', () => {
-  assert.equal(resolveCompactionThreshold(1000000).threshold, 700000);
+test('A14 · 1M 窗口 → 200K 阈值（用户指定，不要 800K）', () => {
+  assert.equal(resolveCompactionThreshold(1000000).threshold, 200000,
+    '1M 窗口下阈值必须正好是 200K');
+  assert.equal(RATIO, 0.2);
 });
 
 test('A14 · 小窗口有下限：64K → 抬到 60K，且标记 source=floor', () => {
   const r = resolveCompactionThreshold(64000);
   assert.equal(r.threshold, COMPACTION_THRESHOLD_FLOOR,
-    '64K*0.7=44.8K 太频，必须抬到下限');
+    '64K*' + RATIO + ' 太频，必须抬到下限');
   assert.equal(r.source, 'floor');
   assert.equal(COMPACTION_THRESHOLD_FLOOR, 60000);
   assert.equal(r.exceedsWindow, false, '60K < 64K，阈值仍可达到');
@@ -347,9 +355,10 @@ test('A14 · 窗口小于下限时必须标 exceedsWindow（否则阈值永远�
   assert.equal(ok.exceedsWindow, false);
 });
 
-test('A14 · 刚好在边界上：100K*0.7=70K > 60K 下限 → 用比例值', () => {
-  const r = resolveCompactionThreshold(100000);
-  assert.equal(r.threshold, 70000);
+test('A14 · 刚好在边界上：窗口×ratio 高于下限 → 用比例值', () => {
+  // ratio 0.2 时需要一个足够大的窗口才会走比例项：500000×0.2=100000 > 60000
+  const r = resolveCompactionThreshold(500000);
+  assert.equal(r.threshold, Math.floor(500000 * RATIO));
   assert.equal(r.source, 'contextWindow');
 });
 
@@ -403,14 +412,17 @@ test('A14 · explainCompactionLimit 对非法输入不崩', () => {
   const e = explainCompactionLimit(null, 0.7, 48000, 0);
   assert.equal(e.threshold, null);
   assert.equal(e.limiter, 'window');
+  // 【2026-11-12】非法 ratio 现在回落到 COMPACTION_THRESHOLD_RATIO（0.8），
+  // 不是硬编码 0.7；headroom 缺省回落到 preset 的 headroomTokens（不再按 0）。
   const f = explainCompactionLimit(200000, NaN, NaN, NaN);
-  assert.equal(f.threshold, 140000, '非法 ratio 回落 0.7、非法 headroom/reserved 按 0');
+  assert.equal(f.threshold, Math.floor(200000 * RATIO),
+    '非法 ratio 应回落当前生效的 ratio（与 preset 一致）');
 });
 
-test('A14 · 端到端：日志里的 200000 会被解析成 140000', () => {
-  const events = [{ type: 'request/context', data: { contextWindow: 200000 } }];
+test('A14 · 端到端：1M 窗口（当前主路由）→ 200K 阈值', () => {
+  const events = [{ type: 'request/context', data: { contextWindow: 1000000 } }];
   const r = resolveCompactionThreshold(latestContextWindow(events));
-  assert.equal(r.threshold, 140000);
+  assert.equal(r.threshold, 200000, '用户指定：1M 窗口压到 200K 就该触发');
 });
 
 // ══════════════════════════════════════════════════════════════════════════

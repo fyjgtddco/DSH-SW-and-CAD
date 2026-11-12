@@ -97,6 +97,25 @@ function markEngineLoaded(mode) {
   } catch (e) { /* 写不进去就算了 */ }
 }
 
+/**
+ * 【2026-11-12 新增】基础摘要指令（降级路径专用）。
+ *
+ * 为什么需要：完整指令要求模型"逐行抄写 EVERY F/M 编号 + 原样保留所有数值"，
+ * 在网关输出上限不够时会空流/截断。降级路径改用一条**最短、最不容易失败**的
+ * 指令，目标是"先把上下文压下去"，而不是"数值零丢失"。
+ * 这是分级降级里的第 ② 级（见 summarize() 里的双层降级注释）。
+ */
+function buildBasicInstruction() {
+  return [
+    'Summarize the conversation above into a terse engineering checkpoint.',
+    'Rules:',
+    '- Keep file paths, commands, and key numbers VERBATIM. Never invent numbers.',
+    '- Cover: 已完成 / 关键决策 / 失败与原因 / 下一步.',
+    '- Drop reasoning, greetings, repeated tool output. Use short bullets.',
+    '- Output Chinese bullets only. No preamble, no explanation of what you did.',
+  ].join('\n');
+}
+
 /** 从 agent 上取会话身份信息（root / target / label / preset）。 */
 function identityOf(agent) {
   const out = { target: '', root: '', label: '', preset: '' };
@@ -219,7 +238,17 @@ class EngineeringCompactionEngine extends BasicCompactionEngine {
     const fresh = extractFacts(rawSpan, { source: 'compaction' });
 
     // 与历史累积集合并：只增不减（用户要求「写了就不能改，只能加」）
-    const prevFacts = readFacts();
+    //
+    // ══ 【2026-11-12 修复·L0 跨会话串味】══════════════════════════════════
+    // 旧实现 `readFacts()` 不带 target → 读全局 `<state_dir>/compaction_facts.json`
+    // → **所有会话（主对话 + 每个子代理）共用一份不断并集的 L0 事实集**
+    //   （mergeFacts 只增不减）。实测 l0_numbers 一路涨：
+    //   3064 → 4627 → 5279 → 7007 条，saved_chars 占比
+    //   62.6% → 13.7% → 2.5% → 30.4% —— 压缩收益被 L0 吃干净，
+    //   最终 restoreFacts 回填量反超原文，触发 ENG_COMPACTION_NOT_SMALLER
+    //   （26 次，输出最高达输入的 2.79 倍）。
+    // 现在按会话 id 分文件：每个 target 只累积自己的事实。
+    const prevFacts = readFacts(id.target);
     const merged = mergeFacts(prevFacts, fresh);
 
     // ── ② 上一次的 L1 / L2（要求本轮在此基础上只增不减）───────────────
@@ -242,7 +271,54 @@ class EngineeringCompactionEngine extends BasicCompactionEngine {
       hasCheckpoint: /<engineering-checkpoint>|<compacted-summary>/.test(rawSpan),
     });
 
-    const result = await summarizeWithLlm(this.ctx, this.config, input, agent, signal, instruction);
+    // ══ 【2026-11-12 修复·压缩直接报错】双层降级 ══════════════════════════
+    // 现场：用户点压缩 → GUI 弹
+    //   "Compaction could not produce a useful summary.
+    //    The attempt is recorded in the session log."
+    // 这句是宿主 dsh-compaction-basic:527 的
+    //   ManualCompactionError("summary", "manual compaction could not
+    //   produce a smaller summary")，由本 summarize() 抛出的任何异常包装而成。
+    //
+    // 设计原则修正：这是【工程模式的附加能力】（L0 数值零丢失），
+    //   它失败时**不该让整次压缩失败** —— 那等于"为了更严格的摘要，
+    //   连普通摘要都用不上"，用户看到的就是压缩报错、上下文继续涨。
+    //   正确做法是分级降级：附加能力挂了就退回官方等价行为，并如实记账。
+    //
+    // 三级：
+    //   ① 完整 L0 注入 + 核对回填（本插件的目标行为）
+    //   ② 失败 → 只做基础摘要（不注入 factsBlock，不做回填），仍保住压缩
+    //   ③ 连基础也失败 → 抛出去（交给宿主报错，这是真的无法压缩）
+    let result;
+    let degraded = null;
+    try {
+      result = await summarizeWithLlm(this.ctx, this.config, input, agent, signal, instruction);
+    } catch (e1) {
+      degraded = 'summarize-l0:' + String((e1 && e1.message) || e1).slice(0, 300);
+      try {
+        const basicInstruction = buildBasicInstruction();
+        result = await summarizeWithLlm(this.ctx, this.config, input, agent, signal,
+                                        basicInstruction);
+        // 降级成功：不注入 L0 事实，merged 仅用于记账统计
+        try {
+          appendCompaction({
+            at: Date.now(), target: id.target, root: id.root, label: id.label,
+            preset: id.preset, layer: 'L3-degraded',
+            l0_numbers: 0, l0_materials: 0, l0_total: 0,
+            degraded_reason: degraded,
+            note: 'L0 注入路径失败，已退回基础摘要（数值不再逐条保证）',
+          });
+        } catch (e) {}
+      } catch (e2) {
+        // 两级都失败 → 如实抛出，并把第一级原因挂上（便于排查真正病因）
+        const err = new Error(
+          'engineering compaction failed at both L0 and basic summarization: '
+          + String((e2 && e2.message) || e2).slice(0, 300)
+          + ' | L0 path error: ' + String((e1 && e1.message) || e1).slice(0, 300));
+        err.code = 'ENG_COMPACTION_BOTH_PATHS_FAILED';
+        err.cause = e2;
+        throw err;
+      }
+    }
 
     // ── ④ 核对 + 强制回填（数值一个都不能动）──────────────────────────
     const modelText = (result.summary || []).map((b) => (b && b.text) || '').join('');
@@ -251,25 +327,39 @@ class EngineeringCompactionEngine extends BasicCompactionEngine {
 
     // ── ⑤ 防「回填后反而不缩短」──────────────────────────────────────
     // 父类有一道硬校验：摘要必须比被替换内容小，否则整次压缩报错。
-    // 极端情况下（原文本身很短、或模型几乎没压缩、或 L0 事实极多），
-    // 回填后可能反而变长 —— 那宁可【放弃本次压缩】，也不能为了缩短而删数。
-    // 放弃是安全的一侧：会话继续照常运行，只是这一轮不省 token。
+    // 【2026-11-12 修正】这里原本是 throw，但那会让用户看到"压缩报错"。
+    //   正确取舍：**模型自己的摘要**（modelText）本来就比原文短的话，
+    //   就退回"只用模型摘要 + 少量高权重事实"，而不是整次压缩失败。
+    //   只有连模型摘要都不短（或空）时才抛 —— 那是真的压不动。
     const inputChars = rawSpan.length;
-    const outChars = restored.text.length;
+    let outChars = restored.text.length;
+    let summaryBlocks = result.summary;
+    let restoreNote = '';
     if (inputChars > 0 && outChars >= inputChars) {
-      const err = new Error(
-        'engineering compaction skipped: after L0 fact restoration the checkpoint is not smaller '
-        + '(input ' + inputChars + ' chars, output ' + outChars + ' chars). '
-        + 'Refusing to shorten by dropping machine facts.',
-      );
-      err.code = 'ENG_COMPACTION_NOT_SMALLER';
-      throw err;
+      // 退一档：去掉回填，只用模型摘要（它通常远短于原文）
+      const modelChars = modelText.length;
+      if (modelChars > 0 && modelChars < inputChars) {
+        outChars = modelChars;
+        summaryBlocks = [{ type: 'text', text: modelText }];
+        restoreNote = ('回填后反而更长（input ' + inputChars + ' / output '
+                       + restored.text.length + ' chars），已退回【仅模型摘要】'
+                       + '（' + modelChars + ' chars）以保证压缩成功；'
+                       + '本轮数值逐条保证降级。');
+      } else {
+        const err = new Error(
+          'engineering compaction skipped: the checkpoint is not smaller even '
+          + 'without L0 restoration (input ' + inputChars + ' chars, '
+          + 'model summary ' + modelText.length + ' chars, output ' + outChars + ' chars).');
+        err.code = 'ENG_COMPACTION_NOT_SMALLER';
+        throw err;
+      }
     }
 
-    let summaryBlocks = result.summary;
     if (restored.restored > 0 || restored.text !== modelText) {
       // 用补回后的文本重建 blocks（保持纯 text，符合父类对「只能文本」的要求）
-      summaryBlocks = [{ type: 'text', text: restored.text }];
+      // ⚠️ 只有【没走退一档】时才用回填后的文本；上面退一档时 summaryBlocks
+      //    已经是 [{text: modelText}]，不能再被 covered 掉。
+      if (!restoreNote) summaryBlocks = [{ type: 'text', text: restored.text }];
     }
 
     // ── ⑥ 落账本（红框数据源）────────────────────────────────────────
@@ -301,8 +391,8 @@ class EngineeringCompactionEngine extends BasicCompactionEngine {
       });
     } catch (e) { /* 记账失败不影响压缩 */ }
 
-    // 事实集写回（单调累积）
-    try { writeFacts(merged); } catch (e) {}
+    // 事实集写回（单调累积，但**按会话分文件**，见上面 readFacts 的修复说明）
+    try { writeFacts(merged, id.target); } catch (e) {}
 
     return Object.assign({}, result, { summary: summaryBlocks });
   }

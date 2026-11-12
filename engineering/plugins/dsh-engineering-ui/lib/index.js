@@ -77,13 +77,16 @@ import { DefenseSigner } from './defense-sign.js';
 //   宿主层少了任何一个包都会让整块 import 求值失败 → 插件不装配 → 修复白做，
 //   所以这里只引本插件自己的文件。
 import { installJobWaitGuard } from './job-wait-guard.js';
+// 【外部监控器接入】SW 使用权/排队/等待/逐零件看板的唯一权威在外部服务。
+// 本模块只做宿主桥（token+epoch 留在宿主内存，Python 侧不可见）。
+import { MonitorBridge, CONFIG_NAME as SW_MONITOR_CONFIG_NAME } from './sw-monitor.js';
 // 【A4】错误码归一 + 退避（纯函数模块，可脱离宿主单测）
 import { classifyModelError, backoffMsOf } from './model-errors.js';
 // 【BUG-A1/A11/A14/B1 修复】收尾守卫的"可判定事实"层（纯函数、无副作用）。
 //   单独成文件是为了把与并行改动的冲突面从"几百行"压到"一条 import"：
 //   lib/index.js 曾被另一路 agent 整份 write 覆盖过两次，判定逻辑放外面才保得住。
 //   ⚠️ 必须写成【单行 import】：多处测试用 /^import .*$/gm 剥 import 头。
-import { hasStandaloneMarker, collectWaitingEvidence, isAnalystAgent as turnGuardIsAnalystAgent, readAnalystSessionId, latestContextWindow, resolveCompactionThreshold, explainCompactionLimit, describePendingJobs, COMPACTION_THRESHOLD_RATIO } from './turn-guard.js';
+import { hasStandaloneMarker, collectWaitingEvidence, isAnalystAgent as turnGuardIsAnalystAgent, readAnalystSessionId, latestContextWindow, resolveCompactionThreshold, explainCompactionLimit, describePendingJobs, COMPACTION_THRESHOLD_RATIO, ENG_COMPACTION_CONFIG } from './turn-guard.js';
 // 【Webots 仿真 · 只读宿主门】配置阶段接入；MCP 行默认禁用，见 preset-engineering.patch.yml。
 //   只做「上下文归属校验 + 报告/证据只读路由」，不启动 Webots、不碰 SolidWorks。
 import { installWebots } from './webots.js';
@@ -1022,17 +1025,54 @@ export function apply(ctx) {
       const modeState = toolsDir ? readJsonSafe(path.join(toolsDir, 'mode_state.json')) : null;
       const workflowState = toolsDir ? readJsonSafe(path.join(toolsDir, 'workflow_state.json')) : null;
       let unsettledJobs = 0;
+      let jobsUnavailable = '';
       try {
         const pj = pendingJobsOf(agent && agent.id);
         if (pj && pj.available) unsettledJobs = pj.pending.length;
+        else jobsUnavailable = (pj && pj.reason) || 'jobs 服务不可用';
+      } catch (e) { jobsUnavailable = String((e && e.message) || e); }
+
+      // ── 【2026-11-12 修复·BUG-2】补两条以前完全没接的宿主侧证据 ──────────
+      // 现场（减速器任务 20261111_224045_56A62E32）：
+      //   主对话 10+ 次写 [WAITING] 全被打回，即使当时明明在等 ——
+      //     · 后台 job（wait-rooms）正在跑；
+      //     · 宿主侧有活跃提问卡（/pending-child 查得到 pendingId）；
+      //   打回的直接原因不是判据错，而是【取证拿不到】：
+      //     a) unsettledJobs 依赖 `jobs.list()` 的 `owner` 字段，而 ownership
+      //        在宿主里并非总是填的 → pendingJobsOf 返回 available:false →
+      //        计数恒 0，"有 job 在跑"这条证据永远拿不到；
+      //     b) 提问卡只在【总计子代理】阶段才有，ask_user.py 走的是
+      //        childAsks 台账 + 宿主 /pending-child 两条路；countOpenQuestions
+      //        只扫 childAsks，宿主侧登记的卡片根本看不见。
+      //   于是模型唯一剩下的证据只有"房间有心跳"—— 而分析阶段压根没有
+      //   active 建模房间（报告 BUG-2 原文正是这句）→ 四条证据实际只剩一条
+      //   窄通道，形同"半实现"。
+      // 修复：把上面两类事实各自补一条独立取证路径（任一命中即放行）。
+      let hostJobs = 0;
+      try {
+        const sum = pendingJobsSummary();
+        // pendingJobsSummary 口径：全局 running/stopping，不看 owner
+        hostJobs = Number(sum && sum.total) || 0;
       } catch (e) {}
-      return collectWaitingEvidence({
+      let hostAsks = 0;
+      try {
+        hostAsks = Number(pendingChildAskCount()) || 0;
+      } catch (e) {}
+
+      const res = collectWaitingEvidence({
         toolsDir,
         modeState,
         workflowState,
-        openQuestions: countOpenQuestions(agent),
-        unsettledJobs,
+        openQuestions: Math.max(countOpenQuestions(agent), hostAsks),
+        unsettledJobs: Math.max(unsettledJobs, hostJobs),
       });
+      if (jobsUnavailable && hostJobs === 0) {
+        // 取证通道不可用 ≠ 没有在等：把原因留在日志里，便于事后判断打回是否合理
+        try {
+          console.warn('[dsh-engineering-ui] [WAITING] 后台 job 取证不可用：' + jobsUnavailable);
+        } catch (e) {}
+      }
+      return res;
     } catch (e) {
       return { waiting: false, evidence: [], reason: String((e && e.message) || e) };
     }
@@ -1113,6 +1153,35 @@ export function apply(ctx) {
         const owner = String(e.childSessionId || '');
         if (keys.indexOf(owner) >= 0) n += 1;
       }
+      return n;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  /**
+   * 【2026-11-12 修复·BUG-2】宿主侧所有未结提问卡的总数（含 pendingAsks）。
+   *
+   * 与 countOpenQuestions 的区别（这正是 BUG-2 打回 10+ 次的直接原因）：
+   *   · countOpenQuestions 按 childSessionId / parentSessionId 过滤，
+   *     只有"这张卡属于当前 agent 这一支"才算证据；
+   *   · 而减速器任务里提问的是【总计子代理】，主对话只是它的父级，且
+   *     ask_user.py 的台账 + 宿主 pendingAsks 两条路都可能登记卡片。
+   *     一旦 owner 字段没落上（或子代理用的是自己的 sessionId），
+   *     父级就数不到 → "有未答提问卡"这条证据对它永远是 0。
+   *
+   * 判据放宽到"本进程里还有没结的卡"：守卫要回答的问题是
+   * 「这个会话此刻是不是在等人」，而不是「这张卡是不是它的直属子代理的」。
+   * 只要整条链路里有一张卡没结，模型除了等确实没有别的选择。
+   */
+  function pendingChildAskCount() {
+    try {
+      let n = 0;
+      for (const e of childAsks.values()) if (e && !e.settled) n += 1;
+      // 主对话自己的提问卡（pendingAsks）同样属于"在等人"
+      try {
+        for (const e of pendingAsks.values()) if (e && !e.settled) n += 1;
+      } catch (e) {}
       return n;
     } catch (e) {
       return 0;
@@ -2274,8 +2343,12 @@ export function apply(ctx) {
   function compactionPresetConfig() {
     const now = Date.now();
     if (compactPresetCache && (now - compactPresetCacheAt) < 30000) return compactPresetCache;
-    const out = { thresholdRatio: COMPACTION_THRESHOLD_RATIO, headroomTokens: 48000,
-                  retainRatio: 0.12, source: 'default', file: null };
+    const out = { thresholdRatio: COMPACTION_THRESHOLD_RATIO,
+                  headroomTokens: ENG_COMPACTION_CONFIG.headroomTokens,
+                  maxTokens: ENG_COMPACTION_CONFIG.maxTokens,
+                  chunkChars: ENG_COMPACTION_CONFIG.chunkChars,
+                  retainRatio: ENG_COMPACTION_CONFIG.retainRatio,
+                  source: 'default', file: null };
     try {
       // ══ 【2026-11-11 修复·P1 preset 探测路径错】══════════════════════════
       // 现场（验收复跑 20261111_131815_580E38FA）：面板显示的 limiter /
@@ -2338,16 +2411,23 @@ export function apply(ctx) {
           if (!fs.existsSync(p)) continue;
           raw = fs.readFileSync(p, 'utf8');
         } catch (e) { continue; }
-        // 极简 YAML 取值：只认这三个键（不引 yaml 库 —— 宿主层少一个依赖少一个故障点）
+        // 极简 YAML 取值：只认这几个键（不引 yaml 库 —— 宿主层少一个依赖少一个故障点）
         const grab = (key) => {
           const m = new RegExp('^\\s*' + key + '\\s*:\\s*([0-9.]+)\\s*$', 'm').exec(raw);
           return m ? Number(m[1]) : null;
         };
         const tr = grab('thresholdRatio');
         const hd = grab('headroomTokens');
+        const mt = grab('maxTokens');
+        const cc = grab('chunkChars');
         const rr = grab('retainRatio');
         if (tr !== null) out.thresholdRatio = tr;
         if (hd !== null) out.headroomTokens = hd;
+        // ── 【2026-11-12】maxTokens 必须一起读：它决定摘要器输出上限。
+        // 不配时宿主会让它 = headroomTokens（见 dsh-compaction-basic:63-64），
+        // 而 headroom 只有 8000 → 摘要被截断 → empty-stream。
+        if (mt !== null) out.maxTokens = mt;
+        if (cc !== null) out.chunkChars = cc;
         if (rr !== null) out.retainRatio = rr;
         out.source = 'preset';
         out.file = p;
@@ -2389,12 +2469,49 @@ export function apply(ctx) {
       //   （宿主那份 config 构造后 deepFreeze，运行期不可写，故这里只做核算）。
       try {
         const pc = compactionPresetConfig();
-        const ex = explainCompactionLimit(cw, pc.thresholdRatio, pc.headroomTokens, null);
+        // ── 【2026-11-12 修复·reserved 写死 0 让 limiter 永远算错】────────────
+        // 旧调用传的是 `null` → explainCompactionLimit 内部把 reserved 当 0 →
+        // 预算项恒等于"窗口 − headroom"，limiter 永远算出 ratio。
+        // 真实口径（宿主 dsh-compaction-basic:757-758）：
+        //   reservedCompletionTokens = header.config.maxTokens ?? defaultMaxTokens ?? 0
+        // 所以这里把【本会话真实的 reserved】传进去：
+        //   ① 优先 header.config.maxTokens（路由真正声明了多少补全预算）；
+        //   ② 没有就用 preset 里的 maxTokens（工程模式已显式配置）；
+        //   ③ 都没有才是 0。
+        let _reserved = 0;
+        try {
+          const _mt = header && header.config && header.config.maxTokens;
+          if (Number.isFinite(Number(_mt)) && Number(_mt) > 0) _reserved = Number(_mt);
+          else if (Number.isFinite(Number(pc.maxTokens)) && Number(pc.maxTokens) > 0) {
+            // 注意：preset 的 maxTokens 是【摘要器输出上限】，不是路由的补全预算。
+            // 它不该直接当 reserved —— 否则 1M 窗口会算成 1000000-48000-8000。
+            // 这里只为让面板能显示"这个数存在"，reserved 仍以路由声明为准。
+            _reserved = 0;
+          }
+        } catch (e) { _reserved = 0; }
+        const ex = explainCompactionLimit(cw, pc.thresholdRatio, pc.headroomTokens,
+                                          _reserved);
         rec.presetThresholdRatio = pc.thresholdRatio;
         rec.presetHeadroomTokens = pc.headroomTokens;
+        rec.presetMaxTokens = pc.maxTokens;
+        rec.presetRetainRatio = pc.retainRatio;
+        rec.presetSource = pc.source;
+        rec.reservedCompletionTokens = _reserved;
         rec.limitRatioTokens = ex.limitRatioTokens;
         rec.limitBudgetTokens = ex.limitBudgetTokens;
         rec.limiter = ex.limiter;
+        if (ex.error) {
+          // 预算项为负 → 宿主的压缩彻底不工作，必须显式暴露而不是当成"阈值偏低"
+          rec.limitError = ex.error;
+          rec.limitErrorMessage = ex.message;
+        }
+        // ── 摘要器输出上限：这是"压不动"的关键解释项 ──────────────────────
+        // 没显式配 maxTokens 时宿主让它 = headroomTokens（8000）→ 抄不完编号 →
+        // 截断 → empty-stream。面板必须能把这件事说清楚。
+        rec.summaryMaxTokens = Number.isFinite(Number(pc.maxTokens)) && Number(pc.maxTokens) > 0
+          ? Number(pc.maxTokens)
+          : Number(pc.headroomTokens);
+        rec.summaryMaxTokensExplicit = Number.isFinite(Number(pc.maxTokens)) && Number(pc.maxTokens) > 0;
       } catch (e) {}
       if (sid) compactThresholdCache.set(sid, rec);
       // 每个会话只打一次，避免每步刷屏（守卫/hook 都在热路径上）
@@ -2553,15 +2670,228 @@ export function apply(ctx) {
     }
   })));
 
-  // ══ 【零件进度表】GET /dsh-engineering-ui/parts-board ═══════════════════
-  // 用户要求（2026-11-07，图二）：「红线上面是子代理，下面是要造的零件的表……
-  //   总计子代理分析完成之后，把所有的零件都给放在那个展示表中……交给总理子
-  //   代理去看零件完成度：正在建 / 未开始 / 完成 / 需要重建 / 失败」。
+  // ══════════════════════════════════════════════════════════════════════════
+  // 【外部监控器 · 命令许可】POST /dsh-engineering-ui/sw-monitor-permit
+  // ══════════════════════════════════════════════════════════════════════════
+  // 这是"每条 SW 命令都必须核验并记账"（教程 3.3）的代码落点。
   //
-  // 数据源是【唯一权威】：mode2_flow.py parts-board（读 mode2_plan 的编制 +
-  //   prime_reports，房间态来自 mode_gate.room-board，pulse 断 = 失败）。
-  //   JS 侧不重新判定状态，只做 HTTP 转发 —— 保证面板与门禁看到的完全是同一份
+  // 为什么取锁必须放在【宿主】而不是 Python 里做：
+  //   教程 3.1 要求"许可证信息由宿主与真实会话、实际工具调用和 worker 绑定"，
+  //   "禁止使用代理可自行填写的 room、lease 字符串来模拟该身份"。
+  //   如果 sw_bridge 自己拿 room 字符串去排队、自己 claim，那么任何进程
+  //   （包括模型随手写的脚本）都能伪造一个 room 把票领走 —— 队列形同虚设。
+  //   放在这里以后：
+  //     · 排队票由宿主用【真实 agent 会话 id + epoch】创建，Python 传不了；
+  //     · 队首预留时宿主挂一个 wait-lock 后台 job，图一的"阻塞等待"变成 job id；
+  //     · claim 也只发生在宿主，Python 拿到的是一次性 command id + 结果。
+  //   Python 侧（sw_bridge._monitor_acquire / _monitor_end）只消费结论。
+  //
+  // 请求：{room, command, part?, wait_s?, session?}
+  // 响应：{ok, command, state:'running'} 或 {ok:false, code, error, position?, owner?}
+  const monitorPermits = new Map();   // command id -> {room, session, startedAt}
+  const monitorWaits = new Map();     // room -> jobId（同一房间只挂一个等待 job）
+
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/sw-monitor-permit',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
+      if (!swMonitorBridge) {
+        return send(res, 200, { ok: false, code: 'MONITOR_BRIDGE_DOWN', error: '宿主桥未装配' });
+      }
+      const _raw = await readBody(req);
+      let body = null;
+      try { body = JSON.parse(_raw); } catch (e) { body = null; }
+      if (!body || typeof body !== 'object') {
+        return send(res, 400, { ok: false, code: 'BAD_REQUEST', error: 'bad json' });
+      }
+      const room = String(body.room || '').trim();
+      const command = String(body.command || '').trim();
+      const part = body.part ? String(body.part) : undefined;
+      const waitS = Number(body.wait_s || 0);
+      if (!room) return send(res, 200, { ok: false, code: 'ROOM_REQUIRED', error: '缺少 room' });
+      if (!command) return send(res, 200, { ok: false, code: 'COMMAND_REQUIRED', error: '缺少 command' });
+      if (!swMonitorBridge.enabled()) {
+        return send(res, 200, {
+          ok: false, code: 'MONITOR_NOT_CONFIGURED',
+          error: '未接入外部监控器：SW 使用权没有权威，命令不得执行。',
+          hint: ('启动 DSH-SW-Monitor 后执行 python mode_gate.py sw-monitor attach --drained；'
+            + '旧进程内锁已删除，没有回退路径。'),
+        });
+      }
+      try {
+        // ① 申请使用权（request → claim 由宿主桥封装成 acquire）。
+        //    注意：监控器把"建票"与"领租约"拆成两步，且必须带 task ——
+        //    这些细节都在 lib/sw-monitor.js 里处理，本路由只关心三态结论。
+        const scope = { room, session: String(body.session || '') };
+        const got = await swMonitorBridge.acquire({
+          room, session: scope.session, wait_s: Number.isFinite(waitS) && waitS > 0 ? waitS : 0,
+        });
+        const state = String((got && got.state) || '');
+        // ② 排队中：挂后台 job 等队首预留（这就是图一的替换点）。
+        //    注意：这里绝不用 sleep 轮询 —— 等待完全发生在 DSH job 里，
+        //    模型拿到的是 job id，回合随时可以结束。
+        if (state === 'queued') {
+          // 等待 job 必须用【同一张票】等，否则每次重试都会新开一张票插队。
+          if (got && got.ticket) scope.ticket = got.ticket;
+          const jobs = (() => { try { return ctx.get ? ctx.get('jobs') : undefined; } catch (e) { return undefined; } })();
+          if (!jobs || typeof jobs.start !== 'function') {
+            return send(res, 200, {
+              ok: false, code: 'JOBS_UNAVAILABLE', state: 'queued',
+              position: got && got.position, owner: got && got.owner,
+              error: 'SW 使用权在排队，但宿主没有 jobs 服务，无法挂后台等待任务。',
+            });
+          }
+          const job = swMonitorBridge.startWaitLockJob(ctx, jobs, scope, room);
+          monitorWaits.set(room, job);
+          return send(res, 200, {
+            ok: true, state: 'queued', job_id: job,
+            position: got && got.position, owner: got && got.owner,
+            hint: ('SW 使用权在队列第 ' + (got && got.position) + ' 位，已挂后台任务 job=' + job
+              + '。用 job_output 等它自然结束（不要 sleep 轮询），'
+              + '结束后重试同一条命令即可。'),
+          });
+        }
+        // ③ 记账：begin 必须在启动 CAD worker 之前完成。
+        //    lease 已经在 acquire() 里领到，且只留在宿主内存里 ——
+        //    教程 3.1 要求许可与真实会话/工具调用绑定，不能交给调用方保管。
+        await swMonitorBridge.call('begin', { room, command, part });
+        monitorPermits.set(command, { room, session: scope.session, startedAt: Date.now() });
+        try { monitorWaits.delete(room); } catch (e) {}
+        return send(res, 200, {
+          ok: true, state: 'running', command,
+          position: got && got.position,
+        });
+      } catch (error) {
+        const code = (error && error.code) || 'MONITOR_ERROR';
+        return send(res, 200, { ok: false, code, error: String((error && error.message) || error) });
+      }
+    }
+  })));
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 【外部监控器 · 命令收尾】POST /dsh-engineering-ui/sw-monitor-done
+  // ══════════════════════════════════════════════════════════════════════════
+  // 教程 3.3 的两条硬要求在这里落地：
+  //   · end 必须在"确认 worker / 子进程已退出、该次命令无在途 COM 操作"之后；
+  //   · 命令返回但后台 job 尚未 settled、spawn 失败后子进程存活情况不明、
+  //     超时、服务掉线时，留在隔离/在途状态，禁止用 finally 无条件 end/release。
+  // 因此本端点【要求调用方显式声明 drained】，并拒绝未知 command。
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/sw-monitor-done',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
+      if (!swMonitorBridge) {
+        return send(res, 200, { ok: false, code: 'MONITOR_BRIDGE_DOWN', error: '宿主桥未装配' });
+      }
+      const _raw = await readBody(req);
+      let body = null;
+      try { body = JSON.parse(_raw); } catch (e) { body = null; }
+      if (!body || typeof body !== 'object') {
+        return send(res, 400, { ok: false, code: 'BAD_REQUEST', error: 'bad json' });
+      }
+      const room = String(body.room || '').trim();
+      const command = String(body.command || '').trim();
+      const release = body.release === true;
+      if (!room || !command) {
+        return send(res, 200, { ok: false, code: 'BAD_REQUEST', error: '需要 room 与 command' });
+      }
+      const known = monitorPermits.get(command);
+      if (!known) {
+        // 未知 command 不能"帮忙 end 一下"：那等于给没取过许可的命令背书。
+        return send(res, 200, {
+          ok: false, code: 'UNKNOWN_COMMAND',
+          error: '该 command 不是本宿主发放的许可，拒绝收尾。',
+        });
+      }
+      try {
+        await swMonitorBridge.call('end', { room, command });
+        monitorPermits.delete(command);
+        let rel = null;
+        if (release) {
+          rel = await swMonitorBridge.call('release', { room, drained: body.drained === true });
+        }
+        return send(res, 200, { ok: true, state: 'ended', released: !!rel });
+      } catch (error) {
+        const code = (error && error.code) || 'MONITOR_ERROR';
+        return send(res, 200, { ok: false, code, error: String((error && error.message) || error) });
+      }
+    }
+  })));
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 【外部监控器 · 宿主桥】POST /dsh-engineering-ui/sw-monitor-op
+  // ══════════════════════════════════════════════════════════════════════════
+  // 为什么需要这一层：host.token 与 epoch 只能待在宿主进程内存里。
+  //   · Python 门禁（sw_bridge / mode_gate）要排队和记账，但它不该看见 token；
+  //   · 模型要"等锁"，但模型自报的 room/lease 字符串不可信；
+  //   · 监控器的票按 epoch+task+room+session 绑定，epoch 换了旧票作废。
+  // 于是：Python 只调本机这条路由 → 宿主补 epoch/token 转发 → 结果回传。
+  // 白名单在 lib/sw-monitor.js 的 OPS 里，路由本身不做任何业务判定。
+  //
+  // ⚠️ 端口：Python 侧【不要】写死，也不该依赖 DSH_WEB_PORT ——
+  //   实测真机会话里 DSH_WEB_PORT 根本没被注入，而 GUI 端口每次启动都变
+  //   （2026-11-12 会话 630e2e4d：宿主在 57496，Python 却连 19387，
+  //    结果 sw-monitor attach 必然 MONITOR_BRIDGE_UNREACHABLE）。
+  //   正确做法是读宿主注入的 DSH_WEB_URL（ask_user.py 也是这么修的）。
+  //   本插件只负责"在这台宿主的这个端口上提供这条路由"，端口由宿主决定。
+  let swMonitorBridge = null;
+  try {
+    swMonitorBridge = new MonitorBridge({
+      stateDir: () => findToolsDir(),
+      warn: (m) => { try { console.warn('[dsh-engineering-ui] ' + m); } catch (e) {} },
+    });
+  } catch (e) {
+    swMonitorBridge = null;
+  }
+
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/sw-monitor-op',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
+      if (!swMonitorBridge) {
+        return send(res, 200, { ok: false, code: 'MONITOR_BRIDGE_DOWN', error: '宿主桥未装配' });
+      }
+      const _raw = await readBody(req);
+      let body = null;
+      try { body = JSON.parse(_raw); } catch (e) { body = null; }
+      if (!body || typeof body !== 'object') {
+        return send(res, 400, { ok: false, code: 'BAD_REQUEST', error: 'bad json' });
+      }
+      const op = String(body.op || '').trim();
+      const payload = (body.payload && typeof body.payload === 'object') ? body.payload : {};
+      // 记账类操作（begin/end/part-*）一次 SW 命令就来一轮，正常门禁会打到上千次，
+      //   所以给它们单独一个更宽的桶；排队类操作本来就少，用默认桶即可。
+      const bucket = 'sw-monitor:' + (/^(begin|end|part-)/.test(op) ? 'ledger' : 'ops');
+      if (rateLimited(bucket)) {
+        return send(res, 429, { ok: false, code: 'RATE_LIMITED', error: '请求过于频繁（监控器桥限流）' });
+      }
+      try {
+        const out = await swMonitorBridge.call(op, payload);
+        return send(res, 200, Object.assign({ ok: true }, out));
+      } catch (error) {
+        const code = (error && error.code) || 'MONITOR_ERROR';
+        const message = String((error && error.message) || error);
+        // 可达性/未接管属于【可预期的降级】，用 200 返回让 Python 侧拿到结构化 code；
+        //   真正 5xx 只留给宿主内部异常（那样才是 bug）。
+        return send(res, 200, { ok: false, code, error: message });
+      }
+    }
+  })));
+
+  // ══ 【零件进度表】GET /dsh-engineering-ui/parts-board ═══════════════════
+  // 图二：红线上面是子代理，下面是本轮要造的零件表（正在建/未开始/完成…）。
+  //
+  // 数据源换成了【外部监控器】（教程 4.3）：mode2_flow.py parts-board 现在
+  //   直接 rpc('board')，状态来自监控器的逐件事件（part-start / part-saved /
+  //   part-failed）与验收结论，不再读 prime_reports（该数据源随总理子代理
+  //   一起删除了）。
+  //   JS 侧仍然【不重新判定状态】，只做 HTTP 转发 —— 面板与门禁必须看到同一份
   //   结论（历史教训：UI 自己猜状态，和门禁打架）。
+  //   监控器不可达时 Python 返回 degraded=true，前端据此显示「不可用」，
+  //   绝不回退成「零件列表是空的」（那会让人以为任务还没开始）。
   disposers.push(ctx.webServer.register(guardRoute({
     kind: 'exact',
     path: PREFIX + '/parts-board',

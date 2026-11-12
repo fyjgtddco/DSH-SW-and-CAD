@@ -294,10 +294,43 @@ export function historyStats(opts) {
  * 读/写 L0 事实累积集（跨压缩单调增长）。
  * 单文件 JSON（不是 JSONL）：它是一份「当前权威快照」，需要整体替换。
  * 但替换规则是【只增不减】，见 facts.mergeFacts()。
+ *
+ * ══ 【2026-11-12 修复·L0 事实跨会话串味】═════════════════════════════════
+ * 现场（46 个发生过压缩的会话，277 次 compaction/end 复盘）：
+ *   旧实现 readFacts()/writeFacts() **不带会话身份**，读的是全局
+ *   `<state_dir>/compaction_facts.json`。而 mergeFacts() 是【只增不减】的并集，
+ *   于是：所有会话（主对话 + 每个子代理）共用一份不断长大的 L0 事实集。
+ *
+ *   实测后果（磁盘旧账本 `compaction_history.jsonl` 的 l0_numbers 一路涨）：
+ *     3064 → 4627 → 5279 → 7007 条
+ *     saved_chars 占 input 比：62.6% → 13.7% → 2.5% → 30.4%
+ *   压缩收益被 L0 越吃越干净，最后 restoreFacts 回填的量超过原文 →
+ *   触发 `ENG_COMPACTION_NOT_SMALLER`（input 165343 / output 461129，输出是
+ *   输入的 2.79 倍）—— 压缩反而把上下文撑大，等于【自我否决】。
+ *
+ * 修法：facts 按 target（会话 id）分文件：
+ *   `<state_dir>/compaction_facts/<safe-target>.json`
+ * `target` 为空时（旧调用方/测试）仍回落到全局文件，保证向后兼容。
  */
-export function readFacts() {
+const FACTS_DIR = 'compaction_facts';
+
+/** 把会话 id 变成安全文件名（只保留字母数字与 -_，其余换成 _）。 */
+function safeTarget(target) {
+  const s = String(target || '').trim();
+  if (!s) return '';
+  return s.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 120);
+}
+
+/** facts 文件的绝对路径（target 为空 → 旧全局文件）。 */
+export function factsPath(target) {
+  const safe = safeTarget(target);
+  if (!safe) return path.join(resolveStateDir(), FACTS_FILE);
+  return path.join(resolveStateDir(), FACTS_DIR, safe + '.json');
+}
+
+export function readFacts(target) {
   try {
-    const p = path.join(resolveStateDir(), FACTS_FILE);
+    const p = factsPath(target);
     if (!fs.existsSync(p)) return { numbers: [], materials: [] };
     const j = JSON.parse(fs.readFileSync(p, 'utf8'));
     return {
@@ -309,10 +342,10 @@ export function readFacts() {
   }
 }
 
-export function writeFacts(facts) {
+export function writeFacts(facts, target) {
   try {
-    const dir = ensureDir(resolveStateDir());
-    const p = path.join(dir, FACTS_FILE);
+    const p = factsPath(target);
+    ensureDir(path.dirname(p));
     fs.writeFileSync(p, JSON.stringify(facts || { numbers: [], materials: [] }, null, 2), 'utf8');
     return { ok: true, path: p };
   } catch (e) {
@@ -320,4 +353,4 @@ export function writeFacts(facts) {
   }
 }
 
-export const FILES = { HISTORY_FILE, FACTS_FILE };
+export const FILES = { HISTORY_FILE, FACTS_FILE, FACTS_DIR };

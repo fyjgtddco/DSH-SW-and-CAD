@@ -22,12 +22,65 @@ import path from 'node:path';
 /** 「在等」的证据窗口：房间近 5 分钟内必须有过心跳/报告变化才算还没死。 */
 export const WAIT_EVIDENCE_WINDOW_MS = 5 * 60 * 1000;
 
-/** A14：阈值 = contextWindow × 该比例。 */
-export const COMPACTION_THRESHOLD_RATIO = 0.7;
+/**
+ * A14：阈值 = contextWindow × 该比例。
+ *
+ * ── 【2026-11-12 修复】0.7 → 0.2（用户指定 200K 阈值）──────────────────
+ * 这里曾硬编码 0.7，而 preset-engineering.patch.yml 几经调整（0.7→0.8→0.2）。
+ * 两处不一致的直接后果：面板/日志按旧值算，宿主按新值压 ——
+ * 用户看面板会以为"阈值不对"，这本身就是"以为压缩没生效"的来源之一。
+ *
+ * 现在用户明确要求「改成 200k 压缩，不要 800k」：
+ *   当前路由 marvis/buddy 的 contextWindow = 1,000,000，
+ *   200000 / 1000000 = 0.2。
+ * ⚠️ 这是【按窗口比例】而非绝对 token：换 200K 窗口的 provider 时会变成 40K。
+ *   若将来固定走小窗口模型，应改用 modelPolicies 按模型单独设阈值。
+ */
+export const COMPACTION_THRESHOLD_RATIO = (() => {
+  try {
+    const v = Number(process.env.DSH_ENG_COMPACTION_RATIO);
+    if (Number.isFinite(v) && v > 0 && v < 1) return v;
+  } catch (e) {}
+  return 0.2;
+})();
+/** 官方 @deepseek-ai/dsh-compaction-basic 的默认阈值比例（用于面板标注来源）。 */
+export const COMPACTION_THRESHOLD_RATIO_OFFICIAL = 0.8;
 /** A14：下限。小窗口（32K/64K）若按比例算会过频压缩，压到 60K 以下没有意义。 */
 export const COMPACTION_THRESHOLD_FLOOR = 60000;
 /** A14：取不到 contextWindow 时沿用原值（历史上就是 ~100K），并打日志。 */
 export const COMPACTION_THRESHOLD_FALLBACK = 100000;
+
+/**
+ * 【2026-11-12 修复】工程模式 preset 里 compaction 那一段的**实际配置**。
+ *
+ * 为什么要把它写在这里：面板要显示"真实生效的阈值"，就必须知道
+ *   headroomTokens 与 thresholdRatio 到底是多少。以前面板只按 0.7 硬算，
+ *   而 preset 又自己改过 0.48→0.8，两边永远对不上。
+ * 这里给出与 `preset-engineering.patch.yml` 中
+ *   `compaction-engineering.config` **逐字一致**的值；
+ * 改 preset 时必须同步改这里（下面有测试守着）。
+ *
+ * ⚠️ 特别注意 `headroomTokens` 的双重身份（这是 11-08 那批压缩失败的真因）：
+ *   宿主 dsh-compaction-basic/lib/index.js:63-64
+ *     const headroomTokens = config.headroomTokens ?? 65536;
+ *     const maxTokens = config.maxTokens ?? headroomTokens;
+ *   → 没显式配 maxTokens 时，**headroomTokens 同时就是摘要器的输出上限**。
+ *   11-08 把它从 48000 降到 8000，摘要 maxTokens 跟着变 8000，
+ *   而 prompt.js 要求逐行抄写几千个 F/M 编号 → 必然截断 → 54 次 empty-stream。
+ *   所以现在 preset 里显式加了 maxTokens，切断这层联动。
+ */
+export const ENG_COMPACTION_CONFIG = {
+  // 【2026-11-12 用户指定】阈值 200K：1M 窗口 × 0.2 = 200000。
+  thresholdRatio: 0.2,
+  headroomTokens: 8000,
+  /** 摘要器输出上限：显式钉住，不再跟着 headroom 走。
+   *  16000 而非 48000：当前路由 buddy 的 maxTokens=128000，
+   *  摘要请求 = chunkChars 输入 + maxTokens 输出，必须留足余量。 */
+  maxTokens: 16000,
+  /** 单段字符预算（分段摘要时每段多少字符）。 */
+  chunkChars: 36000,
+  retainRatio: 0.16,
+};
 
 /** 只认【独占一行】的标记（前后仅允许空白），与文档契约一致。 */
 export function hasStandaloneMarker(text, marker) {
@@ -111,21 +164,45 @@ export function latestContextWindow(events, header) {
  */
 export function explainCompactionLimit(contextWindow, ratio, headroomTokens, reservedTokens) {
   const cw = Number(contextWindow);
+  // ── 【2026-11-12 修复】三个参数缺省时取【工程模式真实配置】，不再各回各的默认
+  // 旧实现：ratio 缺省回 COMPACTION_THRESHOLD_RATIO（0.7），headroom 缺省回 0，
+  //   reserved 缺省回 0 —— 三者叠加后算出来的 limiter 和阈值都跟宿主不一致。
+  //   实测（减速器任务复盘）：宿主实际 threshold=800000/limiter=ratio，
+  //   而面板按旧默认算出 700000，且 reserved 恒 0 让 limiter 永远算 ratio。
   const r = Number.isFinite(Number(ratio)) && Number(ratio) > 0
     ? Number(ratio) : COMPACTION_THRESHOLD_RATIO;
-  const head = Number.isFinite(Number(headroomTokens)) ? Math.max(0, Number(headroomTokens)) : 0;
-  const res = Number.isFinite(Number(reservedTokens)) ? Math.max(0, Number(reservedTokens)) : 0;
+  const head = Number.isFinite(Number(headroomTokens))
+    ? Math.max(0, Number(headroomTokens))
+    : ENG_COMPACTION_CONFIG.headroomTokens;
+  const res = Number.isFinite(Number(reservedTokens))
+    ? Math.max(0, Number(reservedTokens))
+    : 0;
   if (!Number.isFinite(cw) || cw <= 0) {
     return { limitRatioTokens: null, limitBudgetTokens: null, limiter: 'window', threshold: null };
   }
   const limitRatioTokens = Math.floor(cw * r);
   const limitBudgetTokens = Math.floor(cw - res - head);
+  if (limitBudgetTokens <= 0) {
+    // 预算项为负 → 宿主会抛 TargetPressureConfigError（压缩彻底不工作）。
+    // 如实标出来，别让它看起来只是"阈值偏低"。
+    return {
+      limitRatioTokens, limitBudgetTokens, limiter: 'budget',
+      threshold: null,
+      error: 'pressure-budget-exhausted',
+      message: ('预算项为负（窗口 %d − reserved %d − headroom %d）：'
+                + '宿主会抛 TargetPressureConfigError，压缩不会工作。'
+                + '请调小 headroom 或换更大窗口的模型。' % (cw, res, head)),
+    };
+  }
   const limiter = limitBudgetTokens < limitRatioTokens ? 'budget' : 'ratio';
   return {
     limitRatioTokens,
     limitBudgetTokens,
     limiter,
     threshold: Math.floor(Math.min(limitRatioTokens, limitBudgetTokens)),
+    ratio: r,
+    headroomTokens: head,
+    reservedTokens: res,
   };
 }
 
@@ -165,6 +242,17 @@ export function resolveCompactionThreshold(contextWindow) {
     source: 'contextWindow',
     ratio: COMPACTION_THRESHOLD_RATIO,
     exceedsWindow: false,
+    // ── 【2026-11-12】附带真实 limiter 明细，面板可直接展示"为什么是这个值"
+    limit: explainCompactionLimit(cwInt, COMPACTION_THRESHOLD_RATIO,
+                                  ENG_COMPACTION_CONFIG.headroomTokens, 0),
+    // ⚠️ 摘要器输出上限：若与头寸联动（未显式配 maxTokens）会被压到 headroom 大小，
+    //   prompt 要求逐行抄写几千条编号时必然截断 → empty-stream。
+    summaryMaxTokens: ENG_COMPACTION_CONFIG.maxTokens,
+    summaryMaxTokensNote: ('摘要器输出上限 = %d（已显式配置，不再跟随 headroomTokens=%d）。'
+                           + '未显式配置时宿主会让它等于 headroom，'
+                           + '11-08 那批 empty-stream 就是这么来的。')
+      .replace('%d', String(ENG_COMPACTION_CONFIG.maxTokens))
+      .replace('%d', String(ENG_COMPACTION_CONFIG.headroomTokens)),
   };
 }
 
@@ -343,6 +431,23 @@ export function collectWaitingEvidence(o) {
       }
       const awaiting = wf.awaiting || wf.waiting_for;
       if (awaiting) evidence.push('workflow_state awaiting=' + String(awaiting).slice(0, 60));
+      // ── 【2026-11-12 修复·BUG-2】workflow_gate 从来不写 pending/awaiting ──
+      // 现场（减速器任务）：报告里明写"workflow_state.json step=context_asked（挂
+      // pending）"，但上面两条取的都是 `wf.pending` / `wf.awaiting` —— 这两个键
+      // **workflow_gate.py 根本不会写**（我核过实际落盘的 workflow_state.json，
+      // 键只有 step / task / task_id / user_choice / mechanics_result …）。
+      // 于是这条证据永远拿不到，只能靠"房间心跳"那一条窄通道。
+      //
+      // 真实语义：step 本身就是门禁的等待态 ——
+      //   `depth_asked`   问完"要不要严格把关参数"，等用户答才推进；
+      //   `context_asked` 问完背景，等用户答才出问题集。
+      // 这两个 step 下模型除了等用户确实没有别的选择，正是要放行的情形。
+      // （`user_selected` 之后是干活阶段，不在等人，不能算证据。）
+      const WAIT_STEPS = ['depth_asked', 'context_asked', 'questions_asked', 'awaiting_answer'];
+      const step = wf.step === undefined || wf.step === null ? '' : String(wf.step);
+      if (WAIT_STEPS.indexOf(step) >= 0) {
+        evidence.push('workflow_state step=' + step + '（门禁在等用户作答）');
+      }
     }
   } catch (e) {}
 

@@ -20,7 +20,7 @@
   ③ 十阶段流水线 —— 阶段必须按序推进，跳阶段 = 拒绝。
   ④ 子代理数量由【总计子代理】决定 —— 不再固定 3 个；
      数量与依据必须落盘，且必须来自 `decided_by == 总计子代理`。
-  ⑤ 总理子代理 —— 固定存在；建模小屋必须向其上报
+  ⑤ 零件验收 —— 由外部监控器逐件核验（无总理子代理）
      三道防线凭据 / 尺寸 / 名称 / 相邻配合零件，缺字段 = 拒绝。
   ⑥ 相邻零件尺寸一致性 —— 不一致时【必须】升级给父代理干涉。
   ⑦ 零件数据持久台账 —— 可反查（见 part_registry.py）。
@@ -456,8 +456,9 @@ def _fresh_plan():
         #   rooms 快照，于是 mode_gate / defense_gate / workflow_gate 三处
         #   room_type 各说各话（drivetrain/sensor/drawing vs transmission/...）。
         "subagent_config": None,
-        "prime_reports": [],   # 建模小屋 → 总理子代理 的上报
-        "prime_consistency": None,
+        # prime_reports 已删除：零件的完成事实由监控器逐件事件（part-saved）
+    # 与三大防线验收决定，不再依赖某个代理"上报"一个零件建好了。
+        # prime_consistency 已删除：邻接尺寸一致性由监控器 verify-task 计算。
         "notes": [],
     }
 
@@ -1686,7 +1687,7 @@ def _require_analyst_actor(op, actor=None, work_dir=None):
 #: .MODELING_ROOM_TYPES / mode_gate 波次路由对齐；不在此表 = 必然漏启动或免校核）。
 CANONICAL_ROOM_TYPES = (
     "structural", "transmission", "housing", "support", "spring", "thermal",
-    "corrosion", "assembly", "drafting", "prime",
+    "corrosion", "assembly", "drafting",
 )
 
 #: 历史遗留 / 同义写法 → 规范类型。
@@ -1719,8 +1720,8 @@ ROOM_TYPE_ALIASES = {
     "assembly-validation": "assembly",
     "总装": "assembly",
     "验证": "assembly",
-    "prime_agent": "prime",
-    "总理": "prime",
+        # "prime_agent" 已删除（总理子代理角色取消）
+    # "总理" 角色已删除（监控器接替它的验收职责）
 }
 
 
@@ -2019,9 +2020,9 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None, actor=None):
             return {"ok": False,
                     "error": ("子代理【%s】没有列出 parts（该屋负责哪些零件）。"
                               "编制必须写明零件范围，否则无法做归属校验。" % name),
-                    "hint": ("即使本屋【不建零件】（总装 / 出图 / 总理），"
+                    "hint": ("即使本屋【不建零件】（总装 / 出图），"
                              "也要写至少一个占位名：总装写 DSH_XX装配体，"
-                             "出图写 DSH_XX图纸，总理写 全任务零件台账。"
+                             "出图写 DSH_XX图纸。"
                              "空数组 [] 会被拒绝。"),
                     "example_parts": ["DSH_XX装配体"]}
         if not str(r.get("why") or "").strip():
@@ -2038,7 +2039,7 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None, actor=None):
             _miss = (_raw_t is None or not str(_raw_t).strip())
             _allowed = _nz.get("allowed") or [
                 "structural", "transmission", "housing", "support", "spring",
-                "thermal", "corrosion", "assembly", "drafting", "prime"]
+                "thermal", "corrosion", "assembly", "drafting"]
             _out = {
                 "ok": False,
                 "error": ("子代理【%s】%s：%s"
@@ -2093,7 +2094,7 @@ def set_subagent_plan(rooms, rationale, decided_by, work_dir=None, actor=None):
     #   而它可能已经上下文耗尽（同一次任务里就发生了），只能重新 fork。
     #
     # 这两个房间不属于"设计决策"：它们由【流程本身】决定（任何 Mode 2 任务
-    #   都必须装配 + 出图），和固定的【总理子代理】同一性质。
+    #   都必须装配 + 出图）。
     #   让模型去记住这件事，属于把流程约束放在提示词里——正是本项目一直
     #   在消灭的模式。因此这里【代码级自动补齐】：
     #     · 已有同 type 房间 → 不重复添加（尊重总计子代理自己的命名）；
@@ -2250,10 +2251,10 @@ def sync_rooms_snapshot(rooms, work_dir=None, source="workflow_gate.select",
     """【Bug③ 修复】把门禁侧的权威房间表回写进 mode2_plan.json 的 rooms 快照。
 
     为什么还需要"反向同步"：
-      set-subagent-plan 写的是【编制】的快照（不含固定追加的总理子代理）；
-      而 workflow_gate.select 会追加固定的【总理子代理】并可能重建配置。
-      若只单向同步，plan 快照与 workflow_state 仍会差一个房间 → 三处一致性
-      永远判不一致（假告警），真不一致反而被淹没。
+      set-subagent-plan 写的是【编制】的快照；workflow_gate.select 会据此重建
+      运行期房间配置（只含编制里的房间）。两边若只单向同步，plan 快照与
+      workflow_state 仍可能差房间 → 三处一致性判不一致（假告警），
+      真不一致反而被淹没。
       因此 select 落盘后调用本函数，把【最终生效的】房间表写回 plan 快照。
 
     Args:
@@ -2363,7 +2364,7 @@ def room_types_report(work_dir=None):
     # 波1 建模类类型（workflow_gate.WAVE1_TYPES / defense_gate.MODELING_ROOM_TYPES）。
     _wave1 = ("structural", "transmission", "housing", "support", "spring",
               "thermal", "corrosion")
-    _finite = ("assembly", "drafting", "prime")
+    _finite = ("assembly", "drafting")
 
     # 参与比对的房间 = 编制 / 快照 / workflow_state 的并集。
     # mode_state.rooms 是【历史遗留台账】（可能还是上一轮任务的房间），
@@ -2425,15 +2426,13 @@ def room_types_report(work_dir=None):
         return normalize_room_type(v).get("type") if v else None
 
     # 快照 vs 编制 —— Bug③ 的直接判据（含 raw，便于一眼看出旧类型）
-    # 例外：固定的总理子代理只存在于快照（select 追加），编制里没有它属正常，
-    #   不算冲突 —— 否则每次都会假告警，把真不一致淹没。
+    # 注：原先这里对"固定追加的总理子代理"做例外处理（只存在于快照、编制里没有
+    #   属正常）。该角色已删除，快照不再追加任何固定房间，因此例外也一并去掉 ——
+    #   留着它只会让真正的不一致被当成"固定角色"静默放过。
     _snap_diff, _snap_fixed_only = [], []
     for n in sorted(set(src_plan_rooms) | set(src_snapshot)):
         a, b = _norm_or_none(src_plan_rooms.get(n)), _norm_or_none(src_snapshot.get(n))
         if a == b:
-            continue
-        if a is None and b == PRIME_ROOM_TYPE:
-            _snap_fixed_only.append(n)
             continue
         _snap_diff.append({"room": n,
                            "subagent_plan": a,
@@ -2548,236 +2547,15 @@ def get_subagent_plan(work_dir=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 八、★ 总理子代理：固定存在 + 上报契约
+# 八、房间实时状态（总理子代理的角色已删除，见文件末尾的迁移说明）
 # ═══════════════════════════════════════════════════════════════════════════
-PRIME_ROOM_NAME = "总理子代理"
-PRIME_ROOM_TYPE = "prime"
-
-#: 建模小屋向总理子代理上报时【必须】携带的字段。
-#: 用户原话：「都要给总理指代理发三道防线验证的文件链接，尺寸，名字，
-#:          上下左右等会直接接触的零件配合的零件。」
-REQUIRED_REPORT_FIELDS = (
-    "part_name",     # 名字
-    "room",          # 哪个小屋上报的
-    "file",          # 零件文件路径（链接）
-    "dims",          # 尺寸
-    "credentials",   # 三道防线凭据（材料/物理/领域）
-    "adjacent",      # 上下左右等直接接触/配合的零件
-)
-
-#: 三道防线凭据的三条线（缺一条即不合格）
-REQUIRED_CREDENTIAL_KEYS = ("material", "physics", "domain")
-
-
-def prime_room_definition(work_dir=None):
-    """总理子代理的房间定义（固定存在，不参与"数量由总计子代理决定"）。"""
-    return {
-        "name": PRIME_ROOM_NAME,
-        "type": PRIME_ROOM_TYPE,
-        "fixed": True,
-        "why": ("【固定角色】统一规划尺寸、校验相邻零件尺寸一致性、"
-                "汇总全部零件数据为 docx 交付；不一致时升级父代理干涉。"),
-        "duties": [
-            "① 统一规划关键尺寸（给各建模小屋下发同一套尺寸口径）",
-            "② 接收各建模小屋上报：三道防线凭据链接 / 尺寸 / 名称 / 相邻配合零件",
-            "③ 校验相邻零件尺寸是否一致（调 part_registry.check_adjacency_consistency）",
-            "④ 发现不一致 → 标记 escalate_to_parent=true，交父代理做干涉处理",
-            "⑤ 持久维护零件数据台账（part_registry），支持按零件反查关联",
-            "⑥ 全部完成后汇总导出 docx，交主对话",
-            # ── 【2026-10-28 重构】用户要求："总理子代理要一直盯着其他子代理"──
-            "⑦ 【监工】建模期间每轮读 mode_gate.py room-board --json，盯住每个建模小屋的 state："
-            "running/waiting_sw/idle 都算活着（严禁判死）；unbound 让父代理补 subagent-assign；"
-            "dead 才上报父代理走 recover；done 则核对它的 prime-report 是否齐全。",
-            "⑧ 【收件缺口】用 mode2_flow.py prime-board 看还有哪些零件没上报，"
-            "缺口必须催办，不能等到 room-end 才发现。",
-        ],
-        "spawn_timing": ("与 wave1 全部建模小屋【同一条回复内同时 fork】（不得等建模完成后再开）；"
-                         "长生命周期，不阻塞波次推进；wave3 出图完成后 room-end。"),
-        "watch_commands": [
-            "python \"<根>\\tools\\mode_gate.py\" room-board --json",
-            "python \"<根>\\tools\\mode2_flow.py\" prime-board --json",
-        ],
-    }
-
-
-def record_prime_report(report, work_dir=None):
-    """建模小屋 → 总理子代理 的上报登记。**缺字段即拒绝。**
-
-    这是"三道防线凭据 + 尺寸 + 名字 + 相邻配合零件必须上报"的强制点：
-    任何一个字段缺失，本函数返回 ok=False，房间无法完成上报闭环。
-    """
-    if not isinstance(report, dict):
-        return {"ok": False, "error": "上报必须是对象"}
-    # ── 【语义修正】必填校验必须区分"字段缺失"与"字段为空值" ──────────────
-    # 坑：`adjacent` 的合法取值【包含空数组】—— 它表示"该零件确实不与任何
-    #   零件接触"。若用 `not report.get(k)` 一把梭，空数组会被当成"缺字段"，
-    #   于是"独立件"永远上报不了，流程被误锁死。
-    # 现在：adjacent 只要求"键存在且是 list"（空 list 合法）；
-    #   其余字段要求"非空"。
-    missing = []
-    for k in REQUIRED_REPORT_FIELDS:
-        if k == "adjacent":
-            if k not in report:
-                missing.append(k)
-            continue
-        if not report.get(k):
-            missing.append(k)
-    if missing:
-        return {"ok": False,
-                "error": ("【上报不合格】缺少必填字段：%s。"
-                          "总理子代理需要：名字 / 尺寸 / 三道防线凭据链接 / "
-                          "直接接触配合的零件。" % "、".join(missing)),
-                "required": list(REQUIRED_REPORT_FIELDS),
-                "got": sorted(report.keys())}
-
-    # 三道防线凭据必须三条线齐全（允许值为"未产出"，但要显式说明，不能凭空缺）
-    cred = report.get("credentials") or {}
-    if not isinstance(cred, dict):
-        return {"ok": False, "error": "credentials 必须是对象（含 material/physics/domain）"}
-    _miss_cred = [k for k in REQUIRED_CREDENTIAL_KEYS if k not in cred]
-    if _miss_cred:
-        return {"ok": False,
-                "error": ("【三道防线凭据不全】缺少：%s。"
-                          "三条线（材料/物理/领域）都必须给出链接或明确标注未产出。"
-                          % "、".join(_miss_cred)),
-                "required": list(REQUIRED_CREDENTIAL_KEYS)}
-
-    # 尺寸必须有内容
-    dims = report.get("dims")
-    if not dims:
-        return {"ok": False, "error": "dims（尺寸）为空 —— 上报必须带尺寸。"}
-    if isinstance(dims, dict) and not dims:
-        return {"ok": False, "error": "dims 是空对象 —— 上报必须带具体尺寸。"}
-
-    # 相邻零件必须是数组（可以为空数组，表示"确实不与任何零件接触"，
-    # 但要显式给出；缺失已在上面被 missing 拦掉）
-    adj = report.get("adjacent")
-    if not isinstance(adj, list):
-        return {"ok": False, "error": "adjacent 必须是数组（无接触件时写 []）"}
-
-    plan = load_plan(work_dir)
-    if plan.get("_load_error"):
-        return {"ok": False, "error": plan["_load_error"]}
-    rec = {
-        "part_name": str(report.get("part_name")).strip(),
-        "room": str(report.get("room")).strip(),
-        "file": str(report.get("file")).strip(),
-        "dims": dims,
-        "material": report.get("material"),
-        "credentials": {k: cred.get(k) for k in REQUIRED_CREDENTIAL_KEYS},
-        "adjacent": [str(a).strip() for a in adj if str(a).strip()],
-        "interfaces": report.get("interfaces") or [],
-        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "ts": time.time(),
-    }
-    # == 【v2 回归复测 S3 修复】回执制：每次上报都发一个 receipt_id ==
-    # 报告 v2 第8节：「record_prime_report 仍只写 plan["prime_reports"]，
-    #   无 receipt id；全 tools 搜 receipt/回执 仅 webots 无关字段。判定：未修。」
-    #
-    # 为什么必须有回执：报告 §15.2 S3 的判据是
-    #   「每个零件有总理回执 id；无回执的零件不计入完成」。
-    #   没有 receipt_id 时，"上报过"与"没上报过"只能靠数组长度猜，
-    #   重复上报覆盖后更无从追溯是哪一次被采纳 —— 完成度就无法机器判定。
-    #
-    # 设计：
-    #   · receipt_id 由 (part_name + room + 落盘文件 + 尺寸摘要) 派生，
-    #     同一零件同内容重复上报 → 同一个 id（幂等，便于去重）；
-    #     内容变了（重做后尺寸不同）→ 新 id（可追踪是新一版）。
-    #   · 同时写进 plan["prime_receipts"] 作为【只增不减】的回执台账。
-    import hashlib as _hl_rr
-    _seed = json.dumps({
-        "part_name": rec.get("part_name"),
-        "room": rec.get("room"),
-        "file": rec.get("file"),
-        "dims": rec.get("dims"),
-    }, ensure_ascii=False, sort_keys=True)
-    rec["receipt_id"] = "PR-" + _hl_rr.sha256(
-        _seed.encode("utf-8")).hexdigest()[:16].upper()
-
-    # 同一零件重复上报 → 覆盖（保留最新），保证总理看到的是终态
-    lst = [x for x in plan.get("prime_reports", [])
-           if not (isinstance(x, dict) and x.get("part_name") == rec["part_name"])]
-    lst.append(rec)
-    plan["prime_reports"] = lst
-    # 回执台账：只追加不去重抹掉历史（同一 receipt_id 只记一次）
-    _rc = plan.get("prime_receipts")
-    if not isinstance(_rc, list):
-        _rc = []
-    if not any(isinstance(x, dict) and x.get("receipt_id") == rec["receipt_id"]
-               for x in _rc):
-        _rc.append({"receipt_id": rec["receipt_id"],
-                    "part_name": rec["part_name"], "room": rec["room"],
-                    "file": rec["file"], "at": rec["at"], "ts": rec["ts"]})
-    plan["prime_receipts"] = _rc
-    save_plan(plan, work_dir)
-    return {"ok": True, "part_name": rec["part_name"],
-            "receipt_id": rec["receipt_id"],
-            "total_reports": len(lst),
-            "total_receipts": len(_rc),
-            "note": ("已登记到总理子代理台账，回执号 %s。"
-                     "无回执的零件不计入完成。" % rec["receipt_id"])}
-
-
-def prime_receipts(work_dir=None):
-    """列出全部总理回执（S3 回执制）。无回执的零件不计入完成。"""
-    plan = load_plan(work_dir)
-    if plan.get("_load_error"):
-        return {"ok": False, "error": plan["_load_error"]}
-    _rc = plan.get("prime_receipts") or []
-    return {"ok": True, "count": len(_rc), "receipts": _rc}
-
-
-def check_part_receipted(part_name, work_dir=None):
-    """某零件是否已有回执（判"能否计入完成"的唯一依据）。"""
-    _n = str(part_name or "").strip()
-    if not _n:
-        return {"ok": False, "error": "缺少零件名"}
-    r = prime_receipts(work_dir)
-    if not r.get("ok"):
-        return r
-    hits = [x for x in r["receipts"] if str(x.get("part_name")) == _n]
-    return {"ok": True, "part": _n, "receipted": bool(hits),
-            "receipt_id": (hits[-1].get("receipt_id") if hits else None),
-            "count": len(hits)}
-
-
-def prime_reports(work_dir=None):
-    plan = load_plan(work_dir)
-    if plan.get("_load_error"):
-        return {"ok": False, "error": plan["_load_error"]}
-    reps = plan.get("prime_reports", [])
-    return {"ok": True, "count": len(reps), "reports": reps}
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ★ 零件进度表（parts board）—— 用户要求（2026-11-07，图二红线下方那块）
-# ═══════════════════════════════════════════════════════════════════════════
-# 用户原话：「我想这样子分类，红线上面是子代理，下面是要造的零件的表，然后
-#   是总计子代理分析完成之后，把所有的零件都给放在那个展示表中……因为不是会
-#   开总理子代理去看尺寸吗，那么就交给总理子代理去看零件完成度，正在建，那么
-#   就同步成『正在建 xx 零件』，同理『未开始，完成』都是一样的，还有需要
-#   『重建』，还有假设状态是正在建模，那么假设 DSH 断了，比如直接关了 DSH
-#   这种情况，那就显示『失败』」。
-#
-# 状态机（唯一权威，按优先级从高到低判定）：
-#   done        已有 prime-report（零件被总理子代理验收过）
-#   rebuilding  房间被 room-fail/restart 过，正在重做
-#   building    房间正在建模（stage=modeling / 已 room-artifact 但还没上报）
-#   failed      DSH 进程断了（pulse 停了）而零件还没完成 —— 用户明确要求
-#               「正在建模时 DSH 断了 → 显示失败」
-#   not_started 编制里有、房间还没开始
-PART_STATE_DONE = "done"
-PART_STATE_BUILDING = "building"
-PART_STATE_REBUILDING = "rebuilding"
-PART_STATE_FAILED = "failed"
-PART_STATE_TODO = "not_started"
-
-PART_STATE_LABEL = {
-    PART_STATE_DONE: "完成",
-    PART_STATE_BUILDING: "正在建",
-    PART_STATE_REBUILDING: "需要重建",
-    PART_STATE_FAILED: "失败",
-    PART_STATE_TODO: "未开始",
-}
+# 这里原本定义 PRIME_ROOM_NAME / PRIME_ROOM_TYPE / REQUIRED_REPORT_FIELDS /
+# REQUIRED_CREDENTIAL_KEYS，支撑"总装子代理固定存在 + 建模小屋向它上报"。
+# 用户要求取消该角色后，这些常量没有任何读者，故一并删除：
+#   · 零件是否建好 → 监控器 part-saved 事件（带文件指纹与 generation）；
+#   · 三道防线凭据 → 监控器 review-part 逐件核验（材料/物理/领域 + 哈希）；
+#   · 相邻尺寸     → 监控器 verify-task 的台账审计（part_registry）。
+# 保留本注释是为了防止后来者"重新引入一个代理来汇总"——那正是被删除的设计。
 
 
 def _room_live_map(work_dir=None):
@@ -2808,7 +2586,7 @@ def _pulse_alive():
 def autonomy_mode(work_dir=None):
     """读本轮"搭建方式" A/B/C（A=完全自主，无需问；B/C=需要问）。
 
-    用户要求（原文）：「总理子代理先删除对应的错误文件（如果没有选择自主
+    用户要求（原文）：「先删除对应的错误文件（如果没有选择自主
       干完话，即总计子代理之后还能问的话，应该先调用 DSH 内部的提问用户，
       先问再删，但是假设选择了『A = 完全自主搭建』那就不用问，直接删即可）」。
 
@@ -2892,302 +2670,82 @@ def _room_rebuild_flags():
 
 
 def parts_board(work_dir=None):
-    """★ 零件进度表：编制里每个零件一行，供子代理面板红线下方渲染。
+    """★ 零件进度表 —— 数据源 = 外部监控器（唯一权威）。
+
+    ── 为什么整段重写 ──────────────────────────────────────────────────
+    旧实现从 mode2_plan 的编制 + prime_reports（总理子代理上报）推导状态：
+      · "完成"= 总理子代理报过一次；"正在建"= 房间 report_stage 说 modeling。
+      这两个都是【自报】，没有任何东西核对零件文件与验收凭据。
+    教程 4 要求把数据读取换成监控器 board：
+      · 状态来自监控器（part-start/part-saved/part-failed 逐件事件 + 验收结论）；
+      · 前端按 label/state/detail/checks 渲染，保留 counts.done/total；
+      · 后台断开时展示不可用或缓存时间，【禁止回退到旧 prime-report 判完成】。
 
     Returns: {ok, parts:[{name, room, room_type, state, label, detail,
-                          file, has_report, report_at, room_state, room_stage,
-                          artifact_at, safe_to_restart, next_action}],
-              summary:{counts, total, done, building, failed, rebuilding, not_started},
-              pulse_alive, generated_at}
+                          generation, file, has_report, checks,
+                          safe_to_restart}],
+              summary:{counts, total, done}, pulse_alive, quarantined,
+              generated_at, source:"sw_monitor", degraded?}
     """
-    plan = load_plan(work_dir)
-    if plan.get("_load_error"):
-        return {"ok": False, "error": plan["_load_error"]}
-    sp = plan.get("subagent_plan") or {}
-    rooms = sp.get("rooms") or []
-    reports = plan.get("prime_reports") or []
-    rep_by_part = {}
-    for r in reports:
-        if isinstance(r, dict) and r.get("part_name"):
-            rep_by_part[str(r.get("part_name")).strip()] = r
-    live = _room_live_map(work_dir)
-    rebuild = _room_rebuild_flags()
-    pulse = _pulse_alive()
-
+    try:
+        import sw_monitor_client as _mc
+    except Exception as e:
+        return {"ok": False, "source": "sw_monitor",
+                "error": "缺少 sw_monitor_client.py: %r" % (e,)}
+    if not _mc.enabled():
+        return {"ok": False, "source": "sw_monitor", "degraded": True,
+                "error": "未接入外部监控器，逐零件看板不可用。",
+                "hint": ("旧实现读 prime_reports 判「完成」，该数据源已随总理子代理一起删除。"
+                         "启动 DSH-SW-Monitor 并 mode_gate.py sw-monitor attach --drained 后重试。"),
+                "parts": [], "summary": {"counts": {}, "total": 0, "done": 0},
+                "pulse_alive": False, "quarantined": False}
+    try:
+        b = _mc.board()
+    except Exception as e:
+        code = getattr(e, "code", "MONITOR_ERROR")
+        return {"ok": False, "source": "sw_monitor", "degraded": True,
+                "code": code, "error": str(e),
+                "hint": "监控器不可达：看板展示的是「不可用」，不是「没零件」。",
+                "parts": [], "summary": {"counts": {}, "total": 0, "done": 0},
+                "pulse_alive": False, "quarantined": False}
     parts = []
-    seen = set()
-    for room in rooms:
-        rname = str(room.get("name") or "").strip()
-        rtype = room.get("type")
-        row = live.get(rname) or {}
-        rstate = str(row.get("state") or "")
-        rstage = str(row.get("report_stage") or "")
-        rnext = row.get("next_action")
-        r_safe = row.get("safe_to_restart")
-        art = row.get("artifact") if isinstance(row.get("artifact"), dict) else {}
-        for p in (room.get("parts") or []):
-            pname = str(p).strip()
-            if not pname or pname in seen:
-                continue
-            seen.add(pname)
-            rep = rep_by_part.get(pname)
-            has_rep = bool(rep)
-            # ── 状态推导（顺序即优先级）────────────────────────────────
-            if has_rep:
-                state = PART_STATE_DONE
-                detail = "已由总理子代理验收（" + str((rep or {}).get("at") or "") + "）"
-            elif rname in rebuild and rstate not in ("done",):
-                # ── 【需要重建】建过但失败/被回退（用户要求区分于"未开始"）
-                state = PART_STATE_REBUILDING
-                _why = (rebuild.get(rname) or {}).get("reason")
-                detail = ("房间已回退，需要重建"
-                          + ("（原因：" + str(_why) + "）" if _why else ""))
-            elif rstate == "failed":
-                state = PART_STATE_REBUILDING
-                detail = "房间已 fail，需要重做"
-            elif rstage in ("modeling", "modelling", "building", "sw_modeling")                     or rstate in ("running", "waiting_sw"):
-                state = PART_STATE_BUILDING
-                detail = ("正在建模（房间 " + (rstate or "running") + "）"
-                          if rstate != "waiting_sw" else "正在等 SW 锁（属于正常等待）")
-            elif art.get("path") and art.get("exists") is not False:
-                # 已经有产物文件但还没上报 → 视为"正在建/待上报"
-                state = PART_STATE_BUILDING
-                detail = "已有产物文件，等待总理子代理验收"
-            elif pulse is False and rstate not in ("done",):
-                # 用户明确要求：正在建模时 DSH 断了 → 失败
-                state = PART_STATE_FAILED
-                detail = "DSH 进程已断（pulse 停止），该零件不会自己恢复"
-            elif rstate in ("dead", "detached"):
-                state = PART_STATE_FAILED
-                detail = "子代理失联（" + rstate + "）"
-            elif rstage in ("params_shown", "params_confirmed", "registered"):
-                state = PART_STATE_BUILDING if rstage == "params_confirmed" else PART_STATE_TODO
-                detail = {"params_shown": "参数表已出，等待确认",
-                          "params_confirmed": "参数已确认，准备建模",
-                          "registered": "房间已登记，尚未开工"}[rstage]
-            else:
-                state = PART_STATE_TODO
-                detail = "未开始"
-            parts.append({
-                "name": pname,
-                "room": rname,
-                "room_type": rtype,
-                "state": state,
-                "label": PART_STATE_LABEL.get(state, state),
-                "detail": detail,
-                "has_report": has_rep,
-                "file": (rep or {}).get("file") if has_rep else (art.get("path") or None),
-                "report_at": (rep or {}).get("at") if has_rep else None,
-                "room_state": rstate or None,
-                "room_stage": rstage or None,
-                "artifact_at": art.get("at") or None,
-                "safe_to_restart": r_safe,
-                "next_action": rnext,
-            })
-
-    counts = {}
-    for p in parts:
-        counts[p["state"]] = counts.get(p["state"], 0) + 1
+    for row in (b.get("parts") or []):
+        if not isinstance(row, dict):
+            continue
+        parts.append({
+            "name": row.get("name"),
+            "room": row.get("room"),
+            "room_type": row.get("room_type"),
+            "state": row.get("state"),
+            "label": row.get("label"),
+            "detail": row.get("detail"),
+            "generation": row.get("generation"),
+            "file": row.get("file"),
+            "has_report": bool(row.get("has_report")),
+            "checks": row.get("checks") or {},
+            "safe_to_restart": bool(row.get("safe_to_restart")),
+        })
+    summary = b.get("summary") or {}
     return {
         "ok": True,
+        "source": "sw_monitor",
+        "task": b.get("task"),
+        "revision": b.get("revision"),
         "parts": parts,
+        "rooms": b.get("rooms") or {},
         "summary": {
-            "total": len(parts),
-            "counts": counts,
-            "done": counts.get(PART_STATE_DONE, 0),
-            "building": counts.get(PART_STATE_BUILDING, 0),
-            "rebuilding": counts.get(PART_STATE_REBUILDING, 0),
-            "failed": counts.get(PART_STATE_FAILED, 0),
-            "not_started": counts.get(PART_STATE_TODO, 0),
+            "counts": summary.get("counts") or {},
+            "total": summary.get("total", len(parts)),
+            "done": summary.get("done", 0),
         },
-        "pulse_alive": pulse,
-        "autonomy": can_delete_without_asking(work_dir),
+        "sw": b.get("sw") or {},
+        "pulse_alive": b.get("pulse_alive"),
+        "quarantined": b.get("quarantined"),
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "note": ("总理子代理是这张表的唯一维护者；房间状态来自 mode_gate.room-board（权威），"
-                 "零件完成度来自 prime-report。pulse_alive=false 表示 DSH 进程已断。"
-                 "autonomy.may_delete_silently=true 时（A 模式）可直接删失败件；"
-                 "否则必须先问用户。"),
+        "note": ("状态全部来自外部监控器：part-start/part-saved/part-failed 逐件事件，"
+                 "加上三大防线逐件验收结论。pulse_alive=false 表示宿主失联，"
+                 "此时看板显示的是「不可用」，不代表零件没建。"),
     }
-
-
-def prime_board(work_dir=None):
-    """【2026-10-28 重构】总理子代理的监工看板（只读）。
-
-    用户要求："总理子代理要一直盯着第二的其他子代理，去干活"。
-    本命令把"该盯什么"变成一份可直接判断的清单：
-      · rooms：每个建模小屋的实时 state（来自 mode_gate.room-board，权威）
-      · report_gaps：编制里列了零件、但还没 prime-report 的零件
-      · consistency：最近一次相邻尺寸一致性结论
-      · actions：总理现在就该做的事（催报 / 等锁 / 报死 / 收尾）
-    """
-    plan = load_plan(work_dir)
-    if plan.get("_load_error"):
-        return {"ok": False, "error": plan["_load_error"]}
-    sp = plan.get("subagent_plan") or {}
-    rooms = sp.get("rooms") or []
-    reports = plan.get("prime_reports") or []
-    reported = {str(r.get("part_name") or "").strip() for r in reports}
-    expected = []
-    for r in rooms:
-        for p in (r.get("parts") or []):
-            p = str(p).strip()
-            if p and p not in expected:
-                expected.append(p)
-    gaps = [p for p in expected if p not in reported]
-
-    # 房间实时状态：委托 mode_gate 的权威看板（拿不到就显式降级，不猜）
-    live = None
-    live_error = None
-    try:
-        import mode_gate as _mg
-        if hasattr(_mg, "cmd_room_board"):
-            live = _mg.cmd_room_board(as_json=True)
-        else:
-            live_error = "mode_gate.cmd_room_board 不存在（版本不一致）"
-    except Exception as e:
-        live_error = repr(e)
-
-    actions = []
-    if live and isinstance(live, dict):
-        for room in (live.get("rooms") or []):
-            st = str(room.get("state") or "")
-            nm = room.get("room")
-            if st in ("waiting_sw", "running", "idle", "starting"):
-                continue
-            if st == "unbound":
-                actions.append({"room": nm, "action": "父代理补 subagent-assign",
-                                "why": "平台侧存活但未绑定，禁止 reset/restart"})
-            elif st == "dead":
-                actions.append({"room": nm, "action": "上报父代理走 recover/restart",
-                                "why": "平台确认已停止且无近期产物"})
-            elif st == "failed":
-                actions.append({"room": nm, "action": "待父代理重开该房间", "why": "房间已 fail"})
-    if gaps:
-        actions.append({"room": "*", "action": "催办未上报零件", "parts": gaps[:20],
-                        "why": "编制里有、总理台账没有"})
-    # ── 【2026-11-07】把零件进度表一并给出，总理子代理与 UI 共用同一份判定
-    try:
-        _pb = parts_board(work_dir)
-        _parts_view = _pb if _pb.get("ok") else {"ok": False, "error": _pb.get("error")}
-    except Exception as _e_pb:
-        _parts_view = {"ok": False, "error": repr(_e_pb)}
-    return {
-        "ok": True,
-        "prime_room": PRIME_ROOM_NAME,
-        "rooms": (live or {}).get("rooms") or [],
-        "live_error": live_error,
-        "expected_parts": expected,
-        "reported_parts": sorted(p for p in reported if p),
-        "report_gaps": gaps,
-        "consistency": plan.get("prime_consistency"),
-        "parts": _parts_view.get("parts") if isinstance(_parts_view, dict) else None,
-        "parts_summary": _parts_view.get("summary") if isinstance(_parts_view, dict) else None,
-        "pulse_alive": _parts_view.get("pulse_alive") if isinstance(_parts_view, dict) else None,
-        "actions": actions,
-        "hint": ("state=waiting_sw/running/idle/starting 都是活着，严禁判死；"
-                 "只有 dead 才允许 recover/restart。"),
-    }
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 九、★ 相邻尺寸一致性 → 不一致必须升级父代理
-# ═══════════════════════════════════════════════════════════════════════════
-def check_prime_consistency(work_dir=None, registry_work_dir=None):
-    """总理子代理的一致性校验入口。
-
-    优先委托 part_registry.check_adjacency_consistency（几何/接口级比对），
-    并把结果**固化到计划文件**，供交付前总闸复查。
-
-    ★ 强制点：只要存在 mismatch，就返回 ok=False 且
-      `escalate_to_parent=True` —— 不允许"发现了不一致还继续往下走"。
-    """
-    out = {"ok": False, "checked_pairs": 0, "mismatches": [],
-           "escalate_to_parent": False, "source": None}
-
-    reg = None
-    try:
-        import part_registry as _pr
-        reg = _pr
-    except Exception as e:
-        out["error"] = ("part_registry 不可用，无法做相邻尺寸一致性校验: %r。"
-                        "按 fail-closed 处理，视为【未评估】。" % (e,))
-        out["evaluated"] = False
-        return out
-
-    try:
-        res = reg.check_adjacency_consistency(work_dir=registry_work_dir or work_dir)
-    except TypeError:
-        # 兼容旧签名（无 work_dir 关键字）
-        try:
-            res = reg.check_adjacency_consistency()
-        except Exception as e:
-            out["error"] = "一致性校验抛异常: %r" % (e,)
-            out["evaluated"] = False
-            return out
-    except Exception as e:
-        out["error"] = "一致性校验抛异常: %r" % (e,)
-        out["evaluated"] = False
-        return out
-
-    out["source"] = "part_registry.check_adjacency_consistency"
-    out["checked_pairs"] = res.get("checked_pairs", 0)
-    out["mismatches"] = res.get("mismatches", []) or []
-    out["evaluated"] = bool(res.get("evaluated", True))
-    out["summary"] = res.get("summary")
-
-    if not out["evaluated"]:
-        # 没数据可查 ≠ 通过。保持 ok=False 且不给 escalate（不是"不一致"，是"查不了"）
-        out["error"] = ("无法评估相邻尺寸一致性（缺少邻接或接口数据）—— "
-                        "不得当作通过。请先补齐零件台账/接口信息。")
-        _persist_consistency(out, work_dir)
-        return out
-
-    if out["mismatches"]:
-        out["ok"] = False
-        out["escalate_to_parent"] = True
-        out["error"] = ("【相邻零件尺寸不一致】共 %d 处，必须交父代理做干涉处理，"
-                        "不得继续进入总装/交付。" % len(out["mismatches"]))
-    else:
-        out["ok"] = True
-        out["summary"] = out.get("summary") or ("共检查 %d 对相邻零件，尺寸一致。"
-                                                % out["checked_pairs"])
-    _persist_consistency(out, work_dir)
-    return out
-
-
-def _persist_consistency(out, work_dir):
-    try:
-        plan = load_plan(work_dir)
-        if plan.get("_load_error"):
-            return
-        plan["prime_consistency"] = dict(out, at=time.strftime("%Y-%m-%d %H:%M:%S"))
-        save_plan(plan, work_dir)
-    except Exception:
-        pass
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 九·补充、★ 总理子代理【统一核实】闸门（用户新增要求）
-# ═══════════════════════════════════════════════════════════════════════════
-# 用户原话：
-#   「总理子代理要统一核实过数据没有错误了，才能结束」
-#   「其总理子代理也要核实的相关数据是否一致，必须要保证真实」
-#
-# 关键点：**"核实"不能是自我声明**。若只让总理子代理调用一句
-#   `confirm(verified=True)`，那谁都能写 True —— 等于没有核实。
-#
-# 因此本闸门【自己从磁盘重算】，不采信任何调用方传入的"我已核实"：
-#   ① 真读台账文件（part_registry.json），算出每个零件与其邻接件的尺寸一致性；
-#   ② 用规范化 JSON 的 SHA-256 作为"当时到底核对了哪些数据"的指纹；
-#   ③ 与 part_registry 的 audit_verification 交叉验证 —— 证明数据没被绕过模块手改；
-#   ④ 只要还有 mismatch / open 的 unresolved / 指纹失配 → **拒绝结束**。
-#
-# 「才能结束」的落地：pre_delivery_check 会把本闸门作为**硬性前置**，
-#   未通过则 workflow_gate._archive_finished 拒绝归档（拒绝宣告完成）。
-
-#: 核实结论的落盘键（写在计划文件里，便于审计）
-PRIME_VERIFY_KEY = "prime_verification"
 
 
 def _sha256_json(obj):
@@ -3201,204 +2759,32 @@ def _sha256_json(obj):
     return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()
 
 
-def prime_verify_all(work_dir=None, registry_work_dir=None, verified_by=None):
-    """★ 总理子代理统一核实：**从磁盘重算**，不采信自我声明。
-
-    做四件事（任一不过 → ok=False，禁止结束）：
-      1. 读真实台账，做相邻零件尺寸一致性比对；
-      2. 检查 unresolved 台账里是否还有 open 的已知不一致；
-      3. 用 part_registry.audit_verification 验证数据未被绕过模块手改；
-      4. 用当前磁盘数据算指纹并落盘（供事后重算复现）。
-
-    Args:
-        work_dir: 模式二计划文件目录
-        registry_work_dir: 零件台账目录（默认同 work_dir）
-        verified_by: 核实者身份；默认 PRIME_ROOM_NAME（"总理子代理"）
-
-    Returns:
-        {"ok","verified","verified_by","verified_at","digest",
-         "parts_count","checked_pairs","mismatches","open_unresolved",
-         "tampered","blockers", ...}
-    """
-    _by = str(verified_by or PRIME_ROOM_NAME).strip() or PRIME_ROOM_NAME
-    out = {
-        "ok": False, "verified": False, "verified_by": _by,
-        "verified_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "digest": None, "parts_count": 0, "checked_pairs": 0,
-        "mismatches": [], "open_unresolved": [], "tampered": [],
-        "blockers": [], "enforced_by": "mode2_flow.prime_verify_all",
-    }
-    _reg_wd = registry_work_dir or work_dir
-
-    # ── 载入台账模块（不可用则 fail-closed，不得当作"已核实"）────────────
-    reg = None
-    try:
-        import part_registry as _pr
-        reg = _pr
-    except Exception as e:
-        out["blockers"].append(
-            "part_registry 不可用（%r）—— 无法核实数据真实性，按 fail-closed "
-            "视为【未核实】。" % (e,))
-        out["error"] = out["blockers"][0]
-        _persist_verify(out, work_dir)
-        return out
-
-    # ── ① 真读磁盘：零件总数 ─────────────────────────────────────────────
-    parts = {}
-    try:
-        lp = reg.list_parts(work_dir=_reg_wd)
-        if isinstance(lp, dict) and lp.get("ok"):
-            _items = lp.get("parts") or lp.get("items") or []
-            if isinstance(_items, dict):
-                parts = _items
-            else:
-                for _p in _items:
-                    if isinstance(_p, dict) and _p.get("name"):
-                        parts[_p["name"]] = _p
-    except Exception as e:
-        out["blockers"].append("读取零件台账失败：%r" % (e,))
-    out["parts_count"] = len(parts)
-    if not parts:
-        out["blockers"].append(
-            "零件台账为空 —— 没有任何可核实的数据（"
-            "总理子代理必须先收到各小屋上报并落账）。")
-
-    # ── ② 真读磁盘：相邻尺寸一致性 ───────────────────────────────────────
-    try:
-        cons = reg.check_adjacency_consistency(work_dir=_reg_wd)
-    except Exception as e:
-        cons = {"ok": False, "evaluated": False,
-                "error": "一致性校验异常：%r" % (e,)}
-    out["checked_pairs"] = cons.get("checked_pairs", 0)
-    out["mismatches"] = cons.get("mismatches") or []
-    out["consistency_evaluated"] = bool(cons.get("evaluated", True))
-    if out["mismatches"]:
-        out["blockers"].append(
-            "存在 %d 处相邻零件尺寸不一致，必须处理（改一致或用 "
-            "allow_mismatch + 理由显式放行并记入 unresolved）："
-            % len(out["mismatches"]))
-        for _m in out["mismatches"][:5]:
-            _d = _m.get("detail") if isinstance(_m, dict) else str(_m)
-            out["blockers"].append("    · %s" % _d)
-    elif not out["consistency_evaluated"]:
-        # 没数据可查 ≠ 通过（与全仓 fail-closed 口径一致）
-        out["blockers"].append(
-            "相邻尺寸一致性【未评估】（缺邻接或接口数据）—— 不得当作通过。"
-            " 请补齐各零件的 adjacent 与 interfaces（nominal_mm）。")
-
-    # ── ③ unresolved：还有 open 的已知不一致 → 不许结束 ──────────────────
-    try:
-        ul = reg.list_unresolved(work_dir=_reg_wd)
-        if isinstance(ul, dict) and ul.get("ok"):
-            out["open_unresolved"] = ul.get("items") or []
-    except Exception as e:
-        out["blockers"].append("读取 unresolved 台账失败：%r" % (e,))
-    if out["open_unresolved"]:
-        out["blockers"].append(
-            "unresolved 台账仍有 %d 处【未决】的已知不一致 —— "
-            "必须改一致，或显式 resolve-unresolved 并写明理由。"
-            % len(out["open_unresolved"]))
-
-    # ── ④ 防篡改：数据是否被绕过模块手改 ─────────────────────────────────
-    # ⚠️ 字段名以 part_registry 的**实际返回**为准（实测）：
-    #    parts_with_fingerprint / intact_count / tampered / parts_without_fingerprint，
-    #    而不是早期设计的 checked / intact / orphans。用错字段会导致
-    #    "明明有指纹却报没有指纹"的假阴性（实测踩到）。
-    # ⚠️ 特别注意：`orphans` 是 part_registry【函数内部】的局部变量名，
-    #    **不是**返回体的键；返回体的对应键是 `parts_without_fingerprint`。
-    #    写 av.get("orphans") 会静默拿到 None（审计脚本帮我抓到了这一处）。
-    try:
-        av = reg.audit_verification(work_dir=_reg_wd)
-        if isinstance(av, dict) and av.get("ok"):
-            out["tampered"] = av.get("tampered") or []
-            out["audit_checked"] = av.get("parts_with_fingerprint", 0)
-            out["audit_intact"] = av.get("intact_count", 0)
-            # 容错读：新键优先，旧/别名键兜底，两者都无则空表（不静默当"没问题"）
-            out["audit_orphans"] = (av.get("parts_without_fingerprint")
-                                    or av.get("records_without_digest")
-                                    or [])
-            if out["tampered"]:
-                out["blockers"].append(
-                    "★ 检出 %d 处数据在核实之后被改动（疑似绕过模块直接编辑 "
-                    "JSON）—— 真实性无法保证，必须重新走模块登记。"
-                    % len(out["tampered"]))
-                for _t in out["tampered"][:5]:
-                    _nm = _t.get("part") if isinstance(_t, dict) else str(_t)
-                    out["blockers"].append(
-                        "    · %s（记录指纹 %s… 现算 %s…）"
-                        % (_nm,
-                           str((_t or {}).get("digest"))[:10] if isinstance(_t, dict) else "",
-                           str((_t or {}).get("digest_now"))[:10] if isinstance(_t, dict) else ""))
-            elif not out["audit_checked"]:
-                out["blockers"].append(
-                    "台账里没有任何核实指纹 —— 无法证明数据真实性。"
-                    "请通过 part_registry 正常路径登记（会自动留下指纹）。")
-    except Exception as e:
-        out["blockers"].append("审计核实指纹失败：%r" % (e,))
-
-    # ── ⑤ 指纹落盘（可事后重算复现）─────────────────────────────────────
-    _payload = {
-        "parts": parts,
-        "mismatches": out["mismatches"],
-        "open_unresolved": out["open_unresolved"],
-        "registry": getattr(reg, "registry_path", lambda **k: None)(work_dir=_reg_wd)
-        if hasattr(reg, "registry_path") else None,
-    }
-    out["digest"] = _sha256_json(_payload)
-    out["verified"] = not out["blockers"]
-    out["ok"] = out["verified"]
-    if out["verified"]:
-        out["summary"] = (
-            "已核实：%d 个零件、%d 对邻接、无尺寸不一致、无未决记录、"
-            "指纹 %s…（%s）"
-            % (out["parts_count"], out["checked_pairs"], out["digest"][:12], _by))
-    else:
-        out["error"] = ("【总理子代理未通过统一核实】%d 项问题，禁止结束任务。"
-                        % len(out["blockers"]))
-    _persist_verify(out, work_dir)
-    return out
-
-
-def _persist_verify(out, work_dir):
-    """把核实结论固化到计划文件（供交付总闸与事后审计复查）。"""
-    try:
-        plan = load_plan(work_dir)
-        if plan.get("_load_error"):
-            return
-        plan[PRIME_VERIFY_KEY] = dict(out, at=time.strftime("%Y-%m-%d %H:%M:%S"))
-        save_plan(plan, work_dir)
-    except Exception:
-        pass
-
-
-def prime_verify_status(work_dir=None):
-    """读回最近一次核实结论（不重算）。"""
-    plan = load_plan(work_dir)
-    if plan.get("_load_error"):
-        return {"ok": False, "error": plan["_load_error"]}
-    rec = plan.get(PRIME_VERIFY_KEY)
-    if not rec:
-        return {"ok": False,
-                "error": ("尚无核实记录 —— 总理子代理必须统一核实数据后才能结束"
-                          "（调 prime-verify）。")}
-    return {"ok": True, **rec}
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 十、交付前总闸
-# ═══════════════════════════════════════════════════════════════════════════
-def pre_delivery_check(work_dir=None, registry_work_dir=None, require_primes=True):
+def pre_delivery_check(work_dir=None, registry_work_dir=None, require_monitor=True,
+                      require_primes=None):
+    # require_primes 是旧参数名（当时它控制"要不要要求总理子代理核实"）。
+    # 保留为兼容别名：老调用点传 False 仍表示"跳过监控器统一核实"，
+    # 但语义已经变成"跳过监控器 verify-task"，名字不改会让读代码的人误解。
+    if require_primes is not None:
+        require_monitor = bool(require_primes)
     """宣告任务完成之前的**强制总闸**。任一不满足 → ok=False，禁止交付。
 
     检查项：
       ① 十阶段是否都留下产出；
       ② 提问数是否达到该深度的下界（强 ≥10 / 弱 ≥5）；
       ③ 子代理编制是否存在且由总计子代理决定；
-      ④ 总理子代理是否存在；
-      ⑤ 报告数量是否 ≥ 编制里的零件数（每个零件都要上报）；
-      ⑥ 相邻尺寸一致性是否通过（不一致必须已升级处理）；
-      ⑦ ★【总理子代理统一核实】是否已通过（用户要求"核实过数据没有错误
-         了，才能结束"）—— 见 prime_verify_all，**从磁盘重算**而非自我声明。
+      ④ 监控器 verify-task 是否通过（逐件验收 + 台账审计 + 邻接尺寸 +
+         仿真策略）—— 这是原先"总理子代理统一核实"的位置；
+      ⑤ ★ docx 汇总交付物是否存在且合法。
+
+    ── 为什么 ④ 从"找总理子代理"换成"问监控器"────────────────────────
+    旧实现要求必须存在一个【总理子代理】，由它把每个零件上报并统一核实。
+    用户要求取消这个角色，理由已在验收里写明：
+    它是"为了让子代理串起来而开的一个只轮询看板与验收的代理"，本质是把机器
+    该做的事交给一个额外的模型会话去重复确认。
+    现在同一批检查由监控器 verify-task 完成，而且比原来更严：
+      · 零件级：材料/物理/领域凭据逐件核对（哈希、run_id、同房间）；
+      · 台账级：part_registry 审计、邻接尺寸、未解决冲突；
+      · 快照级：验收后文件若被改动，下次读取立刻变 stale。
     """
     blockers = []
     plan = load_plan(work_dir)
@@ -3437,47 +2823,23 @@ def pre_delivery_check(work_dir=None, registry_work_dir=None, require_primes=Tru
         blockers.append("子代理编制不是由【%s】决定的（实际 %r）"
                         % (SUBPLAN_AUTHORITY, sp.get("decided_by")))
 
-    reports = plan.get("prime_reports", [])
-    if require_primes:
-        if not reports:
-            blockers.append("总理子代理没有任何零件上报（三道防线凭据/尺寸/相邻件未上报）")
-        else:
-            # 每个零件都要上报：编制里列出的零件名应能在上报里找到
-            want = set()
-            for r in (sp or {}).get("rooms", []):
-                for p in r.get("parts", []):
-                    want.add(p)
-            got = {r.get("part_name") for r in reports}
-            missing = sorted(want - got)
-            if missing:
-                blockers.append("以下零件未向总理子代理上报：%s" % "、".join(missing))
-
-    cons = plan.get("prime_consistency")
-    if cons is None:
-        blockers.append("未做相邻零件尺寸一致性校验（总理子代理必须执行）")
-    elif cons.get("mismatches"):
-        blockers.append("存在未处理的相邻尺寸不一致 %d 处（必须由父代理干涉处理）"
-                        % len(cons["mismatches"]))
-    elif not cons.get("evaluated", True):
-        blockers.append("相邻尺寸一致性【未评估】（缺数据），不得当作通过")
-
-    # ── ⑦ ★ 总理子代理统一核实（用户新增要求："核实过数据没有错误了，才能结束"）──
-    # 这里**重算**一遍（不采信之前落盘的结论），确保结束时的数据就是被核实的数据。
-    # 若磁盘数据在核实之后被改过，重算会立刻发现并拒绝结束。
+    # ── ④ ★ 监控器统一核实（原"总理子代理统一核实"的位置）─────────────
+    # 每次【重算】，不采信任何落盘结论：验收之后若模型/凭据/台账被改动，
+    # 这里必须立刻变 stale 并拒绝交付（教程 5.2「总装归档前重新读取，
+    # 不能保存一次 PASS 后永久复用」）。
     _pv = None
-    if require_primes:
+    if require_monitor:
         try:
-            _pv = prime_verify_all(work_dir=work_dir,
-                                   registry_work_dir=registry_work_dir)
+            import sw_monitor_client as _mc_vt
+            _pv = _mc_vt.call("verify-task", {})
         except Exception as e:
-            blockers.append("总理子代理统一核实执行异常：%r（按 fail-closed 拒绝结束）"
-                            % (e,))
-        if _pv is not None and not _pv.get("ok"):
-            blockers.append("★ 总理子代理【尚未通过统一核实】—— 数据可能有误，禁止结束任务：")
+            blockers.append("监控器统一核实失败：%s（按 fail-closed 拒绝结束）" % (e,))
+        if _pv is not None and _pv.get("passed") is not True:
+            blockers.append("★ 监控器【尚未通过统一核实】—— 证据不足，禁止结束任务：")
             for _b in (_pv.get("blockers") or [])[:8]:
                 blockers.append("    · %s" % _b)
 
-    # ── ⑧ ★ 总理子代理必须汇总出 docx 交付物 ─────────────────────────────
+    # ── ⑧ ★ 交付前必须有一份汇总 docx ───────────────────────────────
     # 用户原话（需求2）：「最终汇总为 docx 等文档在最后结束的时候，再发给主对话」。
     #
     # 【为什么补这一条】原先 `part_registry.export_docx` 虽然有实现（三条降级路径
@@ -3486,11 +2848,11 @@ def pre_delivery_check(work_dir=None, registry_work_dir=None, require_primes=Tru
     # 现在：交付前总闸会**核实磁盘上真的存在一份由本任务台账导出的 docx**
     # （存在 + 非空 + 是合法 zip 且含 word/document.xml），否则拒绝结束。
     _docx = None
-    if require_primes:
+    if require_monitor:
         _docx = _check_docx_deliverable(work_dir=work_dir,
                                         registry_work_dir=registry_work_dir)
         if not _docx.get("ok"):
-            blockers.append("★ 缺少总理子代理的 docx 汇总交付物 —— 禁止结束任务：")
+            blockers.append("★ 缺少 docx 汇总交付物 —— 禁止结束任务：")
             blockers.append("    · %s" % (_docx.get("error") or "未找到 docx"))
             blockers.append("    · 导出方式："
                             "python part_registry.py export-docx --out \"<交付目录>/零件台账.docx\""
@@ -3527,19 +2889,17 @@ def pre_delivery_check(work_dir=None, registry_work_dir=None, require_primes=Tru
             "questions": {"asked": qr.get("asked"), "min": qr.get("min"),
                           "max": qr.get("max")},
             "subagents": ((sp or {}).get("count")),
-            "prime_reports": len(reports),
-            "prime_verification": (None if _pv is None else {
-                "verified": _pv.get("verified"),
-                "verified_by": _pv.get("verified_by"),
-                "digest": _pv.get("digest"),
-                "parts_count": _pv.get("parts_count"),
-                "checked_pairs": _pv.get("checked_pairs"),
+            "monitor_verification": (None if _pv is None else {
+                "passed": _pv.get("passed"),
+                "status": _pv.get("status"),
+                "checks": _pv.get("checks"),
+                "blockers": _pv.get("blockers"),
             }),
             "docx_deliverable": _docx}
 
 
 def _check_docx_deliverable(work_dir=None, registry_work_dir=None):
-    """核实"总理子代理的 docx 汇总"真的存在且合法。
+    """核实 docx 汇总交付物真的存在且合法。
 
     判定（缺一不可）：
       ① 在交付目录（及台账目录）下能找到 **.docx**；
@@ -3560,7 +2920,7 @@ def _check_docx_deliverable(work_dir=None, registry_work_dir=None):
     # ══ ★【实测缺陷修复 · 2026-10-13】先认【导出时记录的路径】══════════════
     # 现象：`export-docx --out <任意路径>` 成功后，`check-docx` 却报
     #   "在 <work_dir>、<load_cases> 下未找到任何 .docx" → 交付总闸误拦。
-    # 根因：本函数只在【固定目录】里 walk，而总理子代理完全可以把 docx
+    # 根因：本函数只在【固定目录】里 walk，而导出方完全可以把 docx
     #   导出到别处（--out 是允许的），于是"真导出了却查不到"。
     # 修法：把 export_docx_and_record 记录在计划文件里的路径优先纳入检查，
     #   但仍**自己重查磁盘**（不采信记录本身），保持 fail-closed 语义不变。
@@ -3619,7 +2979,7 @@ def _check_docx_deliverable(work_dir=None, registry_work_dir=None):
     _cands.sort(reverse=True)
     out["candidates"] = [_p for _m, _p in _cands][:20]
     if not _cands:
-        out["error"] = ("在 %s 下未找到任何 .docx —— 总理子代理必须汇总导出。"
+        out["error"] = ("在 %s 下未找到任何 .docx —— 交付前必须导出汇总 docx。"
                         % "、".join(_roots) or "交付目录")
         return out
 
@@ -3657,7 +3017,7 @@ def _check_docx_deliverable(work_dir=None, registry_work_dir=None):
 
 
 def export_docx_and_record(out_path=None, work_dir=None, registry_work_dir=None):
-    """总理子代理的 docx 汇总入口：导出并回写计划文件（供总闸核实）。
+    """docx 汇总入口：导出并回写计划文件（供交付总闸核实）。
 
     这是"把 docx 变成流程一等公民"的落点：
       · 导出成功后把路径/大小/时间写进计划文件；
@@ -3672,7 +3032,7 @@ def export_docx_and_record(out_path=None, work_dir=None, registry_work_dir=None)
     _out = out_path
     if not _out:
         _base = os.path.abspath(str(work_dir or _wd or "."))
-        _out = os.path.join(_base, "零件台账_总理汇总.docx")
+        _out = os.path.join(_base, "零件台账_汇总.docx")
     try:
         r = _pr.export_docx(_out, work_dir=_wd)
     except TypeError:
@@ -3708,7 +3068,7 @@ def _main_body(argv):
     ap = argparse.ArgumentParser(
         prog="mode2_flow.py",
         description="模式二（大型器械装配）流程强制契约：动态题数 / 按需提问 / "
-                    "十阶段 / 总计子代理编制 / 总理子代理上报")
+                    "十阶段 / 总计子代理编制 / 监控器逐件验收")
     sub = ap.add_subparsers(dest="cmd")
 
     p = sub.add_parser("set-depth", help="登记参数需求强度（full 强需求 / lite 弱需求）")
@@ -3800,33 +3160,17 @@ def _main_body(argv):
     p = sub.add_parser("subagent-plan", help="查看当前子代理编制")
     p.add_argument("--work-dir", default=None)
 
-    p = sub.add_parser("prime-room", help="查看总理子代理定义")
-    p.add_argument("--work-dir", default=None)
-
-    p = sub.add_parser("prime-report", help="★建模小屋向总理子代理上报")
-    p.add_argument("--json", required=True, help="JSON 对象或 @文件路径")
-    p.add_argument("--work-dir", default=None)
-
-    p = sub.add_parser("prime-reports", help="列出总理子代理收到的全部上报")
-    p.add_argument("--work-dir", default=None)
-
-    p = sub.add_parser("check-consistency", help="★相邻零件尺寸一致性（不一致→升级父代理）")
-    p.add_argument("--registry-work-dir", default=None)
-    p.add_argument("--work-dir", default=None)
-
-    p = sub.add_parser("prime-verify",
-                       help="★★总理子代理统一核实数据（从磁盘重算，未通过禁止结束）")
-    p.add_argument("--registry-work-dir", default=None)
-    p.add_argument("--verified-by", default=None,
-                   help="核实者身份，默认「总理子代理」")
-    p.add_argument("--work-dir", default=None)
-
-    p = sub.add_parser("prime-verify-status", help="读回最近一次核实结论")
-    p.add_argument("--work-dir", default=None)
+    # ── 总理子代理相关子命令已整体删除 ──────────────────────────────────
+    # 删除的：prime-room / prime-report / prime-reports / check-consistency /
+    #         prime-verify / prime-verify-status / prime-board
+    # 原因：这些命令的存在意义是"让总理子代理把每个零件上报、再统一核实"。
+    #   零件级的验收已由监控器（part-saved 事件 + 三大防线逐件核验）承担，
+    #   台账/邻接/冲突由 verify-task 一次算完，不再需要一个额外的模型会话
+    #   去重复确认同一批事实。
 
     p = sub.add_parser("export-docx",
-                       help="★总理子代理汇总导出 docx（交付前总闸会核实它存在）")
-    p.add_argument("--out", default=None, help="输出路径（默认 <交付目录>/零件台账_总理汇总.docx）")
+                       help="★汇总导出 docx（交付前总闸会核实它存在）")
+    p.add_argument("--out", default=None, help="输出路径（默认 <交付目录>/零件台账_汇总.docx）")
     p.add_argument("--registry-work-dir", default=None)
     p.add_argument("--work-dir", default=None)
 
@@ -3840,7 +3184,7 @@ def _main_body(argv):
     p = sub.add_parser("plan", help="打印完整计划文件")
     p.add_argument("--work-dir", default=None)
 
-    # ── 【2026-10-28 重构】总计子代理身份 + 总理监工看板 ──────────────
+    # ── 【2026-10-28 重构】总计子代理身份 ────────────────────────────
     p = sub.add_parser("analyst-bind",
                        help="★在【总计子代理】里运行：绑定它自己的 sessionId")
     p.add_argument("--session-id", default=None,
@@ -3861,10 +3205,6 @@ def _main_body(argv):
                        help="刷新总计子代理存活心跳（阶段动作已自动刷新，一般不用手调）")
     p.add_argument("--note", default="")
     p.add_argument("--actor", default=None, help="调用者 sessionId（默认取 DSH_SESSION_ID）")
-    p.add_argument("--work-dir", default=None)
-
-    p = sub.add_parser("prime-board", help="★总理子代理监工看板（房间状态+上报缺口+待办）")
-    p.add_argument("--json", action="store_true", help="强制 JSON 输出（默认即 JSON）")
     p.add_argument("--work-dir", default=None)
 
     p = sub.add_parser("parts-board",
@@ -3946,8 +3286,6 @@ ooms.json"，
                               note=getattr(args, "note", ""))
     elif args.cmd == "analyst-status":
         r = analyst_status(wd)
-    elif args.cmd == "prime-board":
-        r = prime_board(wd)
     elif args.cmd == "parts-board":
         r = parts_board(wd)
     elif args.cmd == "delete-policy":
@@ -4007,24 +3345,6 @@ ooms.json"，
         r = set_subagent_plan(rooms, args.rationale, args.decided_by, wd, actor=_actor)
     elif args.cmd == "subagent-plan":
         r = get_subagent_plan(wd)
-    elif args.cmd == "prime-room":
-        r = {"ok": True, **prime_room_definition(wd)}
-    elif args.cmd == "prime-report":
-        try:
-            rep = _load_json_arg(args.json)
-        except Exception as e:
-            _print({"ok": False, "error": "json 解析失败: %r" % (e,)})
-            return 1
-        r = record_prime_report(rep, wd)
-    elif args.cmd == "prime-reports":
-        r = prime_reports(wd)
-    elif args.cmd == "check-consistency":
-        r = check_prime_consistency(wd, getattr(args, "registry_work_dir", None))
-    elif args.cmd == "prime-verify":
-        r = prime_verify_all(wd, getattr(args, "registry_work_dir", None),
-                             getattr(args, "verified_by", None))
-    elif args.cmd == "prime-verify-status":
-        r = prime_verify_status(wd)
     elif args.cmd == "export-docx":
         r = export_docx_and_record(getattr(args, "out", None), wd,
                                    getattr(args, "registry_work_dir", None))

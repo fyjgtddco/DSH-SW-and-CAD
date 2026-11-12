@@ -371,9 +371,11 @@ def main():
     # ═══════════════════════════════════════════════════════════════
     sec("审计 F：CLI 与函数的一致性（拼写错误曾漏在 argparse default）")
     for name, src, subs in (
+        # prime-report / prime-verify / check-consistency / prime-board 已删除
+        #   （随总理子代理一起移除），不再要求它们在 argparse 注册。
         ("mode2_flow.py", m2_src, ["set-depth", "ask", "set-subagent-plan",
-                                   "prime-report", "prime-verify", "export-docx",
-                                   "check-docx", "pre-delivery"]),
+                                   "parts-board", "export-docx",
+                                   "check-docx", "pre-delivery", "rooms-template"]),
     ):
         miss = [s for s in subs if ('"%s"' % s) not in src and ("'%s'" % s) not in src]
         ck("%s 的子命令都已在 argparse 注册" % name, not miss, miss)
@@ -436,13 +438,12 @@ def main():
     # 需求2：编制由总计子代理决定 + 房间表采用编制
     wired(m2c, "set_subagent_plan", 2, "总计子代理登记编制")
     wired(m2c, "get_subagent_plan", 2, "读取编制")
-    wired(m2c, "prime_room_definition", 2, "总理子代理定义")
-    # 需求2/新增：总理核实 + docx
-    wired(m2c, "prime_verify_all", 2, "总理统一核实")
+    # 「总理子代理定义 / 统一核实」两条已删除：验收改由监控器 verify-task 完成。
+    # 这里改为断言【监控器总核实确实接进了交付总闸】—— 换实现不等于取消检查。
+    wired(m2c, "pre_delivery_check", 2, "交付前总闸")
     wired(m2c, "_check_docx_deliverable", 2, "docx 交付物核实")
     wired(m2c, "export_docx_and_record", 2, "docx 导出入口")
     # ★ 这两条是反证 4/5 抓出来的盲区：光"有调用"不够，调用还必须是活的
-    not_dead(m2c, "prime_verify_all", "总理统一核实")
     not_dead(m2c, "_check_docx_deliverable", "docx 交付物核实")
     # 总闸必须被 workflow_gate 调用（跨文件）
     ck("★ 交付前总闸被 workflow_gate 调用（跨文件接线）",

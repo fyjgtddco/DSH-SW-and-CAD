@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { createMonitorHost } from './host-adapter.mjs';
+
+const [url, tokenFile, root] = process.argv.slice(2);
+const host = await createMonitorHost({url, tokenFile});
+const {rpc} = host;
+await rpc('attach', {drained:true});
+await rpc('plan', { task:'DEMO', root, rooms:['甲','乙','丙'].map(
+  name => ({name, type:'model', parts:['零件-' + name]})) });
+const scope = room => ({task:'DEMO', room, session:'session-' + room, ticket:'ticket-' + room});
+const [a,b,c] = ['甲','乙','丙'].map(scope);
+for (const t of [a,b,c]) await rpc('request', t);
+const {lease} = await rpc('claim', a);
+const jobs = { start: ({run}) => run() };
+const wait = t => host.startWaitJob(jobs, {owner:t.session, kind:'wait-lock', payload:t});
+const second = wait(b);
+const third = wait(c);
+let thirdEnded = false;
+void third.done.then(() => { thirdEnded = true; });
+await sleep(100);
+const started = performance.now();
+await rpc('release', {...a, lease, drained:true});
+const wake = await Promise.race([second.done, sleep(2000).then(() => 'TIMEOUT')]);
+assert.equal(JSON.parse(wake).state, 'reserved');
+assert.equal(thirdEnded, false);
+const latency = Math.round(performance.now() - started);
+third.cancel();
+assert.equal(JSON.parse(await third.done).state, 'cancelled');
+for (let i=0; i<20 && (await rpc('board', {task:'DEMO'})).sw.queue.length; i++) await sleep(50);
+assert.deepEqual((await rpc('board', {task:'DEMO'})).sw.queue, []);
+console.log('模拟 DSH job 宿主，HTTP 队首唤醒 ' + latency + 'ms，非队首不结束，取消票已清理');

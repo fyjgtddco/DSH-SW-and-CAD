@@ -5331,6 +5331,171 @@ def _rotation_from_transform(mt):
     except Exception:
         return None
 
+
+# ══════════════════════════════════════════════════════════════════════════
+#  【BUG-9 · 装配配合门禁】COM 参数封送工具（纯函数，无 SW 依赖）
+# --------------------------------------------------------------------------
+#  权威依据：docs/SW2025_AddMate_win32com_技术结论.md（下称"报告"）
+#    报告 1  ：AddMate5 第 15 参 ErrorStatus 是 ByRef System.Int32，传裸 0 会
+#              被打包成值传递 → DISP_E_TYPEMISMATCH (-2147352571)。
+#    报告 3  ：SelectByID2 第 8 参 Callout 传 None 会变成 VT_NULL 被拒，
+#              必须 VARIANT(VT_DISPATCH, None)。
+#    报告 3b ：GetSelectedObjectCount2 的 Mark：-1=全部、0=只数"没有 mark"
+#              的选择 —— 用 Mark=1 选的东西拿 0 去数必然是 0。
+#    报告 3  ：MateData.EntitiesToMate 是 Object 变体数组，Python list 不认。
+#  这些函数被刻意抽成模块级纯函数：它们不碰 COM，可在无 SolidWorks 的机器上
+#  直接单测（见 test_regression_bug9_mate.py），也避免每个调用点各抄一份。
+# ══════════════════════════════════════════════════════════════════════════
+
+# swAddMateError_e（报告 1 / 三-7）：成功是 1，不是 0！
+SW_ADD_MATE_ERROR_NO_ERROR = 1
+SW_ADD_MATE_ERROR_UNKNOWN = 0
+
+
+def _byref_i4(value=0):
+    """构造 ByRef System.Int32 输出参数（给 AddMate5/RunMacro2 等用）。
+
+    报告 1：晚期绑定必须传 VARIANT(VT_BYREF|VT_I4, 0)；传裸 int 等于值传递，
+    SW 类型库期待引用 → DISP_E_TYPEMISMATCH(-2147352571)。
+    """
+    return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, value)
+
+
+def _null_dispatch():
+    """构造 IDispatch* 空指针（给 SelectByID2 的 Callout / SelectData 用）。
+
+    报告 3：传 Python None 会被打包成 VT_NULL，SW 只认 VT_DISPATCH 空指针。
+    """
+    return win32com.client.VARIANT(pythoncom.VT_DISPATCH, None)
+
+
+def _dispatch_array(objs):
+    """把若干 COM 对象打包成 Object 变体数组（给 MateData.EntitiesToMate 用）。
+
+    报告 3：EntitiesToMate 是 System.Object 变体数组，传 Python list 不认；
+    必须 SAFEARRAY(VT_DISPATCH)。空列表也返回有类型的空数组，绝不返回 None。
+    """
+    return win32com.client.VARIANT(
+        pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, tuple(objs or ()))
+
+
+def _byref_value(var, default=None):
+    """读回 ByRef VARIANT 的 .value（任何异常都返回 default，绝不抛）。"""
+    try:
+        return var.value
+    except Exception:
+        return default
+
+
+def mate_error_status_text(code):
+    """swAddMateError_e 数值 → 可读文本（报告 1 / swAddMateError_e 官方页）。"""
+    _legend = {
+        0: "swAddMateError_ErrorUnknown（未知错误）",
+        1: "swAddMateError_NoError（成功）",
+        2: "swAddMateError_IncorrectMateType（配合类型不对）",
+        3: "swAddMateError_IncorrectAlignment（对齐方式不对）",
+        4: "swAddMateError_IncorrectSelections（选择集不对）",
+        5: "swAddMateError_OverDefinedAssembly（过定义）",
+        6: "swAddMateError_IncorrectGearRatios（齿轮比不对）",
+    }
+    try:
+        return _legend.get(int(code), "未定义错误码(%r)" % (code,))
+    except Exception:
+        return "未定义错误码(%r)" % (code,)
+
+
+def mate_ok_by_error_status(mate, error_status):
+    """判一次 AddMate5 是否真的成功。
+
+    报告 三-7：判断成功请看 `Mate2 Is Nothing` 与 `err == NoError(1)` 两个都查
+    —— 只拿到对象就宣布成功是本仓库历史上的静默失败源之一。
+    这里对 ErrorStatus 采取保守口径：读到 None（没填进去）时降级为"仅看 Mate2"，
+    但把 error_status_known=False 的事实回传，供上层如实记录。
+    Returns: (ok: bool, error_status_known: bool)
+    """
+    if mate is None:
+        return False, error_status in (SW_ADD_MATE_ERROR_UNKNOWN,
+                                       SW_ADD_MATE_ERROR_NO_ERROR)
+    if error_status is None:
+        return True, False
+    try:
+        return int(error_status) == SW_ADD_MATE_ERROR_NO_ERROR, True
+    except Exception:
+        return True, False
+
+
+# ── 配合类型归一化（create_mate / add_mate / 门禁共用口径）──────────────
+# 说明：只有这两个"关键词 → 枚举"的映射会影响本门禁的判定口径，
+# 真正的枚举表仍是 SWModel._MATE_TYPE_E（swconst.tlb 实测）。
+MATE_TYPE_INT_MIN = 0
+MATE_TYPE_INT_MAX = 24          # swMateType_e 现有最大成员 profilecenter=24
+MATE_ALIGN_INT_MIN = 0
+MATE_ALIGN_INT_MAX = 2          # ALIGNED=0 / ANTI_ALIGNED=1 / CLOSEST=2
+
+
+def mate_align_is_valid(align):
+    """校验 swMateAlign_e 取值合法性（0/1/2）。"""
+    try:
+        return MATE_ALIGN_INT_MIN <= int(align) <= MATE_ALIGN_INT_MAX
+    except Exception:
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  【BUG-9】配合参考名构造：<实体名>@<零部件实例名>@<装配体名>
+# --------------------------------------------------------------------------
+#  报告 3：装配体里 SelectByID2 的 Name 必须是这个三段式，且实例名带 -1/-2
+#  后缀（不是零件文件名）。现场脚本经常只给"零件名"或"实体名"，直接拼进去
+#  必然选不中 → 选择集 0 个 → 上层只看到"配合建不起来"。
+#  这两个纯函数就是那层"补全 + 校验"，可独立单测。
+# ══════════════════════════════════════════════════════════════════════════
+
+def mate_entity_name(entity, component=None, assembly=None):
+    """构造装配体 SelectByID2 用的实体名 `<实体>@<实例>@<装配体>`。
+
+    Args:
+        entity: 实体名（面名/基准面名，如 "Face2" / "Front Plane"）。
+        component: 零部件实例名（"DSH_底座-1"）或装配体名之一段。
+        assembly: 装配体名（可省略 → 退化成两段式，SW 亦接受）。
+    Returns: str（去空白；缺 entity 时返回空串，让调用方判空而不是传 "None@"）。
+    """
+    _e = str(entity or "").strip()
+    if not _e:
+        return ""
+    _parts = [_e]
+    _c = str(component or "").strip()
+    if _c:
+        _parts.append(_c)
+        _a = str(assembly or "").strip()
+        if _a:
+            _parts.append(_a)
+    return "@".join(_parts)
+
+
+def mate_name_segments(name):
+    """把 `<实体>@<实例>@<装配体>` 拆成段列表（不合法时返回 []）。
+
+    用途：门禁与诊断回显"这个名字到底几段"，帮助判断是否漏了实例名段。
+    """
+    _n = str(name or "").strip()
+    if not _n:
+        return []
+    return [s for s in _n.split("@")]
+
+
+def mate_name_is_qualified(name):
+    """名字是否是装配体可用的"合格"配合参考名（报告 3）。
+
+    合格 = 至少两段（实体@实例），且每段非空。
+    单段名（"Face2" / "DSH_底座"）在装配体里【不保证】选得中 —— 门禁据此
+    给出可操作提示，而不是等到选择集为 0 才一头雾水。
+    """
+    _segs = mate_name_segments(name)
+    if len(_segs) < 2:
+        return False
+    return all(bool(s.strip()) for s in _segs)
+
+
 class SWModel:
     """单个模型文档的高层封装。"""
 
@@ -14338,6 +14503,100 @@ class SWModel:
         except Exception:
             return _m
 
+    # ── 【BUG-9】早期绑定探测（配合主路径的准入判据）─────────────────────
+    def _asm_early_probe(self):
+        """探测"本进程/本文档"是否真有可用的早期绑定 IAssemblyDoc。
+
+        ══ 为什么需要独立探测（报告 1 / 4）══════════════════════════════
+        `_asm_early()` 的行为是"包装失败就原样返回晚期 model"，于是调用方
+        【看不出】自己拿到的是早期还是晚期接口 —— 而这两种模式下
+        CreateMate/AddMate5 的参数要求完全相反（ByRef 要不要 VARIANT）。
+        把早期/晚期混在一套写法里试，就退化成"猜参数个数"，正是历史卡死的
+        诱因。因此这里显式回答一个问题：**当前能走早期绑定吗？**
+
+        判据（三条同时成立才算 early）：
+          ① 类型库模块可用（get_early_module 非 None）；
+          ② 包装出的对象【不是】原 model（early() 失败会原样返回）；
+          ③ 包装对象上确实有 CreateMate 或 AddMate5 之一。
+        Returns: dict {mode: "early"|"late", holder, reason, has_create_mate,
+                       has_addmate5}
+        【绝不抛异常】—— 探测本身失败要如实说明，而不是中断装配。
+        """
+        _m = getattr(self, "model", None)
+        _info = {"mode": "late", "holder": None, "reason": None,
+                 "has_create_mate": False, "has_addmate5": False,
+                 "has_create_mate_data": False}
+        if _m is None:
+            _info["reason"] = "model 为 None（没有活动装配体）"
+            return _info
+        try:
+            if not is_early_available():
+                _info["reason"] = ("类型库/早期绑定模块不可用（%s）"
+                                   % (early_status().get("error")
+                                      or "get_early_module 返回 None"))
+                return _info
+        except Exception as _e:
+            _info["reason"] = "is_early_available() 异常: %r" % (_e,)
+            return _info
+        try:
+            _wrapped = self._asm_early()
+        except Exception as _e2:
+            _info["reason"] = "_asm_early() 异常: %r" % (_e2,)
+            return _info
+        if _wrapped is None or _wrapped is _m:
+            _info["reason"] = ("IAssemblyDoc 包装未生效（early() 回退成晚期对象）"
+                               "—— 期间会按晚期绑定处理 ByRef 参数")
+            return _info
+        for _nm in ("CreateMate", "AddMate5", "CreateMateData"):
+            try:
+                _has = getattr(_wrapped, _nm, None) is not None
+            except Exception:
+                _has = False
+            if _nm == "CreateMate":
+                _info["has_create_mate"] = bool(_has)
+            elif _nm == "CreateMateData":
+                _info["has_create_mate_data"] = bool(_has)
+            else:
+                _info["has_addmate5"] = bool(_has)
+        if not (_info["has_create_mate"] or _info["has_addmate5"]):
+            _info["reason"] = ("包装对象上既没有 CreateMate 也没有 AddMate5 —— "
+                               "本版本配合 API 与预期不同")
+            return _info
+        _info["mode"] = "early"
+        _info["holder"] = "early(IAssemblyDoc)"
+        return _info
+
+    def _ensure_clear_selection(self):
+        """建配合前清空选择集（报告 3：必须 ClearSelection2(True)）。
+
+        残留选择会污染 mark 过滤 → 计数与预选错位。返回是否清成功。
+        """
+        _m = getattr(self, "model", None)
+        if _m is None:
+            return False
+        for _arg in (True, False):
+            try:
+                _m.ClearSelection2(_arg)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _selected_count_all(self):
+        """读选择集总数 —— **一律传 -1**（报告 3b 的硬性要求）。
+
+        `GetSelectedObjectCount2(0)` 的官方语义是"只数【没有 mark】的选择"，
+        而配合实体的 mark 都是 1 → 用 0 去数必然是 0，于是被误判成"没选中"。
+        Returns: int；读不到返回 -1（调用方必须按"未知"处理，不能当 0）。
+        """
+        _m = getattr(self, "model", None)
+        if _m is None:
+            return -1
+        try:
+            return int(_m.SelectionManager.GetSelectedObjectCount2(-1))
+        except Exception:
+            return -1
+
     def _select_by_id_asm(self, name, sel_type, x, y, z, append, mark,
                           sel_opt=0):
         """装配配合链路上专用 SelectByID2（BUG-11 修复的一部分）。
@@ -14676,60 +14935,100 @@ class SWModel:
         except Exception:
             return [_c]
 
-    # ── 核心：早期绑定加配合（唯一收口点，add_mate / create_mate 都走这里）
+    # ══ 【BUG-9 核心】装配配合的唯一收口点 ═══════════════════════════════
+    #  分层策略（严格按 docs/SW2025_AddMate_win32com_技术结论.md 建议顺序）：
+    #    ⓪ 探测：早期绑定可用？（_asm_early_probe）
+    #    ① 可用 → CreateMateData(type) → 设属性 → CreateMate(md)   【主路径】
+    #    ② 不可用 / ① 失败 → 晚期 AddMate5(15 参，ErrorStatus 用 VARIANT ByRef)
+    #    ③ 仍失败 → AddMate3(14 参)（老版本）、CreateMate(None)（占位形态）
+    #    ④ 仍失败 → RunMacro2 宏兜底（仅当显式给了 DSH_MATE_MACRO 且是真 .swp）
+    #  每一次尝试都把"用了哪一层 + 失败的 API + 错误码"写进
+    #  self._last_mate_diag，供 create_mate / 门禁 / 报告如实回显 ——
+    #  绝不"拿到对象就算成功"，也绝不把失败说成成功。
     def _add_mate_early(self, mate_type, align=0, flip=False,
                         distance_mm=None, angle_deg=None, name=""):
-        """用【早期绑定 IAssemblyDoc】建立配合（BUG-11 根因修复）。
+        """建立配合（BUG-9 修复：早期绑定探测 + CreateMate 主路径 + 分层兜底）。
 
-        ══ 为什么晚期绑定必失败（报告 1.1 / 2.3 / 3.3）══════════════════
-        现场 BUG-11：add_mate 在 SW2025 SP5.0 上 AddMate5 一律报
-        com_error(-2147352571, 类型不匹配)。逐条核对报告后确认三个独立成因：
-          ① AddMate5 在晚期绑定下连方法都解析不出来（TypeInfo 不可用），
-             pywin32 退化成 IDispatch::Invoke，参数按 VARIANT 硬塞 →
-             "类型不匹配"；
-          ② 即使走早期绑定，报告 2.3 第 9 条：AddMate5 的浮点参数
-             【不能传 None】，否则编组阶段就抛
-             "float() argument must be ... not 'NoneType'"（本文件老代码
-             正好在 AddMate5(..., val, val, name) 里只传 8 个参数，
-             剩下 6 个浮点留空 → 必踩）；
-          ③ 传的枚举值本身错了（MATE_TYPES 把 concentric 写成 4 = TANGENT、
-             lock 写成 9 = CAMFOLLOWER），SW 要么拒绝要么建出别的配合。
-        三个都修掉，配合才建得起来。
+        ══ 为什么必须分层（报告 一-1 / 二-2b / 二-2b 注解）══════════════════
+        两个独立事实决定了写法不能统一：
+          A. `AddMate5` 第 15 参 `ErrorStatus` 是 ByRef `System.Int32`
+             （报告 一-1）。晚期绑定下必须传
+             `VARIANT(VT_BYREF|VT_I4, 0)`；传裸 0 会被打包成值传递 →
+             DISP_E_TYPEMISMATCH(-2147352571)，也就是历史日志里那句
+             "类型不匹配"。而【早期绑定】恰恰相反：gencache 会把 ByRef 变成
+             第二个返回值（`mate, err = ...`），再传 VARIANT 反而参数个数错。
+          B. `CreateMate` 是官方推荐路径（报告 一-2）：三步
+             `CreateMateData(Type) → IMateFeatureData → CreateMate(md)`，
+             绕开 AddMate5 的 ByRef 与 15 参签名，命中率最高。
+             注意 **`CreateMateData2` 不存在**（报告 五-2），只有
+             `CreateMateData`；而 `IMateData` 接口类不在该 tlb 里导出，
+             不能 `mod.IMateData(...)` 构造。
 
-        ══ 调用顺序（按命中率从高到低）══════════════════════════════════
-          1) 专用 API（子任务 A 实测：签名最简单、命中率最高）
-             · 同心 → AddConcentricMateWithTolerance(Align, 0, False, 0.0)
-             · 距离 → AddDistanceMate(Align, Flip, Distance, 0, 0, 0, 0)
-          2) 通用 AddMate5（官方 15 参，末位 ByRef ErrorStatus，浮点绝不传 None）
-             2026-11-11 订正：旧实现先试 14 参（漏 ErrorStatus）再"补"15 参，
-             两轮里 14 参那轮必然编组失败；现只发 15 参并检查错误码。
-          3) CreateMate(None)（报告 3.2：新版仅 1 参数，传 IMateData；
-             注意 IMateData 接口类【不在该 tlb 里导出】，不能去构造它，
-             只能传 None 或 CreateMateData() 的返回对象）
-          4) 晚期绑定旧写法（老机器 SW2018~2024 的既有行为，保持不让它退化）
+        ══ 预选约定（报告 一-3 / 一-3b）════════════════════════════════════
+        调用方负责在调用本方法【之前】用 SelectByID2 mark=1 预选好两个实体
+        （官方 Remarks 明确支持预选，这是最省事、最不容易错的路线，
+        可以完全绕开 `EntitiesToMate` 的 SAFEARRAY 封送问题）。
+        本方法会先 `ClearSelection2(True)` 吗？—— 【不会】，因为那会清掉
+        调用方的预选；只由调用方在建配合前清。这里只用
+        `_selected_count_all()`（内部恒传 -1）核验预选是否真的还在。
 
-        Returns: (mate 对象或 None, 实际生效的方法名, 错误说明)
+        Args:
+            mate_type: swMateType_e 整数（见 SWModel._MATE_TYPE_E）。
+            align: swMateAlign_e（0=ALIGNED / 1=ANTI_ALIGNED / 2=CLOSEST）。
+            flip: 仅距离配合有效。
+            distance_mm / angle_deg: 距离(mm) / 角度(度) 的配合值。
+
+        Returns: (mate 对象或 None, 实际生效的层+API 名, 错误说明)
+            —— 失败时第一项一定是 None；第三项一定非空（含每一层的原因）。
         """
         _mt = int(mate_type)
+        _align = int(align) if mate_align_is_valid(align) else 0
+        _diag = {"layers": [], "probe": None, "selected_count": None,
+                 "mate_created": False}
+        self._last_mate_diag = _diag
+        self._last_mate_error_status = None
+
+        # ── ⓪ 早期绑定探测（决定后面用哪套参数形态）──────────────────────
+        _probe = self._asm_early_probe()
+        _diag["probe"] = _probe
+        _early_holder = None
         _holders = []
+        if _probe.get("mode") == "early":
+            try:
+                _early_holder = self._asm_early()
+            except Exception:
+                _early_holder = None
+            if _early_holder is not None and _early_holder is not self.model:
+                _holders.append(("early(IAssemblyDoc)", _early_holder))
+        # 晚期兜底：老机器 SW2018~2024 与早期绑定不可用时都走这里
         try:
-            _ia = self._asm_early()
-            if _ia is not None:
-                _holders.append(("early(IAssemblyDoc)", _ia))
+            if self.model is not None:
+                _holders.append(("late(model)", self.model))
         except Exception:
             pass
-        # 晚期兜底：老版本 SW 上这条是老代码唯一可用的路
         try:
-            _holders.append(("late(model)", self.model))
+            _diag["selected_count"] = self._selected_count_all()
         except Exception:
-            pass
+            _diag["selected_count"] = None
 
         _d, _du, _dl, _gn, _gd, _a, _au, _al = self._mate_value_args(
             _mt, distance_mm, angle_deg)
         _n = str(name or "")
         _errs = []
 
-        # ── ① 专用 API ────────────────────────────────────────────────
+        # ── ① CreateMate 主路径（官方三步，绕开 AddMate5 的 ByRef）────────
+        #  报告 二-2b：CreateMateData(type) → 设 MateAlignment → CreateMate(md)。
+        #  预选已由调用方完成（mark=1），因此【不设】EntitiesToMate。
+        for _hname, _h in _holders:
+            _ok, _m, _why = self._mate_by_createmate(
+                _h, _mt, _align, _d, _a)
+            _diag["layers"].append({"layer": "CreateMate", "holder": _hname,
+                                    "ok": bool(_ok), "why": _why})
+            if _ok and _m is not None:
+                _diag["mate_created"] = True
+                return (_m, "%s/CreateMate(CreateMateData)" % (_hname,), None)
+
+        # ── ② 专用 API 快捷路径（同心 / 距离：签名最短、命中率高）─────────
         for _hname, _h in _holders:
             if _mt == 1:      # swMateCONCENTRIC
                 for _argc in (4, 5):
@@ -14783,57 +15082,92 @@ class SWModel:
         #     错误码写进返回体（绝不"拿到对象就算成功"）。
         #   · 不在失败重试链里调 rebuild()/ForceRebuild3() —— 大型装配体上
         #     一次全量重建就可能挂几分钟，加重试等于把卡死放大。
-        _am5 = [_mt, int(align), bool(flip), _d, _du, _dl, _gn, _gd,
+        # ══ 【BUG-9 修复】区分早期 / 晚期两种调用形态 ══════════════════════
+        #  官方签名（报告 一-1）：
+        #    AddMate5(MateType, Align, Flip, Distance, DistAbsUpper, DistAbsLower,
+        #      GearRatioNumerator, GearRatioDenominator, Angle, AngleAbsUpper,
+        #      AngleAbsLower, ForPositioningOnly, LockRotation, WidthMateOption,
+        #      ByRef ErrorStatus) -> Mate2
+        #  · 晚期绑定：第 15 参必须是 VARIANT(VT_BYREF|VT_I4, 0)，
+        #      传裸 0 → DISP_E_TYPEMISMATCH(-2147352571)（历史"类型不匹配"真因）；
+        #  · 早期绑定：ByRef 自动解包成第二个返回值，**只传 14 参**，
+        #      再塞 VARIANT 会变成参数个数错（报告 二-2b 的 add_mate_early_bound）。
+        #  判据：holder 名以 "early" 开头 → 14 参双返回值；否则 → 15 参单返回值。
+        #  · 错误码：swAddMateError_e 成功是 1（报告 三-7），0 是 ErrorUnknown，
+        #      所以"Mate2 非 None 但 ErrorStatus 不是 NoError"一律判失败。
+        #  · 不在失败重试链里调 rebuild()/ForceRebuild3 —— 大型装配体上一次全量
+        #      重建可能挂几分钟，加重试等于把卡死放大。
+        _am5 = [_mt, _align, bool(flip), _d, _du, _dl, _gn, _gd,
                 _a, _au, _al, False, False, 0]
-        _ERROR_STATUS_LEGEND = {
-            0: "swAddMateError_ErrorUnknown（未知错误）",
-            1: "swAddMateError_NoError（成功）",
-            2: "swAddMateError_IncorrectMateType（配合类型不对）",
-            3: "swAddMateError_IncorrectAlignment（对齐方式不对）",
-            4: "swAddMateError_IncorrectSelections（选择集不对）",
-            5: "swAddMateError_OverDefinedAssembly（过定义）",
-            6: "swAddMateError_IncorrectGearRatios（齿轮比不对）",
-        }
         for _hname, _h in _holders:
+            _is_early = str(_hname).startswith("early")
             try:
                 _fn = getattr(_h, "AddMate5", None)
             except Exception:
                 _fn = None
             if _fn is None:
-                continue
-            _es = None
-            try:
-                _es = win32com.client.VARIANT(
-                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                _m = _fn(*(_am5 + [_es]))
-            except Exception as _e3:
-                _errs.append("%s/AddMate5(15): %r" % (_hname, _e3))
+                _diag["layers"].append(
+                    {"layer": "AddMate5", "holder": _hname, "ok": False,
+                     "why": "本 holder 上没有 AddMate5"})
                 continue
             _esv = None
-            try:
-                _esv = int(_es.value)
-            except Exception:
-                _esv = None
-            if _m is not None and _esv in (0, 1):
-                self._last_mate_error_status = {
-                    "value": _esv,
-                    "text": _ERROR_STATUS_LEGEND.get(_esv, "未知")}
-                return (_m, "%s/AddMate5(15, ErrorStatus=%d)"
-                        % (_hname, _esv if _esv is not None else -1), None)
-            _errs.append("%s/AddMate5(15): 返回 %s，ErrorStatus=%s（%s）"
+            _m = None
+            if _is_early:
+                # 早期绑定：14 参，ByRef 变成第二个返回值
+                try:
+                    _res = _fn(*_am5)
+                except Exception as _e3a:
+                    _errs.append("%s/AddMate5(14, early): %r" % (_hname, _e3a))
+                    _diag["layers"].append(
+                        {"layer": "AddMate5", "holder": _hname, "ok": False,
+                         "why": "early 14 参调用异常: %r" % (_e3a,)})
+                    continue
+                if isinstance(_res, (tuple, list)):
+                    _m = _res[0] if len(_res) > 0 else None
+                    _esv = _res[1] if len(_res) > 1 else None
+                else:
+                    _m = _res
+            else:
+                # 晚期绑定：15 参，ErrorStatus 用 VARIANT(VT_BYREF|VT_I4)
+                try:
+                    _es = _byref_i4(0)
+                    _m = _fn(*(_am5 + [_es]))
+                    _esv = _byref_value(_es, None)
+                except Exception as _e3:
+                    _errs.append("%s/AddMate5(15, late): %r" % (_hname, _e3))
+                    _diag["layers"].append(
+                        {"layer": "AddMate5", "holder": _hname, "ok": False,
+                         "why": ("late 15 参(VARIANT ByRef)调用异常: %r"
+                                 % (_e3,))})
+                    continue
+            _ok5, _known5 = mate_ok_by_error_status(_m, _esv)
+            if _esv is not None:
+                try:
+                    self._last_mate_error_status = {
+                        "value": int(_esv),
+                        "text": mate_error_status_text(_esv),
+                        "known": bool(_known5)}
+                except Exception:
+                    pass
+            _diag["layers"].append(
+                {"layer": "AddMate5", "holder": _hname,
+                 "ok": bool(_ok5 and _m is not None),
+                 "error_status": _esv,
+                 "error_status_known": bool(_known5),
+                 "error_text": (mate_error_status_text(_esv)
+                                if _esv is not None else None),
+                 "why": None if (_ok5 and _m is not None) else (
+                     "Mate2=None" if _m is None else
+                     "ErrorStatus=%r(%s)" % (_esv, mate_error_status_text(_esv)))})
+            if _ok5 and _m is not None:
+                return (_m, "%s/AddMate5(%d, ErrorStatus=%s)"
+                        % (_hname, 14 if _is_early else 15, _esv), None)
+            _errs.append("%s/AddMate5: 返回 %s，ErrorStatus=%s（%s）"
                          % (_hname, "None" if _m is None else "Mate2",
-                            _esv,
-                            _ERROR_STATUS_LEGEND.get(_esv, "未读到错误码")))
-            # 有明确错误码就记进实例字段，供上层返回体读取
-            try:
-                self._last_mate_error_status = {
-                    "value": _esv,
-                    "text": _ERROR_STATUS_LEGEND.get(_esv, "未知")}
-            except Exception:
-                pass
+                            _esv, mate_error_status_text(_esv)))
         # 老版本才有的 AddMate3（官方 14 参：... ForPositioningOnly,
         #   LockRotation, ByRef ErrorStatus）；原实现只传 12 参，同样漏
-        #   ErrorStatus —— 一并订正。
+        #   ErrorStatus —— 一并订正。早期绑定同样是 13 参 + 双返回值。
         for _hname, _h in _holders:
             try:
                 _fn = getattr(_h, "AddMate3", None)
@@ -14841,41 +15175,229 @@ class SWModel:
                 _fn = None
             if _fn is None:
                 continue
+            _is_early3 = str(_hname).startswith("early")
             try:
-                _es3 = win32com.client.VARIANT(
-                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-                _m = _fn(_mt, int(align), bool(flip), _d, _du, _dl,
-                         _gn, _gd, _a, _au, _al, False, False, _es3)
-                _esv3 = None
-                try:
-                    _esv3 = int(_es3.value)
-                except Exception:
-                    _esv3 = None
-                if _m is not None and _esv3 in (0, 1):
-                    return (_m, "%s/AddMate3(14, ErrorStatus=%d)"
-                            % (_hname, _esv3 if _esv3 is not None else -1), None)
-                _errs.append("%s/AddMate3(14): 返回 %s，ErrorStatus=%s"
+                _a3 = [_mt, _align, bool(flip), _d, _du, _dl,
+                       _gn, _gd, _a, _au, _al, False, False]
+                if _is_early3:
+                    _res3 = _fn(*_a3)
+                    if isinstance(_res3, (tuple, list)):
+                        _m = _res3[0] if len(_res3) > 0 else None
+                        _esv3 = _res3[1] if len(_res3) > 1 else None
+                    else:
+                        _m, _esv3 = _res3, None
+                else:
+                    _es3 = _byref_i4(0)
+                    _m = _fn(*(_a3 + [_es3]))
+                    _esv3 = _byref_value(_es3, None)
+                _ok3, _known3 = mate_ok_by_error_status(_m, _esv3)
+                _diag["layers"].append(
+                    {"layer": "AddMate3", "holder": _hname,
+                     "ok": bool(_ok3 and _m is not None),
+                     "error_status": _esv3,
+                     "error_status_known": bool(_known3),
+                     "why": None if (_ok3 and _m is not None) else
+                     ("Mate2=None" if _m is None else "ErrorStatus=%r" % (_esv3,))})
+                if _ok3 and _m is not None:
+                    return (_m, "%s/AddMate3(%d, ErrorStatus=%s)"
+                            % (_hname, 13 if _is_early3 else 14, _esv3), None)
+                _errs.append("%s/AddMate3: 返回 %s，ErrorStatus=%s"
                              % (_hname, "None" if _m is None else "Mate2", _esv3))
             except Exception as _e4:
-                _errs.append("%s/AddMate3(14): %r" % (_hname, _e4))
+                _errs.append("%s/AddMate3: %r" % (_hname, _e4))
+                _diag["layers"].append(
+                    {"layer": "AddMate3", "holder": _hname, "ok": False,
+                     "why": "调用异常: %r" % (_e4,)})
 
-        # ── ③ CreateMate（报告 3.2：新版仅 1 参数 IMateData）────────────
-        #    ⚠️ 只传 None：IMateData 接口类不在该 tlb 里导出，
-        #    不要试图 mod.IMateData(...) 构造（会 AttributeError）。
-        for _hname, _h in _holders:
-            try:
-                _fn = getattr(_h, "CreateMate", None)
-                if _fn is None:
-                    continue
-                for _arg in (None,):
-                    _m = _fn(_arg)
-                    if _m is not None:
-                        return _m, "%s/CreateMate(None)" % (_hname,), None
-            except Exception as _e5:
-                _errs.append("%s/CreateMate: %r" % (_hname, _e5))
+        # ── ④ 兜底：RunMacro2 宏（报告 一-5 / 二-2c）────────────────────
+        #  宏在 SW 自己进程内跑，等于早期绑定，ByRef 全自动 —— 是 API 全部
+        #  不可用时唯一还能"真建配合"的路。但有三条硬约束，任何一条不满足
+        #  都【不该尝试】（否则会把 COM 线程挂死）：
+        #    · 必须显式配置宏路径（环境变量 DSH_MATE_MACRO），绝不臆造路径；
+        #    · .swp 必须是二进制 OLE 复合文档（手写文本改名 → 模态框无限卡死）；
+        #    · ModuleName 是 `<文件名>1`，优先用 GetMacroMethods 拿真名。
+        _macro = self._run_mate_macro(_mt, _align, _d, _a)
+        if _macro is not None:
+            _diag["layers"].append({"layer": "RunMacro2", "holder": "sw",
+                                    "ok": bool(_macro.get("ok")),
+                                    "why": _macro.get("error")})
+            if _macro.get("ok"):
+                return (None, "RunMacro2(%s)" % (_macro.get("macro"),),
+                        None if _macro.get("mate_feature_created") else
+                        "宏已执行但未回报配合特征（配合是否真建立需复核）")
+            _errs.append("RunMacro2: %s" % (_macro.get("error"),))
 
-        return None, None, (" | ".join(_errs[-4:]) if _errs
+        return None, None, (" | ".join(_errs[-5:]) if _errs
                             else "本版本没有任何可用的 AddMate/CreateMate API")
+
+    # ── 【BUG-9】CreateMate 主路径（官方三步）────────────────────────────
+    def _mate_by_createmate(self, holder, mate_type, align=0,
+                            distance=None, angle=None):
+        """用官方三步建配合：CreateMateData(type) → 设属性 → CreateMate(md)。
+
+        ══ 依据（报告 一-2 / 一-2b / 二-2b）════════════════════════════════
+        官方 `CreateMate` Remarks 就是这个三步流程；`CreateMateData2`
+        **不存在**（报告 五-2），只能用 `CreateMateData(Type)`。
+        `EntitiesToMate` 是 System.Object 变体数组，传 Python list 不认；
+        但官方 Remarks 明确支持"先 SelectByID2 mark=1 预选"，因此本实现
+        **优先走预选**（不设 EntitiesToMate），只有在预选数不足时才退回
+        `VARIANT(VT_ARRAY|VT_DISPATCH, (...))` 显式塞实体。
+
+        ⚠️ 报告 五-5 的已知不确定项：晚期绑定下 `CreateMateData` 的返回值
+        属性可见性未知（可能 DISP_E_MEMBERNOTFOUND）。因此这里对**每个属性
+        赋值**都单独 try，失败只记录不中断 —— 属性设不上时仍尝试
+        `CreateMate(md)`，由 SW 按默认值决定；成败一律以 CreateMate 的
+        返回值 + 后续 Features 校验为准，绝不"设上了属性就宣布成功"。
+
+        Returns: (ok: bool, mate_or_None, why: str|None)
+        """
+        try:
+            _fn_data = getattr(holder, "CreateMateData", None)
+            _fn_mate = getattr(holder, "CreateMate", None)
+        except Exception as _e:
+            return False, None, "取 CreateMate/CreateMateData 失败: %r" % (_e,)
+        if _fn_mate is None:
+            return False, None, "本 holder 上没有 CreateMate"
+        if _fn_data is None:
+            return False, None, ("本 holder 上没有 CreateMateData（报告五-2："
+                                 "CreateMateData2 不存在，只有 CreateMateData）")
+        _notes = []
+        try:
+            _md = _fn_data(int(mate_type))
+        except Exception as _e1:
+            return False, None, "CreateMateData(%r) 调用异常: %r" % (
+                mate_type, _e1)
+        if _md is None:
+            return False, None, "CreateMateData 返回 None"
+        # ① MateAlignment（报告 二-2b：md.MateAlignment = align）
+        if mate_align_is_valid(align):
+            try:
+                _md.MateAlignment = int(align)
+            except Exception as _e2:
+                _notes.append("MateAlignment 设不上: %r" % (_e2,))
+        # ② 距离 / 角度（只有对应类型才有意义）
+        if distance:
+            for _prop in ("Distance", "DistanceValue"):
+                try:
+                    setattr(_md, _prop, float(distance))
+                    break
+                except Exception:
+                    continue
+        if angle:
+            for _prop in ("Angle", "AngleValue"):
+                try:
+                    setattr(_md, _prop, float(angle))
+                    break
+                except Exception:
+                    continue
+        # ③ EntitiesToMate：仅当预选不可用时才显式塞（报告 一-2b 路线 B）
+        _sel_n = self._selected_count_all()
+        if _sel_n is not None and _sel_n < 2:
+            try:
+                _sm = self.model.SelectionManager
+                _e1o = _sm.GetSelectedObject6(1, -1)
+                _e2o = _sm.GetSelectedObject6(2, -1)
+                if _e1o is not None and _e2o is not None:
+                    _md.EntitiesToMate = _dispatch_array((_e1o, _e2o))
+                    _notes.append("改用 EntitiesToMate 显式塞实体")
+            except Exception as _e3:
+                _notes.append("EntitiesToMate 设置失败: %r" % (_e3,))
+        try:
+            _m = _fn_mate(_md)
+        except Exception as _e4:
+            return False, None, "CreateMate(md) 调用异常: %r（%s）" % (
+                _e4, "；".join(_notes) or "无附加说明")
+        if _m is None:
+            return False, None, ("CreateMate(md) 返回 None（%s）"
+                                 % ("；".join(_notes) or "属性设置无异常，"
+                                    "SW 拒绝建配合"))
+        if _notes:
+            self._last_createmate_notes = _notes
+        return True, _m, None
+
+    # ── 【BUG-9】RunMacro2 宏兜底 ────────────────────────────────────────
+    def _run_mate_macro(self, mate_type, align, distance, angle):
+        """API 全不可用时的最后一条路：跑用户提供的 .swp 宏建配合。
+
+        ══ 三条必踩坑（报告 一-5 / 二-2c），每条都做了防御 ════════════════
+          ① `Error` 是 ByRef VT_I4 —— 必须 `VARIANT(VT_BYREF|VT_I4, 0)`，
+             传裸 0 → Type mismatch (arg index 5)。
+          ② `ModuleName` 是 `<文件名>1` —— 传文件名主干会得到 error 22
+             InvalidIndex。这里优先用 `GetMacroMethods` 拿真名，拿不到才猜。
+          ③ `.swp` 必须是**二进制 OLE 复合文档**；手写文本改名会弹 "Cannot open"
+             模态框并**无限期挂住 COM 线程**。因此这里先检查文件头是不是
+             OLE2 复合文档签名 `D0 CF 11 E0 A1 B1 1A E1`，不是就【拒绝调用】。
+
+        安全约束：宏路径只能由环境变量 `DSH_MATE_MACRO` 显式给出，绝不猜路径、
+        绝不生成临时宏（生成出来的必然不是 OLE 复合文档，会挂死进程）。
+
+        Returns: dict|None —— None 表示"没有配置宏 / 前置条件不满足，未尝试"。
+        """
+        _path = (os.environ.get("DSH_MATE_MACRO") or "").strip()
+        if not _path:
+            return None
+        if not os.path.isfile(_path):
+            return {"ok": False, "macro": _path,
+                    "error": "DSH_MATE_MACRO 指向的文件不存在: %s" % _path}
+        # ③ 二进制 OLE 复合文档签名校验（防模态框挂死）
+        try:
+            with open(_path, "rb") as _f:
+                _head = _f.read(8)
+        except Exception as _e:
+            return {"ok": False, "macro": _path,
+                    "error": "读取宏文件失败: %r" % (_e,)}
+        _OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        if _head != _OLE_MAGIC:
+            return {"ok": False, "macro": _path,
+                    "error": ("拒绝执行：该文件不是二进制 OLE 复合文档"
+                              "（头 8 字节 %r ≠ %r）。手写文本改名 .swp 会弹"
+                              "'Cannot open' 模态框并把 COM 线程挂死"
+                              "（报告 二-2c 坑 3）。"
+                              % (_head, _OLE_MAGIC))}
+        _sw = getattr(self, "sw", None)
+        if _sw is None:
+            return {"ok": False, "macro": _path, "error": "sw 不可用（无应用对象）"}
+        _fn = getattr(_sw, "RunMacro2", None)
+        if _fn is None:
+            return {"ok": False, "macro": _path,
+                    "error": "本版本 SldWorks 上没有 RunMacro2"}
+        # ② 模块名：优先 GetMacroMethods 拿真名（形如 "Module1.Proc"）
+        _module = None
+        _proc = "main"
+        try:
+            _methods = _sw.GetMacroMethods(_path, 0)
+            _ml = list(_methods) if _methods is not None else []
+            if _ml:
+                _first = str(_ml[0])
+                if "." in _first:
+                    _module, _proc = _first.split(".", 1)
+                else:
+                    _module = _first
+        except Exception:
+            _module = None
+        if not _module:
+            _stem = os.path.basename(_path).rsplit(".", 1)[0]
+            _module = _stem + "1"      # 见坑 2：<文件名>1
+        # ① Error 必须 ByRef VT_I4
+        try:
+            _err = _byref_i4(0)
+            _ok = _fn(_path, str(_module), str(_proc), 1, _err)
+            _code = _byref_value(_err, None)
+        except Exception as _e5:
+            return {"ok": False, "macro": _path, "module": _module,
+                    "procedure": _proc,
+                    "error": ("RunMacro2 调用异常: %r（注意 Error 必须是 "
+                              "VARIANT(VT_BYREF|VT_I4)，ModuleName 必须是 "
+                              "'<文件名>1'）" % (_e5,))}
+        _out = {"ok": bool(_ok) and (not _code or _code == 0),
+                "macro": _path, "module": _module, "procedure": _proc,
+                "sw_run_macro_error": _code,
+                "mate_feature_created": None}
+        if not _out["ok"]:
+            _out["error"] = ("RunMacro2 失败: ok=%r swRunMacroError=%r"
+                             "（22=InvalidIndex → 模块名不对）"
+                             % (_ok, _code))
+        return _out
 
     def create_mate(self, mate_type, entities, distance_mm=None,
                     angle_deg=None):
@@ -14929,10 +15451,13 @@ class SWModel:
             except Exception:
                 pass
             # 官方五步：① 清空选择 ② 选参考 1 ③ 选参考 2 ④ 建配合
-            try:
-                self.model.ClearSelection2(True)
-            except Exception:
-                pass
+            # ── 【BUG-9】ClearSelection2 必须先做（报告 一-3）──────────────
+            # 残留选择会污染 mark 过滤：配合实体的 mark 都是 1，而计数若用
+            # GetSelectedObjectCount2(0)（语义 = 只数【没有 mark】的选择）就会
+            # 读回 0 → 被误判成"没选中"。本方法已统一走 _selected_count_all()
+            # （内部恒传 -1），并在建配合前强制清一次选择集。
+            _cleared = self._ensure_clear_selection()
+            out["selection_cleared"] = bool(_cleared)
             _notes = []
             _ok_any = False
             for _i, _spec in enumerate(_ents):
@@ -14946,33 +15471,46 @@ class SWModel:
                     _ok_any = True
             out["selections"] = _notes
             # 选择集数量是"能不能建配合"的硬判据（老代码栽在这）
-            _sel_count = 0
-            try:
-                _sel_count = int(self.model.SelectionManager
-                                 .GetSelectedObjectCount2(-1))
-            except Exception:
-                _sel_count = sum(1 for n in _notes if not n.startswith("unselected")
+            _sel_count = self._selected_count_all()
+            if _sel_count < 0:
+                _sel_count = sum(1 for n in _notes
+                                 if not n.startswith("unselected")
                                  and not n.startswith("ERR"))
             out["selected_count"] = _sel_count
             # 从 SelectionMgr 独立再读一次（不依赖我们自己数出来的结果）：
             # 实机发现"面选上后再选第二个对象可能把第一个顶掉"，这个读数
             # 就是判断"选择集真的还在不在"的唯一可信来源，必须留证。
-            try:
-                out["select_mgr_count"] = int(
-                    self.model.SelectionManager.GetSelectedObjectCount2(-1))
-            except Exception:
-                pass
+            # 【BUG-9】同样恒传 -1（报告 一-3b）。
+            _mgr_count = self._selected_count_all()
+            if _mgr_count >= 0:
+                out["select_mgr_count"] = _mgr_count
             if _sel_count < 2:
                 out["error"] = ("配合要求至少选中 2 个参考对象，当前仅 %d 个"
                                 % _sel_count)
                 out["hint"] = ("参考对象必须可被选中：基准面名要存在于本装配体，"
                                "组件名要能被 GetComponents 找到；"
-                               "也可以直接把面对象传进来。")
+                               "也可以直接把面对象传进来。"
+                               "装配体里 SelectByID2 的名字格式是 "
+                               "'<实体名>@<零部件实例名>@<装配体名>'"
+                               "（实例名带 -1/-2 后缀，不是零件文件名）。")
                 return out
+            # 参考名是否"合格"（至少 实体@实例 两段）——报告 一-3。
+            try:
+                out["name_qualified"] = [
+                    mate_name_is_qualified(str(s))
+                    for s in (_ents if isinstance(_ents, (list, tuple)) else [])
+                    if isinstance(s, str)]
+            except Exception:
+                pass
 
             _mate, _api, _err = self._add_mate_early(
                 _mt, align=0, flip=False,
                 distance_mm=distance_mm, angle_deg=angle_deg)
+            _diag = getattr(self, "_last_mate_diag", None)
+            if isinstance(_diag, dict):
+                out["layers"] = list(_diag.get("layers") or [])
+                if _diag.get("probe"):
+                    out["early_probe"] = _diag.get("probe")
             if _mate is not None:
                 out["ok"] = True
                 out["used_api"] = _api
@@ -14998,6 +15536,18 @@ class SWModel:
             # 修复判据：统一 15 参 + VARIANT(VT_BYREF|VT_I4) ErrorStatus，
             #   并检查错误码（0=ErrorUnknown 失败、1=NoError 成功、其它=具体原因）。
             # 参考：https://help.solidworks.com/2025/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.IAssemblyDoc~AddMate5.html
+            #
+            # ── 【BUG-9 去重】本段只在"分层链路压根没试过 late(model)"时执行 ──
+            # 分层链路（_add_mate_early）已经包含晚期 15 参 AddMate5 / 14 参
+            # AddMate3；若这里再原样重试一次，等于同一个 API 连打两遍 ——
+            # 在 AddMate5 其实成功但判定口径不同的情况下会【重复建配合】，
+            # 在必失败的情况下只是把 600s 卡死风险翻倍。因此按 diag 里的
+            # 实际尝试记录决定是否补跑。
+            _ad = getattr(self, "_last_mate_diag", None) or {}
+            _late_already = any(
+                (str((x or {}).get("layer") or "").startswith(("AddMate", "CreateMate")))
+                and str((x or {}).get("holder") or "").startswith("late")
+                for x in (_ad.get("layers") or []))
             _d2, _du2, _dl2, _gn2, _gd2, _a2, _au2, _al2 = self._mate_value_args(
                 _mt, distance_mm, angle_deg)
             _late_errs = []
@@ -15005,36 +15555,39 @@ class SWModel:
                 _fn5 = getattr(self.model, "AddMate5", None)
             except Exception:
                 _fn5 = None
-            if _fn5 is not None:
+            if _fn5 is not None and not _late_already:
                 try:
-                    _es_l = win32com.client.VARIANT(
-                        pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                    _es_l = _byref_i4(0)
                     _m = _fn5(_mt, 0, False, _d2, _du2, _dl2, _gn2, _gd2,
                               _a2, _au2, _al2, False, False, 0, _es_l)
-                    _esv_l = int(getattr(_es_l, "value", -1))
-                    if _m is not None and _esv_l in (0, 1):
+                    _esv_l = _byref_value(_es_l, None)
+                    _ok_l, _known_l = mate_ok_by_error_status(_m, _esv_l)
+                    if _ok_l and _m is not None:
                         out["ok"] = True
-                        out["used_api"] = "late/AddMate5(15, ErrorStatus=%d)" % _esv_l
+                        out["used_api"] = "late/AddMate5(15, ErrorStatus=%s)" % (_esv_l,)
                         out["fallback"] = True
                         return out
-                    _late_errs.append("AddMate5(15): mate=%s ErrorStatus=%s"
-                                      % ("None" if _m is None else "ok", _esv_l))
+                    _late_errs.append("AddMate5(15): mate=%s ErrorStatus=%s(%s)"
+                                      % ("None" if _m is None else "ok", _esv_l,
+                                         mate_error_status_text(_esv_l)))
                 except Exception as _e_l5:
                     _late_errs.append("AddMate5(15): %r" % (_e_l5,))
+            elif _late_already:
+                _late_errs.append("晚期 AddMate5/AddMate3 已由分层链路尝试过，跳过重复调用")
             try:
                 _fn3 = getattr(self.model, "AddMate3", None)
             except Exception:
                 _fn3 = None
-            if _fn3 is not None:
+            if _fn3 is not None and not _late_already:
                 try:
-                    _es_l3 = win32com.client.VARIANT(
-                        pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                    _es_l3 = _byref_i4(0)
                     _m = _fn3(_mt, 0, False, _d2, _du2, _dl2, _gn2, _gd2,
                               _a2, _au2, _al2, False, False, _es_l3)
-                    _esv_l3 = int(getattr(_es_l3, "value", -1))
-                    if _m is not None and _esv_l3 in (0, 1):
+                    _esv_l3 = _byref_value(_es_l3, None)
+                    _ok_l3, _known_l3 = mate_ok_by_error_status(_m, _esv_l3)
+                    if _ok_l3 and _m is not None:
                         out["ok"] = True
-                        out["used_api"] = "late/AddMate3(14, ErrorStatus=%d)" % _esv_l3
+                        out["used_api"] = "late/AddMate3(14, ErrorStatus=%s)" % (_esv_l3,)
                         out["fallback"] = True
                         return out
                     _late_errs.append("AddMate3(14): mate=%s ErrorStatus=%s"
@@ -15049,7 +15602,10 @@ class SWModel:
                                if _late_errs else ""))
             out["hint"] = ("① 确认两个参考对象都被选中（看 selections/selected_count）；"
                            "② 早期绑定不可用时本方法会自动回退，仍失败说明本版 "
-                           "SolidWorks 的配合 API 与预期不同，请附 used_api 报告。")
+                           "SolidWorks 的配合 API 与预期不同，请附 used_api 与 layers 报告。"
+                           "③ 若 layers 显示每一层都失败，最长可信的降级是"
+                           "「add_component 摆位 + 位姿断言 + 原生干涉验证」，"
+                           "并在交付说明里写明配合未真正建立。")
             return out
         except Exception as _e:
             out["error"] = "create_mate 异常: %r" % (_e,)
@@ -15349,202 +15905,286 @@ class SWModel:
         return out
 
     def check_interference(self, include_multibody=True, treat_coincident=True):
-        """干涉检查（多版本 API 兜底）。
+        """干涉检查（【BUG-9】改用 InterferenceDetectionManager 为主路径）。
 
-        ── 【BUG-F 修复】ToolsCheckInterference2 在 SolidWorks 2025 不可用 ──
-        测试反馈：该 API 在 SW2025 已被移除/改名，直接调用即抛异常，
-          而原实现只把异常塞进 error 字段就返回 —— 上层看到 count=0
-          很容易误判成没有干涉（又一次静默失败）。
+        ══ 旧实现的致命缺陷（报告 一-6 / 二-2d）═════════════════════════════
+        `ToolsCheckInterference2` 的两个 ByRef 输出参数（PComp/PFace）在
+        【晚期绑定】下无法填充，读回来永远是 None；而它的**返回计数**同样
+        不可靠。旧代码却写成：
 
-        修复：
-          1) 依次尝试 ToolsCheckInterference2 / ToolsCheckInterference（版本差异）；
-          2) 全部不可用时返回 ok=False 且 available=False，
-             明确区别于"检查通过、无干涉"，绝不给出 count=0 的假结果；
-          3) 给出可操作的降级建议。
+            n = _fn(...)                 # 可能返回 None
+            out["count"] = int(n or 0)   # → 0
+            out["ok"] = True             # → "无干涉" ✅
+
+        于是"有干涉"被安静地报成"无干涉" —— 这是会把缺陷交付出去的
+        **误报型**静默失败，比报错更危险。
+
+        ══ 现在的判据（严格按报告）══════════════════════════════════════════
+          ① 主路径：`IAssemblyDoc.InterferenceDetectionManager` →
+             `IInterferenceDetectionMgr`。用 `GetInterferenceCount()` 拿计数
+             （普通返回值，可当测量值），`GetInterferences()` 拿明细。
+             `TreatCoincidenceAsInterference`（面贴面不算干涉）、
+             `IncludeMultibodyPartInterferences=True`；
+             **`Done()` 必须调用**，否则装配体卡在干涉显示模式。
+          ② 明确区分三态，绝不混同：
+             · ok=True,  count=0        → 真的没有干涉（原生 API 结论）
+             · ok=True,  count>0        → 有干涉
+             · ok=False, available=False→ 结果【不可采信】，不是"没有干涉"
+             · approx=True              → 包围盒近似，仅设计层自查
+          ③ `ToolsCheckInterference*` 仅作【历史兜底】，且其计数被标记
+             `trustworthy=False` —— 绝不用它给出 count=0 的通过结论。
+
+        Args:
+            include_multibody: 多实体零件的内部干涉是否算（→
+                IncludeMultibodyPartInterferences）。
+            treat_coincident: 面贴面重合是否算干涉（→
+                TreatCoincidenceAsInterference）。
 
         Returns:
-          {ok, available, count, interferences:[...], api?, error?, hint?}
-          ok=True 且 count=0  -> 真的没有干涉
-          available=False     -> 本版本无此 API，结果不可采信
+          {ok, available, count, interferences:[...], api?, truncated?,
+           trustworthy?, approx?, error?, hint?, done_called?}
         """
-        out = {"ok": False, "available": False, "count": 0, "interferences": []}
-        comps = []
+        out = {"ok": False, "available": False, "count": 0,
+               "interferences": [], "approx": False, "trustworthy": False}
         try:
             self._activate_self()
+        except Exception:
+            pass
+
+        # ══ ① 主路径：InterferenceDetectionManager ═════════════════════════
+        _mgr_info = self._interference_manager()
+        if _mgr_info.get("ok"):
+            mgr = _mgr_info.get("manager")
+            out["api"] = "InterferenceDetectionManager"
+            out["available"] = True
+            out["manager_holder"] = _mgr_info.get("holder")
+            # 三个属性都单独设：某些版本只支持其中一部分，设不上不该中断。
+            _prop_notes = []
+            for _prop, _val in (
+                    ("TreatCoincidenceAsInterference", bool(treat_coincident)),
+                    ("IncludeMultibodyPartInterferences", bool(include_multibody)),
+                    ("TreatSubAssembliesAsComponents", True)):
+                try:
+                    setattr(mgr, _prop, _val)
+                except Exception as _e_p:
+                    _prop_notes.append("%s 设不上: %r" % (_prop, _e_p))
+            if _prop_notes:
+                out["property_notes"] = _prop_notes
+            _count = None
+            _count_why = None
+            # GetInterferenceCount：新版是【属性/方法】两可（报告 三-1），
+            # 两种形态都试，取到就用 —— 但绝不把"取不到"当成 0。
+            try:
+                _v = getattr(mgr, "GetInterferenceCount")
+                if callable(_v):
+                    _count = int(_v())
+                    out["count_method"] = "方法调用（带括号）"
+                else:
+                    _count = int(_v)
+                    out["count_method"] = "属性访问（无括号）"
+            except Exception as _e_c:
+                _count_why = repr(_e_c)
+            if _count is None:
+                out["ok"] = False
+                out["available"] = False
+                out["trustworthy"] = False
+                out["error"] = ("InterferenceDetectionManager 取到了，但 "
+                                "GetInterferenceCount 两种形态都读不出来"
+                                "（%s）—— 结果不可采信，不要当作没有干涉。"
+                                % (_count_why,))
+                self._interference_done(mgr, out)
+                return out
+            out["count"] = int(_count)
+            out["trustworthy"] = True
+            # 明细（GetInterferences 返回 IInterference 数组；0 个时可能是 None）
+            if _count:
+                try:
+                    _items = mgr.GetInterferences()
+                    out["interferences"] = self._interference_details(_items)
+                except Exception as _e_i:
+                    out["interferences_error"] = repr(_e_i)
+                    out["interferences_note"] = (
+                        "计数可用但明细取不到 —— 干涉确实存在（count>0），"
+                        "请到 SW 界面 评估-干涉检查 查看具体位置。")
+            self._interference_done(mgr, out)
+            out["ok"] = True
+            return out
+
+        # 主路径不可用 → 记录原因，继续走历史兜底
+        out["manager_error"] = _mgr_info.get("error")
+        out["manager_attempts"] = _mgr_info.get("attempts")
+
+        # ══ ② 历史兜底：ToolsCheckInterference（无参，返回值本身可当计数）══
+        #  仅当它能【直接返回一个 int】时才采用；ToolsCheckInterference2/3
+        #  的 ByRef 出参在晚期绑定下填不进去（报告 一-6），
+        #  它的计数一律标 trustworthy=False，绝不据此报"无干涉"。
+        comps = []
+        try:
             comps = self.model.GetComponents(False) or []
         except Exception:
             comps = []
-        n_comp = len(comps)
-
-        # ── 【Bug-30 修复】先准备组件选择集 ────────────────────────────────
-        # 原缺陷：直接调 ToolsCheckInterference2 且把第二参传 None ——
-        #   该 API 需要"要检查的组件数组"，空/None 会因参数类型不匹配而失败
-        #   （实测报"无效参数/类型不匹配"，Bug-30 现象 4）。
-        # 修复：按 API 语义准备两种形态并依次尝试：
-        #   ① 组件数组（GetComponents 的元组）—— 新版本签名；
-        #   ② None（表示"全部组件"）—— 部分版本接受；
-        #   ③ 全选组件后传数量（旧签名）。
         _comp_list = list(comps) if isinstance(comps, tuple) else (
             [comps] if comps else [])
-        _sel_tried = []
-        try:
-            self.clear_selection()
-            for _c in _comp_list:
-                try:
-                    _c.Select4(False, None)
-                except Exception:
-                    try:
-                        _c.Select(False)
-                    except Exception:
-                        pass
-            out["selection_prepared"] = True
-        except Exception as _e:
-            out["selection_prepared"] = False
-            out["selection_error"] = repr(_e)
-
-        # ══ 【Bug5 修复·按实测签名重写】══════════════════════════════════
-        # 本次用生成的类型库缓存【读出真实签名】，修正了先前的错误假设：
-        #
-        #   IAssemblyDoc.ToolsCheckInterference2(
-        #       NumComponents, LpComponents, CoincidentInterference,
-        #       PComp, PFace)
-        #     · NumComponents          = 组件数量 (int)
-        #     · LpComponents           = 组件数组 (VARIANT)
-        #     · CoincidentInterference = 是否把重合面也算干涉 (bool)
-        #     · PComp / PFace          = byref 输出
-        #   IAssemblyDoc.ToolsCheckInterference()  —— 无参版本（最稳）
-        #
-        #   已核对：这些方法【只存在于 IAssemblyDoc】，
-        #     ISldWorks(Application) 上【完全没有】—— 测试部报的
-        #     AttributeError('SldWorks.Application.Tools...') 正是对象层级用错。
-        #
-        #   关键：必须用【前期绑定】的 IAssemblyDoc 包装 self.model 再调用，
-        #     才能命中 InvokeTypes(dispid)，否则 late-binding 报"找不到成员"。
-        last_err = None
-        # 同样必须用【真正的接口 QueryInterface】包装（见 _wrap_with_interface）
-        _asm_early = self._wrap_with_interface(self.model, "IAssemblyDoc")
-        if _asm_early is None:
-            _sel_tried.append("IAssemblyDoc 包装失败，回落 late-binding")
-            _asm_early = None
         _holders = []
-        if _asm_early is not None:
-            _holders.append(("early(IAssemblyDoc)", _asm_early))
+        try:
+            _asm_e = self._wrap_with_interface(self.model, "IAssemblyDoc")
+            if _asm_e is not None:
+                _holders.append(("early(IAssemblyDoc)", _asm_e))
+        except Exception:
+            pass
         _holders.append(("late(model)", self.model))
-        # ── 尝试 A：无参版本（最简单，优先）──────────────────────────────
+        _sel_tried = []
         for _hname, _h in _holders:
             try:
                 _fn = getattr(_h, "ToolsCheckInterference", None)
-                if _fn is None:
-                    continue
+            except Exception:
+                _fn = None
+            if _fn is None:
+                continue
+            try:
                 n = _fn()
-                out["available"] = True
-                out["api"] = "ToolsCheckInterference"
-                out["holder"] = _hname
-                out["count"] = int(n or 0)
-                out["ok"] = True
-                out["selection_prepared"] = out.get("selection_prepared", False)
-                return out
             except Exception as _e_a:
-                last_err = _e_a
                 _sel_tried.append("%s/ToolsCheckInterference(): %r"
                                   % (_hname, _e_a))
-        # ── 尝试 B：ToolsCheckInterference2/3（五参签名，逐形态回退）──────
-        _comp_forms = []
-        if _comp_list:
-            _comp_forms.append(("list", list(_comp_list)))
-            try:
-                _comp_forms.append(("variant_dispatch", win32com.client.VARIANT(
-                    pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, list(_comp_list))))
-            except Exception:
-                pass
-        _comp_forms.append(("none", None))
-        for _sig in ("ToolsCheckInterference2", "ToolsCheckInterference3",
-                     "IToolsCheckInterference2", "IToolsCheckInterference3"):
-            for _hname, _h in _holders:
-                try:
-                    _fn = getattr(_h, _sig, None)
-                except Exception:
-                    _fn = None
-                if _fn is None:
-                    continue
-                for _cname, _cv in _comp_forms:
-                    try:
-                        _pcomp = win32com.client.VARIANT(
-                            pythoncom.VT_BYREF | pythoncom.VT_DISPATCH, None)
-                        _pface = win32com.client.VARIANT(
-                            pythoncom.VT_BYREF | pythoncom.VT_DISPATCH, None)
-                    except Exception:
-                        _pcomp, _pface = None, None
-                    _argc_forms = (("5arg", 5), ("4arg", 4), ("3arg", 3),
-                                   ("2arg", 2))
-                    for _aname, _n in _argc_forms:
-                        try:
-                            if _n >= 5:
-                                n = _fn(n_comp, _cv, bool(treat_coincident),
-                                        _pcomp, _pface)
-                            elif _n == 4:
-                                n = _fn(n_comp, _cv, bool(treat_coincident), _pcomp)
-                            elif _n == 3:
-                                n = _fn(n_comp, _cv, bool(treat_coincident))
-                            else:
-                                n = _fn(n_comp, _cv)
-                            out["available"] = True
-                            out["api"] = _sig
-                            out["holder"] = _hname
-                            out["components_arg"] = _cname
-                            out["argc"] = _aname
-                            out["count"] = int(n or 0)
-                            try:
-                                _arr = _pcomp.value if _pcomp is not None else None
-                            except Exception:
-                                _arr = None
-                            if _arr:
-                                try:
-                                    for x in _arr:
-                                        item = {}
-                                        try:
-                                            item["volume_mm3"] = float(x.Volume) * 1e9
-                                        except Exception:
-                                            item["raw"] = repr(x)
-                                        out["interferences"].append(item)
-                                except Exception:
-                                    pass
-                            out["ok"] = True
-                            out["selection_prepared"] = out.get("selection_prepared", False)
-                            return out
-                        except Exception as _e_call:
-                            last_err = _e_call
-                            _sel_tried.append("%s/%s/%s/%s: %r"
-                                              % (_hname, _sig, _cname, _aname, _e_call))
-                            continue
+                continue
+            if n is None:
+                # 返回值都是 None → 这个 API 在本环境不产出可用结论
+                _sel_tried.append("%s/ToolsCheckInterference(): 返回 None"
+                                  % (_hname,))
+                continue
+            out["api"] = "ToolsCheckInterference(legacy)"
+            out["available"] = True
+            out["holder"] = _hname
+            out["count"] = int(n)
+            out["trustworthy"] = True
+            out["legacy_api"] = True
+            out["ok"] = True
+            out["note"] = ("使用历史 API ToolsCheckInterference 得到的计数"
+                           "（返回值形态可靠）。建议随后在 SW 界面复核。")
+            return out
 
-        # ── 【Bug5 修复】API 全不可用时【自动降级】到几何近似检查 ────────
-        # 实机（SW2025）反馈：ToolsCheckInterference* 在本版不可用，
-        #   原实现只返回 ok=False + 让调用方自己想办法 —— 装配验证链
-        #   因此断在这里（调用方往往直接当"检查失败"跳过）。
-        # 现在自动用包围盒近似检查兜底，并明确标注 approx=True，
-        #   使流程可继续，同时绝不把近似结果伪装成 SW 原生结论。
-        try:
-            _approx = self.geometry_interference_approx()
-            if isinstance(_approx, dict) and _approx.get("ok"):
-                _approx["degraded_from"] = "native-api-unavailable"
-                _approx["native_error"] = repr(last_err)
-                _approx["attempts"] = _sel_tried
-                _approx["hint"] = ("本版 SolidWorks 无可用干涉 API，已自动降级为"
-                                   "包围盒近似检查（approx=True，仅作设计层自查）。"
-                                   "正式交付前请在 SW 界面执行 评估-干涉检查 复核。")
-                return _approx
-        except Exception as _e_approx:
-            out["approx_error"] = repr(_e_approx)
-
-        out["error"] = ("本 SolidWorks 版本无可用的干涉检查 API"
-                        "（ToolsCheckInterference2/1 均已按多种传参形态尝试）: %r"
-                        % (last_err,))
+        # ══ ③ 明确失败：绝不给出 count=0 的"通过"结论 ══════════════════════
+        # 报告 一-6 的核心教训：ToolsCheckInterference2 读回 None 时若当成 0，
+        # 就是把"有干涉"误报成"无干涉"。这里把底层原因一并回传。
+        out["error"] = ("本 SolidWorks 版本无可用的原生干涉检查 API"
+                        "（InterferenceDetectionManager: %s；"
+                        "ToolsCheckInterference: %s）"
+                        % (out.get("manager_error"),
+                           "；".join(_sel_tried[-3:]) or "无该 API"))
         out["attempts"] = _sel_tried
-        out["hint"] = ("结果【不可采信】，不要当作没有干涉。"
-                       "请在 SolidWorks 界面手动执行 评估-干涉检查 确认，"
-                       "或改用 geometry_interference_approx() 做包围盒近似判断。")
+        out["trustworthy"] = False
         return out
+
+    def _interference_manager(self):
+        """取 IInterferenceDetectionMgr（报告 一-6：IAssemblyDoc 上的属性）。
+
+        ⚠️ 关键：绝【不】用 `ToolsCheckInterference2`——它在晚期绑定下两个
+        ByRef 出参填不进去，永远读回 None（见 check_interference 说明）。
+        这里按 早期接口 → 晚期 model → 属性式/方法式 的顺序取，
+        全部失败返回 {ok:False, error:...}，绝不抛异常。
+        """
+        _info = {"ok": False, "manager": None, "holder": None,
+                 "error": None, "attempts": []}
+        _m = getattr(self, "model", None)
+        if _m is None:
+            _info["error"] = "model 为 None"
+            return _info
+        _holders = []
+        try:
+            _asm_e = self._wrap_with_interface(_m, "IAssemblyDoc")
+            if _asm_e is not None:
+                _holders.append(("early(IAssemblyDoc)", _asm_e))
+        except Exception as _e:
+            _info["attempts"].append("IAssemblyDoc 包装失败: %r" % (_e,))
+        _holders.append(("late(model)", _m))
+        for _hname, _h in _holders:
+            for _how in ("attr", "call"):
+                try:
+                    if _how == "attr":
+                        _mgr = getattr(_h, "InterferenceDetectionManager")
+                    else:
+                        _mgr = _h.InterferenceDetectionManager()
+                except Exception as _e2:
+                    _info["attempts"].append("%s/%s: %r" % (_hname, _how, _e2))
+                    continue
+                if _mgr is None:
+                    _info["attempts"].append("%s/%s: 返回 None"
+                                             % (_hname, _how))
+                    continue
+                _info.update({"ok": True, "manager": _mgr,
+                              "holder": "%s/%s" % (_hname, _how)})
+                return _info
+        _info["error"] = ("拿不到 InterferenceDetectionManager（%s）"
+                          % ("；".join(_info["attempts"][-3:]) or "无候选"))
+        return _info
+
+    def _interference_done(self, mgr, out=None):
+        """调 IInterferenceDetectionMgr.Done()（报告 一-6：必须调）。
+
+        不调的话装配体卡在"干涉显示模式"：所有干涉体积被高亮，后续
+        截图/出图全是花的。失败只记录，不抛异常。
+        """
+        _ok = False
+        try:
+            _fn = getattr(mgr, "Done", None)
+            if _fn is not None:
+                _fn()
+                _ok = True
+        except Exception as _e:
+            if isinstance(out, dict):
+                out["done_error"] = repr(_e)
+        if isinstance(out, dict):
+            out["done_called"] = bool(_ok)
+        return _ok
+
+    @staticmethod
+    def _interference_details(items, limit=50):
+        """把 GetInterferences() 的返回值整理成结构化明细（上限 limit 条）。
+
+        报告 二-2d 的接口细节：
+          · `IInterference.Volume`        是【属性】（不带括号），单位 m³；
+          · `IInterference.GetComponentCount()` 是【方法】（带括号）；
+          · 组件列表是 `.Components` 【属性】，不是 `.GetComponents()`。
+        逐项 try —— 任何一项取不到都不该让整个检查失败。
+        """
+        _out = []
+        if items is None:
+            return _out
+        _arr = items if isinstance(items, (list, tuple)) else [items]
+        for _it in _arr[:max(0, int(limit))]:
+            if _it is None:
+                continue
+            _rec = {}
+            try:
+                _v = _it.Volume
+                _rec["volume_m3"] = float(_v)
+                _rec["volume_mm3"] = float(_v) * 1e9
+            except Exception as _e:
+                _rec["volume_error"] = repr(_e)
+            try:
+                _fn = getattr(_it, "GetComponentCount", None)
+                _rec["component_count"] = int(_fn()) if callable(_fn) else None
+            except Exception as _e2:
+                _rec["component_count_error"] = repr(_e2)
+            try:
+                _comps = getattr(_it, "Components", None)
+                if _comps is not None:
+                    _cl = (_comps if isinstance(_comps, (list, tuple))
+                           else list(_comps))
+                    _names = []
+                    for _c in _cl:
+                        try:
+                            _names.append(str(getattr(_c, "Name2", None)
+                                              or getattr(_c, "Name", "")
+                                              or "?"))
+                        except Exception:
+                            continue
+                    _rec["components"] = _names
+            except Exception as _e3:
+                _rec["components_error"] = repr(_e3)
+            _out.append(_rec)
+        return _out
+
 
     def geometry_interference_approx(self, min_overlap_mm=0.05):
         """【Bug-30 修复】几何近似的干涉检查（API 全部失效时的兜底）。

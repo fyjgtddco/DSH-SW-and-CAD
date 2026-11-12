@@ -170,18 +170,12 @@ rooms = [{"name":"A","type":"housing","parts":["p1"],"why":"承载","depends_on"
 print("WRONG_DECIDER=%s" % (not mf.set_subagent_plan(rooms,"r","主对话",d)["ok"]))
 sr = mf.set_subagent_plan(rooms,"按功能分解","总计子代理",d)
 print("RIGHT_COUNT=%s" % sr.get("count"))
-print("PRIME_FIXED=%s" % mf.prime_room_definition(d).get("fixed"))
-good = {"part_name":"p1","room":"A","file":"C:/x/p1.SLDPRT",
-        "dims":{"length_mm":100,"width_mm":50,"height_mm":20},
-        "credentials":{"material":"m.json","physics":"p.json","domain":"d.json"},
-        "adjacent":["p2"]}
-print("REPORT_OK=%s" % mf.record_prime_report(good,d)["ok"])
-missing=[]
-for f in mf.REQUIRED_REPORT_FIELDS:
-    b=dict(good); b.pop(f,None)
-    if not mf.record_prime_report(b,d)["ok"]: missing.append(f)
-print("REQUIRED_FIELDS=%s" % json.dumps(mf.REQUIRED_REPORT_FIELDS))
-print("REJECTED_MISSING=%d" % len(missing))
+# 总理子代理已删除：改为核对【编制】与【交付总闸】这条真实链路。
+print("PRIME_REMOVED=%s" % (not hasattr(mf, "prime_room_definition")))
+print("MONITOR_VERIFY_WIRED=%s" % ("verify-task" in __import__("inspect").getsource(mf.pre_delivery_check)))
+print("REPORT_OK=%s" % (mf.parts_board(d).get("source") == "sw_monitor"))
+print("REQUIRED_FIELDS=%s" % json.dumps(sorted(x["name"] for x in (sr.get("rooms") or []))))
+print("REJECTED_MISSING=%d" % (0 if sr.get("count") == 3 else 1))
 # docx 闸门
 print("FAKE_DOCX_REJECTED=%s" % (not mf._check_docx_deliverable(d,d)["ok"]))
 import io as _io
@@ -191,8 +185,9 @@ shutil.rmtree(d, ignore_errors=True)
 ''')
 for line in out.splitlines():
     if "=" in line and line.split("=")[0] in (
-        "WRONG_DECIDER","RIGHT_COUNT","PRIME_FIXED","REPORT_OK",
-        "REQUIRED_FIELDS","REJECTED_MISSING","FAKE_DOCX_REJECTED","FAKE_2_ALSO_REJECTED"):
+        "WRONG_DECIDER","RIGHT_COUNT","PRIME_REMOVED","MONITOR_VERIFY_WIRED",
+        "REPORT_OK","REQUIRED_FIELDS","REJECTED_MISSING",
+        "FAKE_DOCX_REJECTED","FAKE_2_ALSO_REJECTED"):
         print("  " + line)
 ck("★ 非『总计子代理』决定编制 → 拒绝", "WRONG_DECIDER=True" in out)
 # 【2026-10-30 更新·BUG-07】set-subagent-plan 现在自动补齐两个收尾房间
@@ -200,9 +195,9 @@ ck("★ 非『总计子代理』决定编制 → 拒绝", "WRONG_DECIDER=True" i
 #   传入 3 个建模房间 → 落盘 3 + 2 = 5 个。数量仍由编制决定（不是写死）。
 ck("★ 数量由编制决定（3 个建模 + 2 个自动补齐收尾 = 5）",
    "RIGHT_COUNT=5" in out, [l for l in out.splitlines() if "RIGHT_COUNT" in l])
-ck("总理子代理固定存在（fixed=True）", "PRIME_FIXED=True" in out)
-ck("完整上报 → 通过", "REPORT_OK=True" in out)
-ck("★ 6 个必填字段缺任一 → 拒绝", "REJECTED_MISSING=6" in out, out[:200])
+ck("★ 编制里不含已删除的 prime 房间", "PRIME_REMOVED=True" in out)
+ck("★ 零件看板数据源 = 监控器", "REPORT_OK=True" in out)
+ck("★ 编制房间数 = 3（由编制决定，未追加固定角色）", "REQUIRED_FIELDS=" in out and '"C"' in out, [l for l in out.splitlines() if "REQUIRED_FIELDS" in l])
 ck("★ 假 docx（无 word/document.xml）→ 拒绝", "FAKE_DOCX_REJECTED=True" in out)
 ck("★ 假 docx（有体积但非 zip）→ 仍拒绝", "FAKE_2_ALSO_REJECTED=True" in out)
 
@@ -290,24 +285,28 @@ ck("★ 重复视图拦截（防假三视图）", "duplicate_views" in vc)
 ck("★ 全文件指纹（防 1MB 假阳性）", "sha1_full_12" in vc)
 ck("★ 投影面验算（证明拍对了面）", "check_view_projection" in vc)
 rc, out = py(r'''
-import sys, os, tempfile, shutil
+import sys, os, tempfile, shutil, inspect
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.getcwd())
 import mode2_flow as mf
 d = tempfile.mkdtemp()
-pv = mf.prime_verify_all(work_dir=d)
-print("EMPTY_VERIFY_FAILS=%s" % (not pv.get("ok")))
-print("VERIFIED_BY=%s" % pv.get("verified_by"))
+# 交付总闸必须【每次重算】并问监控器 verify-task；未接入时 fail-closed。
+src = inspect.getsource(mf.pre_delivery_check)
+print("VERIFY_TASK_WIRED=%s" % ("verify-task" in src))
 pd = mf.pre_delivery_check(work_dir=d)
 print("DELIVERY_BLOCKED=%s" % (not pd.get("ok")))
+print("MONITOR_IN_BLOCKERS=%s" % ("监控器" in " ".join(pd.get("blockers") or [])))
+print("PRIME_GONE=%s" % (not hasattr(mf, "prime_verify_all")))
 shutil.rmtree(d, ignore_errors=True)
 ''')
 for line in out.splitlines():
-    if line.split("=")[0] in ("EMPTY_VERIFY_FAILS","VERIFIED_BY","DELIVERY_BLOCKED"):
+    if line.split("=")[0] in ("VERIFY_TASK_WIRED", "DELIVERY_BLOCKED",
+                               "MONITOR_IN_BLOCKERS", "PRIME_GONE"):
         print("  " + line)
-ck("★ 空台账 → 核实用 fail-closed 拒绝", "EMPTY_VERIFY_FAILS=True" in out)
-ck("  核实者 = 总理子代理", "VERIFIED_BY=总理子代理" in out)
+ck("★ 交付总闸确实调用监控器 verify-task", "VERIFY_TASK_WIRED=True" in out)
 ck("★ 未核实 → 交付总闸拒绝结束", "DELIVERY_BLOCKED=True" in out)
+ck("★ blocker 里点名监控器核实失败", "MONITOR_IN_BLOCKERS=True" in out)
+ck("  旧 prime_verify_all 已删除", "PRIME_GONE=True" in out)
 
 # ══════════════════════════════════════════════════════════════════
 sec("SKILL.md（AI 实际遵循的指令）是否已按新流程改写")

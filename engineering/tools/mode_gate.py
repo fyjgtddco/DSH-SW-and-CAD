@@ -14,14 +14,14 @@ Mode Gate -- 代码级强制关卡 v2（SW 进程级使用窗口）
 命令:
     python mode_gate.py declare <1|2|3>      # 声明任务模式
     python mode_gate.py room-start <房间名>   # 小屋启动时登记
-    python mode_gate.py room-end <房间名>     # 完成清理+释放SW锁+确保SW关闭
+    python mode_gate.py room-end <房间名>     # 房间收尾（防线/看图核实+归还使用权+清理）
     python mode_gate.py room-fail <房间名>    # 错误回退
-    python mode_gate.py sw-request <房间名>   # 排队/获取SW使用权（sw_bridge自动调用）
-    python mode_gate.py sw-wait <房间名> [秒] # 阻塞等待SW使用权
-    python mode_gate.py sw-release <房间名>   # 释放SW使用权
-    python mode_gate.py lock-doctor [--auto] # 锁体检：检测/自动清理失效锁、失联状态
-    python mode_gate.py sw-proc              # 查看SW进程状态
-    python mode_gate.py sw-status            # 查看SW锁状态
+    python mode_gate.py sw-status            # 查看SW使用权状态（只读，来自监控器）
+    python mode_gate.py sw-release <房间名>   # 房间归还SW使用权（房间收尾时自动调用）
+    python mode_gate.py sw-monitor status    # 监控器接入状态/排队/心跳（只读）
+    python mode_gate.py sw-monitor attach --drained   # 首次接管（确认旧命令已排空）
+    python mode_gate.py sw-monitor recover --reason "<原因>"  # 失联/持锁重启后的恢复
+    python mode_gate.py sw-proc              # 查看SW进程状态（只读）
     python mode_gate.py status               # 查看关卡状态
     python mode_gate.py check                # 是否允许建模
 """
@@ -78,7 +78,6 @@ def emit(obj):
 
 SW_EXE = "SLDWORKS.EXE"
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
-SW_MAX_HOLD = 4 * 3600   # 单房间最长持锁秒数（兜底防死锁）
 SW_HANDOVER_GRACE = 20   # room-end 时等待SW自行退出的宽限秒数
 SW_HEARTBEAT_TIMEOUT = 180   # 房间心跳超时秒数（超过视为死亡，释放锁）
 # ── 【Bug3 修复】心跳超时与"建模耗时不匹配"导致误判 stale ───────────────────
@@ -102,26 +101,16 @@ SW_EVIDENCE_WINDOW = 900     # 进度报告/待确认文件视为"活着证据"�
 #   这是最强的反误杀证据 —— 心跳可以忘记跳，但落盘文件骗不了人。
 SW_ARTIFACT_WINDOW = 600     # 产物文件的 mtime 在此秒数内 → 视为活跃证据
 SW_ACTIVE_EVIDENCE_WINDOW = 1800  # 兜底：极长的整体活跃窗口（防止长建模被判死）
-SW_STALE_KILL = 120      # 上家SW未关闭时，等待这么久后强制接管
 SW_START_GRACE = 120     # room-start 后允许无心跳的启动宽限秒数（期间状态=starting，禁止判死）
-# ── 单命令级锁（Bug4/5修复）───────────────────────────────────────────────
-SW_CMD_HOLD = 90         # 单条命令最长持锁秒数：超时视为命令已结束，可被接管
-# ── 【P2 清理】已删除两个【定义后从未被引用】的死常量 ────────────────────
-#   SW_ORPHAN_TIMEOUT = 90    —— 孤儿锁回收实际由 _lock_owner_alive 的 5 条
-#                                判据 + _purge_orphan_lock 驱动，不读该常量；
-#   SW_SW_IDLE_TIMEOUT = 600  —— SW 进程空闲清理实际由 SW_MAX_HOLD /
-#                                SW_CMD_HOLD 控制，该常量全文零引用。
-#   留着会误导调参（"改了阈值却没生效"），故直接移除。
-# ── 【Bug2 修复】SW 锁公平轮转（防饥饿）──────────────────────────────────
-# 问题现象：结构件小屋连续提交建模命令（cmd_seq 到 14），每执行一条就刷新
-#   acquired_at，导致 _lock_owner_lock_age 永远小于 SW_CMD_HOLD → 超过 90 秒
-#   也不会被回收；传动机构/壳体机架在队列里被活活饿死（实测锁被独占 272 秒）。
-# 修复：改用【命令条数 + 独占时长】双重公平判据——
-#   · 队首等待者出现后，当前持有者的累计命令数超过 SW_FAIR_CMDS 即必须让位
-#   · 或连续独占（自首次取锁起）超过 SW_FAIR_SECONDS 即必须让位
-#   · 让位时把队首提升为新 owner，保证 FIFO 队列真正前进
-SW_FAIR_CMDS = 3         # 有人在排队时，单房间最多连续执行几条 SW 命令就必须让位
-SW_FAIR_SECONDS = 180    # 有人在排队时，单房间连续独占上限（秒）
+# ── 持锁时长 / 公平轮转 / 强杀接管 —— 全部删除 ──────────────────────────
+# 这些常量原本支撑"进程内锁"的到期与让位：SW_MAX_HOLD、SW_CMD_HOLD、
+# SW_STALE_KILL、SW_FAIR_CMDS、SW_FAIR_SECONDS。它们现在【没有意义】了：
+#   · 已领取的使用权在监控器里【没有自动过期】（教程 3.1），只有宿主确认
+#     排空后的 release 才会流转；
+#   · FIFO 顺序由监控器的票据队列保证，不需要"连跑 N 条就强制让位"；
+#   · "上家 SW 没关就等 120 秒强制接管"在新模型里是不存在的状态 ——
+#     拿不到许可就根本不会启动 COM 操作。
+# 留着它们只会让人以为"改这个阈值能影响排队"，而实际上没有任何代码读它。
 
 # ══ 【A15 修复】房间级串行 + 阻断型 CONCURRENT_BUILD 守卫 ═══════════════════
 # 现场（2026-11-07 会话 session-dcb91b26，6 h 06 min 那次任务）：
@@ -140,8 +129,12 @@ SW_FAIR_SECONDS = 180    # 有人在排队时，单房间连续独占上限（�
 #   ② room-start 前置断言 active_rooms == 0，否则拒绝（即串行 E）；
 #   ③ 装【阻断型】CONCURRENT_BUILD 守卫（不是只记录）；
 #   ④ room-board --json 增 build_overlap_count，作为可回归指标。
-SW_ROOM_HOLD = 1         # 1=房间级独占（A15 后的默认）| 0=退回旧的单命令级
-SW_ROOM_HOLD_MAX = 6 * 3600   # 房间级持锁兜底上限（秒）：超时才允许被接管
+# ── SW_ROOM_HOLD / SW_ROOM_HOLD_MAX 已删除 ───────────────────────────────
+# 它们支撑的是"房间级独占"：room-start 取锁 → 整轮建模期间不释放 → 超过
+# 6 小时才允许被接管。监控器接管后这个模型整个消失了：
+#   · 使用权按【命令】发放（begin/end），房间不再长期占锁；
+#   · 不存在"持锁多久算超时"，因为已领取的使用权没有自动过期；
+#   · 因此 hold_mode 统一报 "permit"，不再有 room/command 两套语义。
 SW_BUILD_WINDOW_KEEP = 200    # 构建区间台账保留条数（超出丢最旧的）
 # 注意：本常量定义在 STATE_DIR 解析【之前】，不能在这里 os.path.join(STATE_DIR)。
 #   实际路径一律走 _build_windows_path()（它才读 STATE_DIR），避免 NameError。
@@ -224,7 +217,19 @@ except Exception:
     STATE_DIR = _BASE_DIR
 
 _SW_STATE_FILE = os.path.join(STATE_DIR, "sw_state.json")
-_SW_MONITOR_PID_FILE = os.path.join(STATE_DIR, "sw_monitor.pid")
+# _SW_MONITOR_PID_FILE 已删除：那个 PID 文件属于旧的"进程内 SW 监控"，
+# 它只记录 SLDWORKS.EXE 在不在（sw_state.json），不参与任何授权判断。
+# 监控器接管后，"谁在用 SW"由票据状态机回答，不再需要这个旁路进程。
+#
+# ⚠️ 但 _SW_GUARD_PID_FILE 属于【另一个】组件：SW 健康看护（CPU/内存超 85%
+#    立即关 SW），它仍在工作，pid 文件是它的幂等判活依据。两者不要混为一谈 ——
+#    清理旧监控代码时曾把它一起删掉，导致看护启动直接 AttributeError。
+_SW_GUARD_PID_FILE = os.path.join(STATE_DIR, "sw_guard.pid")
+# SW 健康看护的阈值与采样间隔。这几个常量原先定义在"进程内 SW 监控"
+# 那一段里，清理那整段时被一并删掉，导致 ensure_sw_guard() 直接 NameError。
+SW_GUARD_INTERVAL = 10      # 采样间隔（秒）
+SW_GUARD_CPU_LIMIT = 85.0   # CPU 占比上限（%）——超了立刻关 SW
+SW_GUARD_MEM_LIMIT = 85.0   # 内存占比上限（%）——超了立刻关 SW
 _SW_MONITOR_INTERVAL = 3   # 监控刷新间隔（秒）
 
 # 兼容别名：下游有两处按不带前缀的名字引用（曾 NameError）。
@@ -236,6 +241,59 @@ MODE_NAMES = {"1": "基础零件搭建", "2": "大型复杂器械装配", "3": "
 NL = chr(10)
 HEARTBEAT_DIR = os.path.join(STATE_DIR, "heartbeats")
 REPORTS_DIR = os.path.join(STATE_DIR, "reports")
+
+# ══ 【2026-11-12 新增·BUG-7】外购/标准件房间类型 ═══════════════════════════
+# 现场（减速器任务 20261111_224045_56A62E32）：
+#   附件件房间 5 件（油标/放油螺塞/通气器/视孔盖/定位销）经用户决策改为
+#   **外购、不建模**。房间照常 room-start，但 room-end 被三大防线拦死：
+#   既没有 .sldprt（→ 材料凭据无从校验）、也没有 physics/domain 报告
+#   （→ 物理与领域防线无从校验）。最后只能 `--force` 放行 —— 而 force 是
+#   "绕过留痕"的语义，会把一个【完全合理的工程决策】记成一次违规绕行。
+#
+# 这类房间本来就不该走建模防线：它产出的是【采购清单】而不是零件。
+# 现在给它一等公民身份：type=purchased。
+#   · 三大防线 / 看图 / 三段自检 / 位姿门 全部按"不适用"豁免（不是绕过）；
+#   · 但必须留下 BOM 采购清单（reports/<房间>.bom.json），否则照样拦 ——
+#     豁免的是"建模证据"，不是"交付责任"。
+PURCHASED_ROOM_TYPES = ("purchased", "standard", "outsourced", "外购", "标准件")
+#: 仍按建模房间严格校验的类型（与 _MODELING_TYPES 同口径，集中定义避免多处漂移）
+MODELING_ROOM_TYPES = ("structural", "transmission", "housing",
+                       "support", "spring", "thermal", "corrosion")
+
+
+def is_purchased_room(name, state=None):
+    """该房间是否为【外购/标准件房间】（不建模，只出 BOM）。
+
+    类型来源按优先级：
+      ① mode_state.rooms[房间].type（room-start 时或人工写入）
+      ② 编制里的类型（mode2_plan / select 返回的 rooms[].type）——
+         「总计子代理」在 set-subagent-plan 时就能把某房间标成外购，
+         不必等 room-start 才生效，否则房间表与豁免口径会短暂不一致。
+      ③ 房间名里直接带"外购/标准件/采购件"
+    """
+    _wanted = set(x.lower() for x in PURCHASED_ROOM_TYPES)
+    try:
+        st = state if isinstance(state, dict) else load_state()
+    except Exception:
+        st = {}
+    try:
+        rec = (st.get("rooms") or {}).get(str(name)) or {}
+        t = str((rec or {}).get("type") or "").strip().lower()
+        if t and t in _wanted:
+            return True
+    except Exception:
+        pass
+    try:
+        t2 = str((_room_type_map() or {}).get(str(name)) or "").strip().lower()
+        if t2 and t2 in _wanted:
+            return True
+    except Exception:
+        pass
+    try:
+        n = str(name or "")
+        return any(k in n for k in ("外购", "标准件", "采购件"))
+    except Exception:
+        return False
 
 
 def _sw_running():
@@ -851,18 +909,56 @@ def cmd_subagent_free(room):
 #
 # ⚠️ 本函数【绝不】调用 taskkill 之外的任何破坏性操作；SW 进程由调用方
 #    自行决定是否 close-all。
-def cmd_residue_check(clean=False, force=False, quiet=False):
+def cmd_residue_check(clean=False, force=False, quiet=False, purge_alive=False):
     """检测（并按需清理）上一轮对话残留：子对话登记 / 房间 / 门禁状态。
 
     Args:
         clean: True 时执行清理（清 rooms/subagents/锁/门禁推进态 + 孤儿报告）。
-        force: True 时连【被判为 alive 的房间】也一并清（危险，仅用户明确要求时）。
+        force: True 时【连门禁残留门禁态也一并清】，并放宽一项一致性检查。
+        purge_alive: True 时才连【被判为 alive 的活动房间】一起清。
         quiet: True 时精简输出。
+
+    ── 【2026-11-12 修复·BUG-3】force 的语义被拆开 ──────────────────────
+    现场（减速器任务 20261111_224045_56A62E32）：
+        mode_gate.py residue-check --clean --force
+        → 【force】清除活动房间: 总理子代理
+        → 【force】清除活动房间: 附件件
+    这两个房间当时都还活着（总理在监工、附件件已 room-start 在等指令），
+    结果被清出 mode_state：room-board 变空、done 记录丢失，workflow 认为
+    wave1 未完成，被迫重新 room-start + room-end 写回 —— 白白多跑一轮门禁。
+
+    根因：`--force` 同时承担了两件事
+        ① "残留体检也要清门禁推进态 / 放宽检查"（这是它的本意）
+        ② "连活着的房间也清掉"（这是它顺带干的事，但与"只清僵尸/孤儿"
+           的直觉完全相反）
+    于是任何一次"我想强制清残留"都会被理解成"把所有活动房间杀掉"。
+
+    修复：把 ② 拆成独立开关 `purge_alive`（CLI: `--purge-alive`）。
+      · `--force`         → 只影响残留判定口径，**绝不动活房间**（默认安全）
+      · `--purge-alive`   → 显式要求清活动房间，必须先经 `--clean --force`，
+                            且会在输出里逐条列出被清的房间名（留痕）
+      · 只加 `--purge-alive` 不加 `--force` → 直接拒绝并给出正确用法，
+        避免误触。
+      · 未加 `--purge-alive` 时，输出里始终列出被保护的活动房间清单，
+        让调用方一眼看到"这些活着，我没动"。
 
     Returns:
         {"ok", "has_residue", "alive", "zombie", "stale", "orphan",
-         "gate_residue", "cleaned", "actions", "hint"}
+         "gate_residue", "cleaned", "actions", "hint", "protected_alive"}
     """
+    # ── 参数守卫：--purge-alive 必须与 --clean --force 同时出现 ──────────
+    if purge_alive and not (clean and force):
+        return {
+            "ok": False,
+            "error": "PURGE_ALIVE_REQUIRES_CLEAN_FORCE",
+            "message": ("--purge-alive 会清掉仍在活动的房间（见 BUG-3 现场："
+                        "总理子代理/附件件被误清后 room-board 变空、done 记录丢失）。\n"
+                        "它只在你【确认这些房间真的不要了】时使用，且必须"
+                        "与 --clean --force 一起写：\n"
+                        "  python mode_gate.py residue-check --clean --force --purge-alive\n"
+                        "只清僵尸/孤儿残留请用：python mode_gate.py residue-check --clean"),
+            "purge_alive": True,
+        }
     state = load_state()
     rooms = state.get("rooms") or {}
     subs = state.get("subagents") or {}
@@ -1003,15 +1099,17 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
                 _subs.pop(_rn, None)
                 actions.append("清除 subagent 映射: %s" % _rn)
 
-        # 4b) 活着的房间：仅在 force 时清（默认保护，避免误杀正在干活的屋子）
-        if force:
+        # 4b) 活着的房间：【只有显式 --purge-alive 才清】。
+        #     默认一律保护 —— 见本函数 docstring 里 BUG-3 的现场记录：
+        #     --force 曾经顺带把活房间清掉，导致 room-board 变空、done 记录丢失。
+        if purge_alive:
             for item in alive:
                 _rn = item["room"]
                 _rooms.pop(_rn, None)
                 _subs.pop(_rn, None)
-                actions.append("【force】清除活动房间: %s" % _rn)
+                actions.append("【purge-alive】清除活动房间: %s（显式要求，已留痕）" % _rn)
         elif alive:
-            actions.append("保留 %d 个活动房间（未加 --force，不清理）: %s"
+            actions.append("保留 %d 个活动房间（未加 --purge-alive，不清理）: %s"
                            % (len(alive), ", ".join(x["room"] for x in alive)))
         # 4b-2) unbound 房间【永不清理】：平台说它还活着，清掉就是误杀。
         if unbound:
@@ -1075,9 +1173,13 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
         result["counts"] = {"alive": len(result.get("alive") or []),
                             "unbound": len(result.get("unbound") or []),
                             "zombie": 0, "stale": 0, "orphan": 0}
-        if force:
+        if purge_alive:
             result["alive"] = []
             result["counts"]["alive"] = 0
+        else:
+            # 没显式要求 purge 时，把"我保护了哪些活房间"单独列出来（留痕），
+            # 避免调用方误以为"活房间已经被清干净了"。
+            result["protected_alive"] = [x.get("room") for x in alive]
 
     # ── 5) 提示文案 ────────────────────────────────────────────────────
     # 【阶段 C】unbound 的文案必须与"残留"区分开：平台说它还活着，
@@ -1095,14 +1197,16 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
                                  len(_ci.get("orphan") or []),
                                  ("step=%s" % _ci["gate_residue_step"])
                                  if _ci.get("gate_residue_step") else "无",
-                                 ("；保留 %d 个活动房间（未加 --force）" % _kept)
+                                 ("；保留 %d 个活动房间（未加 --purge-alive）: %s"
+                                  % (_kept, ", ".join(result.get("protected_alive") or [])))
                                  if _kept else "",
                                  _unbound_hint))
         elif not has_residue and not alive and not unbound:
             result["hint"] = "干净：未检出任何子对话/任务残留。"
         elif not has_residue and alive:
             result["hint"] = ("未检出残留，但有 %d 个活动房间正在运行 —— "
-                              "新任务请等其结束或显式 --force。%s" % (len(alive), _unbound_hint))
+                              "它们不会被清理；确要清掉请显式加 --purge-alive。%s"
+                              % (len(alive), _unbound_hint))
         elif not has_residue and unbound:
             result["hint"] = ("未检出残留。%s" % (_unbound_hint.lstrip("；"),))
         else:
@@ -1122,8 +1226,9 @@ def cmd_residue_check(clean=False, force=False, quiet=False):
 #   本命令用于：
 #     ① 体检：列出所有副本的路径与关键字段，指出不一致；
 #     ② 对齐：把权威状态覆盖到副本（--sync），或清空副本的运行时状态（--clean）。
-_STATE_FILES = ("workflow_state.json", "mode_state.json", "sw_state.json",
-                "workflow_state.json", "mode_state.json")
+# sw_state.json 已从运行时状态清单移除：它只是旧监控进程写的派生缓存，
+# 现在没有任何代码依赖它（sw-status 直接问监控器与 tasklist）。
+_STATE_FILES = ("workflow_state.json", "mode_state.json")
 
 
 def _alt_tools_dirs():
@@ -2643,78 +2748,62 @@ def _confirm_granted(room, detail):
 
 
 def cmd_wait_rooms(targets, timeout=900.0, interval=10.0, all_active=False):
-    """【BUG-03 修复】阻塞等待若干房间离开 active，或等待超时。
+    """等房间【被监控器验收并收尾】，而不是"离开 active 状态"。
 
-    设计目标：把"父代理反复轮询 room-board / parts 目录"换成【一次命令行阻塞】。
-    轮询发生在 Python 进程里、只读状态文件，几乎不耗 token；
-    到点（或状态变化）后一次性返回结构化结论。
+    ── 为什么整段重写（图一的根因）─────────────────────────────────────────
+    旧实现是一个 while 循环 + time.sleep，把整个命令挂在"mode_state 里还有
+    active 房间"上。于是：
+      · 主对话卡在这条命令上几十秒到十几分钟，GUI 没有任何反馈；
+      · 退出即被 turn-guard 判成"没干活"，模型只能继续挂着，形成死循环；
+      · 判据也只是"状态文件里 active 变 false"，无法区分
+        "验收通过" 与 "失败了但把房间关掉了"。
 
-    终止条件（任一即返回）：
-      ① 目标房间全部离开 active（ended_at / failed_at / 判定 dead）；
-      ② 期间任一房间状态发生变化（便于父代理及时处理异常）；
-      ③ 到达 timeout；
-      ④ all_active=True 时，只要 mode_state 里已经没有 active 房间就返回。
+    监控器提供了真正的判据（教程 6 wait-rooms）：ready 表示目标房间
+    【已验收并收尾】；attention 表示有失败/过期证据要处理。这里只做两件事：
+      ① 发起一次带 timeout 的等待（HTTP 最长 25 秒窗口）；
+      ② 若还没到终态，把剩余等待交给【调用方决定的 DSH 后台 job】——
+         本函数绝不 sleep 轮询。
 
-    Returns: {"ok":bool, "returned_because":str, "elapsed_sec":float,
-              "rooms":[{room, state, active, ended, failed}], "board":[...]}
+    用法（教程 3.3）：主对话调宿主挂 wait-rooms 后台 job，模型拿 job id。
+    命令行这条路径保留给"确实只想阻塞一小段"的场景，但窗口从 900 秒压到
+    25 秒级别，超出部分必须靠 job。
+
+    Returns: {"ok", "state": ready|attention|paused|waiting, "rooms": {...},
+              "elapsed_sec", "job_required": bool}
     """
     _t0 = time.time()
-    _last_sig = None
-    _first = True
-    _board = []
-    while True:
-        st = load_state()
-        rooms = st.get("rooms") or {}
-        if all_active and not targets:
-            targets = [n for n, v in rooms.items()
-                       if isinstance(v, dict) and v.get("active")]
-        rows = []
-        _sig_bits = []
-        for n in targets:
-            info = rooms.get(n) or {}
-            ended = bool(info.get("ended_at"))
-            failed = bool(info.get("failed_at"))
-            active = bool(info.get("active"))
-            try:
-                _bd = _board_entry(n, info, (st.get("subagents") or {}), state=st)
-                _state = _bd.get("state")
-            except Exception:
-                _bd = {}
-                _state = "unknown"
-            rows.append({"room": n, "state": _state, "active": active,
-                         "ended": ended, "failed": failed})
-            _sig_bits.append("%s:%s:%s%s%s" % (n, _state, active, ended, failed))
-        if targets:
-            _board = rows
-        else:
-            _board = []
-        _sig = "|".join(_sig_bits)
-        # 条件①／②：全部结束 或 状态发生变化
-        _all_done = bool(targets) and all(not r["active"] for r in rows)
-        if _all_done:
-            return {"ok": True, "returned_because": "all_rooms_inactive",
-                    "elapsed_sec": round(time.time() - _t0, 1),
-                    "rooms": rows, "note": "全部目标房间已离开 active 状态"}
-        if all_active and not targets:
-            return {"ok": True, "returned_because": "no_active_rooms",
-                    "elapsed_sec": round(time.time() - _t0, 1), "rooms": [],
-                    "note": "mode_state 里已无 active 房间"}
-        if (not _first) and _sig != _last_sig:
-            return {"ok": True, "returned_because": "state_changed",
-                    "elapsed_sec": round(time.time() - _t0, 1),
-                    "rooms": rows,
-                    "note": ("房间状态发生变化（提前返回，便于及时处置）；"
-                             "如需继续等请再次调用本命令")}
-        _last_sig = _sig
-        _first = False
-        if (time.time() - _t0) >= timeout:
-            return {"ok": True, "returned_because": "timeout",
-                    "elapsed_sec": round(time.time() - _t0, 1),
-                    "rooms": rows,
-                    "note": ("等待超时（%ss）。房间仍在跑属正常；"
-                             "请用 room-report-read 看进度，不要据此判死。"
-                             % int(timeout))}
-        time.sleep(max(1.0, min(interval, 60.0)))
+    rooms = [str(x) for x in (targets or []) if str(x).strip()]
+    if not rooms and not all_active:
+        return {"ok": False, "error": "wait-rooms 必须给出【显式房间名单】",
+                "hint": "示例: python mode_gate.py wait-rooms 传动齿轮件 标准件外购 --timeout 900"}
+    try:
+        client = _monitor()
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+    try:
+        client.require_ready()
+    except Exception as e:
+        return _monitor_error(e)
+    # 窗口上限压到 20 秒：HTTP 等待窗（适配器 25 秒续窗）之内，
+    # 超出的等待必须由宿主 job 承担，命令行不再"挂在原地"。
+    win = max(1.0, min(float(timeout or 20), 20.0))
+    try:
+        out = client.wait_rooms(rooms, timeout=win)
+    except Exception as e:
+        return _monitor_error(e)
+    state = str(out.get("state") or "waiting")
+    return {"ok": True, "state": state, "rooms": out.get("rooms") or {},
+            "elapsed_sec": round(time.time() - _t0, 1),
+            # 未到终态时明确告诉调用方"该挂后台 job 了"，而不是让它继续 sleep。
+            "job_required": state == "waiting",
+            "hint": ({
+                "ready": "目标房间已验收并收尾。",
+                "attention": "有房间失败或证据过期，先处置再继续（看每行的 blockers）。",
+                "paused": "宿主失联/监控器隔离：不要动 SW，先恢复宿主桥。",
+                "waiting": ("还没到终态。不要再循环调用本命令："
+                            "请让宿主挂 wait-rooms 后台 job（拿 job id），"
+                            "或稍后重新调用一次。"),
+            }.get(state))}
 
 
 def ensure_room_heartbeat(room, max_silence=600):
@@ -2795,16 +2884,17 @@ def _release_sw_after_report(room, stage):
     _stage = str(stage or "").strip().lower()
     if _stage not in ("done", "delivered", "part_done", "failed"):
         return None
+    # 监控器接管后，房间上报终态【不等于】要动队列：
+    #   · 房间级的"占位"已经不存在（使用权按命令发放）；
+    #   · 真正需要归还的是"这条命令"，由 sw_bridge 的 end 负责；
+    #   · 如果最后一条命令忘了 end，room-end 会兜底 release（见该处注释）。
+    # 这里只回一个可观测的结论，不再改任何锁状态 —— 查询/上报有副作用正是
+    # 旧实现最容易被误用的地方。
     try:
-        st = load_state()
-        lk = _sw_lock(st)
+        lk = _sw_lock_mirror(load_state())
         if str(lk.get("owner") or "") == str(room):
-            _r = cmd_sw_release(str(room)) or {}
-            return {"released": True, "release": _r}
-        if str(room) in (lk.get("queue") or []):
-            lk["queue"] = [x for x in (lk.get("queue") or []) if x != str(room)]
-            save_state(st)
-            return {"released": False, "queue_removed": True}
+            return {"released": False,
+                    "note": "房间已上报终态，但仍有在途命令；room-end 时会归还使用权"}
     except Exception as _e:
         return {"released": False, "error": repr(_e)}
     return None
@@ -3205,38 +3295,36 @@ UNBOUND_NEXT_ACTION = ("python mode_gate.py subagent-assign <房间> <id>"
 
 
 def _sw_lock_snapshot(state=None):
-    """读取 SW 使用窗口的【真实排队情况】（owner / queue / 持锁时长）。
+    """读 SW 使用窗口的当前排队情况（监控器镜像，纯只读）。
 
-    数据来源：
-      · mode_state.sw_lock —— owner / queue / acquired_at（sw_bridge 排队时写）；
-      · sw_state.json      —— 只有进程级事实（SLDWORKS.EXE 在不在），用于印证。
-    绝不修改任何状态（纯只读快照）。
+    这里原本还顺带读 sw_state.json（旧监控进程写的派生缓存）。该缓存已随
+    "进程内 SW 监控"一起删除：它只记录 SLDWORKS.EXE 在不在，而那件事现在
+    和"谁有权用 SW"完全没有关系（这正是 2026-11-11 八对构建重叠的根因）。
+
+    owner/queue 来自 mode_state.sw_lock —— 它是 _refresh_sw_lock_mirror()
+    从监控器 board 单向同步过来的【镜像】，不是判定来源。
     """
     out = {"owner": None, "queue": [], "age_sec": None,
-           "sw_running": None, "source": None}
+           "sw_running": None, "source": None, "available": False}
     try:
         _st = state if isinstance(state, dict) else load_state()
         _lk = (_st or {}).get("sw_lock") or {}
         if isinstance(_lk, dict):
-            out["owner"] = _lk.get("owner") or None
-            _q = _lk.get("queue")
-            out["queue"] = [str(x) for x in _q] if isinstance(_q, list) else []
-            _acq = _lk.get("acquired_at")
-            if _acq:
-                try:
-                    out["age_sec"] = round(time.time() - float(_acq), 1)
-                except Exception:
-                    out["age_sec"] = None
-            out["source"] = "mode_state.sw_lock"
+            _src = _lk.get("source") or ""
+            out["source"] = _src or None
+            out["revision"] = _lk.get("revision")
+            # 只有"来自监控器的镜像"才能代表真实占用。旧实现的残留
+            # （source 为空）不再对外暴露 owner/queue —— 展示不存在占用比
+            # 展示一个假占用安全得多。
+            if _lk.get("available") is True and _src == "sw_monitor":
+                out["available"] = True
+                out["owner"] = _lk.get("owner") or None
+                _q = _lk.get("queue")
+                out["queue"] = [str(x) for x in _q] if isinstance(_q, list) else []
     except Exception:
         pass
     try:
-        if os.path.exists(_SW_STATE_FILE):
-            with open(_SW_STATE_FILE, "r", encoding="utf-8") as f:
-                _sw = json.load(f) or {}
-            out["sw_running"] = _sw.get("sw_running")
-            out["sw_count"] = _sw.get("sw_count")
-            out["sw_state_updated_at"] = _sw.get("updated_at")
+        out["sw_running"] = bool(_sw_running())
     except Exception:
         pass
     return out
@@ -3302,6 +3390,118 @@ def _board_guidance(board_state, room):
     return False, "正在运行，严禁判死/重启", "无需动作（正在跑）"
 
 
+def _recent_live_trace(room, state=None, subs=None, now=None):
+    """【BUG-4】"活人痕迹"探测：子代理没产出零件时，还能证明它活着吗？
+
+    背景（减速器任务 20261111_224045_56A62E32，箱体件 b932c79d）：
+      子代理全程在写建模脚本、发消息、持 SW 锁，room-board 却报
+      `state=dead / platform=missing / subagent_id=null`；补一次
+      subagent-assign 立刻翻回 running —— 死的只是【绑定】。
+
+    为什么会判死：已有的产出证据 `_recent_artifact_evidence` 只认
+      `.SLDPRT/.SLDASM` 这类【成品】。而一个房间在"写脚本 → 跑 SW → 出零件"
+      的中间段落里，磁盘上只有 .py / .log，没有零件 → 证据为空 → 判死。
+      **"还没产出零件"不等于"人没了"。**
+
+    所以这里补三类【中间过程痕迹】，任一命中即认为它还在干活：
+      ① 本任务的 .py / .log / .json 脚本与日志近期被写过（建模脚本、run 日志）
+      ② 该房间持有 SW 锁，或还在 SW 队列里排队（waiting_sw 的一等状态）
+      ③ 房间报告 / 待确认文件（C 模式等用户确认）近期有更新
+
+    ⚠️ 【心跳不算痕迹】——心跳是本项目历史上最不可信的信号（Bug-23：心跳
+    age 涨到 1222s、平台侧却一直 running 在出零件）。若把心跳算进来，
+    任何"跳过一次心跳然后死掉"的房间都永远判不成 dead，等于把判死废掉。
+    判死只认硬痕迹：磁盘产出、脚本/日志、SW 锁、报告。
+
+    窗口用 SW_EVIDENCE_WINDOW（与产出证据同口径，避免两套标准打架）。
+    任何异常都返回 found=False —— 探测失败不能变成"判死"的理由，
+    调用方在拿不到痕迹时仍会走原有严格判定，行为与修复前一致。
+
+    Returns:
+        {"found": bool, "reasons": [str], "newest": {path, age_sec} | None}
+    """
+    out = {"found": False, "reasons": [], "newest": None}
+    _now = now if isinstance(now, (int, float)) else time.time()
+    try:
+        win = float(SW_EVIDENCE_WINDOW)
+    except Exception:
+        win = 300.0
+
+    def _hit(p, label):
+        try:
+            if not p or not os.path.exists(p):
+                return None
+            age = _now - os.path.getmtime(p)
+            if age <= win:
+                out["reasons"].append("%s（%ds 前）" % (label, int(age)))
+                cand = {"path": p, "age_sec": round(age, 1)}
+                if (out["newest"] is None) or (age < out["newest"]["age_sec"]):
+                    out["newest"] = cand
+                return age
+            return None
+        except Exception:
+            return None
+
+    # ① 本任务工作目录里的脚本 / 日志（中间过程产物）
+    try:
+        base = None
+        wf = None
+        try:
+            if os.path.exists(WORKFLOW_STATE_PATH):
+                with open(WORKFLOW_STATE_PATH, "r", encoding="utf-8") as _f:
+                    wf = json.load(_f) or {}
+        except Exception:
+            wf = None
+        base = (wf or {}).get("work_dir")
+        if base and os.path.isdir(base):
+            # 只扫两层，避免把整个工作目录递归拖慢看板
+            for root, dirs, files in os.walk(base):
+                depth = root[len(base):].count(os.sep)
+                if depth > 1:
+                    dirs[:] = []
+                    continue
+                for fn in files:
+                    if not fn.lower().endswith((".py", ".log", ".json")):
+                        continue
+                    # 房间相关：文件名含房间名，或就在该房间子目录里
+                    if (room in fn) or (room in root):
+                        if _hit(os.path.join(root, fn), "脚本/日志"):
+                            break
+    except Exception:
+        pass
+
+    # ② SW 锁持有 / 队列中
+    try:
+        _sw = _sw_lock_snapshot(state) if state else {}
+        if str(_sw.get("owner") or "") == str(room):
+            out["reasons"].append("正持有 SW 锁（在建模）")
+            out["found"] = True
+        elif room in (_sw.get("queue") or []):
+            out["reasons"].append("在 SW 队列中排队（waiting_sw）")
+            out["found"] = True
+    except Exception:
+        pass
+
+    # ③ 报告 / 待确认文件近期有更新
+    #    ⚠️ 【故意不含心跳】——心跳恰恰是本项目历史上最不可信的信号
+    #    （Bug-23：心跳 age 涨到 1222s、平台侧却一直 running 在出零件）。
+    #    把心跳算作"活人痕迹"，会让任何"刚跳过一次心跳然后死掉"的房间
+    #    永远判不成 dead —— 等于把判死废掉。判死只认【硬痕迹】：
+    #    磁盘产出、脚本/日志、SW 锁。
+    try:
+        for _p, _label in (
+            (_report_path(room), "房间报告"),
+            (_pending_confirm_path(room), "待确认"),
+        ):
+            _hit(_p, _label)
+    except Exception:
+        pass
+
+    if out["reasons"]:
+        out["found"] = True
+    return out
+
+
 def _board_entry(name, info, subs, state=None, type_map=None, st=None):
     """单个房间的看板行（room-board / room-status / residue-check 共用判定）。
 
@@ -3349,6 +3549,29 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
         or (_assigned_age is not None and _assigned_age <= BOARD_IDLE_SEC)
     )
     # ── state 推导（顺序即优先级，勿随意调整）────────────────────────────
+    # ── 【2026-11-12 修复·BUG-4】先判"绑定丢失但有活动"，再接 detached/dead ──
+    # 现场（减速器任务 20261111_224045_56A62E32）：
+    #   箱体件子代理 b932c79d 全程活跃（写脚本、发消息、持 SW 锁建模），
+    #   但 room-board 报 `state=dead / platform=missing / subagent_id=null`；
+    #   手动补一次 subagent-assign 立刻翻回 running —— 说明进程根本没死，
+    #   死的是【房间到子代理的绑定】。
+    #
+    # 根因（两条判定都没看"活人留下的痕迹"）：
+    #   ① `_plat == "missing"`（注册表里找不到）时，只要 _ev.any 为假、超宽限，
+    #      就直接判 dead；
+    #   ② `_detached` 的判据 A/B 同样只看"注册表 + assigned_age"。
+    #   而 BUG-4 场景里子代理正在【写建模脚本】，还没产出 .SLDPRT →
+    #   `_recent_artifact_evidence` 找不到零件 → _ev.any=false → 判死。
+    #   "没产出零件"被当成了"死了"，这是把【产出证据】当成了【活性证据】。
+    #
+    # 修复：dead / detached 之前先查一道【活人痕迹】(见下)，命中则降级处理：
+    #   · 有活人痕迹 + 绑定丢失 → `unbound`（正确动作是补 subagent-assign，
+    #     而不是 room-fail 杀掉活进程）；
+    #   · 有活人痕迹 + 已 detached → `idle`（活着、暂时没有可观察动作）。
+    # 判据宁可保守：拿不到痕迹才允许判死，与 README「dead 是唯一允许重启的状态」对齐。
+    _live_trace = _recent_live_trace(name, state=state, subs=subs, now=now)
+    _has_live_trace = bool(_live_trace.get("found"))
+
     # ── 【2026-10-29 G04】detached 判定：绑定的 subagent 在平台侧查不到 ──────
     # 只有在"注册表里确实有别的 agent、但没有它"时才算失联；
     # 注册表整个不存在/为空（插件没跑、或本轮刚启动还没写入）时【不判】——
@@ -3368,14 +3591,15 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
             and not _agent
             and _assigned_age is not None
             and _assigned_age > DETACHED_GRACE_SEC
-            and not _ev.get("any")):
+            and not _ev.get("any")
+            and not _has_live_trace):          # 【BUG-4】有活人痕迹就不算失联
         _detached = True
         _detached_reason = ("平台注册表里找不到该子代理（%s），"
                             "send_message 也唤不醒 → 失联" % (_plat or "无结论"))
     # 判据 B（G04 整批失联）：DSH 重启过（runId 变了）→ 本轮之前绑定的子代理
     #   全部不可寻址，直接判 detached（不必逐个去注册表里碰运气）。
     if (_sid and not _detached and not info.get("ended_at")
-            and not info.get("failed_at")):
+            and not info.get("failed_at") and not _has_live_trace):
         try:
             _rid_changed, _prev_rid, _cur_rid = _run_id_changed()
         except Exception:
@@ -3390,14 +3614,25 @@ def _board_entry(name, info, subs, state=None, type_map=None, st=None):
     elif info.get("failed_at"):
         board_state = "failed"
     elif _detached:
-        board_state = "detached"
+        # 【BUG-4】失联但磁盘上还有活人痕迹 → 降级为 idle（活着，别杀）
+        board_state = "idle" if _has_live_trace else "detached"
     elif _plat == "running" and not _sid:
         # 平台说活着，只是房间没绑 subagent —— 这是 assign 漏了，不是死
         board_state = "unbound"
+    elif _has_live_trace and _plat in (None, "missing") and not _sid:
+        # 【BUG-4】注册表里找不到、房间也没绑，但磁盘上有活人痕迹 →
+        #   典型"绑定丢失"现场：补 subagent-assign 即可，严禁判死/重启。
+        board_state = "unbound"
     elif (_plat in ("inactive", "missing") and not _ev.get("any")
+          and not _has_live_trace
           and _beyond_grace):
-        # 只有平台【明确】说不在 + 无任何证据 + 超宽限，才允许判死
+        # 只有平台【明确】说不在 + 无任何证据 + 无活人痕迹 + 超宽限，才允许判死
         board_state = "dead"
+    elif (_plat in ("inactive", "missing") and _has_live_trace
+          and not _ev.get("any")):
+        # 【BUG-4】平台说不在、也没有正式产出，但有人在写脚本/发消息/占着 SW
+        #   → 活着但暂时无可观察动作，降级为 idle（不判死、不重启）
+        board_state = "idle"
     elif _legacy == "waiting_sw":
         board_state = "waiting_sw"
     elif _plat == "running" and not _fresh_activity:
@@ -4217,6 +4452,14 @@ def cmd_room_board(room=None, as_json=True, wait=0):
 
 
 def _cmd_room_board_once(room=None, as_json=True):
+    # ── SW 使用权事实：从监控器同步到本地镜像后再出看板 ──────────────────
+    # 必须在取快照【之前】刷新，否则看板会展示上一次调用留下的 owner/queue，
+    # 让人以为"锁还在某个已收工的房间手上"。刷新失败不影响房间状态判定
+    # （那些只看 mode_state 的房间记录）。
+    try:
+        _refresh_sw_lock_mirror()
+    except Exception:
+        pass
     # 【G04】顺手把本次 DSH 的 runId 记进 platform_status（只写 _meta，不影响房间结论）；
     #   下一次运行读到不同 runId 即可判"整批失联"。
     try:
@@ -4321,7 +4564,13 @@ def _cmd_room_board_once(room=None, as_json=True):
         "rooms": rows,
         "sw_lock": {"owner": _sw.get("owner"), "queue": _sw.get("queue") or [],
                     "age_sec": _sw.get("age_sec"),
-                    "sw_running": _sw.get("sw_running")},
+                    "sw_running": _sw.get("sw_running"),
+                    # 【监控器接管】这一块现在是【镜像】：来源是监控器 board，
+                    # 由 _refresh_sw_lock_mirror 单向同步。source=sw_monitor 时
+                    # 才有参考价值；source 为空说明监控器没接上，此时 owner/queue
+                    # 不代表任何真实占用。
+                    "available": bool(_sw.get("available")),
+                    "source": _sw.get("source")},
         "summary": {
             "rooms": len(rows),
             "counts": _counts,
@@ -4334,11 +4583,11 @@ def _cmd_room_board_once(room=None, as_json=True):
             #   区间以"此刻"为终点），同房间的多条命令合并成一次构建。
             # 回归用法：python mode_gate.py room-board --json 后取这个字段。
             "build_overlap_count": _ov_count,
-            "hold_mode": "room" if _room_hold_enabled() else "command",
+            "hold_mode": "permit",
         },
         # ── 【A15】并发构建证据（明细，便于定位是哪两个房间重叠了多久）──
         "concurrent_build": {
-            "hold_mode": "room" if _room_hold_enabled() else "command",
+            "hold_mode": "permit",
             "overlap_count": _ov_count,
             "overlaps": _overlaps[:20],
             "violations_file": os.path.join(
@@ -4346,9 +4595,9 @@ def _cmd_room_board_once(room=None, as_json=True):
                 CONCURRENT_BUILD_VIOLATIONS),
             "violation_count": len(_violations),
             "target": 0,
-            "note": ("房间级串行（A15）要求 build_overlap_count=0；"
-                     ">0 表示同一时刻有两个房间在用 SW（文档串写风险）。"
-                     "应急退回旧语义：DSH_SW_ROOM_HOLD=0。"),
+            "note": ("build_overlap_count=0 表示同一时刻只有一个房间在用 SW。"
+                     ">0 说明监控器发出的命令许可被并发使用 —— 这是硬故障，"
+                     "不是配置问题：检查是否有未接入的旁路入口在直接驱动 COM。"),
         },
         "platform_registry": {
             "file": PLATFORM_AGENTS_FILE,
@@ -5016,327 +5265,261 @@ def set_parallel_mode(raw):
     return val
 
 
-def _lock_owner_alive(state, owner):
-    """判断锁持有者的房间是否仍然存活。
+# ══════════════════════════════════════════════════════════════════════════
+# 【外部监控器接管】SW 使用权的唯一权威 = DSH-SW-Monitor
+# ══════════════════════════════════════════════════════════════════════════
+# 这一段替换掉原来的进程内锁实现（_lock_owner_alive / _purge_orphan_lock /
+# _reclaim_lock / 公平轮转 / sw-request / sw-wait / sw-release / lock-doctor，
+# 共约 700 行）。删掉它们不是为了精简，而是因为那些机制本身导致了三个结构性
+# 缺陷，而每一个都在现场留下过事故：
+#
+#   ① "进程存在性 = 锁空闲"
+#      A15 之后房间级独占仍然被并存：2026-11-11 验收复跑实测 8 对构建区间
+#      重叠，最长 216 秒。因为房间刚取到锁、SW 还没启动时，running=False，
+#      对第二个房间来说就等于"锁空闲"。
+#   ② "等待 = 命令型重试"
+#      忙碌时只能返回 sw_busy，让子代理 sleep 后重跑同一条命令。于是"等锁"
+#      必须一直占着回合（图一：主对话挂在 wait-rooms --timeout 900 上）。
+#   ③ "回收 = 猜"
+#      _lock_owner_alive 用心跳 / 报告 / 产物 mtime 猜持有者死活，
+#      _purge_orphan_lock 用 prev_owner 标志兜底，_reclaim_lock 再用公平
+#      轮转兜底 —— 三层猜测叠加，结果时而让位过早（半成品被踩），
+#      时而让位过晚（队列饿死）。
+#
+# 监控器用持久化状态机替代这三层猜测：票据按 epoch/task/room/session 绑定，
+# 队首领取有窗口，领取后的使用权不会自动过期，释放必须由宿主确认 worker 排空。
+# 因此这里【只】保留翻译层，不再保留任何判定。
+#
+# ⚠️ 禁止在本文件里再写一份 owner/queue 判断。双权威就是这次改造要根除的病。
 
-    存活判据（任一满足即为存活）：
-      1. 该房间在 rooms 中 active=True
-      2. 该房间心跳文件 age <= SW_HEARTBEAT_TIMEOUT
-      3. 【Bug3 修复】该房间有近期进度报告（报告刷新=小屋在干活）
-      4. 【Bug3 修复】该房间有待确认文件且新鲜（C模式正在走确认流程）
-      5. 【C1 修复】磁盘有近期产出（最强证据）
+#: 监控器拒绝/不可达时给模型的统一出口码（供调用方分支）。
+_MONITOR_CODES = ("MONITOR_NOT_CONFIGURED", "MONITOR_BRIDGE_UNREACHABLE",
+                  "MONITOR_BRIDGE_HTTP", "MONITOR_NOT_ATTACHED")
 
-    【Bug3 修复说明】原实现只认"active + 心跳新鲜"。而小屋建模时【经常
-    没空跳心跳】，超过 180s 就被当孤儿 → 锁被回收给别的房间 → 两个房间
-    同时用 SW 抢 API，正是"锁判定不稳"的来源之一。
-    现在把"报告/待确认文件"也作为存活证据：小屋每上报一次都会写报告，
-    比心跳更贴近"它到底还在不在干活"。
 
-    ── 【Bug-07 修复】外部强杀 SW 时锁必须立即失效 ────────────────────
-    实测缺陷：用户手动关闭全部 SolidWorks 后，mode_state.sw_lock 的 owner
-      反复被清空又重建（purged_by 依次为各房间），锁状态与平台侧
-      list_agents 不一致（room 报 running / 平台 inactive）。
-    根因：本函数的 5 条判据全部只看【房间侧证据】（active/心跳/报告/
-      产出文件），完全没看【SW 进程事实】。于是"SW 已被外部强杀、但房间
-      记录还活着"时，锁仍被认为有效占用 —— 队列里其它房间拿不到锁，
-      直到某个超时兜底才被 purge，表现为锁状态反复抖动。
-    修复：本房间若曾启动 SW（sw_by_room=True）或正持有锁，而
-      【SLDWORKS.EXE 已不存在】，则该锁已无实际资源可让渡 —— 立即判为
-      不存活（可回收），让队首房间马上拿到使用权。
-      注意：只对"本房间启动的 SW"生效；用户手工开的 SW（sw_by_room=False）
-      仍然允许附着使用，不会被误回收。
+def _monitor():
+    """惰性导入监控器客户端（避免 tools 目录不在 sys.path 时炸导入）。"""
+    import sw_monitor_client as _c
+    return _c
+
+
+def _monitor_error(exc):
+    """把监控器异常翻译成门禁统一返回体。"""
+    try:
+        code = getattr(exc, "code", None) or "MONITOR_ERROR"
+        extra = getattr(exc, "extra", None) or {}
+    except Exception:
+        code, extra = "MONITOR_ERROR", {}
+    out = {"ok": False, "gate": "SW_MONITOR", "code": code,
+           "error": str(exc),
+           "hint": ("SW 使用权由外部监控器（DSH-SW-Monitor）统一分配。"
+                    "旧进程内锁已删除，不存在回退路径。"
+                    "先启动监控器并执行 python mode_gate.py sw-monitor attach --drained。")}
+    try:
+        out.update({k: v for k, v in extra.items() if k not in out})
+    except Exception:
+        pass
+    return out
+
+
+def _refresh_sw_lock_mirror(state=None):
+    """把监控器的排队/持有情况写进 mode_state.sw_lock —— 【只读镜像】。
+
+    为什么还要写进 mode_state：room-board / status / 设置页都在读这个字段，
+    它们读的必须是监控器的事实，而不是本进程的判断。所以这里只做
+    "监控器 → 本地镜像"的单向同步；任何写入方都不得把它当权威反推回去。
     """
-    if not owner:
+    try:
+        client = _monitor()
+        if not client.enabled():
+            # 未接入：把上一次运行残留的 owner/queue 清成中性值。
+            # 这些字段来自已删除的进程内锁，留着会让人以为"某房间还占着 SW"
+            # （实测 room-board 会显示 owner=传动齿轮件、队列里有已删除的
+            #   "总理子代理"，全是历史脏数据）。
+            try:
+                st = state if isinstance(state, dict) else load_state()
+                cur = st.get("sw_lock") or {}
+                # 只清"旧进程内锁"留下的行（source 不是 sw_monitor）。
+                # 已经标了 source=sw_monitor 的镜像不动 —— 那是测试夹具或
+                # 上一次成功同步的结果，覆盖它等于凭空抹掉一份真实事实。
+                if (cur.get("owner") or cur.get("queue")) \
+                        and str(cur.get("source") or "") != "sw_monitor":
+                    st["sw_lock"] = {"owner": None, "queue": [], "acquired_at": None,
+                                     "available": False, "source": "none"}
+                    if state is None:
+                        save_state(st)
+            except Exception:
+                pass
+            return None
+        b = client.board()
+        sw = (b or {}).get("sw") or {}
+        owner = (sw.get("owner") or {}).get("room") if sw.get("owner") else None
+        queue = [q.get("room") for q in (sw.get("queue") or []) if isinstance(q, dict)]
+        st = state if isinstance(state, dict) else load_state()
+        st["sw_lock"] = {"owner": owner, "queue": queue,
+                         "acquired_at": None, "source": "sw_monitor",
+                         "available": True,
+                         "revision": (b or {}).get("revision")}
+        if state is None:
+            save_state(st)
+        return st["sw_lock"]
+    except Exception:
+        return None
+
+
+def _sw_lock_mirror(state=None):
+    """读本地镜像（不发起网络调用）。调用方需要最新值先调 _refresh_sw_lock_mirror。"""
+    try:
+        st = state if isinstance(state, dict) else load_state()
+        lk = st.get("sw_lock")
+        if not isinstance(lk, dict):
+            lk = {"owner": None, "queue": [], "acquired_at": None}
+            st["sw_lock"] = lk
+        return lk
+    except Exception:
+        return {"owner": None, "queue": [], "acquired_at": None}
+
+
+def _sw_running():
+    """SLDWORKS.EXE 是否在跑（只用于报告与清场，【不】参与任何授权判定）。"""
+    try:
+        n, _pids = _sw_proc_list()
+        return n > 0
+    except Exception:
         return False
-    lk = state.get("sw_lock") or {}
-    # ── 【Bug-07】SW 进程事实优先：进程没了，锁就是空的 ──────────────────
+
+
+def cmd_sw_monitor_status():
+    """监控器接入状态（只读）。给 status / 自检 / 设置页用。"""
     try:
-        # ── 【A15 修复 · 关键】必须"确实见过 SW 在跑"才允许据进程消失判死 ──
-        # 原实现把 _is_owner 也纳入判据：只要【正持有锁】且 SLDWORKS.EXE 不在，
-        #   就当持有者已死、立刻回收锁。
-        # 这在"房间级锁"下是致命误伤：room-start 取锁时 SW 还没启动
-        #   （sw_by_room 刚被置 True、进程数为 0），于是刚取得的锁下一秒就被判死，
-        #   乙房间照样能抢走 —— 房间级串行等于没做。
-        # 实测（隔离环境）：甲 sw-request acquired=true 后，乙立刻 sw-request
-        #   仍 acquired=true，hold_mode 停在 command，正是这条判据在放行。
-        #
-        # 现在改用 sw_seen_running：只有【本轮持锁期间确实见过 SLDWORKS.EXE 在跑】，
-        #   随后又不见了，才认定"被外部强杀"（这才是 Bug-07 要解决的情形）。
-        #   从未见过在跑 = 还没启动 = 不能据此判死（否则等于取消锁）。
-        #   附注：sw_by_room 在"SW 尚未启动"时也会被置 True，故它不能单独作为判据。
-        if lk.get("sw_seen_running") and not _sw_running():
-            return False
-    except Exception:
-        pass
-    # 判据1: 房间仍然 active
-    rooms = state.get("rooms", {})
-    room = rooms.get(owner)
-    if room and room.get("active"):
-        return True
-    # 判据2: 心跳新鲜
-    try:
-        hb = _heartbeat_path(owner)
-        if os.path.exists(hb):
-            age = time.time() - os.path.getmtime(hb)
-            if age <= SW_HEARTBEAT_TIMEOUT:
-                return True
-    except Exception:
-        pass
-    # ── 判据3: 近期进度报告（Bug3 新增）──
-    try:
-        rp = _report_path(owner)
-        if os.path.exists(rp):
-            if (time.time() - os.path.getmtime(rp)) <= SW_EVIDENCE_WINDOW:
-                return True
-    except Exception:
-        pass
-    # ── 判据4: 待确认文件新鲜（Bug3 新增）──
-    try:
-        pd = _pending_confirm_path(owner)
-        if os.path.exists(pd):
-            if (time.time() - os.path.getmtime(pd)) <= SW_EVIDENCE_WINDOW:
-                return True
-    except Exception:
-        pass
-    # ── 判据5: 磁盘有近期产出（C1 新增 · 最强证据）──────────────────────
-    # 房间专心建模时既没心跳也没上报，但模型文件在落盘 —— 这就是活着。
-    # 若不纳入此判据，锁会被当"孤儿锁"回收给别的房间，两个房间同时抢 SW API，
-    # 这正是测试反馈中"锁判定不稳"的根源之一。
-    try:
-        room_rec = rooms.get(owner) or {}
-        _art_ok = _recent_artifact_evidence(owner, since=room_rec.get("started_at"))
-        if _art_ok.get("found"):
-            return True
-    except Exception:
-        pass
-    return False
+        info = _monitor().status_summary()
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+    info["sw_process_running"] = _sw_running()
+    info["mirror"] = _sw_lock_mirror()
+    return {"ok": True, "monitor": info}
 
 
-def _purge_orphan_lock(state, requester=None, verbose=False):
-    """【Bug6 修复】孤儿锁快速体检 —— 清掉"owner:null 但 prev_owner 残留"的阻塞。
+def cmd_sw_monitor_attach(drained=False, recover=False, reason=""):
+    """接管/恢复。drained 必须由调用方在【确认排空后】显式声明。
 
-    问题现象：
-      sw_lock 里 owner 已经是 null（持有者释放/死亡），但 prev_owner 还留着
-      一个【已死房间】的名字，且 sw_by_room=True。于是队列里所有房间调用
-      sw-request 都看到"SW 被上一家占着"，一律返回 sw_busy:true，
-      队列永久阻塞 —— 也就是"锁没了却谁也进不来"。
-
-    原实现的缺口：
-      cmd_sw_request 里只在 `owner 为空 且 sw_by_room` 时清一次，
-      且完全依赖 _lock_owner_alive() 判定。但存在两类漏网：
-        ① prev_owner 指向的房间根本没在 rooms 表里（如 rooms-reset 后残留）
-        ② prev_owner 对应的 SW 进程其实早已退出，却没人去核对
-      这两类都会让清理条件不成立 → 标志一直挂着。
-
-    本函数在每次取锁前做一次彻底体检，满足【任一】即清理：
-      A. owner 为空 且 prev_owner 为空          → sw_by_room 无意义，清掉
-      B. owner 为空 且 prev_owner 已死/未登记    → 清 prev_owner + sw_by_room
-      C. owner 为空 且 SW 进程根本没在跑         → 清 prev_owner + sw_by_room
-         （进程都不在了，"上一家还占着"的前提不成立）
-
-    注意：本函数会【自行 save_state 落盘】（调用方无需再保存），
-    因为它在多处被调用（sw-request / lock-doctor），统一落盘可避免
-    "改了内存却没写盘 → 下一个进程读到的还是旧锁"这类隐蔽 bug。
-
-    Returns: dict {purged: bool, actions: [..]}
+    这里不做"没 drained 就自动当 drained"的默认放行 —— 那正是教程
+    3.1 明令禁止的"前端提示词充当拦截"。
     """
-    lk = state.get("sw_lock")
-    if not isinstance(lk, dict):
-        return {"purged": False, "actions": []}
-    actions = []
-    owner = lk.get("owner")
-    prev = lk.get("prev_owner")
+    try:
+        client = _monitor()
+        out = client.call("attach" if not recover else "recover",
+                          {"drained": bool(drained), "reason": reason})
+    except Exception as e:
+        return _monitor_error(e)
+    _refresh_sw_lock_mirror()
+    return {"ok": True, "monitor": out,
+            "hint": ("监控器已接管 SW 使用权。drained=%s"
+                     % bool(drained))}
 
-    # owner 还在 → 不是孤儿场景，交给常规公平/回收逻辑处理
-    if owner:
-        # 但 owner 自己已死也要回收（保持与既有逻辑一致，这里只做标记）
-        if not _lock_owner_alive(state, owner):
-            actions.append("owner=%r 已死" % owner)
-        else:
-            return {"purged": False, "actions": []}
 
-    if owner:
-        # owner 死了：清 owner，转为 prev 清理流程
-        lk["owner"] = None
-        lk["acquired_at"] = None
-        lk["cmd_seq"] = 0
-        lk["fair_start"] = None
+def cmd_sw_monitor_plan(rooms_json=None):
+    """登记本轮任务与房间编制（数据来自 mode2_plan 的 subagent_plan）。
 
-    # ── 场景 A/B：prev_owner 为空或已死 ──────────────────────────────
-    if not prev:
-        if lk.get("sw_by_room"):
-            lk["sw_by_room"] = False
-            actions.append("sw_by_room 无意义(owner/prev 均空)→清")
-    elif not _lock_owner_alive(state, prev):
-        lk["prev_owner"] = None
-        if lk.get("sw_by_room"):
-            lk["sw_by_room"] = False
-        actions.append("prev_owner=%r 已死/未登记→清" % prev)
+    教程 2：model 是实际建模房间，purchased 只交 BOM，other 由原门禁收尾。
+    """
+    client = _monitor()
+    try:
+        client.require_ready()
+    except Exception as e:
+        return _monitor_error(e)
+    # 原先这里调 work_dir()——该函数在本文件里【不存在】，手动 plan 必崩
+    # （2026-11-12 真机复现：NameError: name 'work_dir' is not defined）。
+    # 用既有的 _default_work_dir()：它就是"产物在哪"的权威推断，且已修过
+    # 双轨问题（读 workflow_state.work_dir 而不是硬编码桌面 test）。
+    wd = _default_work_dir()
+    task = client.task_of()
+    if not task:
+        return {"ok": False, "error": "workflow_state.json 里没有 task_id，"
+                                      "请先 workflow_gate.py init/select"}
+    rooms = None
+    if rooms_json:
+        # 与 mode2_flow.py 的约定保持一致：支持 ① 内联 JSON ② @文件路径
+        #   ③ 裸 .json 文件路径。原先只认内联，PowerShell 下引号被吃掉就
+        #   只能报 "Expecting property name..."，使用者根本不知道该换什么写法。
+        _raw = str(rooms_json).strip()
+        _is_path = False
+        if _raw.startswith("@"):
+            _is_path, _raw = True, _raw[1:].strip().strip("'\"")
+        elif _raw.lower().endswith(".json") and os.path.isfile(_raw):
+            _is_path = True
+        try:
+            if _is_path:
+                with open(_raw, "r", encoding="utf-8-sig") as _f:
+                    rooms = json.load(_f)
+            else:
+                rooms = json.loads(_raw)
+        except Exception as e:
+            return {"ok": False,
+                    "error": "rooms_json 解析失败: %r" % (e,),
+                    "hint": ("三种写法都支持：① 内联 JSON "
+                             "'[{\"name\":\"房间\",\"type\":\"model\",\"parts\":[\"件\"]}]' "
+                             "② 文件路径 C:\\path\\rooms.json "
+                             "③ 兼容写法 @C:\\path\\rooms.json")}
     else:
-        # ── 场景 C：prev_owner 名义上"活着"，但 SW 进程其实没在跑 ────
-        #  心跳文件可能因 recover/restart 残留而仍新鲜，这里用进程事实兜底。
         try:
-            if not _sw_running():
-                lk["prev_owner"] = None
-                if lk.get("sw_by_room"):
-                    lk["sw_by_room"] = False
-                actions.append("SW 进程未运行(prev_owner=%r)→清" % prev)
-                prev = None   # 已清，跳过下方场景 D
+            import mode2_flow as _m2
+            plan = _m2.load_plan(wd) or {}
+            rooms = ((plan.get("subagent_plan") or {}).get("rooms")) or None
         except Exception:
-            pass
-
-    # ── 【新-6 修复】场景 D：owner 为空 → 锁定视为【可用】，强制推进队列 ──
-    # 测试反馈（幽灵占用 / flapping orphan lock）：
-    #   sw_lock = {owner: null, queue: [3个房间], prev_owner: "壳体机架",
-    #              sw_by_room: true}
-    #   SW 进程【空闲】却对所有房间报 sw_busy: true，谁都拿不到使用权，
-    #   时而自愈时而复发，小屋重试 ~10 次 / 等 70~90s 才拿到窗口。
-    #
-    # 根因：owner 被清空后，prev_owner / sw_by_room 残留 —— 只要
-    #   prev_owner 指向的房间"名义上还活着"（心跳新鲜或仍在 rooms 表里），
-    #   上面三个场景都不成立，标志就一直挂着，队列永不推进。
-    #
-    # 修复原则（简单且安全）：**没有 owner 就是没有持锁者**。
-    #   prev_owner 只是"上一家是谁"的审计信息，不应用于阻止他人取锁；
-    #   sw_by_room 表示"SW 是被某个房间启动的"，也不应阻止取锁。
-    #   因此 owner 为空时，一律清掉这两个标志，让队首立即获得使用权。
-    if not lk.get("owner") and lk.get("prev_owner"):
-        lk["prev_owner"] = None
-        actions.append("owner 为空→prev_owner 标志清除(防幽灵占用)")
-    if not lk.get("owner") and lk.get("sw_by_room"):
-        lk["sw_by_room"] = False
-        actions.append("owner 为空→sw_by_room 标志清除(防幽灵占用)")
-
-    if actions:
-        lk["purged_at"] = time.time()
-        lk["purged_by"] = requester or "auto"
-        lk["purged_actions"] = actions[-5:]
-        # 【关键】立即落盘：调用方（sw-request / lock-doctor）可能不会再次保存，
-        # 不落盘会导致"内存改了、磁盘没改"，下一个进程读到的仍是孤儿锁。
-        try:
-            save_state(state)
-        except Exception:
-            pass
-    return {"purged": bool(actions), "actions": actions}
-
-
-def _lock_owner_lock_age(state):
-    """返回当前锁已持有的秒数（无 acquired_at 时返回 0）。"""
-    lk = state.get("sw_lock") or {}
-    at = lk.get("acquired_at")
-    if not at:
-        return 0.0
+            rooms = None
+    if not rooms:
+        return {"ok": False, "error": "没有可登记的编制：请先 mode2_flow.py "
+                                      "set-subagent-plan --rooms-json ..."}
     try:
-        return max(0.0, time.time() - float(at))
-    except Exception:
-        return 0.0
+        out = client.call("plan", {"task": task, "root": wd,
+                                   "simulation_required": False,
+                                   "rooms": rooms})
+    except Exception as e:
+        return _monitor_error(e)
+    return {"ok": True, "plan": out, "task": task}
 
 
-def _reclaim_lock(state, reason, requester=None):
-    """【Bug1/3修复】回收失效锁：owner 死亡 / 超时 / 孤儿。
+def monitor_part_event(op, room, part, command, gen=0, file_path=None, reason=None):
+    """把零件的开工/保存/失败事件转给监控器（逐零件看板的唯一数据源）。
 
-    返回 (reclaimed: bool, old_owner: str|None)
+    教程 4：sw_bridge.run / SWModel.save() 完成、文件已稳定后，传【准确的受管
+    文件路径】给 part-saved；同一命令可顺序产生多件，每件必须有独立事件。
+    失败发 part-failed。命令结束仍有未上报保存的零件，监控器记失败。
+
+    这里刻意不做任何"猜"：没有文件名就不报保存，没有命令就不报开工。
+    监控器对错误代际（STALE_GENERATION）是拒绝的，本地不能先替它兜底。
     """
-    lk = _sw_lock(state)
-    owner = lk.get("owner")
-    if not owner:
-        # 【Bug5修复】owner 为空但 sw_by_room=True 且进程在跑 → 释放标志，
-        # 让队首能立即接管，而不是被 prev_owner 逻辑永久挡住。
-        if lk.get("sw_by_room") and not lk.get("prev_owner"):
-            lk["sw_by_room"] = False
-            return True, None
-        return False, None
-
-    held = _lock_owner_lock_age(state)
-    alive = _lock_owner_alive(state, owner)
-
-    should_reclaim = False
-    why = ""
-    # 【Bug2 修复】公平轮转：有人排队时，持有者不能无限续期。
-    # 只有当 requester 不是 owner 本人（即确有其他房间在争用）时才触发。
-    queue = [q for q in (lk.get("queue") or []) if q != owner]
-    has_waiter = bool(queue) and requester != owner
-    cmds = int(lk.get("cmd_seq", 0) or 0)
-    # 自"本轮首次取锁"起算的连续独占时长（首次取锁时由 sw-request 记 fair_start）
-    fair_start = lk.get("fair_start") or lk.get("acquired_at")
     try:
-        fair_held = time.time() - float(fair_start) if fair_start else 0.0
+        client = _monitor()
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+    try:
+        if op == "part-start":
+            return client.part_start(room, part, command, int(gen or 0))
+        if op == "part-saved":
+            return client.part_saved(room, part, command, int(gen or 0), file_path)
+        if op == "part-failed":
+            return client.part_failed(room, part, command, int(gen or 0), reason or "未知失败")
+    except Exception as e:
+        return MonitorError_out(e)
+    return {"ok": False, "error": "未知零件事件: %s" % op}
+
+
+def MonitorError_out(exc):
+    try:
+        return {"ok": False, "code": getattr(exc, "code", "MONITOR_ERROR"),
+                "error": str(exc)}
     except Exception:
-        fair_held = 0.0
-
-    # == 【v2 回归复测 P0 修复】房间级独占时，公平轮转【不参与】==========
-    # 现场（复测报告 v2 第2.1节，真实 D 流程复现）：
-    #   A(结构件) 正在建模、还没 save，B(轮系传动件) 一开始排队，
-    #   锁就立刻被拿走（sw-status: owner=轮系传动件, prev_owner=结构件）。
-    # 根因就在下面两个 elif：它们只判 has_waiter + cmds/fair_held，
-    #   【完全不看 hold_mode】。而 hold_mode="room" 的语义恰恰是
-    #   "这一整轮建模期间锁归本房间，中途不放" —— 一旦允许排队者轮转，
-    #   房间级独占就退化成命令级，A 的半成品文档随时会被 B 的操作踩到。
-    #
-    # 两个指标还都会被"陈旧值"放大：
-    #   · fair_start 泄漏（sw-release 原先不清它）→ fair_held 被算成几万秒；
-    #   · cmd_seq 在房间级模式下本来就该累计到几十上百。
-    # 所以在 room 模式下，这两个判据必须整体停用，只保留：
-    #   ① 持有者已死/失联；② 超过房间级兜底上限（_room_hold_limit，默认 6 h）。
-    _room_mode = _room_hold_enabled()
-    if not alive:
-        should_reclaim = True
-        why = "持有者[%s]已无活动心跳/已非活动房间" % owner
-    elif _room_mode and has_waiter:
-        # 房间级独占：观察得到排队，但【不让位】——等它自己 room-end。
-        # 不写 should_reclaim，只留下可审计的说明。
-        why = ""
-    elif (not _room_mode) and has_waiter and cmds >= SW_FAIR_CMDS:
-        # 排队者已等候多时，且持有者已连跑满额命令 → 让位（防饥饿核心）
-        should_reclaim = True
-        why = ("公平轮转：持有者[%s]已连续执行 %d 条命令(上限%d)，"
-               "队首[%s]等待中，强制让位" % (owner, cmds, SW_FAIR_CMDS, queue[0]))
-    elif (not _room_mode) and has_waiter and fair_held > SW_FAIR_SECONDS:
-        should_reclaim = True
-        why = ("公平轮转：持有者[%s]连续独占 %.0f 秒(上限%d)，"
-               "队首[%s]等待中，强制让位" % (owner, fair_held, SW_FAIR_SECONDS, queue[0]))
-    elif held > _room_hold_limit() and requester != owner:
-        # 单命令级锁：超过 SW_CMD_HOLD 仍未释放，视为该命令已结束
-        # ── 【A15 修复】房间级持锁时改用 SW_ROOM_HOLD_MAX ─────────────────
-        #   房间级独占（hold_mode="room"）本来就该跨越整轮建模的几十条命令，
-        #   若仍按 90 秒判超时，房间一建模就被别的房间抢走，等于没锁。
-        #   注意：房间级不使用 SW_CMD_HOLD，但【仍受】SW_MAX_HOLD（4 h）兜底。
-        should_reclaim = True
-        why = ("持有者[%s]持锁%.0f秒超过%s上限%d秒"
-               % (owner, held,
-                  "房间级" if _room_hold_enabled() else "单命令",
-                  _room_hold_limit()))
-
-    if should_reclaim:
-        lk["prev_owner"] = owner
-        lk["owner"] = None
-        lk["acquired_at"] = None
-        # 只有在进程确实没跑时才清 sw_by_room，避免误判正在运行的SW
-        if not _sw_running():
-            lk["sw_by_room"] = False
-        if requester and requester in lk.get("queue", []):
-            pass
-        return True, owner
-    return False, None
+        return {"ok": False, "error": "监控器调用异常"}
 
 
-def _room_hold_enabled():
-    """【A15】是否启用房间级独占锁（默认开启）。
+def cmd_sw_monitor_recover(reason):
+    """故障恢复：接管前必须确认旧命令与 CAD 子进程已彻底排空。"""
+    if not str(reason or "").strip():
+        return {"ok": False, "error": "recover 必须写明原因（监控器侧硬约束）"}
+    return cmd_sw_monitor_attach(drained=True, recover=True, reason=reason)
 
-    环境变量 DSH_SW_ROOM_HOLD=0 可退回旧的单命令级语义（应急开关）。
-    """
-    v = (os.environ.get("DSH_SW_ROOM_HOLD") or "").strip().lower()
-    if v in ("0", "false", "no", "off"):
-        return False
-    return bool(SW_ROOM_HOLD)
-
-
-def _room_hold_limit():
-    """【A15】当前锁模式的持锁超时上限（秒）。"""
-    return SW_ROOM_HOLD_MAX if _room_hold_enabled() else SW_CMD_HOLD
-
-
-# ══ 【A15】构建区间台账：build_overlap_count 的唯一数据源 ═══════════════════
 def _build_windows_path():
     try:
         os.makedirs(os.path.dirname(SW_BUILD_WINDOW_FILE), exist_ok=True)
@@ -5380,7 +5563,7 @@ def _record_build_start(room):
         now = time.time()
         ws.append({"room": room, "start_ts": now, "end_ts": None,
                    "task_id": _current_workflow_task_id(),
-                   "hold_mode": "room" if _room_hold_enabled() else "command"})
+                   "hold_mode": "permit"})
         _save_build_windows(ws)
         return now
     except Exception:
@@ -5477,7 +5660,7 @@ def _log_concurrent_build_violation(room, others, reason):
                     "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "task_id": _current_workflow_task_id(),
                     "room": room, "others": others, "reason": reason,
-                    "pid": _lock_ident()})
+                    "pid": _exec_ident()})
         rec = rec[-100:]
         with open(vp, "w", encoding="utf-8") as f:
             json.dump({"records": rec, "updated_at": time.time()},
@@ -5499,32 +5682,43 @@ def _active_week_rooms(state):
     return sorted(out)
 
 
-def _lock_ident():
-    """== [A-55] 当前【执行体】的身份串（pid + 会话片段）=================
-    为什么需要：SW 锁原先只记"房间名"。同一房间名下若有两个执行体
-      （room-fail 后重开、旧子代理仍活着；或子代理与主对话共用房间名）,
-      两者都满足 owner==name，于是都会命中"我自己持有"的续期分支，
-      同时以为自己独占 SW，并发写同名零件互相覆盖。
-    这里给每次进程一份身份：pid 必变，session 片段用于跨进程区分。
+def _sw_lock(state):
+    """兼容别名：返回 mode_state 里的 sw_lock 字段（监控器镜像）。
+
+    旧实现里它是【权威】：owner/queue/acquired_at 由 sw-request 写入，
+    所有判定都读它。现在权威在监控器，这里的字段由
+    _refresh_sw_lock_mirror() 单向同步 —— 只读，且只有 source=sw_monitor
+    时才有意义（_sw_lock_snapshot 负责这层过滤）。
+
+    保留这个函数名是因为 room-board / room-end / dry-run 等十几处都在用；
+    改名会让 diff 淹没真正重要的改动。但任何【写 owner】的代码都不许再出现。
+    """
+    return _sw_lock_mirror(state)
+
+
+def _lock_needed(state):
+    """模式 2 一律需要 SW 使用权许可。
+
+    旧实现在这里返回"要不要排队"；现在恒为 True：监控器接管后没有
+    "不需要许可"的情形（连单房间也要过 begin/end 记账）。
+    """
+    return str(state.get("mode")) == "2"
+
+
+def _exec_ident():
+    """当前执行体身份串（pid + 会话片段）。
+
+    原先叫 _lock_ident，是 SW 锁用来区分"同一房间名下的两个执行体"的
+    （A-55 修复：重开房间时旧子代理还活着 → 两个执行体都以为自己持锁，
+    并发写同名零件互相覆盖）。锁改由监控器按 session 绑定之后，这个用途
+    消失了；但【违规记录】仍要标出是谁触发的，所以保留并改名。
     """
     try:
         _pid = os.getpid()
     except Exception:
         _pid = 0
     _sid = str(os.environ.get("DSH_SESSION_ID") or "")[:8]
-    # 子代理进程与主对话可能同 pid（同机不同会话）→ 带上会话片段
     return "%s:%s" % (_pid, _sid)
-
-
-def _sw_lock(state):
-    return state.setdefault("sw_lock", {"owner": None, "queue": [], "acquired_at": None,
-                                        "prev_owner": None, "sw_by_room": False,
-                                        "owner_ident": None})
-
-
-def _lock_needed(state):
-    """模式2 一律启用 SW 使用窗口（串行天然无竞争，并行自动排队）。"""
-    return str(state.get("mode")) == "2"
 
 
 def _sw_proc_list():
@@ -5539,428 +5733,6 @@ def _sw_proc_list():
         return len(pids), pids
     except Exception:
         return 0, []
-
-
-def cmd_sw_monitor_start():
-    """标记监控已启动（用于 status 显示）。"""
-    return {"ok": True, "note": "请在模式2激活时调用 sw-monitor-bg 启动真正监控"}
-
-
-def _stop_sw_monitor(quiet=True):
-    """【2026-11-11 修复】真正【结束】SW 后台监控进程，而不只是删 PID 文件。
-
-    ── 现场（验收复跑 20261111_131815_580E38FA，磁盘实锤）────────────
-    `_monitor_bg_impl` 进程 4 个并存（PID 28804 / 14092 / 31040 / 15796，跨两个
-    任务），init 与 room-end 均未终止它们。即使任务收工、SW 早已关闭，这些
-    进程仍在每 3 秒 tasklist 一次，直到用户手工结束。
-
-    ── 根因（三条叠加，缺一不可）──────────────────────────────────────
-      ① 旧的 cmd_sw_monitor_stop() 只 `os.remove(pid 文件)`，【从不杀进程】——
-         而 _sw_monitor_loop 是 `while True`，PID 文件一删就再也没人能找到它；
-      ② cmd_sw_monitor_bg() 的幂等判活用 `os.kill(old_pid, 0)`，而本文件
-         `_pid_alive()` 的注释已经写明：这个调用在本机 Windows + Python 3.13
-         上是【假阴性】（对确实活着的进程抛 OSError(22)）→ 每次都判"没在跑"
-         → 每次 select 都新起一个（workflow_gate.py:4525 在 parallel 模式下
-         Popen 一次）；
-      ③ 没有任何清理挂点：room-end / close-all / rooms-reset 都不理它。
-
-    本函数是三条的公共出口：按 pid 真杀 + 清 PID 文件。任何异常都只写进返回体，
-    绝不阻断调用方（收尾路径上失败也比分不掉强）。
-
-    Args:
-        quiet: True 表示"没有在跑"不算失败（收尾场景的常态）。
-    Returns: {ok, stopped, pid, error?}
-    """
-    out = {"ok": True, "stopped": False, "pid": None}
-    try:
-        with open(_SW_MONITOR_PID_FILE, "r", encoding="utf-8") as f:
-            mpid = int((f.read() or "").strip())
-    except Exception:
-        # 没有 PID 文件：可能本来就没起过，也可能文件被旧实现删了但进程还活着
-        # （正是旧 stop 的坑）。这里做一次尽力而为的孤儿清理。
-        out["stopped"] = bool(_purge_orphan_monitors())
-        out["note"] = ("无 PID 文件；已按命令行特征清理孤儿监控进程"
-                       if out["stopped"] else "无 PID 文件（未发现孤儿监控）")
-        return out
-    out["pid"] = mpid
-    if not _pid_alive(mpid):
-        try:
-            os.remove(_SW_MONITOR_PID_FILE)
-        except Exception:
-            pass
-        out["note"] = "PID 文件指向的进程已不存在（仅清理文件）"
-        return out
-    try:
-        subprocess.run(["taskkill", "/F", "/PID", str(mpid)],
-                       capture_output=True, text=True, encoding="mbcs",
-                       errors="replace", timeout=15,
-                       creationflags=CREATE_NO_WINDOW)
-    except Exception as e:
-        out["ok"] = False
-        out["error"] = "taskkill 失败: %r" % (e,)
-        return out
-    # taskkill 是异步信号 → 必须轮询确认真的退了，不能只看返回码。
-    for _ in range(20):        # 最多 2.0s
-        if not _pid_alive(mpid):
-            break
-        time.sleep(0.1)
-    out["stopped"] = not _pid_alive(mpid)
-    if not out["stopped"]:
-        out["ok"] = False
-        out["error"] = "taskkill 已发出但进程仍未退出（PID=%d）" % mpid
-        return out
-    try:
-        os.remove(_SW_MONITOR_PID_FILE)
-    except Exception:
-        pass
-    return out
-
-
-def _list_python_procs_with_cmdline():
-    """列出所有 python 进程的 (pid, CommandLine)，供孤儿识别用。
-
-    ── 【2026-11-11 实测坑】不能用 wmic ─────────────────────────────────
-    本机（Windows 11 + Python 3.13）实测 `wmic` 【已不存在】：
-        'wmic' is not recognized as an internal or external command
-    wmic 自 Windows 10 21H1 起被标记弃用、新装 Win11 默认不再预装。
-    第一版实现用 wmic 取命令行，结果 _purge_orphan_monitors() 恒返回 []
-    —— 也就是说"孤儿清理"这一路是【静默失效】的（写起来像对，实际什么都不做）。
-    这正是本仓库反复强调的"看着修了、其实没生效"，故改用 PowerShell
-    Get-CimInstance（Win11 上必在），并保留 tasklist 作为最粗的兜底。
-
-    Returns: [(pid, cmdline_str), ...]；取不到就返回 []（调用方按"没找到"处理）
-    """
-    out = []
-    # ① 首选：PowerShell Get-CimInstance（能拿到 CommandLine）
-    try:
-        _ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
-               "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress")
-        _r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _ps],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=30,
-            creationflags=CREATE_NO_WINDOW)
-        _txt = (_r.stdout or "").strip()
-        if _txt:
-            try:
-                _data = json.loads(_txt)
-            except Exception:
-                _data = None
-            if isinstance(_data, dict):
-                _data = [_data]
-            for _it in (_data or []):
-                try:
-                    _pid = int(_it.get("ProcessId"))
-                except Exception:
-                    continue
-                out.append((_pid, str(_it.get("CommandLine") or "")))
-            if out:
-                return out
-    except Exception:
-        pass
-    # ② 兜底：tasklist（拿不到命令行，只能给出"有这些 python 进程"）
-    try:
-        _r2 = subprocess.run(["tasklist", "/FI", "IMAGENAME eq python.exe",
-                              "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, encoding="mbcs",
-                             errors="replace", timeout=15,
-                             creationflags=CREATE_NO_WINDOW)
-        for _line in (_r2.stdout or "").splitlines():
-            _cols = [c.strip().strip('"') for c in _line.split(",")]
-            if len(_cols) < 2 or _cols[0].lower() != "python.exe":
-                continue
-            try:
-                out.append((int(_cols[1]), ""))
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return out
-
-
-def _purge_orphan_monitors():
-    """按命令行特征找出并结束【孤儿】_monitor_bg_impl 进程（不含自己）。
-
-    只在 _stop_sw_monitor 拿不到 PID 文件时兜底用 —— 旧实现删文件不杀进程，
-    已经泄漏的那批只能靠命令行特征认回来。取不到就返回空，绝不影响主流程。
-
-    ⚠️ 只杀命令行里【确实含 _monitor_bg_impl】的进程。拿不到命令行时
-       （tasklist 兜底那条路）【绝不猜】—— 猜错会杀掉别的房间的建模进程。
-    """
-    killed = []
-    for _pid, _cmd in _list_python_procs_with_cmdline():
-        if _pid <= 0 or _pid == os.getpid():
-            continue
-        # 命令行必须明确含特征串；空命令行（tasklist 兜底）一律跳过，绝不误杀
-        if "_monitor_bg_impl" not in (_cmd or ""):
-            continue
-        try:
-            subprocess.run(["taskkill", "/F", "/PID", str(_pid)],
-                           capture_output=True, text=True, encoding="mbcs",
-                           errors="replace", timeout=10,
-                           creationflags=CREATE_NO_WINDOW)
-            killed.append(_pid)
-        except Exception:
-            continue
-    return killed
-
-
-def cmd_sw_monitor_stop():
-    """停止监控（【2026-11-11 修复】真正结束进程 + 清理 PID 文件）。"""
-    return _stop_sw_monitor(quiet=True)
-
-
-def _monitor_alive():
-    """检测监控进程是否真的存活（并清理失效 PID 文件）。"""
-    if not os.path.exists(_SW_MONITOR_PID_FILE):
-        return False
-    try:
-        with open(_SW_MONITOR_PID_FILE, "r") as f:
-            mpid = int(f.read().strip())
-    except Exception:
-        return False
-    if mpid <= 0:
-        return False
-    # Windows 用 tasklist 判断，跨平台用 os.kill(pid, 0)
-    try:
-        if sys.platform == "win32":
-            out = subprocess.run(["tasklist", "/FI", "PID eq %d" % mpid, "/FO", "CSV", "/NH"],
-                                 capture_output=True, text=True, encoding="mbcs", errors="replace", timeout=10,
-                                 creationflags=CREATE_NO_WINDOW)
-            if str(mpid) not in (out.stdout or ""):
-                try:
-                    os.remove(_SW_MONITOR_PID_FILE)
-                except Exception:
-                    pass
-                return False
-            return True
-        os.kill(mpid, 0)
-        return True
-    except Exception:
-        try:
-            os.remove(_SW_MONITOR_PID_FILE)
-        except Exception:
-            pass
-        return False
-
-
-def _write_sw_state_now():
-    """【Bug2修复】立即回写一次真实进程状态（不依赖监控进程）。"""
-    try:
-        count, pids = _sw_proc_list()
-        st = {"sw_running": count > 0, "sw_count": count, "sw_pids": pids,
-              "updated_at": time.time()}
-        with open(_SW_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(st, f)
-        return st
-    except Exception:
-        return None
-
-
-def _sync_sw_state_file(running=None, pids=None, writer="auto", force=False):
-    """【BUG-观察-8 修复】把 sw_state.json 与真实进程状态对齐（查询即自愈）。
-
-    背景（竞速小车任务实测）：
-      sw-state.json 记录 `file_running=false`，但 `tasklist` 显示
-      SLDWORKS.exe 仍在跑（PID 15116）—— 派生缓存与事实脱节。
-      根因：sw_state.json 的刷新依赖一个常驻监控进程（sw_monitor.pid），
-      而该进程默认根本没启动；唯一的纠正逻辑又被 `if auto:` 关在
-      `lock-doctor --auto` 里，用户不主动跑就永远不纠正。
-
-    影响：sw_bridge._sw_locked_by_other() 读到陈旧 sw_state.json 会误判
-      "SW 被占用"（假忙）或"SW 已关闭"（假闲）→ 传导成队列阻塞或 API 冲突。
-
-    修复：凡是已经探测出真实进程数的命令（sw-status / lock-doctor），
-      顺手做一次比对；不一致或文件过期（>30s）就立即回写。
-      sw_state.json 是纯派生缓存，回写无副作用。
-
-    Args:
-        running/pids: 调用方已探测到的真实进程数/PID 列表；None 则自行探测
-        writer: 写入者标识，便于排查
-        force: 强制回写（忽略"是否需要"的判断）
-
-    Returns: dict {checked, file_running, file_count, real_running, real_count,
-                   file_age_seconds, mismatch, corrected}
-    """
-    if running is None:
-        try:
-            running, pids = _sw_proc_list()
-        except Exception:
-            running, pids = 0, []
-    info = {
-        "checked": True,
-        "real_running": bool(running > 0),
-        "real_count": running,
-        "real_pids": pids,
-        "file_running": None,
-        "file_count": None,
-        "file_age_seconds": None,
-        "mismatch": None,
-        "corrected": False,
-        "writer": writer,
-    }
-    stale = None
-    try:
-        with open(_SW_STATE_FILE, "r", encoding="utf-8") as f:
-            stale = json.load(f)
-    except Exception:
-        stale = None
-
-    if stale is None:
-        # 文件不存在 → 直接建立一份真实快照
-        info["mismatch"] = True
-    else:
-        info["file_running"] = stale.get("sw_running")
-        info["file_count"] = stale.get("sw_count")
-        try:
-            info["file_age_seconds"] = round(
-                time.time() - float(stale.get("updated_at", 0)), 1)
-        except Exception:
-            info["file_age_seconds"] = None
-        info["mismatch"] = (bool(stale.get("sw_running")) != bool(running > 0))
-
-    _age = info.get("file_age_seconds")
-    _need = bool(force or info["mismatch"] or _age is None or _age > 30)
-    if _need:
-        try:
-            st = {"sw_running": running > 0, "sw_count": running, "sw_pids": pids,
-                  "updated_at": time.time(), "written_by": writer}
-            with open(_SW_STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump(st, f)
-            info["corrected"] = True
-        except Exception:
-            pass
-    return info
-
-
-def cmd_sw_monitor_status():
-    """查看监控状态 + SW 进程信息（含自动自愈）。"""
-    alive = _monitor_alive()
-    count, pids = _sw_proc_list()
-    state = {}
-    try:
-        with open(_SW_STATE_FILE, "r", encoding="utf-8") as f:
-            state = json.load(f)
-    except Exception:
-        pass
-    # 【Bug2修复】监控失联或状态文件过期 → 立即用真实进程回写
-    file_age = None
-    if state:
-        try:
-            file_age = time.time() - float(state.get("updated_at", 0))
-        except Exception:
-            file_age = None
-    stale = (file_age is None or file_age > SW_MONITOR_INTERVAL * 4
-             or bool(state.get("sw_running")) != (count > 0))
-    if stale:
-        fresh = _write_sw_state_now()
-        if fresh:
-            state = fresh
-    return {
-        "ok": True, "monitor_running": alive,
-        "sw_running": count > 0, "sw_count": count, "sw_pids": pids,
-        "last_updated": state.get("updated_at"),
-        "state_file": state if state else {},
-        "state_was_stale": stale,
-        "state_file_age_seconds": round(file_age, 1) if file_age is not None else None,
-    }
-
-
-def _sw_monitor_loop():
-    """后台监控主循环。"""
-    import atexit
-    def cleanup():
-        try:
-            os.remove(_SW_MONITOR_PID_FILE)
-        except Exception:
-            pass
-    atexit.register(cleanup)
-    while True:
-        try:
-            count, pids = _sw_proc_list()
-            st = {"sw_running": count > 0, "sw_count": count, "sw_pids": pids, "updated_at": time.time()}
-            with open(_SW_STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump(st, f)
-        except Exception:
-            pass
-        time.sleep(SW_MONITOR_INTERVAL)
-
-
-def cmd_sw_monitor_bg():
-    """在子进程中启动 SW 监控（幂等）。
-
-    ── 【2026-11-11 修复】幂等判活不能用 os.kill(pid, 0) ────────────────
-    现场（验收复跑 20261111_131815_580E38FA）：`_monitor_bg_impl` 残留 4 个
-    （PID 28804 / 14092 / 31040 / 15796），跨两个任务。
-
-    根因：旧实现用 `os.kill(old_pid, 0)` 判"已在运行"，而本文件 `_pid_alive()`
-    的注释（约 :5786）早已写明——该调用在本机 Windows + Python 3.13 上对
-    **确实活着的** python 进程会抛 `OSError(22, '参数错误')`，即【假阴性】。
-    于是幂等判定恒为 False → 每次 select（workflow_gate.py:4525 在 parallel
-    模式 Popen 一次）都新起一个，越积越多。
-
-    修复：改用与看护（sw_guard）同款的 `_pid_alive()`（OpenProcess 优先，
-    失败退回 tasklist 文本匹配），并在"发现旧进程已死"时顺手清掉 PID 文件。
-    """
-    import subprocess as sp
-    # 检查是否已在运行
-    if os.path.exists(_SW_MONITOR_PID_FILE):
-        try:
-            with open(_SW_MONITOR_PID_FILE, "r", encoding="utf-8") as f:
-                old_pid = int((f.read() or "").strip())
-        except Exception:
-            old_pid = None
-        # 【2026-11-11】os.kill(pid,0) 在本机是假阴性 → 统一走 _pid_alive()
-        if old_pid and _pid_alive(old_pid):
-            return {"ok": True, "already_running": True, "pid": old_pid}
-        # 旧进程已死：清掉陈旧 PID 文件，避免它挡住下一次启动
-        try:
-            os.remove(_SW_MONITOR_PID_FILE)
-        except Exception:
-            pass
-    script = os.path.abspath(__file__)
-    proc = sp.Popen([sys.executable, script, "_monitor_bg_impl"],
-                    creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-    try:
-        # 【BUG-观察-15 修复】补 encoding —— 原先无 encoding，按系统 locale(cp936)
-        #   写盘，是本仓库唯一一处"写入不指定编码"的漏点。
-        with open(_SW_MONITOR_PID_FILE, "w", encoding="utf-8") as f:
-            f.write(str(proc.pid))
-    except Exception:
-        pass
-    return {"ok": True, "started_pid": proc.pid,
-            "message": "SW 后台监控已启动（PID=%d），每 %d 秒刷新状态" % (proc.pid, SW_MONITOR_INTERVAL)}
-
-
-def _monitor_bg_impl():
-    """后台监控实现入口。"""
-    _sw_monitor_loop()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 【第4项 · 代码强制】SW 健康看护：锁解锁后、建模前自动启动
-# ═══════════════════════════════════════════════════════════════════════════
-# 用户原话：
-#   「在子代理的SW锁解锁之后，利用SW建模之前，利用 DSH 的后台任务运行时
-#     （ctx.jobs），让父代理启动一个耗时命令，专门做轻量级的定期检查。
-#     比如每 10 秒统计一次系统关键指标，一旦内存、CPU超85％阈值就输出一行
-#     警报。这个 job 会立即返回一个 job id，在后台持续跑着。一旦相关指数
-#     超标立马关闭SW」
-#
-# 与既有 sw-monitor 的区别（不要混用）：
-#   · sw-monitor（上面）：只记录 SLDWORKS.EXE 在不在 → 写 sw_state.json，**不杀进程**；
-#   · sw_guard（本函数拉起）：采 CPU/内存，超阈值**立即关闭 SW** → 写 sw_guard_state.json。
-#   两者互补，各自有独立 pid 文件，互不干扰。
-#
-# 落实方式：**由 mode_gate 在真实获取 SW 使用权的那一刻自动拉起**，
-#   而不是靠"提示词提醒模型记得启动"。任何代码路径只要拿到锁，看护就在跑。
-
-_SW_GUARD_PID_FILE = os.path.join(STATE_DIR, "sw_guard.pid")
-
-#: 看护默认阈值与间隔（与 sw_guard.py 的默认值保持一致）
-SW_GUARD_INTERVAL = 10
-SW_GUARD_CPU_LIMIT = 85.0
-SW_GUARD_MEM_LIMIT = 85.0
 
 
 def _sw_guard_path():
@@ -6399,7 +6171,7 @@ def cmd_room_start(name):
             return {"ok": False, "room": name, "gate": "CONCURRENT_BUILD",
                     "error": "【CONCURRENT_BUILD 阻断】房间 [%s] 开工被拒绝。" % name,
                     "active_rooms": _other_live,
-                    "hold_mode": "room" if _room_hold_enabled() else "command",
+                    "hold_mode": "permit",
                     "detail": _cb_reason,
                     "hint": ("房间级串行（A15）要求同一时刻只有一个房间在使用 SW。"
                              "① 等现有房间 room-end/room-fail 后再 room-start；"
@@ -6504,34 +6276,17 @@ def cmd_room_start(name):
             pass
         # 心跳保留（不删），新一波会自然刷新 mtime
     save_state(state)
-    # ══ 【A15 修复】房间开工即取 SW 使用权（hold_mode="room"）════════════════
-    # 旧语义：锁在每条 sw_bridge 命令结束就释放 → 两个脚本同时在建。
-    # 新语义：room-start 取锁、room-end/room-fail 释放，整轮建模只允许一个房间。
+    # ══ room-start【不再取锁】═════════════════════════════════════════════
+    # 旧实现在这里预取"房间级独占权"（A15），从此整轮建模
+    # 都要靠进程内的 owner 字段维持，并靠心跳/产物 mtime 猜它是否还活着。
     #
-    # ⚠️ 必须放在上面 save_state(state)【之后】。原因是本函数的 state 是函数
-    #   开头 load 的【内存副本】：cmd_sw_request() 会自行 load/save 并写入
-    #   sw_lock，若随后再 save_state(state)，就会用旧副本把刚取得的锁整块
-    #   覆盖成空 —— 实测症状是"甲取锁成功、乙紧接着也能取到"，
-    #   房间级串行等于没做（与 parallel_mode 自愈那段是同一个坑）。
+    # 新模型：使用权由监控器按【一次命令】发放（begin/end），房间不再长期
+    # 占锁。这样做的两个直接好处：
+    #   ① 房间在纯文件阶段（写脚本、读报告、验签）不占 SW，别的房间可以先用；
+    #      教程 3.3 明说"锁可在纯文件验签、离线校核和台账核实时提前交给下一房间"；
+    #   ② 不再需要"这个房间到底还活着吗"的猜测 —— 没有在途命令就等于没占资源。
+    # room-end / room-fail 也不再"释放锁"，只做产物的收尾。
     _room_lock_note = None
-    if _room_hold_enabled():
-        try:
-            _lk_res = cmd_sw_request(name)
-            if _lk_res.get("acquired"):
-                _room_lock_note = "room-start 已取得 SW 房间级独占权"
-            else:
-                _room_lock_note = ("room-start 未能取得 SW 独占权（队列第 %s 位，"
-                                   "持有者=%s）；首次建模命令会自动排队等待"
-                                   % (_lk_res.get("position"), _lk_res.get("owner")))
-            # ── 【N3 修复】不再在 room-start 开构建窗口 ────────────────────
-            # 现场（2026-11-10 复检）：窗口从 room-start 开、room-end 关，
-            #   把"A 持锁 + B 排队等待"（B 从未建模）也统计成 build_overlap
-            #   → 已修好的并发防护永远报违规（假阳性）。
-            # 窗口现在只在【实际 SW 命令执行】时开合（sw_bridge 取锁后开、
-            #   命令结束即关），排队等待不计入 —— 见 sw_bridge.main() 的
-            #   _record_build_start/_record_build_end 调用。
-        except Exception as _e_lk:
-            _room_lock_note = "room-start 取锁异常（不阻断登记）：%r" % (_e_lk,)
     msg = "小屋 [%s] 已登记,可开始建模" % name
     result = {"ok": True, "room": name, "message": msg}
     # ── 【A15 修复】把房间级独占权的取得结果如实告诉调用方 ────────────────
@@ -6539,7 +6294,7 @@ def cmd_room_start(name):
     #   看不到"本房间拿没拿到 SW 独占权"，只能靠再跑一次 room-board 猜。
     if _room_lock_note:
         result["sw_room_lock"] = _room_lock_note
-        result["hold_mode"] = "room" if _room_hold_enabled() else "command"
+        result["hold_mode"] = "permit"
     # ── 【Bug#18 修复】明确告知调用方：历史是否被保留 ─────────────────────
     result["history_preserved"] = (not _fresh)
     result["fresh_reason"] = ("explicit_fresh" if _fresh_explicit else
@@ -7073,23 +6828,19 @@ def _finalize_room(name, failed=False, force=False):
         #   回收站与全盘均无副本（转台轴/51208轴承/夹爪轴/可换阶梯钳口块/
         #   增力摇杆 5 件永久丢失）。此后又出现 parts 内文件被改名
         #   .wrong<HHMMSS> 后删除的同类现象。
-        # 正确语义（与 lock-doctor 一致）：
-        #   · owner 是本房间或无人持有 -> 释放锁并允许清场；
-        #   · owner 是【别的房间】且该房间仍活着 -> 只释放本房间的队列位，
-        #     【绝不杀 SW 进程】，并把原因回传给调用方。
-        _owner_now = lk.get("owner") or lk.get("prev_owner")
+        # 正确语义（监控器接管后）：
+        #   · 本房间不是当前的 SW 使用房间 -> 只做本房间收尾，【绝不杀 SW 进程】；
+        #   · 是本房间 -> 宿主已确认本命令排空，可以清场。
+        # 判断依据从"猜持有者死活"换成监控器的 sw.owner（只读镜像），
+        # 因为死后台账号/心跳残留再也不会影响谁在用 SW。
+        _owner_now = lk.get("owner")
         _kill_ok = True
         _kill_skip_reason = None
         if _owner_now and _owner_now != name:
-            try:
-                _other_alive = _lock_owner_alive(state, _owner_now)
-            except Exception:
-                _other_alive = True   # 判不了就当活着，fail-closed 不杀
-            if _other_alive:
-                _kill_ok = False
-                _kill_skip_reason = (
-                    "SW 正被房间 [%s] 使用且仍存活：--force 只释放本房间队列位，"
-                    "【不关闭 SW 进程】，以免抹掉它正在保存的零件。" % (_owner_now,))
+            _kill_ok = False
+            _kill_skip_reason = (
+                "SW 当前的使用权在房间 [%s] 名下：--force 只做本房间收尾，"
+                "【不关闭 SW 进程】，以免抹掉它正在保存的零件。" % (_owner_now,))
         if _kill_ok and _sw_running():
             _sw_force_close()
             killed = True
@@ -7106,22 +6857,18 @@ def _finalize_room(name, failed=False, force=False):
         except Exception:
             pass
         return True, killed, waited, _release_reason
-    # 【Bug1修复】owner 已是死房间（或本来就是自己）→ 都要释放锁。
-    # 原先只在 was_owner 时释放，导致死房间留下的锁永久占用。
-    _owner_dead = bool(lk.get("owner")) and (not _lock_owner_alive(state, lk.get("owner")))
-    if not (was_owner or _owner_dead):
+    # 【Bug1 的原始动机已消失】旧实现要处理"死房间留下锁永久占用"，
+    # 才需要 owner_dead 这条旁路。监控器接管后不存在"死在锁里的房间"：
+    # 没有在途命令就没有占用，宿主失联会冻结票据而不是留下脏锁。
+    if not was_owner:
         # 明确告知为什么没释放（Bug-25/27：原实现只回 false 不说原因）
         if _owner_at_entry:
-            _release_reason = ("SW 锁属于其它房间 [%s]，未释放（避免打断它的工作）。"
-                               "若确认它已停，用 room-end --force 强制释放。"
+            _release_reason = ("SW 使用权在其它房间 [%s] 名下，本房间收尾不释放。"
                                % _owner_at_entry)
         else:
-            _release_reason = "SW 锁无 owner（无需释放）"
-    if was_owner or _owner_dead:
-        if _owner_dead and not was_owner:
-            lk["prev_owner"] = lk.get("owner")
-        else:
-            lk["prev_owner"] = name
+            _release_reason = "本房间当前未占用 SW（无需释放）"
+    if was_owner:
+        lk["prev_owner"] = name
         lk["owner"] = None
         lk["acquired_at"] = None
         # 本房间启动的 SW 必须完全关闭，下一个房间才能干净地开SW
@@ -7161,7 +6908,10 @@ def _finalize_room(name, failed=False, force=False):
     #   导致 room-end 对所有房间全部失效（比首轮原 bug 更严重）。
     # 这里补齐第 4 个值；_release_reason 在成功释放时为 None（由调用方按
     # was_owner 判定措辞），保持与 force 分支同一契约。
-    return (was_owner or _owner_dead), killed, waited, _release_reason
+    # 【监控器接入】原来的 (was_owner or _owner_dead) 是为了处理"死房间留下的锁"。
+    # 现在没有"死房间占着锁"这种状态（使用权按命令发放、领取后不自动过期，
+    # 宿主失联会冻结票据），所以判据只剩 was_owner 一个。
+    return was_owner, killed, waited, _release_reason
 
 
 def _visual_gate_for_room(name):
@@ -7893,6 +7643,109 @@ def idempotent_remember(cmd, target, flags, result):
     _idem_save(_kept)
 
 
+def _purchased_bom_gate(name):
+    """【BUG-7】外购/标准件房间的"交付物"校验：必须有非空采购清单。
+
+    为什么豁免三类建模门却不豁免它：
+      外购房间不产出 .sldprt，所以材料凭据 / 物理校核 / 领域规则 / 看图 /
+      三段自检 / 位姿声明全部无从谈起 —— 对它们打勾没有意义，
+      逼着调用方 `--force` 反而把正当决策记成违规。
+      但"外购"不等于"什么都不用交"：工程上必须给出**采购清单**
+      （型号 / 数量 / 标准号 / 供应商），否则总装阶段会凭空多出几件
+      无来源的零件。所以豁免的是"建模证据"，保留的是"交付责任"。
+
+    清单位置与口径（与门禁其余读根一致，避免又出现 BUG-5 那种读写两侧对不上）：
+      <work_dir>/reports/<房间>.bom.json
+      {
+        "room": "附件件",
+        "items": [
+          {"name": "油标", "qty": 1, "spec": "M16×1.5", "standard": "JB/T 7941.1",
+           "supplier": "外购"},
+          ...
+        ]
+      }
+      也接受顶层直接是数组（`[{...}, ...]`）的简写形式。
+
+    Returns:
+        {"ok": bool, "gate"/"skipped", "count", "items", "message", "path"}
+    """
+    _dirs = []
+    try:
+        _wd = _default_work_dir()
+        if _wd:
+            _dirs.append(os.path.join(str(_wd), "reports"))
+    except Exception:
+        pass
+    _dirs.append(os.path.join(os.getcwd(), "reports"))
+    _dirs.append(REPORTS_DIR)
+
+    _path = None
+    _data = None
+    for _d in _dirs:
+        _f = os.path.join(_d, "%s.bom.json" % name)
+        if os.path.isfile(_f):
+            _path = _f
+            try:
+                with open(_f, "r", encoding="utf-8") as _h:
+                    _data = json.load(_h)
+            except Exception as _e:
+                return {"ok": False, "room": name, "gate": "BOM_UNREADABLE",
+                        "path": _f,
+                        "error": "采购清单存在但无法解析：%r" % (_e,),
+                        "message": ("=== 外购件房间缺少可读的采购清单（拒绝下线）===\n"
+                                    "房间: %s\n文件: %s\n\n"
+                                    "请修好该 JSON 后重试。" % (name, _f))}
+            break
+    if _path is None:
+        _expect = os.path.join((_dirs[0] if _dirs else "reports"),
+                               "%s.bom.json" % name)
+        return {"ok": False, "room": name, "gate": "PURCHASED_BOM_REQUIRED",
+                "expected_path": _expect,
+                "message": ("=== 外购件房间必须先出采购清单（拒绝下线）===\n"
+                            "房间: %s\n期望文件: %s\n\n"
+                            "本房间被标记为【外购/标准件】（type=purchased），"
+                            "因此不校验建模证据（材料/物理/领域/看图/三段自检），\n"
+                            "但必须交付采购清单（型号/数量/标准号/供应商）。\n\n"
+                            "写法：\n"
+                            "{\n"
+                            "  \"room\": \"%s\",\n"
+                            "  \"items\": [\n"
+                            "    {\"name\": \"油标\", \"qty\": 1, \"spec\": \"M16×1.5\",\n"
+                            "     \"standard\": \"JB/T 7941.1\", \"supplier\": \"外购\"}\n"
+                            "  ]\n"
+                            "}\n"
+                            "（也接受顶层直接是数组的简写）"
+                            % (name, _expect, name))}
+    # 归一化 + 非空校验
+    _items = []
+    if isinstance(_data, list):
+        _items = _data
+    elif isinstance(_data, dict):
+        _items = _data.get("items") or _data.get("bom") or []
+    if not isinstance(_items, list):
+        _items = []
+    _items = [x for x in _items if isinstance(x, dict) and str(x.get("name") or "").strip()]
+    if not _items:
+        return {"ok": False, "room": name, "gate": "PURCHASED_BOM_EMPTY",
+                "path": _path,
+                "message": ("=== 采购清单是空的（拒绝下线）===\n"
+                            "房间: %s\n文件: %s\n\n"
+                            "外购件房间的交付物就是 BOM；空清单等于没有交付。\n"
+                            "每项至少要有 name，建议补 qty / spec / standard / supplier。"
+                            % (name, _path))}
+    # 提醒缺项（不拦截）：数量是采购的最基本信息
+    _missing_qty = [str(x.get("name")) for x in _items
+                    if not (x.get("qty") or x.get("quantity"))]
+    return {"ok": True, "room": name, "skipped": False,
+            "gate": "PURCHASED_BOM_OK", "count": len(_items),
+            "items": _items, "path": _path,
+            "missing_qty": _missing_qty,
+            "message": ("外购件房间按 BOM 收尾：%d 项%s"
+                        % (len(_items),
+                           ("；以下缺数量字段（建议补）：" + ", ".join(_missing_qty[:8]))
+                           if _missing_qty else ""))}
+
+
 def cmd_room_end(name, force=False, dry_run=False):
     """【三大防线】room-end 是"房间下线"这个不可逆动作 —— 就在这里强制执行三道防线。
 
@@ -7992,13 +7845,34 @@ def cmd_room_end(name, force=False, dry_run=False):
         _vg = _visual_gate_for_room(name)
         if _vg and not _vg.get("ok") and not _vg.get("skipped"):
             return _vg
+    # ══ 【2026-11-12 新增·BUG-7】外购/标准件房间：建模类门全部豁免，但查 BOM ══
+    # 这类房间不产出 .sldprt，看图/三段自检/位姿/三大防线对它天然不适用。
+    # 强行套用只会逼出 `--force`，把一个正当的工程决策记成"违规绕行"
+    # （减速器任务的附件件 5 件正是这么被记进 defense_bypass.json 的）。
+    # 现在改为：豁免建模证据，但【必须】有采购清单，且清单不能是空的。
+    _is_purchased = (not force) and is_purchased_room(name)
+    if _is_purchased:
+        _bom = _purchased_bom_gate(name)
+        if not _bom.get("ok"):
+            return _bom
+        # 豁免也要留痕（不是绕过，是"该房间按外购处理"这一事实本身要可审计）
+        try:
+            _bm = load_state()
+            _rm = (_bm.get("rooms") or {}).get(str(name)) or {}
+            _rm["purchased"] = True
+            _rm["bom_checked_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            _rm["bom_items"] = _bom.get("count")
+            _bm.setdefault("rooms", {})[str(name)] = _rm
+            save_state(_bm)
+        except Exception:
+            pass
     # ══ 【第5项 · 代码强制】三段自检（bbox / 体积 / 特征数）═══════════════
     # 回溯报告 7 P5 的事故：没有齿的「齿轮」被宣布建模成功。
     #   当时只验「文件在 + 凭据 + 截图」，而包围盒对圆盘与真齿轮几乎一样，
     #   抓不出来；体积与特征数才抓得住。详见 _selfcheck_gate_for_room 文档。
     # 强制点：房间下线（不可逆）前，每个零件都必须有 PASS 的三段自检记录。
     # 放行：与三大防线同一套绕行机制（--force / DSH_DEFENSE_BYPASS=1，均留痕）。
-    if not force:
+    if not force and not _is_purchased:
         _sc = _selfcheck_gate_for_room(name)
         if _sc and not _sc.get("ok") and not _sc.get("skipped"):
             return _sc
@@ -8007,11 +7881,11 @@ def cmd_room_end(name, force=False, dry_run=False):
     #   无声明 = 不可审计，一律不通过」。
     # 现场：零件 +Z、总装 +Y、图纸 +Z 三处各自看都对，合起来整机错位 90 度。
     # 只做静态可判部分（读 pr.json），不在门禁里拉起 SW。
-    if not force:
+    if not force and not _is_purchased:
         _pg = _pose_gate_for_room(name)
         if _pg and not _pg.get("ok") and not _pg.get("skipped"):
             return _pg
-    if not force:
+    if not force and not _is_purchased:
         try:
             import defense_gate as _dg
             if _dg.bypass_requested():
@@ -8122,8 +7996,10 @@ def cmd_room_end(name, force=False, dry_run=False):
         _would = [
             "把房间 [%s] 标记为已结束（mode_state.rooms.%s.active=False，"
             "写 ended_at）" % (name, name),
-            ("从 SW 锁队列中移除本房间" if str(name) in (_lk.get("queue") or [])
-             else "SW 锁队列中本来就没有本房间（无需移除）"),
+            # 使用权现在是【按命令】发放的：房间本身不在队列里，
+            # 只有正在跑的那条命令会占住 SW（教程 3.3）。
+            ("结束在途命令并归还使用权" if (_lk.get("owner") == str(name))
+             else "本房间当前未占用 SW（无需归还）"),
         ]
         if force:
             _would.append(
@@ -8184,12 +8060,16 @@ def cmd_room_end(name, force=False, dry_run=False):
         _record_build_end(name)
     except Exception:
         pass
+    # 这里只在"最后一条命令忘了 end"时才需要收尾。正常情况下 sw_bridge 自己
+    # 会在命令结束（且确认 worker 排空）后调 monitor.end；release 是房间级动作，
+    # 对"房间已经不再动 SW"成立，因此放在收尾处补一刀是安全的。
     try:
         _st_rl = load_state()
-        if (_sw_lock(_st_rl).get("owner") == str(name)):
+        _owner_rl = (_st_rl.get("sw_lock") or {}).get("owner")
+        if _owner_rl == str(name):
             _room_hold_release = cmd_sw_release(str(name))
         else:
-            _room_hold_release = {"ok": True, "note": "锁不在本房间名下，无需释放"}
+            _room_hold_release = {"ok": True, "note": "本房间当前未占用 SW，无需归还"}
     except Exception as _e_rl:
         _room_hold_release = {"ok": False, "error": repr(_e_rl)}
     # ══ 【A-52 修复】下线即冻结产物：记指纹 + 置只读 ══════════════════════
@@ -8227,7 +8107,7 @@ def cmd_room_end(name, force=False, dry_run=False):
         pass
     _out = {"ok": True, "room": name, "sw_lock_released": was_owner,
             "sw_killed": killed, "sw_lock_release_reason": _reason,
-            "hold_mode": "room" if _room_hold_enabled() else "command",
+            "hold_mode": "permit",
             "room_hold_release": _room_hold_release,
             "message": msg}
     # 【A-52】冻结结论如实回传（只读失败也要让调用方看到）
@@ -8434,7 +8314,7 @@ def _require_build_exclusive(name, state=None):
         "gate": "CONCURRENT_BUILD",
         "active_rooms": _others,
         "strict_source": _why,
-        "hold_mode": "room" if _room_hold_enabled() else "command",
+        "hold_mode": "permit",
         "error": "【CONCURRENT_BUILD 阻断】" + _reason,
         "hint": ("(1) 等现有房间 room-end/room-fail 后再取 SW 使用权；"
                  "(2) 串行(E) 才会有这道硬拦，并行(D) 只观测；"
@@ -8443,379 +8323,25 @@ def _require_build_exclusive(name, state=None):
     }
 
 
-def cmd_sw_request(name):
-    """排队/获取 SW 使用权。快路径直接获取；否则入队等待。"""
-    state = load_state()
-    lk = _sw_lock(state)
-    if not _lock_needed(state):
-        save_state(state)
-        return {"ok": True, "need_lock": False, "room": name}
-    # == 【A15 补·报告 9-B-2】房间级独占：首次取 SW 使用权前先断言 ==
-    # 这段就是 mode_gate.py:6029 注释里承诺、而代码里从未实现的
-    #   _require_build_exclusive —— 每 10 s 采样的守卫当初记了 12 次
-    #   CONCURRENT_BUILD=2~3，却没有任何一处在"要锁的时候"真的拦下来。
-    # 现在：串行策略(E) 下，若还有别的房间在世 -> 直接拒绝取锁并回传
-    #   结构化原因 + 证据入口；并行(D)/未知 -> 只观测，不改变用户可选策略。
-    _excl = _require_build_exclusive(name, state)
-    if _excl:
-        return _excl
-    # 【Bug2 修复·饥饿根因】原实现在这里直接给持有者续期：
-    #     if lk.get("owner") == name: return {"acquired": True}
-    # 这等于让持有者无限次"插自己的队"，永远不会走到下面的公平检查，
-    # 于是 cmd_seq 一路涨到 14、锁被独占 272 秒，队列里的房间被饿死。
-    #
-    # 现在改为：持有者再次取锁时，先做公平体检——若队列里有别人在等，
-    # 且自己已达连跑上限（SW_FAIR_CMDS）或连续独占超时（SW_FAIR_SECONDS），
-    # 则主动让位；否则才允许续期。
-    # == [A-55 修复] 锁身份不能只有"房间名字符串" ====================
-    # 原实现只比较 lk["owner"] == name。实测（2026-11-01 CRITICAL）：
-    #   同一房间名下跑了【两个】执行体（重开房间时旧子代理还活着，
-    #   或子代理与主对话共用房间名），后者每次 sw-request 都命中这条
-    #   分支、无条件 renewed=True —— 两者同时以为自己持有 SW 使用权，
-    #   并发写同名零件（一方 20CrMnTi/56x60x30，另一方 45/170x140x24），
-    #   后写者覆盖先写者，双方都以为成功。
-    # 现在：owner 记录里同时保存【执行体身份】(pid + session 片段)，
-    #   只有身份也一致才算"我自己持有"；身份不同则视为争用，走公平排队。
-    #   旧状态文件没有 owner_ident 时保持原行为（向后兼容）。
-    _ident_now = _lock_ident()
-    q0 = lk.setdefault("queue", [])
-    _owner_ident = str(lk.get("owner_ident") or "")
-    if (lk.get("owner") == name
-            and (not _owner_ident or _owner_ident == _ident_now)):
-        _others = [x for x in q0 if x != name]
-        _cmds = int(lk.get("cmd_seq", 0) or 0)
-        _fs = lk.get("fair_start") or lk.get("acquired_at")
-        try:
-            _fheld = time.time() - float(_fs) if _fs else 0.0
-        except Exception:
-            _fheld = 0.0
-        if _others and (_cmds >= SW_FAIR_CMDS or _fheld > SW_FAIR_SECONDS):
-            # 让位：清空自己，把队首扶正，交由下方流程重新分配
-            lk["prev_owner"] = name
-            lk["owner"] = None
-            lk["acquired_at"] = None
-            lk["cmd_seq"] = 0
-            lk["fair_start"] = None
-            save_state(state)
-            lk = _sw_lock(state)
-        else:
-            # 续期时刷新身份戳（同一执行体才允许长期续）
-            lk["owner_ident"] = _ident_now
-            save_state(state)
-            return {"ok": True, "need_lock": True, "acquired": True, "room": name,
-                    "renewed": True, "cmd_seq": _cmds,
-                    "owner_ident": _ident_now}
-    q = lk.setdefault("queue", [])
-    if name not in q:
-        q.append(name)
-
-    # ── 【Bug6 修复】孤儿锁快路径体检 ───────────────────────────────────
-    # 必须在 reclaim 与快路径判定【之前】执行：owner:null 但 prev_owner 残留
-    # （已死房间）会让 sw_by_room 一直挂着，队列全员 sw_busy 永久阻塞。
-    # 这里做一次彻底清理，让队首能立即接管。
-    try:
-        _orphan = _purge_orphan_lock(state, requester=name)
-        if _orphan.get("purged"):
-            save_state(state)
-            lk = _sw_lock(state)
-    except Exception:
-        pass
-
-    # ── 【Bug1/3修复】先尝试回收失效锁（死房间/超时/孤儿）──
-    reclaimed, old_owner = _reclaim_lock(state, "sw-request", requester=name)
-    if reclaimed:
-        save_state(state)
-        lk = _sw_lock(state)
-
-    running = _sw_running()
-    # 【Bug5修复】owner为空但 sw_by_room=True 且进程在跑 → 无人持锁却挡住队首。
-    # 若 prev_owner 已不再是活动房间，清掉 sw_by_room 让队首立即接管。
-    if (not lk.get("owner")) and lk.get("sw_by_room"):
-        _prev = lk.get("prev_owner")
-        if _prev and not _lock_owner_alive(state, _prev):
-            lk["sw_by_room"] = False
-            lk["prev_owner"] = None
-            save_state(state)
-        elif not _prev:
-            lk["sw_by_room"] = False
-            save_state(state)
-    can_fast = False
-    # 快路径: 锁空闲 + 自己是队首 + (SW没在跑 或 SW不是房间启动的)
-    if (not lk.get("owner")) and q and q[0] == name:
-        can_fast = ((not running) or (not lk.get("sw_by_room")))
-    if can_fast:
-        lk["owner"] = name
-        # == [A-55] 同时记录执行体身份，供"是否是我自己持有"判定 ==
-        lk["owner_ident"] = _lock_ident()
-        lk["acquired_at"] = time.time()
-        # 【Bug4修复】单命令级锁：记录本次命令编号，命令结束后即可释放。
-        # 同一个房间的下一步命令会重新排队，但不影响其他房间公平性。
-        # 新一轮取锁：若上一轮已让位（fair_start 为空），重置计数与公平计时
-        if not lk.get("fair_start"):
-            lk["cmd_seq"] = 0
-            lk["fair_start"] = time.time()
-        lk["cmd_seq"] = int(lk.get("cmd_seq", 0)) + 1
-        # 【A15 修复】房间级独占：持锁跨整轮建模，不再"命令结束就放"。
-        lk["hold_mode"] = "room" if _room_hold_enabled() else "command"
-        lk["sw_by_room"] = (not running) or bool(lk.get("sw_by_room"))
-        # 【A15】只有亲眼见过 SW 在跑，才允许日后据"进程消失"判锁失效
-        lk["sw_seen_running"] = bool(lk.get("sw_seen_running")) or bool(running)
-        lk["queue"] = [x for x in q if x != name]
-        save_state(state)
-        return {"ok": True, "need_lock": True, "acquired": True, "room": name,
-                "sw_was_running": running, "hold_mode": lk["hold_mode"],
-                "cmd_seq": lk["cmd_seq"], "max_hold_seconds": _room_hold_limit()}
-    pos = (q.index(name) + 1) if name in q else None
-    save_state(state)
-    return {"ok": True, "need_lock": True, "acquired": False, "queued": True,
-            "position": pos, "owner": lk.get("owner"), "sw_running": running,
-            "wait_hint": "SW 正被 [%s] 使用（进程级检测）。请 Start-Sleep 90 秒后重试同一命令，队列位置已保留。" % lk.get("owner")}
-
-
-def cmd_sw_wait(name, timeout=300):
-    """阻塞等待 SW 使用权。上家SW进程未关闭时持续等待，超时强制接管。"""
-    deadline = time.time() + int(timeout)
-    state = load_state()
-    lk = _sw_lock(state)
-    if lk.get("owner") == name:
-        return {"ok": True, "acquired": True, "room": name}
-    q = lk.setdefault("queue", [])
-    if name not in q:
-        q.append(name)
-        save_state(state)
-    stale_since = None
-    last_reclaim_check = 0
-    while True:
-        state = load_state()
-        lk = _sw_lock(state)
-        if lk.get("owner") == name:
-            return {"ok": True, "acquired": True, "room": name}
-        q = lk.get("queue", [])
-        # ── 【Bug1/3/5修复】每秒检查一次失效锁，立即回收而不是干等 ──
-        now_ts = time.time()
-        if now_ts - last_reclaim_check >= 1.0:
-            last_reclaim_check = now_ts
-            reclaimed, old_owner = _reclaim_lock(state, "sw-wait", requester=name)
-            if reclaimed:
-                save_state(state)
-                lk = _sw_lock(state)
-                q = lk.get("queue", [])
-        if (not lk.get("owner")) and q and q[0] == name:
-            running = _sw_running()
-            # 【Bug5修复】prev_owner 若已死亡，不能继续挡队首
-            _prev_owner = lk.get("prev_owner")
-            if _prev_owner and _prev_owner != name and not _lock_owner_alive(state, _prev_owner):
-                lk["sw_by_room"] = False
-                lk["prev_owner"] = None
-                save_state(state)
-                running = _sw_running()
-            blocked_by_prev = running and lk.get("sw_by_room") and lk.get("prev_owner") not in (None, name)
-            if not blocked_by_prev:
-                lk["owner"] = name
-                lk["acquired_at"] = time.time()
-                lk["cmd_seq"] = int(lk.get("cmd_seq", 0)) + 1
-                lk["hold_mode"] = "room" if _room_hold_enabled() else "command"
-                lk["sw_by_room"] = (not running) or bool(lk.get("sw_by_room"))
-                lk["sw_seen_running"] = bool(lk.get("sw_seen_running")) or bool(running)
-                lk["queue"] = [x for x in q if x != name]
-                save_state(state)
-                return {"ok": True, "acquired": True, "room": name, "waited": True,
-                        "hold_mode": lk["hold_mode"],
-                        "max_hold_seconds": _room_hold_limit()}
-            if stale_since is None:
-                stale_since = time.time()
-            elif time.time() - stale_since > SW_STALE_KILL:
-                _sw_force_close()
-                lk["owner"] = name
-                lk["acquired_at"] = time.time()
-                lk["sw_by_room"] = True
-                lk["queue"] = [x for x in q if x != name]
-                save_state(state)
-                return {"ok": True, "acquired": True, "room": name, "forced": True,
-                        "note": "上一房间未关闭SW，已等待%d秒后强制关闭并接管" % SW_STALE_KILL}
-        held = (time.time() - lk.get("acquired_at")) if lk.get("acquired_at") else 0
-        if lk.get("owner") and held > SW_MAX_HOLD:
-            old = lk.get("owner")
-            lk["owner"] = name
-            lk["acquired_at"] = time.time()
-            lk["queue"] = [x for x in q if x != name]
-            save_state(state)
-            return {"ok": True, "acquired": True, "room": name, "took_over": True,
-                    "took_over_from": old, "note": "原占用者超过%d秒未释放，已强制接管" % SW_MAX_HOLD}
-        if time.time() >= deadline:
-            pos = (q.index(name) + 1) if name in q else None
-            return {"ok": False, "acquired": False, "room": name, "owner": lk.get("owner"),
-                    "position": pos, "sw_running": _sw_running(),
-                    "error": "SW 正被 [%s] 占用(已 %.0f 秒)，等待超时。请稍后重试。" % (lk.get("owner"), held)}
-        time.sleep(1.0)
-
-
-def cmd_lock_doctor(auto=False):
-    """【Bug1/2/3/5修复】锁体检：检测并清理失效锁、孤儿队列、失联状态。
-
-    auto=False 仅报告；auto=True 自动修复。
-    """
-    state = load_state()
-    lk = _sw_lock(state)
-    report = {"ok": True, "auto": auto, "findings": [], "fixed": []}
-
-    owner = lk.get("owner")
-    held = _lock_owner_lock_age(state)
-    running, pids = _sw_proc_list()
-
-    # 检查1: owner 是否存活
-    if owner:
-        alive = _lock_owner_alive(state, owner)
-        report["findings"].append({
-            "check": "owner_alive", "owner": owner, "alive": alive, "held_seconds": round(held, 1)
-        })
-        if not alive:
-            if auto:
-                lk["prev_owner"] = owner
-                lk["owner"] = None
-                lk["acquired_at"] = None
-                report["fixed"].append("释放死房间[%s]持有的锁（已持%.0f秒）" % (owner, held))
-            else:
-                report["findings"].append({"issue": "owner_dead", "owner": owner,
-                                           "hint": "运行 lock-doctor --auto 自动释放"})
-        elif held > SW_CMD_HOLD:
-            report["findings"].append({"issue": "owner_over_hold", "owner": owner,
-                                       "held": round(held, 1), "limit": SW_CMD_HOLD})
-            if auto:
-                lk["prev_owner"] = owner
-                lk["owner"] = None
-                lk["acquired_at"] = None
-                report["fixed"].append("释放超时锁（[%s] 持锁%.0f秒 > %d秒）" % (owner, held, SW_CMD_HOLD))
-
-    # 检查2: Bug5/Bug6 —— owner=null 但 sw_by_room / prev_owner 残留
-    if not lk.get("owner"):
-        _prev = lk.get("prev_owner")
-        _orphan = bool(lk.get("sw_by_room")) or bool(_prev)
-        if _orphan:
-            _prev_alive = _lock_owner_alive(state, _prev) if _prev else None
-            report["findings"].append({
-                "issue": "orphan_lock_residue",
-                "sw_by_room": bool(lk.get("sw_by_room")),
-                "prev_owner": _prev,
-                "prev_owner_alive": _prev_alive,
-                "sw_process_running": running,
-                "hint": ("owner 已为空，但残留标志仍在 → 队列会被 sw_busy 永久阻塞。"
-                         "用 lock-doctor --auto 或 sw-request 快路径自动清理。")
-            })
-            if auto:
-                # 【Bug6 修复】用统一的体检函数，覆盖三类漏网：
-                #   prev 为空 / prev 已死未登记 / SW 进程根本没跑
-                _res = _purge_orphan_lock(state, requester="lock-doctor")
-                if _res.get("purged"):
-                    report["fixed"].append(
-                        "清除孤儿锁残留: %s" % "; ".join(_res.get("actions", [])))
-                else:
-                    # 兜底：prev 名义上存活但确需清理时，仍按旧语义清一次
-                    lk["sw_by_room"] = False
-                    lk["prev_owner"] = None
-                    report["fixed"].append("强制清除孤儿标志 sw_by_room + prev_owner")
-
-    # 检查3: 队列中的死房间
-    dead_in_queue = []
-    for r in list(lk.get("queue", [])):
-        if not _lock_owner_alive(state, r):
-            dead_in_queue.append(r)
-    if dead_in_queue:
-        report["findings"].append({"issue": "dead_rooms_in_queue", "rooms": dead_in_queue})
-        if auto:
-            lk["queue"] = [x for x in lk.get("queue", []) if x not in dead_in_queue]
-            report["fixed"].append("清除队列中已死亡的房间: %s" % ", ".join(dead_in_queue))
-
-    # 检查4: Bug2 —— sw_state.json 与真实进程对比
-    # ── 【BUG-观察-8 修复】去掉 `if auto:` 门槛，统一走 _sync_sw_state_file ──
-    # sw_state.json 是纯派生缓存，与事实不符时无条件回写（不再要求 --auto），
-    # 避免"用户不主动跑 lock-doctor --auto 就永远不同步"。
-    stale = None
-    try:
-        with open(_SW_STATE_FILE, "r", encoding="utf-8") as f:
-            stale = json.load(f)
-    except Exception:
-        pass
-    _sync = _sync_sw_state_file(running, pids, writer="lock-doctor")
-    if stale is not None or _sync.get("corrected"):
-        report["findings"].append({
-            "check": "sw_state_sync", "file_running": _sync.get("file_running"),
-            "real_running": _sync.get("real_running"),
-            "real_count": _sync.get("real_count"), "real_pids": _sync.get("real_pids"),
-            "file_age_seconds": _sync.get("file_age_seconds"),
-            "mismatch": _sync.get("mismatch"),
-        })
-        if _sync.get("corrected"):
-            report["fixed"].append(
-                "回写 sw_state.json（真实进程数=%d）" % _sync.get("real_count", 0))
-
-    # 检查5: 队列非空但无人持锁 → 队首应能立即接管
-    q = lk.get("queue", [])
-    if q and not lk.get("owner"):
-        report["findings"].append({"issue": "queue_stalled", "queue": q,
-                                   "hint": "队首应可接管（若被 sw_by_room 挡住，已自动清除）"})
-
-    if auto:
-        save_state(state)
-    report["lock_after"] = dict(_sw_lock(load_state()))
-    report["sw_running_now"] = running
-    report["sw_pids_now"] = pids
-    return report
-
-
 def cmd_sw_release(name):
-    state = load_state()
-    lk = _sw_lock(state)
-    if lk.get("owner") == name:
-        lk["prev_owner"] = name
-        lk["owner"] = None
-        lk["acquired_at"] = None
-        # == 【v2 回归复测 P0 修复】释放时必须一并清 fair_start / cmd_seq ==
-        # 现场（复测报告 v2 第2.1节实测）：
-        #   A(结构件) 还在建模、尚未保存，sw-status 就显示
-        #   owner=轮系传动件, prev_owner=结构件 -- 锁提前易手，
-        #   而 mode_state.sw_lock.fair_start 仍是两小时前的陈旧时间戳。
-        # 根因链：
-        #   sw-release 只清 owner/acquired_at，【不清 fair_start】->
-        #   下一次某房间取锁时 _reclaim_lock 用 fair_start 算"已持锁多久"
-        #   -> 算成 8 万秒 -> 远大于 SW_FAIR_SECONDS(180) -> 判定"该让位"
-        #   -> 立即 reclaim 把锁抢走。
-        # 换句话说：fair_start 是"公平轮转的计时起点"，释放时不重置，
-        #   就等于给下一个持有者伪造了一个"我已经占了很久"的计时器。
-        # 因此这里必须与 owner 同时清零，三者是同一个语义单元。
-        lk["fair_start"] = None
-        lk["cmd_seq"] = 0
-        lk["released_at"] = time.time()
-        save_state(state)
-        nxt = lk.get("queue", [None])[0] if lk.get("queue") else None
-        return {"ok": True, "released": name, "next_in_queue": nxt,
-                "fair_reset": True,
-                "message": "SW 使用权已释放（含公平计时重置），队列下一个: %s" % nxt}
-    # ── 【BUG-观察-7 修复】未持有锁时也要清残留的 prev_owner 标志 ──────────
-    # 背景：_gate_sw_unlock()（在 finally 里）通常已经先把 owner 清成 null，
-    #   于是小屋 close-all 之后调用的 sw-release 永远走这个"未持有锁"分支，
-    #   而该分支原先直接 return —— 从不碰 prev_owner。
-    #   结果：owner=null 但 prev_owner 残留 + sw_by_room=true →
-    #   队列被 sw_busy 永久阻塞。这正是竞速小车任务的现场。
-    # 修复：只要 prev_owner 是调用者自己、且 SW 进程确实没在跑，
-    #   就把审计标志一起清掉（lock-doctor 之外的第二道自愈）。
-    _purged = []
-    try:
-        if lk.get("prev_owner") == name and not _sw_running():
-            lk["prev_owner"] = None
-            if lk.get("sw_by_room"):
-                lk["sw_by_room"] = False
-            lk["purged_at"] = time.time()
-            lk["purged_by"] = "sw-release"
-            lk["purged_actions"] = ["prev_owner=%r 随 sw-release 清除" % name]
-            save_state(state)
-            _purged.append("prev_owner=%r 已清（SW 进程未运行）" % name)
-    except Exception:
-        pass
-    return {"ok": True, "released": None, "owner": lk.get("owner"),
-            "orphan_purged": _purged,
-            "note": "该房间未持有 SW 锁" + ("（已顺带清理残留标志）" if _purged else "")}
+    """房间归还 SW 使用权（转调监控器）。
 
+    语义变化（教程 3.3）：release 必须带 drained —— 即宿主已核实
+    worker/子进程已退出、该次命令无在途 COM 操作。不能再像旧实现那样
+    "命令结束就 finally 里无条件释放"。
+    """
+    try:
+        client = _monitor()
+        client.require_ready()
+    except Exception as e:
+        return _monitor_error(e)
+    try:
+        out = client.release(str(name), drained=True)
+    except Exception as e:
+        return _monitor_error(e)
+    _refresh_sw_lock_mirror()
+    return {"ok": True, "room": name, "released": True, "monitor": out,
+            "drained": True}
 
 def cmd_close_all(quit=False):
     """关闭全部 SolidWorks 并释放 SW 锁（流程清场用）。
@@ -9010,64 +8536,57 @@ def _heartbeat_age_detail(room):
 
 
 def cmd_sw_status():
-    state = load_state()
-    # 【Bug1修复】查询状态时顺带回收失效锁（只读查询也要顺手清理）
-    reclaimed, old_owner = _reclaim_lock(state, "sw-status")
-    if reclaimed:
-        save_state(state)
-    # ── 【BUG-观察-7 修复】查询时顺手清孤儿锁（prev_owner 残留会永久阻塞队列）──
-    # 背景：prev_owner 的清理原先只写在 _purge_orphan_lock() 里，而调用它的只有
-    #   sw-request 与 lock-doctor --auto。小屋 close-all 关掉 SW 后走的是
-    #   sw-status / sw-release 两条路径，都不清 prev_owner →
-    #   owner=null 但 prev_owner 残留 + sw_by_room=true →
-    #   队列里所有房间一律 sw_busy:true，永久阻塞，只能靠人工跑 lock-doctor。
-    # 修复：sw-status 是最高频的旁路查询，在这里做"查询即自愈"。
-    orphan = _purge_orphan_lock(state, requester="sw-status")
-    if orphan.get("purged"):
-        save_state(state)
-    lk = state.get("sw_lock", {})
-    held = 0
-    if lk.get("acquired_at"):
-        held = time.time() - lk["acquired_at"]
-    owner = lk.get("owner")
-    _owner_alive = _lock_owner_alive(state, owner) if owner else None
-    _owner_hb_age = _heartbeat_age(owner) if owner else None
-    # 队列中每个房间的心跳年龄，便于排查
-    queue_detail = []
-    for r in lk.get("queue", []):
-        queue_detail.append({
-            "room": r,
-            "alive": _lock_owner_alive(state, r),
-            "heartbeat_age": _heartbeat_age(r),
-            "is_head": (lk.get("queue", [None])[0] == r),
-        })
+    """SW 使用权的当前事实 —— 全部来自监控器，本地不判定。
+
+    旧实现这里会顺手"回收失效锁 / 清孤儿标志 / 对账 sw_state.json"，
+    即查询本身带自愈副作用。那是三层猜测的另一面：查一次就可能改变谁能用 SW。
+    现在查询是纯只读，权威只有监控器，查询不再有副作用。
+    """
     running, pids = _sw_proc_list()
-    # ── 【BUG-观察-8 修复】查询时把 sw_state.json 与真实进程对齐（查询即自愈）──
-    # 背景：sw_state.json 的刷新原先只靠一个默认根本没启动的常驻监控
-    #   （sw_monitor.pid 不存在），纠正逻辑又被关在 lock-doctor --auto 里。
-    #   于是 sw_state.json 可能长期记录"SW 未运行"而 SLDWORKS.exe 实际在跑
-    #   （或反之）→ sw_bridge._sw_locked_by_other() 读到陈旧文件就误判"被占用"，
-    #   传导成假忙/假闲甚至队列阻塞（与 BUG-观察-7 合流）。
-    # 修复：sw-status 已经探测出真实进程数，顺手比对并回写派生缓存。
-    _sw_sync = _sync_sw_state_file(running, pids, writer="sw-status")
-    return {"ok": True, "owner": owner, "queue": lk.get("queue", []),
-            "queue_detail": queue_detail,
-            "held_seconds": round(held, 1),
-            "held_limit_seconds": SW_CMD_HOLD,
-            "over_hold": held > SW_CMD_HOLD,
-            "sw_running": running > 0, "sw_pids": pids,
-            "sw_by_room": lk.get("sw_by_room"), "prev_owner": lk.get("prev_owner"),
-            "owner_alive": _owner_alive,
-            "owner_heartbeat_age": _owner_hb_age,
-            "owner_heartbeat_timeout": SW_HEARTBEAT_TIMEOUT,
-            "reclaimed_on_query": reclaimed,
-            "reclaimed_from": old_owner,
-            # 【BUG-观察-7】本次查询清掉了哪些孤儿锁标志
-            "orphan_purged": orphan.get("actions", []),
-            # 【BUG-观察-8】sw_state.json 与真实进程的对账/纠正结果
-            "sw_state_sync": _sw_sync,
-            "hold_mode": lk.get("hold_mode"),
-            "parallel_mode": get_parallel_mode(), "lock_needed": _lock_needed(state)}
+    info = {"ok": True, "sw_running": running > 0, "sw_pids": pids,
+            "parallel_mode": get_parallel_mode()}
+    try:
+        client = _monitor()
+    except Exception as e:
+        info.update({"monitor": {"enabled": False, "error": repr(e)}})
+        return info
+    if not client.enabled():
+        info.update({"monitor": {"enabled": False},
+                     "lock_needed": True,
+                     "hint": ("未接入外部监控器：建模命令当前一律被拒绝。"
+                              "先启动 DSH-SW-Monitor 再 mode_gate.py sw-monitor attach --drained。")})
+        return info
+    try:
+        b = client.board()
+    except Exception as e:
+        info.update({"monitor": {"enabled": True, "reachable": False,
+                                 "error": str(e)},
+                     "hint": "监控器不可达：不要改用其它方式动 SW，先恢复宿主桥。"})
+        return info
+    sw = (b or {}).get("sw") or {}
+    owner = sw.get("owner") or None
+    queue = sw.get("queue") or []
+    mirror = {"owner": (owner or {}).get("room") if owner else None,
+              "queue": [q.get("room") for q in queue if isinstance(q, dict)],
+              "source": "sw_monitor", "revision": (b or {}).get("revision")}
+    try:
+        st = load_state()
+        st["sw_lock"] = mirror
+        save_state(st)
+    except Exception:
+        pass
+    info.update({
+        "monitor": {"enabled": True, "reachable": True,
+                    "pulse_alive": (b or {}).get("pulse_alive"),
+                    "quarantined": (b or {}).get("quarantined"),
+                    "revision": (b or {}).get("revision"),
+                    "task": (b or {}).get("task")},
+        "owner": mirror["owner"], "queue": mirror["queue"],
+        "owner_detail": owner, "queue_detail": queue,
+        "summary": (b or {}).get("summary"),
+        "lock_needed": True,
+    })
+    return info
 
 
 def cmd_status():
@@ -9128,13 +8647,14 @@ _CMD_FLAGS = {
     "archive-restore": ("--batch", "--part", "--force", "--dry-run"),
     "archive-list": (),
     "stale-artifacts": ("--epoch", "--quarantine", "--dry-run"),
-    "residue-check": ("--clean", "--force"),
-    "lock-doctor": ("--auto",),
+    "residue-check": ("--clean", "--force", "--purge-alive", "--quiet"),
+    # "lock-doctor" 已删除（锁权威归监控器）；保留在表里会让人以为还能调。
     "doctor": ("--sync", "--clean", "--migrate"),
     "close-all": ("--quit",),
     "room-board": ("--room", "--json", "--wait"),
     "whoami": ("--session-id",),
-    "sw-wait": ("--timeout",),
+    # "sw-wait" 已删除（等锁改由 DSH 后台 job 承担）。
+    "sw-monitor": ("--drained", "--reason", "--rooms-json"),
     "room-lease": ("--heartbeat", "--ttl"),
 }
 # 短别名 → 长名（校验前归一化，避免 "-f" 被当成未知参数）
@@ -9271,7 +8791,8 @@ def main():
                   "sw-request/sw-wait/sw-release": "SW 使用权排队/等待/释放",
                   "sw-status": "SW 锁与进程状态（只读）",
                   "stale-artifacts [目录] [--quarantine]": "扫描/隔离上一轮遗留件",
-                  "residue-check [--clean] [--force]": "子对话残留体检与清理",
+                  "residue-check [--clean] [--force] [--purge-alive]": "子对话残留体检与清理；"
+                  "【--force 不清活动房间】，确要清活动房间须显式 --purge-alive（BUG-3）",
                   "rooms-reset": "清空房间/子代理/锁/报告",
                   "close-all [--quit]": "【Bug⑧】默认只关文档、SW 进程保活；"
                                        "--quit 才真正退出 SW",
@@ -9301,8 +8822,10 @@ def main():
         _stop_hit = _stop_mod.guard(cmd, allow={
             "stop-all", "stop", "resume", "clear-stop",
             "status", "room-board", "board", "sw-status", "sw-proc",
-            "close-all", "gate-integrity", "doctor", "sw-monitor-start",
-            "sw-monitor-stop", "sw-monitor-status", "sw-monitor-bg",
+            "close-all", "gate-integrity", "doctor",
+            # SW 使用权的只读/运维入口（监控器）：停止令期间仍可查看与恢复，
+            # 否则用户下了停止令就再也看不到"到底谁在用 SW"。
+            "sw-monitor",
             "residue-check", "residue", "stale-artifacts", "wait-rooms",
         })
         if _stop_hit:
@@ -9399,55 +8922,37 @@ def main():
                 "④ 核对现状 → python mode_gate.py room-board --json",
             ],
         }
-    elif cmd == "sw-request":
-        result = cmd_sw_request(args[1] if len(args) > 1 else "unknown")
-    elif cmd == "sw-wait":
-        # ── 【A-18 / KI-20 修复】兼容 --timeout N 写法 ────────────────────
-        # 原实现直接 int(args[2])，而 sw_bridge.py 的 sw_busy hint 明确教用户
-        #   写 "sw-wait <房间> --timeout 90" → int('--timeout') 必抛
-        #   ValueError: invalid literal for int() with base 10: '--timeout'
-        #   （实测 2026-11-01 加工头室 / 主传动齿轮凸轮室各触发一次）。
-        # 现在两种写法都接受：
-        #   sw-wait <房间> <秒>          （历史位置参数）
-        #   sw-wait <房间> --timeout <秒>（hint 教的写法）
-        _sw_name = args[1] if len(args) > 1 else "unknown"
-        _sw_timeout = 300
-        _rest = list(args[2:])
-        if "--timeout" in _rest:
-            _i = _rest.index("--timeout")
-            if _i + 1 < len(_rest):
-                try:
-                    _sw_timeout = int(_rest[_i + 1])
-                except (TypeError, ValueError):
-                    result = {"ok": False, "gate": "INVALID_TIMEOUT",
-                              "error": ("--timeout 必须是整数秒，收到 %r。"
-                                        "用法: sw-wait <房间> [秒] 或 "
-                                        "sw-wait <房间> --timeout <秒>"
-                                        % (_rest[_i + 1],))}
-                    _rest = None
-            else:
-                result = {"ok": False, "gate": "INVALID_TIMEOUT",
-                          "error": "--timeout 缺少秒数。用法: sw-wait <房间> --timeout <秒>"}
-                _rest = None
-        elif _rest:
-            # 兼容 = 形式与纯位置参数
-            _cand = _rest[0]
-            if str(_cand).startswith("--timeout="):
-                _cand = str(_cand).split("=", 1)[1]
-            try:
-                _sw_timeout = int(_cand)
-            except (TypeError, ValueError):
-                result = {"ok": False, "gate": "INVALID_TIMEOUT",
-                          "error": ("超时必须是整数秒，收到 %r。"
-                                    "用法: sw-wait <房间> [秒] 或 "
-                                    "sw-wait <房间> --timeout <秒>" % (_cand,))}
-                _rest = None
-        if _rest is not None:
-            result = cmd_sw_wait(_sw_name, _sw_timeout)
+    elif cmd == "sw-monitor":
+        # 外部监控器的运维入口（教程 6「故障恢复顺序」）
+        #   sw-monitor status                      只读：接入状态 / 排队 / 心跳
+        #   sw-monitor attach --drained            首次接管（确认旧命令已排空）
+        #   sw-monitor recover --reason "<原因>"   失联/持锁重启后的受保护恢复
+        #   sw-monitor plan [--rooms-json '<json>'] 登记任务与房间编制
+        _sub = (args[1] if len(args) > 1 else "status").strip().lower()
+        if _sub == "status":
+            result = cmd_sw_monitor_status()
+        elif _sub == "attach":
+            result = cmd_sw_monitor_attach(drained=("--drained" in args))
+        elif _sub == "recover":
+            _why = ""
+            if "--reason" in args:
+                _i = args.index("--reason")
+                if _i + 1 < len(args):
+                    _why = args[_i + 1]
+            result = cmd_sw_monitor_recover(_why)
+        elif _sub == "plan":
+            _rooms = None
+            if "--rooms-json" in args:
+                _i = args.index("--rooms-json")
+                if _i + 1 < len(args):
+                    _rooms = args[_i + 1]
+            result = cmd_sw_monitor_plan(_rooms)
+        else:
+            result = {"ok": False, "error": "未知子命令: sw-monitor %s" % _sub,
+                      "usage": "sw-monitor [status|attach --drained|"
+                               "recover --reason <原因>|plan [--rooms-json <json>]]"}
     elif cmd == "sw-release":
         result = cmd_sw_release(args[1] if len(args) > 1 else "unknown")
-    elif cmd == "lock-doctor":
-        result = cmd_lock_doctor(auto=("--auto" in args))
     elif cmd == "room-heartbeat":
         result = cmd_room_heartbeat(args[1] if len(args) > 1 else "unknown")
     elif cmd in ("room-lease", "lease"):
@@ -9680,10 +9185,13 @@ def main():
                                   args[3] if len(args) > 3 else "user")
     elif cmd in ("residue-check", "residue"):
         # 【残留检测】上一轮对话的子对话/房间/门禁残留体检与清理
-        # 用法: mode_gate.py residue-check [--clean] [--force] [--quiet]
+        # 用法: mode_gate.py residue-check [--clean] [--force] [--purge-alive] [--quiet]
+        #   --force       → 只影响残留判定口径（清门禁推进态），【绝不动活动房间】
+        #   --purge-alive → 显式要求清活动房间（可与 --clean --force 组合），见 BUG-3
         result = cmd_residue_check(clean=("--clean" in args),
                                    force=("--force" in args),
-                                   quiet=("--quiet" in args))
+                                   quiet=("--quiet" in args),
+                                   purge_alive=("--purge-alive" in args))
     elif cmd == "rooms-reset":
         # 【Bug1 修复】支持 --purge-pmode 显式清除并行模式落盘值
         _purge = "--purge-pmode" in args[1:]
@@ -9725,16 +9233,6 @@ def main():
                   if _set else
                   {"ok": False, "error": "参数必须为 D/E/parallel/sequential",
                    "got": _val})
-    elif cmd == "sw-monitor-start":
-        result = cmd_sw_monitor_start()
-    elif cmd == "sw-monitor-stop":
-        result = cmd_sw_monitor_stop()
-    elif cmd == "sw-monitor-status":
-        result = cmd_sw_monitor_status()
-    elif cmd == "sw-monitor-bg":
-        result = cmd_sw_monitor_bg()
-    elif cmd == "_monitor_bg_impl":
-        _monitor_bg_impl()
     # ══ 【第4项】SW 健康看护（超阈值立即关 SW）══════════════════════════
     elif cmd == "sw-guard-start":
         result = cmd_sw_guard_start(args[1] if len(args) > 1 else None)

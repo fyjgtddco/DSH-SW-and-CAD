@@ -290,7 +290,8 @@ _full = {
     "subagent_plan": {"rooms": _rooms, "blob": "w" * 6000},
     "part_ownership": {"rooms": {r[0]: {"keywords": ["a"] * 50} for r in _rooms},
                        "blob": "z" * 5000},
-    "prime_report_contract": {"required_fields": ["f"] * 40, "blob": "v" * 3000},
+    # 原键名 prime_report_contract 已随总理子代理删除，换成 monitor_contract
+    "monitor_contract": {"parts": "p" * 4000, "review": "r" * 3000},
     "assembly_confirmed": False,
     "pending_rooms": _rooms, "wave_rooms": _rooms,
     "all_pending_rooms": [{"name": r[0], "type": r[1]} for r in _rooms],
@@ -299,7 +300,7 @@ _full = {
     "sync": {"done_rooms": [], "all_rooms": ["结构件"], "in_sync": True},
     "message": "M", "conflict_warning": None,
     "part_ownership_file": "/tmp/x.json",
-    "subagent_plan_required": False, "prime_room": "总理子代理",
+    "subagent_plan_required": False,
     "ready_to_build": True,
 }
 
@@ -324,7 +325,7 @@ for _k in ("ok", "step", "choice", "parallel_mode", "pending_rooms",
 
 _ext = _brief.get("brief_externalized") or {}
 for _k in ("subagent_config", "subagent_plan", "part_ownership",
-           "prime_report_contract"):
+           "monitor_contract"):
     check("★ brief 把 %r 外置成文件" % _k, _k in _ext, sorted(_ext))
     _p = _brief.get(_k + "_file")
     check("★ brief 给出 %r 的文件路径且文件存在" % _k,

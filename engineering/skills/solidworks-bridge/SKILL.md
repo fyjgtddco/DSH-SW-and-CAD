@@ -127,17 +127,16 @@ python "<包目录>\sw_bridge.py" run "script.py" --room "结构件"
 $env:DSH_ROOM = "结构件"; python "<包目录>\sw_bridge.py" run "script.py"
 ```
 
-- 并行模式下多个小屋同时跑：SW 调用自动检测进程并 FIFO 排队（谁先排队谁先用）
-- 若返回 sw_busy:true：用 `python mode_gate.py sw-wait <房间> --timeout 90` 原地阻塞等锁（或 `wait-rooms`），
-  再重试同一条命令（必须带 --room）；队列位置已保留，禁止放弃
-- 🚫禁止用 `Start-Sleep 90 + job_output wait:true` 长阻塞轮询：静默等待会让用户以为 DSH 卡死
-  （2026-10-31 事故，见 docs/DSH卡死事故分析_job_output阻塞.md）
-- 🔴**【A1-① 修复】等锁/等后台 job 不许多轮 sleep**：`sw-wait` / `wait-rooms` 是唯一的等待方式
-  （一次调用、进程内阻塞、零 token）；确实没有阻塞原语时，同一等待目标短 sleep 连续
-  **不得超过 3 次**，第 4 次必须换原语或按 `[WAITING]` 结束回合。
-  判据永远读 `room-board --json`，不要按"等了多久"猜状态。
-- 前一个小屋完全关闭 SW 进程后，队首小屋自动获得 SW 使用权
-- 串行模式 / 非模式2：锁自动跳过，零影响
+- SolidWorks 使用权由**外部监控器**（DSH-SW-Monitor）统一分配：每条命令执行前先取一次性许可，
+  拿不到就【不执行】。多个小屋同时跑时由监控器 FIFO 排队（先到先用）。
+- 若返回 `sw_busy:true`：响应里带 **job_id** —— 用 `job_output` 等这个后台任务**自然结束**，
+  然后重试同一条命令（必须带 --room）。**禁止 sleep 轮询、禁止反复重试同一条命令、禁止 job_kill 它**：
+  等待发生在 DSH 后台任务里，不占回合、不烧 token。
+- 若返回 `MONITOR_NOT_CONFIGURED`：监控器没接上，此时所有建模命令一律拒绝。旧进程内锁已删除，
+  没有回退路径；先启动服务再 `python "<根>\tools\mode_gate.py" sw-monitor attach --drained`。
+- 只读查看：`python "<根>\tools\mode_gate.py" sw-monitor status`（谁在用 / 谁在排队 / 心跳）。
+- 判据永远读 `room-board --json` 的 state 字段，不要按"等了多久"猜状态。
+- 串行模式 / 非模式2：同样受监控器约束（不再有"自动跳过"的旁路）。
 - 锁随小屋生命周期保持，由主对话的 room-end 统一释放并确保 SW 进程关闭
 - 小屋收工前必须 close-all 完全关闭 SW，否则 room-end 等 20 秒后会强制关闭
 
@@ -170,7 +169,7 @@ print("DONE")
 在创建任何下一个子代理（同级小屋或下一级子代理孩子）之前：
 1. 当前建模必须已完成并保存（`m.save(...)`）
 2. 调用 `python "<工程模式根目录>\tools\sw_bridge.py" close-all` 保存并关闭 SW
-3. 确认 SW 锁已释放（room-end 会自动释放；或 `python "<工程模式根目录>\tools\mode_gate.py" sw-release <房间名>`）
+3. 确认使用权已归还（`close-all` 会自动向监控器 release；`room-end` 也会兜底释放）
 **严禁开着 SW 去开下一个子代理！**
 
 ## 5. 已踩坑与解决方案

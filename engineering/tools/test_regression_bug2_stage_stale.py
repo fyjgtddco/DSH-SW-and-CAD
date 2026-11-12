@@ -553,8 +553,9 @@ def main():
         _sel2 = _run(_WG, "select", "B,D")
         check("★ 端到端：重做后 select 放行", _sel2.get("ok") is True,
               {"gate": _sel2.get("gate"), "error": _sel2.get("error")})
-        check("★ 端到端：放行时带出总理子代理",
-              "总理子代理" in str((_sel2.get("subagent_config") or {}).get("rooms")),
+        # 总理子代理已删除；这里改为断言"房间表确实带出来了"（同一条放行路径）。
+        check("★ 端到端：放行时带出房间表",
+              bool((_sel2.get("subagent_config") or {}).get("rooms")),
               (_sel2.get("subagent_config") or {}).get("rooms"))
     finally:
         shutil.rmtree(_sd, ignore_errors=True)

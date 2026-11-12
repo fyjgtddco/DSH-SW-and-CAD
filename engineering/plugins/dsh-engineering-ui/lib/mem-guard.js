@@ -114,26 +114,89 @@ export function reclaimIntervalMs() {
 }
 
 /**
+ * 读一行的 activity 字段（宿主 dsh-subagent/lib/types/list-children.js:149）。
+ *
+ * 宿主逐行下发 `activity: sessions.get(id) === undefined ? 'inactive' : 'running'`——
+ * **这是判断"是否真占名额"的唯一权威字段**。取不到时返回 undefined，
+ * 由调用方决定回退口径（见 countOccupiedChildren）。
+ */
+function rowActivity(row) {
+  const a = row && row.activity;
+  return (a === 'running' || a === 'inactive') ? a : undefined;
+}
+
+/**
  * 该 root 当前「占着并发名额」的子代理 id 列表。
  *
- * ── 为什么统计孙代（实测坑）────────────────────────────────────────
- * DSH 的子代理名额由每个 root 的 ActivationPool 统一计数，且只有子代理真正
- * 结束（自然收敛或被 dispose）才释放。主对话 fork 出来、已经跑完但仍驻留的
- * 小屋照样占名额 —— 只数「自己的直接子代理」会低估，于是闸门看起来放行了，
- * 实际 fork 仍会被宿主拒绝（ACTIVATION_LIMIT_REACHED）。
+ * ══ 【2026-11-12 修复·BUG-1 并发名额死锁】══════════════════════════════
+ * 现场（减速器任务 20261111_224045_56A62E32，9 件建模已完成、出图屋开不出来）：
+ *   `subagent_fork` 报「子代理并发已达上限（当前 N / 上限 M）」，即使子代理
+ *   全部 inactive、room-end 都做完了；上限从 3 调到 6 后，**6 个历史子代理
+ *   立刻把 6 个名额占满**，第 7 个永远开不出来 —— wave3 出图彻底卡死。
+ *
+ * 根因（本函数，不是宿主）：
+ *   旧实现只判 `kind === 'child' && id`，**完全不看 activity**，于是把目录里
+ *   所有历史子代理（含早已收工、DSH 重启后仍留在 catalog 里的）统统算成
+ *   "在跑"。注释里那句"只数直接子代理会低估"把问题带偏了：真正决定名额的是
+ *   宿主 ActivationPool 的 slot，而 slot 在 `finishDisposal`→`releaseSlot()`
+ *   （dsh-subagent/lib/index.js:2048）就已经还回去了 —— **inactive 子代理
+ *   不占任何 slot**。所以按 catalog 全量计数必然越用越满，重启也不会清空
+ *   （catalog 是持久化的），这正是报告里说的"永久累积"。
+ *
+ * 修复口径：
+ *   · 有 activity 字段（0.2.x 宿主）→ **只数 `running`**。running 的每个
+ *     后代都对应一个活着的 Activation，与宿主 slot 一一对应；
+ *     祖先若还有 running 的孙代，它自己的 Activation 也还开着，同样计入。
+ *   · 没有 activity 字段（旧宿主）→ 回退旧口径（直接子 + 有孙代的中间层），
+ *     宁可保守也不放行失控。
+ *
+ * ⚠️ 不要再改回"全量 catalog 计数"—— 那会让名额只增不减。
  *
  * @param rows subagents.listDescendants(rootId) 的返回值
  * @param rootId root 会话 id
  */
 export function countOccupiedChildren(rows, rootId) {
-  const out = [];
   const list = Array.isArray(rows) ? rows : [];
-  for (const row of list) {
-    if (!row || row.kind !== 'child' || !row.id) continue;
-    if (String(row.parentId || '') === String(rootId || '')) { out.push(String(row.id)); continue; }
-    if (row.hasChildren === true) out.push(String(row.id));
+  const kids = list.filter((r) => r && r.kind === 'child' && r.id);
+  const anyActivity = kids.some((r) => rowActivity(r) !== undefined);
+
+  const ids = [];
+  const running = [];
+  const inactive = [];
+
+  if (anyActivity) {
+    for (const row of kids) {
+      const id = String(row.id);
+      const act = rowActivity(row);
+      // 有 activity 但缺字段的行：按 running 处理（保守，避免闸门被绕过）
+      if (act === 'inactive') { inactive.push(id); continue; }
+      running.push(id);
+      ids.push(id);
+    }
+    return {
+      ids,
+      running,
+      inactive,
+      mode: 'activity',
+      hasChildren: kids.length > 0,
+      inactiveCount: inactive.length,
+    };
   }
-  return { ids: out, hasChildren: list.some((r) => r && r.kind === 'child') };
+
+  // ── 旧宿主回退：没有 activity 字段，只能按拓扑估 ──────────────────────
+  for (const row of kids) {
+    const id = String(row.id);
+    if (String(row.parentId || '') === String(rootId || '')) { ids.push(id); continue; }
+    if (row.hasChildren === true) ids.push(id);
+  }
+  return {
+    ids,
+    running: ids,
+    inactive: [],
+    mode: 'topology',
+    hasChildren: kids.length > 0,
+    inactiveCount: Math.max(0, kids.length - ids.length),
+  };
 }
 
 /**
@@ -146,14 +209,23 @@ export function countOccupiedChildren(rows, rootId) {
  */
 export function evaluateConcurrency(rows, rootId, _agentId, max) {
   const limit = Number.isFinite(max) && max > 0 ? max : DEFAULT_MAX_SUBAGENTS;
-  const active = countOccupiedChildren(rows, rootId).ids.length;
-  if (active < limit) return { allowed: true, active, max: limit };
+  const occ = countOccupiedChildren(rows, rootId);
+  const active = occ.ids.length;
+  if (active < limit) {
+    return {
+      allowed: true, active, max: limit,
+      inactive: occ.inactiveCount, counted_by: occ.mode,
+    };
+  }
   const message = '子代理并发已达上限（当前 ' + active + ' / 上限 ' + limit + '），本次 subagent_fork 已被拒绝。'
     + '\n【为什么】每个子代理都常驻占用内存与一个 DSH 子代理名额；同批开太多会把内存打爆，整个工程模式一起卡死。'
     + '上限可用 DSH_ENG_MAX_SUBAGENTS 调整（默认 3）。'
     + '\n【现在怎么做】先等一个已在跑的小屋结束（或对它 room-fail / interrupt_agent 收尾），'
     + '再用 mode_gate.py room-board 确认名额释放，然后重新 fork。'
-    + '\n【不要】把多的零件塞给同一个房间硬编 —— 那会让该房间的报告与门禁口径对不上。';
+    + '\n【不要】把多的零件塞给同一个房间硬编 —— 那会让该房间的报告与门禁口径对不上。'
+    + (occ.inactiveCount > 0
+      ? ('\n【注意】另有 ' + occ.inactiveCount + ' 个已收工子代理只留在目录里，**不占名额**，不用为它们重启 DSH。')
+      : '');
   return { allowed: false, active, max: limit, reason: 'SUBAGENT_LIMIT_REACHED', message };
 }
 

@@ -1022,12 +1022,15 @@ window.__ModuleLoader__.load({
       '.eng-pb-badge.ok{background:rgba(22,163,74,.15);color:#15803d}' +
       '.eng-pb-badge.warn{background:rgba(234,179,8,.18);color:#a16207}' +
       '.eng-pb-badge.bad{background:rgba(220,38,38,.15);color:#b91c1c}' +
+      // 「等待 SW」用中性偏冷色，与"正在建"的蓝区分开：排队不是干活。
+      '.eng-pb-badge.wait{background:rgba(14,116,144,.14);color:#0e7490}' +
       '.eng-pb-ft{align-items:center;border-top:1px solid var(--dsw-alias-border-l1,#f0f2f5);display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;padding-top:4px}' +
       '.eng-pb-stat{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#8b95a3)}' +
       '.eng-pb-stat.ok{color:#15803d}' +
       '.eng-pb-stat.run{color:#2563eb}' +
       '.eng-pb-stat.warn{color:#a16207}' +
       '.eng-pb-stat.bad{color:#b91c1c}' +
+      '.eng-pb-stat.wait{color:#0e7490}' +
       '.eng-pb-alert{color:#b91c1c;font-size:10.5px;font-weight:600}' +
       // ── 【压缩历史】右列详情区的独立一页（用户截图里的「绿框」）─────────
       // 【布局 v12】用户要求：
@@ -3742,9 +3745,21 @@ window.__ModuleLoader__.load({
      *   ⚠️ 状态判定【一律在 Python 侧】——UI 只负责画。历史上 UI 自己猜状态
      *      与门禁打架，带来过"看板说活着、门禁说已死"的扯皮。
      */
+    // 状态 → 徽标样式。教程 4.3 要求补齐 queued/validating/blocked/
+    // disconnected/stale 这几档，因为监控器的零件状态机比旧的
+    // 「未开始/正在建/完成」多出"等待 SW / 待验收 / 验收受阻 / 宿主失联 /
+    // 文件已变更"。少了映射就会退化成灰色 idle，把"验收受阻"画成"未开始"。
     var ENG_PART_STATE_CLS = {
-      done: 'ok', building: 'run', rebuilding: 'warn',
-      failed: 'bad', not_started: 'idle',
+      done: 'ok',
+      building: 'run',
+      validating: 'run',
+      queued: 'wait',
+      rebuilding: 'warn',
+      blocked: 'warn',
+      stale: 'warn',
+      failed: 'bad',
+      disconnected: 'bad',
+      not_started: 'idle',
     };
     function EngPartsBoard(props) {
       // 紧凑模式：渲染在左列窄区（用户把零件表从右侧详情区搬到了左列下方），
@@ -3788,9 +3803,14 @@ window.__ModuleLoader__.load({
       var parts = Array.isArray(data.parts) ? data.parts : [];
       var sum = data.summary || {};
       var counts = sum.counts || {};
-      var label = function (k) {
-        return ({ done: '完成', building: '正在建', rebuilding: '需要重建',
-                  failed: '失败', not_started: '未开始' })[k] || k;
+      // 徽标文案：优先用服务端给的 label（监控器是唯一的判定方，
+      //   它的中文标签就是权威），本地表只在缺 label 时兜底。
+      var label = function (k, serverLabel) {
+        if (serverLabel) return String(serverLabel);
+        return ({ done: '完成', building: '正在建', validating: '待验收',
+                  queued: '等待 SW', rebuilding: '需要重建', blocked: '验收受阻',
+                  stale: '文件已变更', failed: '失败', disconnected: '宿主失联',
+                  not_started: '未开始' })[k] || k;
       };
       var head = h('div', { className: 'eng-pb-cap' },
         h('span', { className: 'eng-pb-cap-t' }, '零件'),
@@ -3811,24 +3831,48 @@ window.__ModuleLoader__.load({
       }
       var rows = parts.map(function (p, i) {
         var cls = ENG_PART_STATE_CLS[p.state] || 'idle';
+        // 验收明细（材料/物理/领域/仿真/登记）逐条进 tooltip：
+        //   「差在哪一条证据」是使用者最常问的问题，不该藏在日志里。
+        var checks = p.checks && typeof p.checks === 'object' ? p.checks : null;
+        var checkLines = '';
+        if (checks) {
+          var ks = Object.keys(checks);
+          if (ks.length) {
+            checkLines = '\n验收：' + ks.map(function (k) {
+              var v = checks[k] || {};
+              return k + '=' + String(v.status || '?');
+            }).join(' / ');
+          }
+        }
         return h('div', {
           className: 'eng-pb-row', key: 'pb' + i,
           title: (p.room ? ('房间：' + p.room + '\n') : '') + (p.detail || '')
+            + (p.generation ? ('\n第 ' + p.generation + ' 代') : '')
             + (p.file ? ('\n文件：' + p.file) : '')
+            + checkLines
             + (p.next_action ? ('\n下一步：' + p.next_action) : ''),
         },
           h('span', { className: 'eng-pb-name' }, String(p.name || '')),
-          h('span', { className: 'eng-pb-badge ' + cls }, label(p.state)),
+          h('span', { className: 'eng-pb-badge ' + cls }, label(p.state, p.label)),
           compact ? null : h('span', { className: 'eng-pb-room' }, String(p.room || '')));
       });
       var foot = h('div', { className: 'eng-pb-ft' },
-        ['done', 'building', 'rebuilding', 'failed', 'not_started'].map(function (k) {
+        ['done', 'building', 'validating', 'queued', 'rebuilding', 'blocked',
+         'stale', 'failed', 'disconnected', 'not_started'].map(function (k) {
           if (!counts[k]) return null;
           return h('span', { className: 'eng-pb-stat ' + (ENG_PART_STATE_CLS[k] || 'idle'), key: 's' + k },
             label(k) + ' ' + counts[k]);
         }),
+        // 来源与新鲜度：监控器不可达时必须让使用者看到"这是不可用"而不是
+        // "零件列表是空的"（教程 4.3「后台断开时展示不可用或缓存时间」）。
+        data.source === 'sw_monitor'
+          ? h('span', { className: 'eng-pb-stat idle', key: 'src' }, '监控器')
+          : null,
         data.pulse_alive === false
-          ? h('span', { className: 'eng-pb-alert' }, 'DSH 已断') : null);
+          ? h('span', { className: 'eng-pb-alert' },
+              data.quarantined ? '监控器隔离中' : '宿主失联') : null,
+        data.degraded
+          ? h('span', { className: 'eng-pb-alert' }, '监控器不可用') : null);
       return h('div', { className: boardCls }, head,
         h('div', { className: 'eng-pb-list' }, rows), foot);
     }

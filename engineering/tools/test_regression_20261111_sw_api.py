@@ -402,16 +402,33 @@ check("★ _position_from_transform_mm 仍用索引 9/10/11",
 # ══════════════════════════════════════════════════════════════════════
 sec("E. AddMate5/AddMate3：15/14 参 + ByRef ErrorStatus；配合链路不重建")
 # ══════════════════════════════════════════════════════════════════════
+# ⚠️ 【BUG-9 更新】本轮把 ByRef 封送收敛成模块级 _byref_i4()（= 同一个
+#    VARIANT(VT_BYREF|VT_I4)，但只在【晚期绑定】路径使用）；早期绑定必须
+#    发 14 参（ByRef 自动解包成第二个返回值，再塞 VARIANT 会参数个数错）。
+#    成功判据也从 "_esv in (0,1)" 收紧成 mate_ok_by_error_status()
+#    —— 官方 swAddMateError_e 的 NoError 是 1，0 是 ErrorUnknown，
+#    "0 也算成功"是错的。因此本节断言同步到新实现（判据更严，不是放宽）。
 _ame = _body("_add_mate_early")
 check("★ 不再有 14 参的 AddMate5 尝试（'14' 形式已删）",
       '"14"' not in _ame, _ame[:200])
-check("★ AddMate5 只发 15 参（_am5 + [ErrorStatus]）",
+check("★ 晚期 AddMate5 发 15 参（_am5 + [ErrorStatus]）",
       "_fn(*(_am5 + [_es]))" in _ame)
-check("★ AddMate5 的 ErrorStatus 是 VT_BYREF|VT_I4",
-      "VT_BYREF | pythoncom.VT_I4" in _ame)
-check("★ 检查 ErrorStatus 值（0/1 才认成功）", "_esv in (0, 1)" in _ame)
-check("★ AddMate3 发 14 参 + ErrorStatus（原来只发 12 参）",
-      "_es3" in _ame and "_al, False, False, _es3" in _ame)
+check("★ 早期 AddMate5 发 14 参（不塞 VARIANT，ByRef 自动解包）",
+      "_fn(*_am5)" in _ame)
+check("★ AddMate5 的 ErrorStatus 由 _byref_i4 构造（VT_BYREF|VT_I4）",
+      "_byref_i4(0)" in _ame
+      and "VT_BYREF | pythoncom.VT_I4" in _body("_byref_i4"),
+      _body("_byref_i4")[:200])
+check("★ 成功判据是 mate_ok_by_error_status（ErrorStatus 必须 == NoError(1)）",
+      "mate_ok_by_error_status" in _ame)
+check("★ 不再把 ErrorStatus 0(ErrorUnknown) 当成功",
+      "_esv in (0, 1)" not in _ame,
+      [ln.strip() for ln in _ame.splitlines() if "_esv in (" in ln])
+check("★ 晚期 AddMate3 发 14 参 + ErrorStatus（原来只发 12 参）",
+      "_a3 + [_es3]" in _ame and "_byref_i4(0)" in _ame,
+      [ln.strip() for ln in _ame.splitlines() if "_a3" in ln])
+check("★ 失败时把 ErrorStatus 写进返回体字段",
+      "_last_mate_error_status" in _ame and "mate_error_status" in _body("create_mate"))
 check("★ 失败时把 ErrorStatus 写进返回体字段",
       "_last_mate_error_status" in _ame and "mate_error_status" in _body("create_mate"))
 _cm = _body("create_mate")

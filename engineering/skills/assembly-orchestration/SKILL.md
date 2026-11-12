@@ -90,13 +90,13 @@ provider: filesystem
   |        v
   +---> wave1（同一条回复一次性 fork 全部）：
   |       [建模房间1] [建模房间2] ... [建模房间N]   ← 数量来自编制，不是固定 3/5 个
-  |       [总理子代理]（与建模同批启动，长生命周期监工）
+  |       （零件验收由监控器逐件完成，没有额外的"监工"子代理）
   |         每个 fork 后立刻 mode_gate.py subagent-assign <房间> <id>
   |
   +---> wave2：[总装与验证]   （wave1 全部 room-end 后）
   +---> wave3：[工程图输出]   （wave2 room-end 后）
   |
-  +---> 大屋汇总交付（收尾前 room-end 总理子代理）
+  +---> 大屋汇总交付（监控器 verify-task 通过后归档）
 
 ### 错误路由（红线）
 小屋N FAIL
@@ -176,7 +176,7 @@ python "<工程模式根目录>\tools\mode_gate.py" room-board --json
 ```
 - 只看每个房间的 `state`：
   · `starting` / `running` / `idle` → 正常（`running` 时禁止说"没反应"）；
-  · `waiting_sw` → **在排 SW 锁，属正常等待，禁止判死、禁止 reset**；
+  · `waiting_sw` → **在等监控器发使用权，属正常等待，禁止判死、禁止 reset**；
   · `unbound` → 平台 alive 但没 `subagent-assign` → **补 assign**；
   · `dead` → 才允许 `recover` / `restart`，且先看 `safe_to_restart`；
   · `done` → 收结果、更新 todo。
@@ -260,7 +260,7 @@ python "<工程模式根目录>\tools\mode_gate.py" room-board --json
 
 ### 2.5.1 唯一事实源：任务级 `up` 契约
 
-整个任务只允许**一个**"上"。它在开工时由**总计子代理**（或总理子代理）一次性写定，
+整个任务只允许**一个**"上"。它在开工时由**总计子代理**一次性写定，
 落在任务目录 `reports/up_contract.json`，之后**建模 / 总装 / 出图三波共用同一份**：
 
 ```json
@@ -295,7 +295,7 @@ python "<工程模式根目录>\tools\mode_gate.py" room-board --json
 本房间零件：<零件名...>
 要求：① save 后必须写 <零件>.SLDPRT.pr.json，up_axis="Z"、up_sign=+1、main_axis=<主轴>；
       ② Top Plane 草图 y = −世界Z（ZSIGN 修正），cut 方向按材料所在侧给 flip；
-      ③ 不许改 origin 约定；如需偏离，停下上报，由总理子代理统一改契约。
+③ 不许改 origin 约定；如需偏离，停下上报主对话，由它统一改契约。
 ```
 
 - **建模波（wave1）**：每个小屋按 `rooms[房间名]` 写 `.pr.json`；
@@ -304,7 +304,7 @@ python "<工程模式根目录>\tools\mode_gate.py" room-board --json
 - **出图波（wave3）**：主视图方向按 `world_up` 定，图纸上"上"必须与整机"上"一致。
 
 > 🔴 出现"某个房间想用自己的 +Y 当上"时，唯一合法动作是：`escalate_to_parent=true`
-> 上报 → 由总理子代理统一改 `up_contract.json` → 再原样下发。**不许房间内私改**。
+> 上报 → 由主对话统一改 `up_contract.json` → 再原样下发。**不许房间内私改**。
 
 ### 2.5.3 每件零件必须携带的声明
 
@@ -374,18 +374,18 @@ assert_orientation(m, [(n, load_pr(n)) for n in planned], world_up=contract["wor
 > 🔴 **【2026-10-28】旧版这里写死了「第1波 = 结构件+传动机构+壳体机架 三个房间」的固定表**，
 > 该表**已废弃（deprecated）**，连同它那个"爆发期"式叫法一起停用。
 > 房间表的唯一来源 = `mode2_flow.py set-subagent-plan`
-> 登记的编制（总计子代理产出）；`select` 的 `wave1` 只是把它读出来，并固定追加「总理子代理」。
+> 登记的编制（总计子代理产出）；`select` 的 `wave1` 只是把它读出来，**不追加任何固定房间**。
 > **代码默认表不得作为兜底。**
 
 ```
-wave1 = select.wave1 = 编制里的全部建模房间 + 总理子代理   ← 同时启动（同一条回复）
+wave1 = select.wave1 = 编制里的全部建模房间   ← 同时启动（同一条回复）
 wave2 = 总装与验证                                       ← wave1 全部 room-end 后
 wave3 = 工程图输出                                       ← wave2 room-end 后
 ```
 
 **wave1 步骤（不可打乱）**：
 1. 对每个房间 `mode_gate.py room-start <房间名>`（登记，**在创建 subagent 之前**）
-2. **同一条回复里一次性 `subagent_fork` 全部房间**（含总理子代理）——⚠️ 严禁只开一个
+2. **同一条回复里一次性 `subagent_fork` 全部房间** ——⚠️ 严禁只开一个
 3. **每个 fork 后立刻** `mode_gate.py subagent-assign <房间名> <fork 返回的 id>`
    （漏了 → `room-board` 永远 `unbound`，上报与判定全部失真）
 4. 建模小屋 prompt：只做本房间零件 + 本房间 `part_ownership` keywords
@@ -393,28 +393,25 @@ wave3 = 工程图输出                                       ← wave2 room-end
 报错回退：定位出错源房间（房间名以**编制为准**）→ `mode_gate.py room-fail <源房间>`
 → 重新 `select` → 重做该房间 → 再进 wave2。
 
-**总理子代理（与 wave1 同批启动，长生命周期监工）**：
-- 开工 `mode2_flow.py prime-board` / `prime-room`；
-- 循环读 `mode_gate.py room-board --json`，**只看 `state`**：
-  `running`/`starting`/`idle` 正常；**`waiting_sw` = 正常等待（不许判死）**；
-  `unbound` → 提示父代理补 `subagent-assign`；`dead` 才报；`done` 收报告；
-- 收件 `prime-report` → `check-consistency` → `prime-verify`；
-- **不计入 wave 完成判定**（长生命周期），但**收尾前必须 `room-end 总理子代理`**。
+**零件验收（无「总理子代理」）**：
+- 零件建成 = 监控器收到 `part-saved`（`sw_bridge` 保存后自动发，带文件指纹与 generation）；
+- 逐件验收 = 监控器 `review-part`；房间收尾 = `review-room` → `close-room`；
+- 全任务总核实 = `verify-task`（台账审计 + 邻接尺寸 + 未决冲突 + 凭据哈希）；
+- 只读进度：`python "<根>\tools\mode2_flow.py" parts-board`（数据源就是监控器 board）。
 
-SW 使用窗口互斥（进程级强制，检测 SLDWORKS.EXE 进程）+ 锁排队：
-  - 每个小屋的 sw_bridge.py 调用自动检测 SW 进程并 FIFO 排队（谁先排队谁先用）
-  - 某个小屋在用 SW 时，其他小屋的调用返回 sw_busy:true → 用【阻塞式等待】把锁等回来：
-    `python mode_gate.py sw-wait <房间> --timeout 90`（或 `wait-rooms <房间> --timeout 90`），
-    Python 进程内原地轮询、零 token、队列位置保留，**禁止放弃**
-    （`room-board` 里这时显示 `waiting_sw`，**属正常等待，不是死亡**）
-  - 🚫不要用 `Start-Sleep 90 + job_output wait:true` 这类长阻塞轮询：静默数十秒会让用户
+SW 使用权 = 外部监控器统一发放（进程级 FIFO 票据，不再是"检测 SLDWORKS.EXE 在不在"）：
+  - 每条 `sw_bridge.py` 命令执行前自动向监控器取一次性许可，拿不到就【不执行】；
+  - 忙时返回 `sw_busy:true` + **job_id** → 用 `job_output` 等它**自然结束**，再重试同一条命令；
+    **禁止 sleep 轮询、禁止反复重试、禁止 job_kill**（等待在后台任务里，不占回合）；
+  - `room-board` 这时显示 `waiting_sw`，**属正常等待，不是死亡**；
+  - 监控器没接上（`MONITOR_NOT_CONFIGURED`）时所有建模命令一律拒绝，旧锁已删除无回退路径。
     以为 DSH 卡死（2026-10-31 事故根因，见 docs/DSH卡死事故分析_job_output阻塞.md）
   - 🔴**【A1-① 修复 · 等房间一律用阻塞原语，禁止 time.sleep 轮询】**
     现场：旧提示词写着"宁可多轮短等"，被照抄成单轮 477 次 `sleep(30)`、轮询 4 小时 02 分
     （占墙钟 66%），期间零产物；用户以为进程卡死。
-    · **只准**用阻塞原语：`mode_gate.py wait-rooms "<房间...>" --timeout 900`（等房间离开 active）、
+    · **只准**用阻塞原语：`mode_gate.py wait-rooms "<房间...>" --timeout 20`（等房间验收收尾，一次拿结论）、
       `mode_gate.py room-board --wait 900`（等看板有变化再返回）、
-      `mode_gate.py sw-wait <房间> --timeout 90`（等 SW 锁）、`wait-rooms --all-active`
+      `wait-rooms --all-active`
       —— 一次调用拿到结论，**外面禁止再套 sleep 循环**；
     · 判据用 `room-board --json` 的 `state`/`safe_to_restart`/`next_action`，
       不要"看时间过去了多久"来猜；
@@ -438,7 +435,7 @@ SW 使用窗口互斥（进程级强制，检测 SLDWORKS.EXE 进程）+ 锁排�
       每房间给 `state` / `detail` / `subagent_id` / `platform` / `report_stage` /
       `sw_queue_pos` / `safe_to_restart` / `next_action`；
     · 只看 tuple（`state` / `safe_to_restart` / `next_action`）：
-      `running`/`starting`/`idle` 正常；**`waiting_sw` = 在等 SW 锁，属正常，禁止判死**；
+      `running`/`starting`/`idle` 正常；**`waiting_sw` = 在等监控器发使用权，属正常，禁止判死**；
       `unbound` = 平台 alive 但没 assign → **补 assign，禁止 reset**；`dead` 才可 recover/restart；
     · 主对话**不再**必须手写 `platform-sync`（保留为人工覆盖手段，不是心跳义务）；
     · 小屋 **不需要** room-heartbeat（命令保留兼容，已降级为辅助证据）；
@@ -450,7 +447,7 @@ SW 使用窗口互斥（进程级强制，检测 SLDWORKS.EXE 进程）+ 锁排�
 
 **大屋（主对话）独占：mode_gate / workflow_gate / subagent 相关命令**
 小屋（子代理）在任何情况下都**绝对禁止**调用以下命令——调用了就是夺舍，主流程会被劫持：
-- ❌ 禁止调用 mode_gate.py **编排命令**（room-start / room-end / room-fail / sw-request / sw-wait / sw-release / declare / check）
+- ❌ 禁止调用 mode_gate.py **编排命令**（room-start / room-end / room-fail / sw-monitor / declare / check）
 - ❌ 禁止调用 workflow_gate.py（init / provide_context / select / status）
 - ❌ 禁止调用 list_agents / interrupt_agent / send_message / subagent_fork 等编排命令
 - ❌ 禁止修改 mode_state.json / workflow_state.json
@@ -463,7 +460,7 @@ SW 使用窗口互斥（进程级强制，检测 SLDWORKS.EXE 进程）+ 锁排�
 - room-heartbeat <房间名>              —— 【Bug-23】兼容保留，**已非必需**
 
 这些命令**只写入 reports/ 与 heartbeats/ 文件**，不修改 mode_state.json 的
-房间状态、SW 锁、队列，因此不属于编排命令，小屋可安全调用。
+房间状态、SW 使用权队列，因此不属于编排命令，小屋可安全调用。
 （【B2 修复】旧版铁律笼统写"禁止调用 mode_gate.py"，与 C 模式要求的
  "小屋进度旁路上报" 直接矛盾，导致 C 模式无法合规执行。现按命令语义区分。）
 
@@ -473,7 +470,7 @@ SW 使用窗口互斥（进程级强制，检测 SLDWORKS.EXE 进程）+ 锁排�
 > `refresh-stage` / `set-subagent-plan` / `stage-status` / `questions`，
 > 以及 `tools/ask_user.py`（子代理**唯一**的提问桥；子代理直调 `ask_user_question` 必抛 `DELEGATED_CALLER`）。
 > 它**仍然禁止**调 `mode_gate.py` 的编排命令（room-start / room-end / subagent-assign / recover 等）——
-> 那是主对话与总理子代理的职责。**别的命令都不许由小屋碰。**
+> 那是主对话的职责。**别的命令都不许由小屋碰。**
 
 小屋的唯一职责：在本小屋负责的房间内完成建模 / 验证 / 输出文件，并上报进度。
 所有房间登记、锁管理、波次推进、子代理编排，**全部由大屋统一调度**，小屋一概不参与。
@@ -565,7 +562,7 @@ python "<工程模式根目录>\tools\mode_gate.py" room-board --json
 
 - **只看 tuple（`state` / `safe_to_restart` / `next_action`）**，不要拿 mtime、心跳 age、
   `list_agents.startedAt` 自行推算死活；
-- `waiting_sw` = 在等 SW 锁，**属正常等待**；
+- `waiting_sw` = 在等监控器发使用权，**属正常等待**；
 - `unbound` = 平台 alive 但没 assign → **补 assign**，**禁止 reset**；
 - `dead` 才允许 `recover` / `restart`。
 
@@ -717,7 +714,7 @@ python "<工程模式根目录>\tools\mode_gate.py" residue-check --clean  # 体
 
 | 波次 | 名称 | 房间 | 启动方式 | 前置条件 |
 |------|------|------|---------|---------|
-| wave1 | 建模爆发期 | **select 返回的编制建模房间（每批 ≤3）+ 总理子代理**（数量由编制决定） | **分批同时启动**（每批一条回复连续 fork 该批全部，≤3 个） | 无 |
+| wave1 | 建模爆发期 | **select 返回的编制建模房间**（每批 ≤3，数量由编制决定） | **分批同时启动**（每批一条回复连续 fork 该批全部，≤3 个） | 无 |
 | wave2 | 收敛汇合期 | 总装与验证 | 单独创建 | wave1 全部 room-end |
 | wave3 | 出图期 | 工程图输出 | 单独创建 | 总装 room-end |
 
@@ -752,15 +749,20 @@ python "<工程模式根目录>\tools\mode_gate.py" residue-check --clean  # 体
 
 ## 六点六、零件进度表（2026-11-07）
 
-总理子代理通过 `mode2_flow.py parts-board` 维护每个零件的完成度：
+零件完成度由外部监控器维护（`mode2_flow.py parts-board` 直接转发 board）：
 
 | 状态 | 含义 |
 |------|------|
 | `not_started` 未开始 | 编制里有、房间还没开工 |
-| `building` 正在建 | 房间在建模 / 等 SW 锁 / 已有产物待验收 |
-| `done` 完成 | 已有 `prime-report`（总理子代理已验收） |
+| `queued` 等待 SW | 房间已开工，正在监控器队列里等使用权 |
+| `building` 正在建 | 房间正在实际建模（有在途 SW 命令） |
+| `validating` 待验收 | 零件已保存，监控器正在核材料/物理/领域凭据 |
+| `done` 完成 | 逐件验收通过（凭据哈希、run_id、同房间全部对得上） |
 | `rebuilding` 需要重建 | 房间被 `room-fail`/`restart` 过，正在或等着重做 |
-| `failed` 失败 | 子代理失联，**或 DSH 进程已断（pulse 停）而零件未完成** |
+| `blocked` 验收受阻 | 凭据缺失/不合规，监控器给出具体缺口 |
+| `stale` 已变更 | 验收后模型或凭据被改动，旧结论作废 |
+| `failed` 失败 | 建模失败，或命令结束时仍未上报保存 |
+| `disconnected` 宿主失联 | 宿主心跳断了，此时不要动 SW |
 
 > 右侧面板「零件」区读的就是这一份（`GET /parts-board`），
 > **不要在对话里另报一套状态**。
@@ -776,7 +778,7 @@ python "<工程模式根目录>\tools\mode_gate.py" residue-check --clean  # 体
 
 依赖原理：
 - wave1 各建模房间彼此独立设计，互不等待（SW 调用由互斥锁自动排队，排队中即 `waiting_sw`）
-- **总理子代理与 wave1 同批启动**，长生命周期持续盯 `room-board`，但**不计入 wave 完成判定**
+- 零件验收由监控器逐件进行，**不额外占用一个子代理名额**
 - wave2 总装需要 wave1 的全部零件文件 → 必须等 wave1 全部 room-end
 - wave3 出图需要总装体 → 必须等 wave2 完成
 
@@ -786,11 +788,13 @@ python "<工程模式根目录>\tools\mode_gate.py" residue-check --clean  # 体
 3. 重新调用 select → 返回 wave1（只含失败房间）→ 重做
 4. 重做完成后再次 select → 重新进入 wave2
 
-SW 使用窗口（多屋并行时）：
-- 多个建模房间并行时，某个房间正在用 SW，其他房间到达 SW 窗口时自动停下等待
-- 期间 `room-board` 显示 `waiting_sw` —— **这是正常等待，不是死亡，禁止 reset**
-- 用完释放后，按 FIFO 顺序：谁先暂停排队谁先用
-- 每次占用有 4 小时防死锁上限（`SW_MAX_HOLD`，超时自动接管）
+SW 使用权（多屋并行时）：
+- SolidWorks 使用权由外部监控器（DSH-SW-Monitor）统一发放，每条命令前先取许可；
+- 多个建模房间并行时，某个房间正在用 SW，其他房间的命令会返回 `sw_busy` + **job_id**，
+  用 `job_output` 等它自然结束再重试同一条命令（**禁止 sleep 轮询 / 反复重试 / job_kill**）；
+- 期间 `room-board` 显示 `waiting_sw` —— **这是正常等待，不是死亡，禁止 reset**；
+- 用完释放后按 FIFO 顺序流转；**没有"持锁超时自动接管"**：已领取的使用权不会自动过期，
+  只有宿主确认排空后的 `release` 才归还。
 
 ## 八、典型执行示例
 
@@ -801,12 +805,12 @@ SW 使用窗口（多屋并行时）：
 2. [进度: 15%] **spawn 总计子代理**（analyst-bind → 十阶段 → 按需提问 → set-subagent-plan）
    主对话只等它结束（`wait_agent` / `list_agents`）
 3. [进度: 20%] provide_context #3（力学估算）→ 问 A/B/C 与 D/E → select
-   → wave1 = 编制全部建模房间 + 总理子代理
+→ wave1 = 编制全部建模房间
 4. [进度: 25%] wave1：各房间 room-start → **一条回复一次性 fork 全部**
    → 每个 fork 后立刻 `subagent-assign <房间> <id>`
-   → 总理子代理同批启动，循环读 `room-board --json`（`waiting_sw` 不算死）
+→ 每个小屋开工先读 `room-board --json` 确认 running（`waiting_sw` 不算死）
 5. [进度: 60%] wave1 各房间建模 → FEA → 领域规则 → 压缩摘要 → room-end
    （SW 排队时 `waiting_sw`，正常等待，**禁止判死/reset**）
 6. [进度: 75%] wave2：总装与验证（等 wave1 全部 room-end）→ 干涉检查 + 整体 FEA
 7. [进度: 92%] wave3：工程图输出 → GB/T 检查 → CADX 验证
-8. [进度: 100%] 汇总交付：`room-end 总理子代理` → 文件清单 + 验证报告
+8. [进度: 100%] 汇总交付：监控器 `verify-task` 通过 → 导出 docx → 文件清单 + 验证报告

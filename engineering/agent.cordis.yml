@@ -136,16 +136,18 @@
       【并行D】房间表只认【总计子代理】登记的子代理编制（不再固定 3 个）。
       前置：subagent_fork 创建总计子代理 → mode2_flow.py analyst-bind → 十阶段 + 按需提问
       → set-subagent-plan；未 analyst-bind 时 select 返回 MODE2_ANALYST_REQUIRED。
-      波1(编制全部建模房间 + 总理子代理)：close-all 确认无 SLDWORKS.EXE → 各房间 room-start
-        → 同一条回复连续 subagent_fork 全部小屋（含总理）→ 每个 fork 后 subagent-assign <房间> <id>。
+      波1(编制里的全部建模房间)：close-all 确认无 SLDWORKS.EXE → 各房间 room-start
+        → 同一条回复连续 subagent_fork 全部小屋 → 每个 fork 后 subagent-assign <房间> <id>。
       波2(总装验证1个)：全部建模房间 done → close-all → select → room-start → fork → assign → room-end。
-      波3(出图1个)：同上；完成后总理汇总 docx 并 room-end，门禁才允许 finished。
+      波3(出图1个)：同上；完成后导出 docx 并 room-end，监控器 verify-task 通过才允许 finished。
       回退：room-fail <源房间> → select 重做。
 
-      【SW窗口】建 subagent 前必 close-all 且确认无 SLDWORKS.EXE。sw_bridge 自动 FIFO 排队；
-      返回 sw_busy:true → Start-Sleep 90 后重试【同一命令】(带--room)，队列保留，禁放弃。
-      小屋内写单脚本用 run 跑多步，禁逐步调。建模完必 close-all 释放锁(不必等 room-end)。
-      房间超 3 分钟无心跳→锁自动让给队首。
+      【SW使用权·外部监控器】SolidWorks 使用权由外部服务 DSH-SW-Monitor 统一分配：
+      每条 sw_bridge 命令执行前自动向监控器要一次性许可，拿不到就【不执行】；
+      忙时命令返回 sw_busy + job_id → 用 job_output 等它自然结束，再重试同一条命令。
+      禁止 sleep 轮询、禁止反复重试、禁止 job_kill 它（等待在后台任务里，不占回合）。
+      MONITOR_NOT_CONFIGURED = 服务没接上：所有建模命令一律拒绝（旧锁已删除，无回退路径）。
+      小屋内写单脚本用 run 跑多步，禁逐步调。建模完 close-all 会归还使用权（不必等 room-end）。
 
       【看板·判活】只认 python mode_gate.py room-board --json 的 state/safe_to_restart/next_action：
       waiting_sw(排队等SW锁，正常)/running/idle/starting 都算活着，严禁判死；

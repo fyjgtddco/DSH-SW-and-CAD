@@ -4,7 +4,7 @@
 覆盖：
   1) select 在 analyst 未绑定 → MODE2_ANALYST_REQUIRED（不许拿主对话自演的十阶段开工）
   2) 主对话越权调 set-subagent-plan → MODE2_ANALYST_REQUIRED
-  3) analyst 绑定 + 十阶段走完 + 编制登记 → 放行；wave1 必须含【总理子代理】
+  3) analyst 绑定 + 十阶段走完 + 编制登记 → 放行；wave1 必须等于编制
   4) 绑定后主对话调 begin-stage → ANALYST_ACTOR_REQUIRED（身份不匹配）
   5) 子代理会话调 init → ROOT_SESSION_REQUIRED（三个小屋各自重跑门禁的根因）
 
@@ -125,11 +125,14 @@ def main():
         r = run("workflow_gate.py", ["select", "A,D"], d, "MAIN-SESSION")
         check("★ select 放行", r.get("ok") is True, r.get("error"))
         names = [x.get("name") for x in (r.get("pending_rooms") or [])]
-        check("★ wave1 同时包含建模房间与总理子代理",
-              "结构件" in names and "总理子代理" in names, names)
-        check("总理子代理已在房间表中",
-              any(x[0] == "总理子代理" for x in
-                  ((r.get("subagent_config") or {}).get("rooms") or [])), names)
+        # 【监控器接入】不再有"固定追加的总理子代理"：wave1 完全等于编制。
+        check("★ wave1 含编制里的建模房间", "结构件" in names, names)
+        check("★ wave1 不含已删除的 prime 房间",
+              not any("总理" in str(n) for n in names), names)
+        _room_names = [x[0] for x in
+                       ((r.get("subagent_config") or {}).get("rooms") or [])]
+        check("房间表完全来自编制（不含固定角色）",
+              not any("总理" in str(n) for n in _room_names), _room_names)
 
         print("=" * 70)
         print("5. 子代理会话调编排命令 → ROOT_SESSION_REQUIRED")

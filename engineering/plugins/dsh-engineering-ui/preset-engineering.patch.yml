@@ -84,6 +84,13 @@
                 ③领域：每房间须出 reports/<房间>.domain.json，有 CRITICAL 拒 room-end。
                 自查 python "<根>\tools\defense_gate.py" check-room <房间>|check-task。宿主不可用→无签名→fail-closed。
                 合法绕行仅 --force / DSH_DEFENSE_BYPASS=1（留痕）。别等 room-end 才首次校核。
+                【外购/标准件房间·BUG-7】用户决定"不建模、按 BOM 外购"的房间，用
+                `mode_gate.py room-start <房间> --type purchased`（类型含 purchased/standard/
+                outsourced 或房间名带"外购/标准件"均可识别）。这类房间**豁免**材料/物理/领域
+                三大防线 + 看图 + 三段自检 + 位姿门（它本来就不产 .sldprt），
+                但**必须**交 reports/<房间>.bom.json（非空清单：name 必需，建议 qty/spec/standard/supplier），
+                否则 room-end 报 PURCHASED_BOM_REQUIRED / PURCHASED_BOM_EMPTY。
+                别再用 --force 混过去 —— 那是"违规绕行"语义，会把正当决策记进 defense_bypass.json。
 
                 ## SW 建模
                 python "<根>\tools\sw_bridge.py" run <脚本>。先 conn-gate --target sw 读 skip_startup：
@@ -130,7 +137,7 @@
                   跑法：python sw_bridge.py self-check <零件> --expect '{"bbox_mm":[...],"volume_mm3":...,"features":["Extrusion*"],"feature_count":N}'
                   任何一段"被跳过"都不算通过（跳过≠通过）；room-end 会因缺 PASS 记录而拒绝下线。
                 ⑤ 🔴【上方向单点声明·跨房间共享】整个任务只允许【一个】"上"：
-                  由总计子代理/总理子代理在开工时一次性写定（up_axis + up_sign + 原点约定），
+                  由总计子代理在开工时一次性写定（up_axis + up_sign + 原点约定），
                   然后原样下发进每个小屋的 prompt（建模、总装、出图三波共用同一份，不许各写一套）。
                   机器判据（违反即判失败，不是"建议"）：
                     · 各零件 <零件>.pr.json 的 up_axis/up_sign 与总装房的 world_up 不一致 → 朝向冲突；
@@ -213,7 +220,7 @@
                   （该命令共调三次，状态机 mode_confirm_asked→depth_asked→context_asked→mechanics_done）
                   优先读用户写明载荷(100N/10kg)，冲击只影响动载系数；落盘 gate_load_case.json；
                   返回 load_is_estimate=true 时必须先向用户复核。
-                7) 分别问 A/B/C、D/E（两次独立调用）8) select C,E → 出子代理配置（wave1=编制全部建模房间+总理子代理）
+                7) 分别问 A/B/C、D/E（两次独立调用）8) select C,E → 出子代理配置（wave1=编制里的全部建模房间）
                 9) 按返回建全部小屋。
 
                 🔴【总计子代理】必须是**真实子代理**：subagent_fork，description="总计子代理（十阶段分析）"。
@@ -228,15 +235,33 @@
                 【串行E】todo 列全 → 逐房间：mode_gate.py room-start(须在建 subagent 前) → subagent_fork → 等完成(list_agents)
                 → interrupt_agent → room-end。禁提前建多个 subagent，禁同开多 SW 实例。
 
+                🔴【建子代理用哪个工具·按波次分】(BUG-8，2026-11-12 减速器任务实测)
+                  `subagent_fork` **会继承本会话全部已完成历史**（门禁 25 问 + 多轮守卫拉扯 +
+                  各子代理汇报）。到波 3 时父会话已经很胖，fork 出去的子代理一开局就背着
+                  几十万 token，再叠加自己的任务 → 直接 `ran out of room` / dead。
+                  现场：wave3 出图小屋 e1de1737 启动后 10 分钟零产出即死，任务因此无法收尾。
+                  规则：
+                  · **波 1（建模小屋 / 总计子代理）→ 用 subagent_fork**：
+                    它们需要父会话里的需求结论、载荷数值、房间编制、尺寸裁决 —— 继承是必需的。
+                  · **波 2（总装）/ 波 3（出图）→ 用 `subagent`（spawn，不继承历史）**：
+                    这两步只依赖【磁盘上的产物】（parts/*.sldprt、reports/*.json、台账 docx），
+                    不依赖对话历史。prompt 里必须写全：任务目录绝对路径、要读哪些
+                    reports/台账文件、交付物放哪、门禁命令怎么调。
+                  · 判断口径：子代理**只需读文件就能干**→ 用 subagent；**必须知道"我们之前
+                    商量过什么"**→ 才用 subagent_fork。
+                  · 波 3 一次出图很多件（10 张图 + DWG + CADX）时，可再拆成 2 个子代理
+                    （零件图 / 总装图）分别串行跑，别让一个屋扛全部。
+
                 【并行D】房间表以编制为准，select 给几个就开几个（空=全完成）。
-                波1 = select 返回的**全部建模房间 + 总理子代理**（数量由总计子代理决定，禁写死 3/5）：
+                波1 = select 返回的**全部建模房间**（数量由总计子代理决定，禁写死 3/5）：
                   close-all 关 SW 并确认无进程 → 各房间 room-start → 同一条回复连续 subagent_fork 全部，
                   prompt 须写"只做本房间零件" → **每次 fork 后立刻 subagent-assign <房间> <fork 返回的 id>**。
-                  总理子代理同批启动、长生命周期：循环读 python "<根>\tools\mode_gate.py" room-board --json，只看 state；
-                  waiting_sw 只是排队（禁判死/禁 reset）；unbound→提醒父代理补 assign；dead 才报；
-                  并用 prime-board/prime-report/check-consistency/prime-verify 履职；收尾前 room-end 总理子代理。
-                波2(总装验证1个)：波1全部建模房间 room-end → close-all → select → room-start → fork → assign → room-end。
-                波3(出图1个)：同上。回退：room-fail <源房间> → select 重做。
+                  每个小屋开工第一件事读 room-board 确认自己是 running；waiting_sw 只是排队（禁判死/禁 reset）；
+                  unbound→提醒父代理补 assign；dead 才报。
+                 ⚠️ **没有总理子代理**：零件是否建成由监控器按 part-saved 事件判定，"三道防线/邻接尺寸/总核实"
+                   由监控器 review-part / verify-task 直接算，不需要任何代理去"上报给谁"或"替谁核实"。
+                波2(总装验证1个)：波1全部建模房间 room-end → close-all → select → room-start → **subagent** → assign → room-end。
+                波3(出图1个)：同上，**用 subagent**（不继承历史，见上面 BUG-8 规则）。回退：room-fail <源房间> → select 重做。
 
                 🔴【并发硬上限=3】同一时刻最多 3 个子代理占名额（宿主按 root 统一计数，
                   含已跑完但仍驻留的小屋）。插件在 tools/pre-execute 里做了代码级闸门：
@@ -263,19 +288,24 @@
                   删除错误零件文件前，先看本轮搭建方式（python mode2_flow.py delete-policy）：
                   · A = 完全自主搭建 → 直接删，不必问；
                   · B / C（或读不到） → **必须先问用户**（主对话 ask_user_question，
-                    或总理子代理经 ask_user.py），得到答复后再删。
+                    或建房小屋经 ask_user.py），得到答复后再删。
                   绝不允许"先删了再说"。
 
-                📋【零件进度表】总理子代理负责维护零件完成度（mode2_flow.py parts-board）：
-                  not_started=未开始 / building=正在建 / done=完成 /
-                  rebuilding=需要重建 / failed=失败（含 DSH 进程已断的情况）。
-                  这份结论同时喂给右侧面板「零件」区，【不要在对话里另报一套状态】。
+                📋【零件进度表】数据来自外部监控器（mode2_flow.py parts-board 转发 board）：
+                  not_started=未开始 / queued=等待 SW / building=正在建 / validating=待验收 /
+                  done=完成 / rebuilding=需要重建 / blocked=验收受阻 / stale=文件或凭据已变更 /
+                  failed=失败 / disconnected=宿主失联。
+                  右侧面板「零件」区读的就是这一份，【不要在对话里另报一套状态】。
+                  看板 degraded=true 表示监控器不可达，此时显示「不可用」而不是「没有零件」。
 
-                【SW窗口】建 subagent 前必 close-all 且确认无 SLDWORKS.EXE。sw_bridge 自动 FIFO 排队；
-                返回 sw_busy:true → 用【阻塞式等待】python mode_gate.py wait-rooms <房间> --timeout 90
-                （或 sw-wait <房间>），让 Python 原地等锁；队列保留，禁放弃。
-                小屋内写单脚本用 run 跑多步，禁逐步调。建模完必 close-all 释放锁(不必等 room-end)。
-                单房间最长持锁 4 小时(SW_MAX_HOLD，兜底防死锁)，超时锁自动让给队首（与心跳无关）。
+                【SW使用权 · 外部监控器】SolidWorks 使用权由外部服务 DSH-SW-Monitor 统一分配：
+                 · 每条 sw_bridge 命令执行前自动向监控器要一次性许可，拿不到就【不执行】；
+                 · 忙时命令返回 **sw_busy + job_id**：用 job_output 等这个 job 自然结束，然后重试同一条命令。
+                 **禁止 sleep 轮询、禁止反复重试、禁止 job_kill 它**（等待发生在后台任务里，不占回合）。
+                 · MONITOR_NOT_CONFIGURED = 服务没接上：此时所有建模命令一律拒绝。旧进程内锁已删除，
+                   没有回退路径；先启动服务再 python "<根>\tools\mode_gate.py" sw-monitor attach --drained。
+                 · 只读查看：python "<根>\tools\mode_gate.py" sw-monitor status。
+                 小屋内写单脚本用 run 跑多步，禁逐步调。建模完 close-all 会归还使用权（不必等 room-end）。
 
                 🚫【长等待·铁律（BUG-A1① 修复 2026-11-07）】禁止用 time.sleep / Start-Sleep 轮询去等子代理、等房间、等 SW 锁。
                 事故（session-6019cd4b）：job_output{wait:true,timeout_ms:270000} 静默阻塞，
@@ -288,22 +318,20 @@
                   根因：它把"轮询"写成了等房间的第一选择 —— 只要模型还愿意等，就能无限 sleep 下去，
                     永远没有"已经等完了"的判据；轮询次数不产生任何状态，只烧时间。
                   判据：同一等待目标连续 sleep ≥4 次即视为违规（= 该用阻塞原语却没用）。
-                ✅ 等房间 / 等子代理 / 等 SW 锁：只准用【阻塞原语】——一次调用拿到结论，外面禁止再套 sleep 循环：
-                  ① python "<根>\tools\mode_gate.py" wait-rooms "<房间1>,<房间2>" --timeout 900
-                     等指定房间全部离开 active（done/failed/dead）或超时，一次性返回结论；
-                     等本轮全部房间用 wait-rooms --all-active --timeout 900。
-                  ② python "<根>\tools\mode_gate.py" room-board --wait 900
-                     "等到有变化再返回"：看板指纹变了 / 全部在世房间离开 active / 到点，三者任一即返回；
-                     返回里带 waited_sec 与 returned_because（timeout 只说明"还在跑"，不是判死依据）。
-                  ③ python "<根>\tools\mode_gate.py" sw-wait <房间> --timeout 90
-                     sw_busy:true 时用它：进程内原地等锁，队列位置保留，零 token。
-                  ④ python "<根>\tools\mode_gate.py" room-board --json（+ room-report-read <房间>）
-                     只读判据：state / safe_to_restart / next_action / report_stage；看不看都要看字段，别按耗时猜。
-                ⚠️ 只有在【确实没有阻塞原语可用】时（例：等一个 sw_bridge run 的后台 job 收尾），
-                  才允许短 sleep，且【同一等待目标连续不得超过 3 次】；第 4 次必须停下改用上面三条原语，
-                  或按下面的 [WAITING] 结束回合。此时仍受硬上限：单次 sleep ≤30s、
-                  job_output wait:true 的 timeout_ms ≤30000（切碎的是等待窗口，不是允许你循环）。
-                宿主侧另有硬兜底：插件已把 job_output 的长等待切成 ≤45s 窗口，到点即返回"仍在运行"。
+                ✅ 等房间 / 等子代理 / 等 SW 使用权：只准用【宿主后台 job 或一次性查询】，禁止 sleep 循环：
+                   ① sw_busy 返回的 job_id → job_output 等它【自然结束】（不要 wait:true 长超时、不要反复取）
+                      这是监控器的 wait-lock 后台任务：队首预留时它自己结束，模型拿到的是 job id 而不是阻塞。
+                   ② python "<根>\tools\mode_gate.py" wait-rooms "<房间1>,<房间2>" --timeout 20
+                      一次拿到 ready / attention / paused / waiting；返回 job_required=true 时说明还没到终态，
+                      该做的是"让宿主挂 wait-rooms 后台 job"或稍后再查一次，**不是循环调用本命令**。
+                   ③ python "<根>\tools\mode_gate.py" room-board --wait 900
+                      "等到有变化再返回"：看板指纹变了 / 全部在世房间离开 active / 到点，三者任一即返回；
+                      返回里带 waited_sec 与 returned_because（timeout 只说明"还在跑"，不是判死依据）。
+                   ④ python "<根>\tools\mode_gate.py" room-board --json（+ room-report-read <房间>）
+                      只读判据：state / safe_to_restart / next_action / report_stage；看不看都要看字段，别按耗时猜。
+                 ⚠️ 只有在【确实没有阻塞原语可用】时（例：等一个 sw_bridge run 的后台 job 收尾），
+                   才允许短 sleep，且【同一等待目标连续不得超过 3 次】；第 4 次必须停下改用上面的原语，
+                   或按下面的 [WAITING] 结束回合。宿主侧另把 job_output 的长等待切成 ≤45s 窗口兜底。
                 💤 允许【结束回合】等（配合 [WAITING] 终止态；该终止态由 Host 半实现，现阶段须自己写清摘要）：
                   仅当"等待"就是唯一下一步、且上面三条阻塞原语都拿不回结论时才可这样收尾，格式固定：
                   [WAITING] 在等：<房间/锁/后台job>；判据：room-board state=<starting|running|idle|waiting_sw|unbound>；
@@ -607,8 +635,82 @@
                   #   实测口径：1M 窗口下两者都得 800K，reserved=0 与 65536 同值，
                   #   所以这条只是"更贴近官方语义"，不是"更激进"。
                   # retainRatio 同步平齐官方 0.16（保留更多原文，少丢数值）。
-                  thresholdRatio: 0.8
+                  #
+                  # ══ 【2026-11-12 修复·压缩"压不动"的真因】══════════════════════
+                  # 上面那句"headroom 只影响预算项"是【错的】，必须纠正（保留原文
+                  #   以供对照，别删）：
+                  #
+                  # 宿主 dsh-compaction-basic/lib/index.js:63-64 逐字是：
+                  #     const headroomTokens = config.headroomTokens ?? 65536;
+                  #     const maxTokens      = config.maxTokens ?? headroomTokens;
+                  # → **没显式配 maxTokens 时，headroomTokens 同时就是摘要器的
+                  #   输出上限**。它不只影响"何时开始压"，还决定"摘要能写多长"。
+                  #
+                  # 现场证据（46 个发生过压缩的会话、277 次 compaction/end）：
+                  #   · headroom=48000 时期（11-01 / 11-07）：maxTokens=48000，
+                  #     183 次 compaction/summary，压缩基本正常；
+                  #   · 本文件把 headroom 降到 8000（11-08）后：maxTokens 跟着变
+                  #     8000，而 prompt.js 要求"Copy EVERY F-number and M-number
+                  #     ... one per line"（现场要抄 5000~7000 条）→ 输出必然被截断
+                  #     → 日志里 **54 次 `trae: llm response empty stream (code=3003)`**。
+                  #   · 另有 **26 次 `ENG_COMPACTION_NOT_SMALLER`**：
+                  #     "after L0 fact restoration the checkpoint is not smaller
+                  #      (input 165343 chars, output 461129 chars)" —— 输出是输入的
+                  #     2.79 倍，压缩把自己撑爆了。
+                  #
+                  # 结论：**降 headroom 会同时削弱摘要输出能力**，是一处隐蔽的
+                  #   耦合。修法不是把 headroom 调回去（那会让阈值降成 86K），
+                  #   而是【显式配 maxTokens】把两个概念拆开：
+                  #     · headroomTokens = 8000  → 只管阈值
+                  #     · maxTokens      = 48000 → 只管摘要输出上限（足够抄完编号）
+                  #
+                  # ══ 【2026-11-12 用户指定】阈值改成 200K（原 800K）══════════════
+                  # 用户原话：「改成200k压缩，不要800k」。
+                  #
+                  # 为什么是 ratio 0.2：当前默认路由 marvis/main-auto 的
+                  #   contextWindow = 1,000,000（日志 request/context 实测），
+                  #   而阈值 = min(窗口×ratio, 窗口−reserved−headroom)。
+                  #   reserved = header.config.maxTokens ?? 0 = 0（marvis 信封
+                  #   刻意不声明 maxTokens），headroom = 8000
+                  #   → 预算项 = 992000，远大于比例项 → **比例项生效**。
+                  #   要得到 200,000 → ratio = 200000/1000000 = 0.2。
+                  #
+                  # ⚠️ 这是【按窗口比例】而不是绝对 token 数：换成 200K 窗口的
+                  #   provider 时阈值会变成 40000，那对小窗口是过频压缩。
+                  #   若将来固定走小窗口模型，应改回较高 ratio 或改用 modelPolicies
+                  #   按模型单独设阈值（宿主支持 modelPolicies[].thresholdRatio）。
+                  #
+                  # ⚠️ 200K 阈值意味着【压缩会频繁发生】（当前会话峰值已到 ~480K，
+                  #   即每涨到 200K 就压一次）。压缩本身是有损的，必须先保证
+                  #   "压得动"—— 见下面 maxTokens 与 facts 回填的三处修复。
+                  thresholdRatio: 0.2
                   headroomTokens: 8000
+                  # ⚠️ 显式声明摘要输出上限，切断与 headroomTokens 的联动。
+                  #    不写这行 = 上限被 headroom 压到 8000 = 必截断 = empty-stream。
+                  #
+                  # 【2026-11-12 调整】48000 → 16000。
+                  # 为什么：当前主路由 buddy/deepseek-v4.1-flash 的
+                  #   header.config.maxTokens = 128000（日志实测），
+                  #   而摘要请求体量 = 输入(分段字符预算) + 输出(maxTokens)。
+                  #   原来输入 ≈64000 字符 + 48000 输出 ≈ 112K，贴着 128K 上限
+                  #   → 网关易判超限/截断 → 用户看到压缩报错。
+                  #   现在输入 36000 字符（由插件内置默认）+ 16000 输出 ≈ 52K。
+                  #   ⚠️ 48000 曾是 11-01/11-07 的成功值，但那时是 trae 网关、
+                  #      窗口 200K 的配置；现在路由与窗口都变了，照搬旧值反而贴边。
+                  #
+                  # ⛔ 【严禁在此处写 chunkChars】—— 血的教训（2026-11-12）：
+                  #   宿主 resolveConfig() 第一行就是
+                  #     validateKeys(config, BASIC_COMPACT_CONFIG_KEYS, "BasicCompactionConfig")
+                  #   BASIC_COMPACT_CONFIG_KEYS 是【严格白名单】，只有：
+                  #     thresholdRatio / headroomTokens / retainRatio / retainTokens /
+                  #     summarizationProvider / summarizationModel / maxTokens /
+                  #     compactionRetries / maxOverflowRetries / modelPolicies / auto
+                  #   一旦多写一个键（例如 chunkChars），宿主直接抛
+                  #     "BasicCompactionConfig: unknown key chunkChars"
+                  #   → **整个 engineering preset 装载失败、工程模式从列表里消失**。
+                  #   分段字符预算请走环境变量 DSH_ENG_COMPACTION_CHUNK_CHARS
+                  #   （那是插件自己读的，不经宿主 schema 校验）。
+                  maxTokens: 16000
                   retainRatio: 0.16
 
               - id: command-compact

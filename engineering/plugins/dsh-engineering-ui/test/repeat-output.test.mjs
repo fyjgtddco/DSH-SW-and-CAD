@@ -108,8 +108,14 @@ const rewritten = source
   // 【A4】错误码归一模块（相对 import）一并内联
   .replace("from './model-errors.js'", "from '" + MODEL_ERRORS_URL + "'")
   .replace("from './turn-guard.js'", "from '" + TURNGUARD_URL + "'");
-assert.ok(rewritten.includes('data:text/javascript'), '依赖 shim 必须替换成功');
-const { apply } = await import('data:text/javascript;base64,' + Buffer.from(rewritten).toString('base64'));
+// 【外部监控器】sw-monitor.js 是新增的相对 import。显式替换链每加一个模块
+//   就要改一次测试，已经漏过三次（job-wait-guard / webots / 本例）——
+//   这里改用 inlineLocalLibs 统一兜底：它扫描剩下的所有 './xxx.js' 并内联。
+const fullyInlined = inlineLocalLibs(rewritten, new URL('../lib/', import.meta.url));
+assert.ok(!/from '\.\/[^']+\.js'/.test(fullyInlined),
+  'lib/ 下不应再有未内联的相对 import（会 ERR_UNSUPPORTED_RESOLVE_REQUEST）');
+assert.ok(fullyInlined.includes('data:text/javascript'), '依赖 shim 必须替换成功');
+const { apply } = await import('data:text/javascript;base64,' + Buffer.from(fullyInlined).toString('base64'));
 
 function harness(rootAgents) {
   const routes = new Map();

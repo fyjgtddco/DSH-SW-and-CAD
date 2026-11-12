@@ -16,7 +16,7 @@
 
 要求：
   · 所有"含零件"的房间类型（含 drivetrain / sensor）都纳入物理校核；
-  · 只对纯出图/协调类（drafting / assembly / prime）豁免；
+  · 只对纯出图/协调类（drafting / assembly）豁免；（prime 已随总理子代理删除）
   · workflow_gate 的类型别名映射必须同步
     （drivetrain→transmission、sensor→housing、drawing→drafting），
     避免"门禁放行、防线豁免"的互相矛盾。
@@ -75,9 +75,10 @@ for _t in ("structural", "housing", "transmission", "drivetrain", "sensor",
     check("require_physics(%r) == True" % _t,
           DG.room_type_requires_physics(_t) is True,
           DG.room_type_requires_physics(_t))
-for _t in ("drafting", "assembly", "prime",
+for _t in ("drafting", "assembly",
            # 历史名 drawing 归一化为 drafting → 同样豁免
            "drawing"):
+    # 注：prime 已随总理子代理一起删除，不再是豁免类型（会被当成非法类型）。
     check("纯出图/协调类 %r 豁免（require_physics=False）" % _t,
           DG.room_type_requires_physics(_t) is False,
           DG.room_type_requires_physics(_t))
@@ -115,7 +116,7 @@ for _t in ("structural", "transmission", "housing", "drivetrain", "sensor",
     check("两个模块对 %r 的判定一致" % _t,
           WG.room_type_is_modeling(_t) == DG.room_type_requires_physics(_t),
           (WG.room_type_is_modeling(_t), DG.room_type_requires_physics(_t)))
-for _t in ("drafting", "assembly", "prime", "drawing"):
+for _t in ("drafting", "assembly", "drawing"):
     check("workflow_gate 对纯出图类 %r 判为非建模类（drawing→drafting）" % _t,
           WG.room_type_is_modeling(_t) is False, WG.room_type_is_modeling(_t))
     check("纯出图类 %r 两模块判定一致（都不强制物理）" % _t,

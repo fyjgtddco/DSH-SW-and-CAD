@@ -246,6 +246,40 @@ def _norm_name(name):
     return str(name or "").strip()
 
 
+#: 调试/测试件的命名特征（大小写不敏感的前缀 / 包含模式）。
+#  现场（20261111_131815_580E38FA）：台账 15 条里 6 条是这种东西 ——
+#    测试块、DIAG_下箱座_debug、DIAG_min_block、DIAG_rightplane、
+#    DIAG_manualcut、DIAG_manualcut2，且 parts/ 下文件早已被清掉。
+#  这些件不是交付物：会被查重闸/相邻尺寸核对当成真零件，也会混进导出的 docx。
+#  刻意【只做特征命中，不做全名白名单】——小屋的调试件名字千变万化。
+_DEBUG_PART_PREFIXES = ("diag_", "diag-", "probe_", "probe-", "debug_",
+                        "debug-", "tmp_", "temp_", "scratch_")
+_DEBUG_PART_CONTAINS = ("_debug", "-debug", "_test", "-test", "_尝试",
+                        "_临时", "_备份", "_bak")
+
+
+def _looks_like_debug_part(name):
+    """判断零件名是否像【调试/测试件】。命中返回命中的特征串，否则 None。
+
+    只读名字、不看其它字段 —— 判据必须可复核、可解释（本仓库一贯要求）。
+    """
+    s = _norm_name(name)
+    if not s:
+        return None
+    low = s.casefold()
+    for pfx in _DEBUG_PART_PREFIXES:
+        if low.startswith(pfx):
+            return pfx
+    for sub in _DEBUG_PART_CONTAINS:
+        if sub in low:
+            return sub
+    # 纯中文的"测试块 / 测试件"这类：中文不做 casefold，单独判前缀
+    for cn in ("测试块", "测试件", "临时件", "草稿件"):
+        if s.startswith(cn):
+            return cn
+    return None
+
+
 def _norm_key(name):
     """零件名比较键：去空白 + casefold（用于宽松命中已登记零件）。"""
     return _norm_name(name).casefold()
@@ -1798,6 +1832,40 @@ def add_part(record, work_dir=None, reason=None, allow_mismatch=False,
     if not os.path.isfile(file_path):
         warnings.append("模型文件当前不存在于磁盘：%s（允许先登记后建模）" % file_path)
 
+    # ══ 【2026-11-11 新增·P3 调试件混进交付台账】══════════════════════════
+    # 现场（验收复跑 20261111_131815_580E38FA，台账实锤）：
+    #   本任务台账 15 条里 6 条是【调试/测试件】——
+    #     测试块、DIAG_下箱座_debug、DIAG_min_block、DIAG_rightplane、
+    #     DIAG_manualcut、DIAG_manualcut2
+    #   而 parts/ 目录里这些文件【早已不存在】（收尾时被 tidy/删除）。
+    #   后果不是"多几条脏数据"这么轻：
+    #     · check_reusable 会读到"有记录、但文件不在"的条目，判定语义
+    #       在 new/reuse/unknown 之间摇摆；
+    #     · 相邻尺寸一致性核对会把不存在的零件拉进 pairs，产出假冲突；
+    #     · 交付台账（导出 docx）里出现 DIAG_* 这种明显不是零件的东西。
+    #   为什么不在 add_part 里直接【拒绝】：小屋调试阶段确实需要登记能查重，
+    #     一刀切拒绝会逼它们绕过模块手写 JSON（那更糟）。
+    #   所以这里做两件事：
+    #     ① 打 debug_part=True 标记 + 结构化 warning，让下游能过滤；
+    #     ② 文件已不存在时升级为 WARN 并注明"这是残留登记"。
+    #   真正的"交付前剔除"由 export/docx 与 check-consistency 侧按标记过滤。
+    _dbg_hit = _looks_like_debug_part(name)
+    if _dbg_hit:
+        warnings.append({
+            "kind": "debug_part_in_registry",
+            "part": name,
+            "severity": "WARN" if not os.path.isfile(file_path) else "INFO",
+            "matched": _dbg_hit,
+            "file_exists": bool(os.path.isfile(file_path)),
+            "detail": ("%s 看起来是【调试/测试件】（命中 %r）。它不应该出现在交付台账里："
+                       "会被查重闸与相邻尺寸核对当成真零件，也会混进导出的 docx。"
+                       "调试件请建模到 scripts/ 或临时目录，不要 save 到 parts/；"
+                       "已经登记的可由交付前清理剔除。%s"
+                       % (name, _dbg_hit,
+                          "" if os.path.isfile(file_path)
+                          else "（当前磁盘上已无此文件 —— 属残留登记）")),
+        })
+
     # ── ②b 【Bug⑪】并入零件 origin 约定（来自 <零件>.origin.json）────────
     # 为什么放在台账里：装配侧（总装/工程图/一致性核对）读的是【台账】。
     #   origin 只躺在零件目录边上的 .origin.json 里没人读，等于没记录。
@@ -3070,7 +3138,42 @@ def _check_core(data, only_pairs=None):
     only_pairs: 若给出 [(a,b)]，只检查这些对（用于"改某个零件时"的定向复检）。
     """
     parts = data.get("parts") or {}
+    # ══ 【2026-11-11 新增·调试件不参与一致性核对】══════════════════════════
+    # 现场（20261111_131815_580E38FA）：台账 15 条里 6 条是调试/测试件
+    #   （测试块、DIAG_*），且 parts/ 下文件早已被清掉。
+    # 为什么必须在这里滤掉（而不是只在登记时提示）：
+    #   _adjacency_pairs 只按 adjacent 字段连边，调试件一旦被别的零件写进
+    #   adjacent（小屋调试时经常顺手写上"测试块"），就会凭空产生 A-B 配对 →
+    #   以"接口缺失"或"尺寸不符"的形式污染 mismatches / insufficient，
+    #   而真正交付件的冲突会被淹没在这些噪音里（假阳性把真问题埋掉）。
+    # 处理：把它们单独归入 debug_parts 名单并给出 INFO 级提醒，
+    #   不参与 pairs 计算 —— 既不假装看不见，也不让它们制造假冲突。
+    _debug_names = []
+    _debug_notes = []
+    for _nm in list(parts.keys()):
+        _hit = _looks_like_debug_part(_nm)
+        if not _hit:
+            continue
+        _debug_names.append(_nm)
+        _debug_notes.append({
+            "kind": "debug_part_excluded",
+            "part": _nm,
+            "severity": "INFO",
+            "escalate_to_parent": False,
+            "detail": ("%s 是调试/测试件（命中 %r），已排除在相邻尺寸核对之外；"
+                       "交付前应从台账剔除，不要让它进 docx。" % (_nm, _hit)),
+        })
+    _dbg = set(_debug_names)
+
     pairs, one_way, dangling, self_loops = _adjacency_pairs(data)
+    if _dbg:
+        # 只要有一端是调试件，这条边就不该参与核对
+        pairs = [(a, b) for (a, b) in pairs if a not in _dbg and b not in _dbg]
+        one_way = [x for x in one_way
+                   if x.get("from") not in _dbg and x.get("to") not in _dbg]
+        dangling = [x for x in dangling
+                    if x.get("from") not in _dbg and x.get("to") not in _dbg]
+        self_loops = [x for x in self_loops if x not in _dbg]
     if only_pairs is not None:
         want = set(tuple(sorted(p)) for p in only_pairs)
         pairs = [p for p in pairs if tuple(sorted(p)) in want]
@@ -3240,6 +3343,9 @@ def _check_core(data, only_pairs=None):
         "dangling": dangling,
         "one_way": one_way,
         "self_loops": self_loops,
+        # 【2026-11-11】调试/测试件：已排除在核对之外，但必须如实报出来
+        "debug_parts": _debug_names,
+        "debug_notes": _debug_notes,
     }
 
 
@@ -3346,6 +3452,12 @@ def check_adjacency_consistency(work_dir=None, only_pairs=None):
         "unresolved": _open_unresolved(data),
         "unresolved_count": len(_open_unresolved(data)),
         "escalate_to_parent": bool(escalate),
+        # ── 【2026-11-11】调试/测试件：已从 pairs 里排除，但如实回显 ────────
+        # 现场：台账 15 条里 6 条是"测试块 / DIAG_*"，parts/ 下文件早没了。
+        # 它们必须【被排除在核对之外】（否则凭空造出假冲突），
+        # 但也必须【让人看得见】（否则交付台账里混着 DIAG_* 都没人知道）。
+        "debug_parts": core.get("debug_parts") or [],
+        "debug_count": len(core.get("debug_parts") or []),
         "summary": summary,
         "note": ("evaluated=false 表示「没数据可查」，与「检查通过」严格区分；"
                  "不一致项一律 severity=ERROR、escalate_to_parent=true。"),

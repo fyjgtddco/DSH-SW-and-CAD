@@ -112,7 +112,11 @@ def main():
         check("E6 gate=CONCURRENT_BUILD",
               (r or {}).get("gate") == "CONCURRENT_BUILD", r)
         check("E6 指明占用者", (r or {}).get("active_rooms") == ["甲"], r)
-        check("E6 hold_mode=room", (r or {}).get("hold_mode") == "room", r)
+        # 【监控器接入】hold_mode 不再有 room/command 两档：使用权按命令
+        #   发放，统一报 "permit"。这里断言它【不再是 room】，说明房间级
+        #   独占模型确实退场了。
+        check("E6 hold_mode 不再是 room", (r or {}).get("hold_mode") != "room", r)
+        check("E6 hold_mode=permit", (r or {}).get("hold_mode") == "permit", r)
         check("E6 给出证据入口",
               "room-board" in str((r or {}).get("hint")), r)
 
@@ -135,28 +139,28 @@ def main():
         check("E7 已 end/fail 的房间不算在世",
               mg._require_build_exclusive("乙", st_ended) is None)
 
-        section("E9 hold_mode 默认 room")
-        check("E9 SW_ROOM_HOLD == 1",
-              int(mg.SW_ROOM_HOLD) == 1, mg.SW_ROOM_HOLD)
-        check("E9 _room_hold_enabled() 为真", mg._room_hold_enabled() is True)
-        check("E9 持锁上限用房间级（非命令级）",
-              mg._room_hold_limit() == mg.SW_ROOM_HOLD_MAX,
-              mg._room_hold_limit())
+        section("E9 房间级独占锁已删除（使用权归监控器）")
+        for _gone in ("SW_ROOM_HOLD", "SW_ROOM_HOLD_MAX", "_room_hold_enabled",
+                      "_room_hold_limit"):
+            check("E9 %s 已删除" % _gone, not hasattr(mg, _gone))
 
         section("E10 接线断言（源码级）")
         src = open(os.path.join(HERE, "mode_gate.py"), encoding="utf-8").read()
-        m = re.search(r"def cmd_sw_request\(name\).*?(?=\ndef )", src, re.S)
-        body = m.group(0) if m else ""
-        check("E10 cmd_sw_request 内调用了该闸",
-              "_require_build_exclusive(" in body,
-              "未接线 = 闸门形同不存在")
-        check("E10 调用结果被 return（真的拦住）",
-              re.search(r"_excl\s*=\s*_require_build_exclusive\([^)]*\)"
-                        r"[\s\S]{0,400}?return\s+_excl", body) is not None,
-              body[:400])
-        check("E10 不再只存在于注释里",
-              src.count("_require_build_exclusive") >= 4,
-              src.count("_require_build_exclusive"))
+        # 进程内取锁入口已删除，闸门现在接在【命令许可】这一侧：
+        #   sw_bridge._gate_sw_lock 才是真正决定"能不能动 SW"的地方。
+        _sb = open(os.path.join(HERE, "sw_bridge.py"), encoding="utf-8").read()
+        _m = re.search(r"def _gate_sw_lock\(.*?(?=\ndef )", _sb, re.S)
+        _gate_body = _m.group(0) if _m else ""
+        check("E10 命令许可入口存在（sw_bridge._gate_sw_lock）",
+              bool(_gate_body), "未接线 = 闸门形同不存在")
+        check("E10 许可入口先 require_ready（未接入即拒绝）",
+              "require_ready()" in _gate_body, _gate_body[:300])
+        check("E10 许可入口返回结构带 denied/busy/permit 三态",
+              all(k in _gate_body for k in ('"denied"', '"busy"', '"permit"')),
+              _gate_body[:400])
+        check("E10 闸门仍有调用点（不是死代码）",
+              src.count("_require_build_exclusive") + _sb.count("_require_build_exclusive") >= 2,
+              (src.count("_require_build_exclusive"), _sb.count("_require_build_exclusive")))
 
         section("汇总")
         print("  PASS=%d  FAIL=%d" % (PASS, FAIL))

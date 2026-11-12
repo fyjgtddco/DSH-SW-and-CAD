@@ -311,24 +311,26 @@ def main():
         shutil.rmtree(d, ignore_errors=True)
 
     # ══════════════════════════════════════════════════════════════════
-    section("G2. select 后置对账：sync-rooms 把最终房间表（含总理）回写快照")
-    # set-subagent-plan 写的快照不含"固定追加的总理子代理"；select 追加后必须回写，
-    # 否则 plan 快照与 workflow_state 永远差一个房间 → 假告警掩盖真不一致。
+    section("G2. select 后置对账：sync-rooms 把最终房间表回写快照")
+    # workflow_gate.select 落盘后必须把最终房间表回写 mode2_plan 快照，
+    # 否则 plan 快照与 workflow_state 会差房间 → 假告警掩盖真不一致。
+    # 注：原先这里还断言"固定追加的总理子代理"，该角色已删除。
     d = fresh()
     try:
         prime_all_stages(d)
         mf.set_subagent_plan(ROOMS_LEGACY, "按功能分解划房间", "总计子代理", d)
         _final = ([x["name"], mf.normalize_room_type(x["type"])["type"]]
                   for x in ROOMS_LEGACY)
-        _final = list(_final) + [["总理子代理", "prime"]]
+        # 不再追加任何固定角色：最终表 == 编制表
+
         r = mf.sync_rooms_snapshot(_final, d, source="test.sync",
                                    task_id="T-SYNC-1")
         check("★ sync-rooms 成功", r["ok"], r.get("error"))
         plan = mf.load_plan(d)
         snap = (plan.get("subagent_config") or {}).get("rooms") or []
-        check("★ 快照含总理子代理（6 个房间）", len(snap) == 6, snap)
-        check("★ 快照写了总理子代理类型 prime",
-              ["总理子代理", "prime"] in snap, snap)
+        check("★ 快照房间数 == 编制房间数", len(snap) == len(ROOMS_LEGACY), snap)
+        check("★ 快照不含已删除的 prime 房间",
+              not any(str(x[1]) == "prime" for x in snap), snap)
         check("★ 快照 synced_from 标注来源",
               (plan.get("subagent_config") or {}).get("synced_from") == "test.sync", plan.get("subagent_config"))
         check("★ task_id 一并校正（避免跨任务污染）", plan.get("task_id") == "T-SYNC-1", plan.get("task_id"))
@@ -342,7 +344,9 @@ def main():
         check("★ 空房间表 → 拒绝（不清空快照）",
               not mf.sync_rooms_snapshot([], d)["ok"])
         _after = (mf.load_plan(d).get("subagent_config") or {}).get("rooms") or []
-        check("★ 拒绝后快照保持原样（仍 6 个）", len(_after) == 6, _after)
+        # 编制是 5 个房间（总理子代理已删除），拒绝后必须原样保持 5 个
+        check("★ 拒绝后快照保持原样（仍 5 个）",
+              len(_after) == len(ROOMS_LEGACY), _after)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -411,8 +415,8 @@ def main():
         _snap2 = (_rt.get("sources") or {}).get("plan_snapshot") or {}
         if not isinstance(_snap2, dict):
             _snap2 = {x[0]: x[1] for x in _snap2}
-        check("★ 端到端：快照含固定追加的总理子代理",
-              _snap2.get("总理子代理") == "prime", _snap2)
+        check("★ 端到端：快照不含已删除的 prime 房间",
+              "prime" not in _snap2.values(), _snap2)
         check("★ 端到端：快照里传动房是 transmission（不是 drivetrain）",
               _snap2.get("传动与轮组") == "transmission", _snap2)
         _rows = {x["room"]: x for x in (_rt.get("by_room") or [])}

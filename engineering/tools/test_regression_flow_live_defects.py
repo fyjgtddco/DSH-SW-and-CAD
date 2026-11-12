@@ -154,7 +154,7 @@ ck("★ 指引含 set-subagent-plan 命令",
 ck("  拒绝时不生成旧房间表（rooms 为空）",
    not ((r4b.get("subagent_config") or {}).get("rooms") or []))
 
-sec("缺陷 B-②（正路）：登记编制后 select 放行，房间表由编制决定 + 追加总理")
+sec("缺陷 B-②（正路）：登记编制后 select 放行，房间表完全由编制决定")
 # 从 select 的拒绝返回里取计划文件所在目录（= 本任务的交付目录）
 wd = r4.get("plan_file")
 wd = os.path.dirname(wd) if wd else None
@@ -198,16 +198,19 @@ ck("★ 房间表 = 总计子代理的编制（非旧默认表）",
    "臂体结构" in _names and "关节传动" in _names, _names)
 ck("★ 不含旧流程的『结构件/传动机构/壳体机架』默认表",
    "结构件" not in _names and "传动机构" not in _names, _names)
-ck("★ 总理子代理被固定追加", "总理子代理" in _names, _names)
+ck("★ 房间表不含已删除的 prime 房间", "总理子代理" not in _names, _names)
 ck("★ rooms_source 标注为总计子代理",
    "总计子代理" in str((r6.get("subagent_config") or {}).get("rooms_source")),
    (r6.get("subagent_config") or {}).get("rooms_source"))
-_pr = r6.get("prime_room") or {}
-ck("★ 总理子代理职责含『校验相邻尺寸一致性』",
-   any(("相邻" in str(d) and "一致" in str(d)) for d in (_pr.get("duties") or [])),
-   _pr.get("duties"))
-ck("★ 总理子代理职责含『汇总 docx』",
-   any("docx" in str(d) for d in (_pr.get("duties") or [])), _pr.get("duties"))
+# 总理子代理已删除：改为断言【监控器契约被下发】（验收职责的新落点）。
+_mc = r6.get("monitor_contract") or {}
+ck("★ 下发了监控器验收契约", bool(_mc), _mc)
+ck("★ 契约说明零件验收走监控器 review",
+   "review" in str(_mc.get("review") or ""), _mc.get("review"))
+ck("★ 契约说明总核实走 verify-task",
+   "verify-task" in str(_mc.get("task_verify") or ""), _mc.get("task_verify"))
+ck("★ 契约仍要求 docx 汇总", "docx" in str(_mc.get("final_docx") or ""),
+   _mc.get("final_docx"))
 
 sec("缺陷 B-①：僵尸房间不得永久挡住 init")
 src2 = open(WG, encoding="utf-8").read()

@@ -231,12 +231,13 @@ python physics_bridge.py fatigue <case.json> --stress 45   # 直接给应力
   **【总计子代理】** → 它 `analyst-bind`、跑完十阶段、按需提问、
   `set-subagent-plan` 登记编制；未完成时 `select` 直接返回
   `MODE2_ANALYST_REQUIRED`。
-- **第 1 波·独立爆发期**：编制里的**全部建模房间 + 总理子代理**同时启动
-  （每个 fork 后立刻 `subagent-assign`）；总理长生命周期、持续盯 `room-board`。
+- **第 1 波·独立爆发期**：编制里的**全部建模房间**同时启动
+  （每个 fork 后立刻 `subagent-assign`）。**没有总理子代理** —— 零件建成由监控器
+  按 `part-saved` 事件判定，逐件验收走 `review-part`。
 - **第 2 波·收敛汇合期**：全部建模房间 `done` 后 → 总装确认门禁 → 总装小屋
-  （总理在总装前做一致性校验与 `prime-verify`）。
-- **第 3 波·出图期**：总装完成后 → 工程图小屋；总理汇总 docx 后
-  `room-end`，门禁才允许归档 `finished`。
+  （总装前核对由监控器 `verify-task` 一次性完成：台账 + 邻接尺寸 + 未决冲突）。
+- **第 3 波·出图期**：总装完成后 → 工程图小屋；导出 docx、房间 `room-end` 后，
+  监控器 `verify-task` 通过，门禁才允许归档 `finished`。
 
 ---
 
@@ -341,23 +342,58 @@ python mode_gate.py room-report <房间名> <阶段> <详情>
 
 ---
 
-## SW 使用窗口（进程级 FIFO 锁）
+## SW 使用权（外部监控器，进程内锁已删除）
 
-SolidWorks 是单实例程序，`mode_gate.py` 在**进程级**检测 `SLDWORKS.EXE`
-并给每个房间发 FIFO 排队锁。
+> **2026-11-12 起，工程模式不再自己维护 SW 锁。** 这一节记录删除了什么、为什么、
+> 以及现在由谁负责。改动前请先读，不要"顺手加回来一个 owner 字段"。
 
-### 公平轮转（防饥饿）
+### 删掉了什么
 
-- 有人在排队时，单房间最多连续执行 `SW_FAIR_CMDS`（3）条命令
-- 或连续独占 `SW_FAIR_SECONDS`（180）秒
-- 超出即**强制让位**给队首，保证队列真正前进
+| 旧实现 | 行数 | 删除原因 |
+|---|---|---|
+| `sw-request` / `sw-wait` / `sw-release` / `lock-doctor` 命令 | ~470 | 排队、等待、体检全部由监控器的票据状态机负责 |
+| `_lock_owner_alive` / `_purge_orphan_lock` / `_reclaim_lock` | ~290 | 用心跳/产物 mtime/prev_owner 三层"猜"持锁者死活 |
+| `SW_FAIR_CMDS` / `SW_FAIR_SECONDS` / `SW_MAX_HOLD` / `SW_CMD_HOLD` / `SW_STALE_KILL` | 常量 | 公平轮转与超时接管在票据模型下不存在 |
+| `_monitor_bg_impl` 常驻进程 + `sw_monitor.pid` | ~120 | 只记录 SLDWORKS.EXE 在不在；实测跨任务泄漏 4 个进程 |
 
-### 免锁命令
+### 两个必须记住的现场事故
 
-`close-all` / `sw-release` / `rooms-reset` **无需 `--room`**——
-它们本身就是释放动作，串行模式下更无房间概念。
+**① 「SW 进程没在跑」被当成「锁空闲」（2026-11-11）**
 
----
+`can_fast` 当时写的是 `(not running) or (not sw_by_room)`。房间刚取到锁、
+SW 还没冷启动时 `running=False`，于是第二个房间直接 `acquired=True`。
+room-board 自报 `hold_mode=room`，实际 **8 对构建区间重叠**，最长 216 秒。
+→ 现在的判据里**没有任何进程探活**：授权只看监控器的票据。
+
+**② 「等锁」必须占着回合（图一）**
+
+忙时只能返回 `sw_busy`，让子代理 sleep 后重试同一条命令。主对话于是挂在
+`wait-rooms --timeout 900` 上一动不动，退出即被收尾守卫判"没干活"。
+→ 现在排队时命令立刻返回 **`job_id`**，等待发生在 DSH 后台任务里。
+
+### 现在谁负责
+
+| 关注点 | 入口 | 位置 |
+|---|---|---|
+| 命令许可 | `sw_bridge._gate_sw_lock` → `sw_monitor_client.permit` | `sw_bridge.py` |
+| 宿主侧票据/租约 | `MonitorBridge.acquire` | `lib/sw-monitor.js` |
+| 许可路由 | `POST /dsh-engineering-ui/sw-monitor-permit` | `lib/index.js` |
+| 运维（接管/恢复/查看） | `mode_gate.py sw-monitor {status,attach,recover,plan}` | `mode_gate.py` |
+| 逐零件看板 | `mode2_flow.py parts-board` → `rpc('board')` | `mode2_flow.py` |
+| 交付总核实 | `pre_delivery_check` → `rpc('verify-task')` | `mode2_flow.py` |
+
+### 代码约束（改之前先看）
+
+1. **不要在 `mode_gate.py` 里再写 owner/queue 判断。**
+   `mode_state.sw_lock` 现在是**只读镜像**（`_refresh_sw_lock_mirror`
+   从监控器 board 单向同步，带 `source="sw_monitor"`）。任何"写 owner"
+   的代码都会造成双权威，而双权威正是这次改造要根除的病。
+2. **不要给 `sw_bridge` 加"跳过取锁"的开关。**
+   旧代码里的 `DSH_SW_LOCK_OFF` 已删除 —— 它的语义是"绕过唯一权威"。
+3. **`_SW_GUARD_PID_FILE` / `SW_GUARD_*` 属于另一个组件**（SW 健康看护，
+   CPU/内存 > 85% 立即关 SW），不要跟着"旧监控"一起删。清理时踩过这个坑。
+4. **排队返回 `job_id` 后不要 sleep 轮询**：等待在后台任务里，
+   模型该做的是 `job_output` 等它自然结束，再重试同一条命令。
 
 ## 文件结构
 
@@ -368,7 +404,7 @@ engineering/
 ├── install-plugin.ps1         # 一键安装（宿主层 patch + 插件注册）
 ├── README.md
 ├── 常见SW启动失败问题.md        # SW 启动排查手册
-├── skills/                    # 技能（7 个）
+├── skills/                    # 技能（8 个）
 │   ├── mode-selection/        # 强制入口：模式选择 + 门禁
 │   ├── assembly-orchestration/# 总装编排
 │   ├── cad-workflow/          # CAD 工作流
@@ -387,6 +423,8 @@ engineering/
 │   ├── settings.py            # 【换机修复】本机设置（交付目录/软件路径，带机器指纹）
 │   ├── env_check.py           # 【换机修复】环境自检 + 给新对话的修复提示词
 │   ├── physics/               # 物理仿真（GB/T 规则库）
+│   ├── sw_monitor/            # ★ 外部监控器（SW 使用权唯一权威）+ docs/
+│   ├── sw_monitor_client.py   # ★ Python 侧接入点（permit/done/board）
 │   └── examples/              # 建模样例
 └── plugins/
     └── dsh-engineering-ui/            # 三栏 UI + 提问卡片 + 守卫 + 提问记账
@@ -433,7 +471,7 @@ engineering/
 | 23 | **缺依赖时「设置静默失效」**（python 3.5 → SyntaxError） | 新增 `env_check.py` 自检 + `sw_bridge.py` 版本闸门 + 插件 `resolvePython` 版本校验 |
 | 24 | **提醒弹窗不出现** | 失败可重试（成功才封顶）+ 设置页「立即查看提醒」确定性入口 |
 | 25 | 设置页中文乱码（Python 子进程按 GBK 输出） | 所有 Python 调用注入 `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1` |
-| A1-① | **提示词自相矛盾**："宁可多轮短等"被照抄成单轮 477 次 `sleep(30)` / 4h02m 轮询（占墙钟 66%） | persona「长等待·铁律」重写：禁止 sleep 轮询，只准 `wait-rooms` / `sw-wait` 阻塞原语；无原语时同目标短 sleep ≤3 次；补 `[WAITING]` 结束回合边界 |
+| A1-① | **提示词自相矛盾**："宁可多轮短等"被照抄成单轮 477 次 `sleep(30)` / 4h02m 轮询（占墙钟 66%） | persona「长等待·铁律」重写：禁止 sleep 轮询，只准阻塞原语（2026-11-12 起等 SW 改成等 `job_id`）；无原语时同目标短 sleep ≤3 次；补 `[WAITING]` 结束回合边界 |
 | A6 | **工具输出 U+FFFD 乱码 180 条**，模型据乱码脑补出错误设计前提（"差速+舵机转向"） | persona「工具输出编码·铁律」：每条 python 调用强制 UTF-8 前置模板；出现 `\uFFFD`/"�" 禁下结论，必须重跑 + read 原文核对（注入式根治在 `lib/index.js`） |
 | P1-①② | **坐标系与方向语义没写死**：Top Plane 镜像、`cut()` 方向、"上方向"无声明 | `skills/sw-design` 新增「〇、开工前必读」操作手册（ZSIGN/`flip=True`/`<零件>.SLDPRT.pr.json`/零旋转装配报警），persona 同步压缩版 |
 | C1 | **三套"上"方向**（零件 +Z / 总装 +Y / 图纸 +Z）→ 整机错位 90° | `skills/assembly-orchestration` 新增「二点五、『上』方向契约」：任务级 `up_contract.json` 单点声明、三波共享、六条机器判据 J1~J6 |
@@ -461,7 +499,7 @@ $T = "<工程模式根目录>\tools"
 python "$T\mode_gate.py" status          # 关卡状态
 python "$T\mode_gate.py" room-status     # 房间六态
 python "$T\mode_gate.py" whoami          # 身份对照表
-python "$T\mode_gate.py" lock-doctor     # SW 锁体检
+python "$T\mode_gate.py" sw-monitor status  # 监控器接入状态/排队
 python "$T\sw_bridge.py" doctor          # SW 环境自检
 ```
 

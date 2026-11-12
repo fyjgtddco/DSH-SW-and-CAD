@@ -263,59 +263,30 @@ def main():
               gp["ok"] and gp["count"] == 4
               and "assembly" in _gp_types and "drafting" in _gp_types,
               {"count": gp.get("count"), "types": _gp_types})
-        # 总理子代理定义固定存在
-        pr = mf.prime_room_definition(d)
-        check("总理子代理固定存在且 fixed=True",
-              pr["name"] == "总理子代理" and pr["fixed"] is True, pr)
-        check("总理子代理职责含一致性校验与 docx 汇总",
-              any("一致" in d0 for d0 in pr["duties"]) and
-              any("docx" in d0 for d0 in pr["duties"]), pr["duties"])
+        # 总理子代理已删除：编制读回不应再自动补任何固定房间
+        check("编制里不含已删除的 prime 房间",
+              "prime" not in _gp_types, _gp_types)
+        import mode2_flow as _mf2
+        check("prime_room_definition 已删除",
+              not hasattr(_mf2, "prime_room_definition"))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
     # ═══════════════════════════════════════════════════════════════
-    section("5. 总理子代理上报：必填字段缺一即拒")
+    # ═══════════════════════════════════════════════════════════════
+    section("5. 总理子代理上报已删除；验收改由监控器逐件核验")
     d = fresh()
     try:
-        good = {"part_name": "大臂", "room": "结构件",
-                "file": "C:/x/DSH_大臂.SLDPRT",
-                "dims": {"length_mm": 300, "width_mm": 40, "height_mm": 40},
-                "material": "6061-T6",
-                "credentials": {"material": "C:/x/大臂.material.json",
-                                "physics": "C:/x/reports/结构件.physics.json",
-                                "domain": "C:/x/reports/结构件.domain.json"},
-                "adjacent": ["关节座"]}
-        r = mf.record_prime_report(good, d)
-        check("完整上报 → 通过", r["ok"], r.get("error"))
-        # 逐字段缺失都必须被拒
-        for f in mf.REQUIRED_REPORT_FIELDS:
-            bad = dict(good)
-            bad.pop(f, None)
-            rr = mf.record_prime_report(bad, d)
-            check("缺 %s → 拒绝" % f, not rr["ok"], rr.get("error"))
-        # 三道防线缺一条 → 拒
-        for k in mf.REQUIRED_CREDENTIAL_KEYS:
-            bad = dict(good)
-            cred = dict(good["credentials"])
-            cred.pop(k)
-            bad["credentials"] = cred
-            rr = mf.record_prime_report(bad, d)
-            check("三道防线缺 %s → 拒绝" % k, not rr["ok"], rr.get("error"))
-        # 空尺寸 → 拒
-        bad = dict(good); bad["dims"] = {}
-        check("空 dims → 拒绝", not mf.record_prime_report(bad, d)["ok"])
-        # adjacent 非数组 → 拒
-        bad = dict(good); bad["adjacent"] = "关节座"
-        check("adjacent 非数组 → 拒绝", not mf.record_prime_report(bad, d)["ok"])
-        # adjacent 空数组是合法的（确实不接触任何件）
-        bad = dict(good); bad["adjacent"] = []; bad["part_name"] = "独立件"
-        check("adjacent=[] → 允许（确实无接触件）",
-              mf.record_prime_report(bad, d)["ok"])
-        # 重复上报同一零件 → 覆盖，不重复累积
-        for _ in range(3):
-            mf.record_prime_report(good, d)
-        prs = mf.prime_reports(d)
-        check("同零件重复上报 → 覆盖（不累积）", prs["count"] == 2, prs["count"])
+        for gone in ("record_prime_report", "prime_reports",
+                     "prime_receipts", "check_part_receipted",
+                     "REQUIRED_REPORT_FIELDS", "REQUIRED_CREDENTIAL_KEYS",
+                     "PRIME_ROOM_NAME", "PRIME_ROOM_TYPE"):
+            check("%s 已删除" % gone, not hasattr(mf, gone))
+        # 监控器客户端必须提供逐件验收入口（能力没丢，换执行者）
+        import sw_monitor_client as _mc5
+        for fn in ("part_start", "part_saved", "part_failed", "board"):
+            check("监控器客户端有 %s" % fn,
+                  callable(getattr(_mc5, fn, None)))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -327,22 +298,25 @@ def main():
         check("★ 空白状态 → 总闸拒绝交付", not r["ok"], r)
         check("总闸列出多个 blocker", len(r["blockers"]) >= 3, r["blockers"])
         joined = " | ".join(r["blockers"])
-        for kw in ("十阶段", "子代理编制", "总理子代理", "一致性"):
+        # 「总理子代理」已换成「监控器」：判据的措辞必须跟着实现走，
+        #   否则测试会因为一条过期的关键词而永久红。
+        for kw in ("十阶段", "子代理编制", "监控器"):
             check("blocker 覆盖「%s」" % kw, kw in joined, joined)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
-    # ═══════════════════════════════════════════════════════════════
-    section("7. 一致性校验：无 part_registry 时 fail-closed（不假 PASS）")
+    section("7. 邻接一致性：能力仍在 part_registry（只是不再由总理调用）")
     d = fresh()
     try:
-        r = mf.check_prime_consistency(d)
-        # part_registry 若尚未就绪，必须 ok=False 且 evaluated=False（绝不静默通过）
-        check("★ 无法评估时 ok=False（不假 PASS）", not r["ok"], r)
-        check("★ 无法评估时 evaluated=False", r.get("evaluated") is False, r)
+        import part_registry as _pr7
+        check("part_registry.check_adjacency_consistency 仍在",
+              callable(getattr(_pr7, "check_adjacency_consistency", None)))
+        # 无法评估时必须 ok=False 且 evaluated=False（绝不静默通过）
+        _c = _pr7.check_adjacency_consistency(work_dir=d)
+        check("★ 无法评估时 ok=False（不假 PASS）", not _c.get("ok"), _c)
+        check("★ 无法评估时 evaluated=False", _c.get("evaluated") is False, _c)
     finally:
         shutil.rmtree(d, ignore_errors=True)
-
     # ═══════════════════════════════════════════════════════════════
     section("8. 原子写与读取健壮性")
     d = fresh()
@@ -370,9 +344,11 @@ def main():
     #   SUBPAN_AUTHORITY 拼写错误（应为 SUBPLAN_AUTHORITY），
     #   函数测试完全覆盖不到 —— 一跑真命令就 NameError。
     #   因此这里把每个子命令都真正调一遍（用 --help 至少走完 argparse 构建）。
+    # prime-* / check-consistency 已随总理子代理删除；parts-board 是新的
+    #   逐零件看板入口（转发监控器 board），必须在这里被 CLI 冒烟覆盖到。
     _subs = ["set-depth", "begin-stage", "mark-stage-done", "stage-status", "ask",
-             "questions", "set-subagent-plan", "subagent-plan", "prime-room",
-             "prime-report", "prime-reports", "check-consistency", "pre-delivery", "plan"]
+             "questions", "set-subagent-plan", "subagent-plan", "parts-board",
+             "delete-policy", "export-docx", "check-docx", "pre-delivery", "plan"]
     _bad = []
     import contextlib
     for _s in _subs:

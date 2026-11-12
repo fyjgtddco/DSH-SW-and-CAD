@@ -372,24 +372,30 @@ def main():
               all(w.get("task_id") == "T-R12" for w in mg._load_build_windows()),
               mg._load_build_windows())
 
-        # ---------------- H. R5：上报终态即释放 SW 占位 ----------------
-        section("H. R5 完工上报释放 SW 队列占位")
+        # ---------------- H. R5：上报终态不再动锁（监控器接管）----------------
+        section("H. R5 完工上报【不再】改锁状态（使用权按命令发放）")
+        # 旧行为：房间上报 done 就把它从 sw_lock 的 owner/queue 里摘掉。
+        # 新模型里没有"房间占位"：使用权按命令 begin/end 发放，房间上报终态
+        # 只说明它不再需要新命令，真正归还由 room-end（兜底 release）完成。
+        # 所以这里改为断言【上报终态不会凭空改锁】，避免出现第二条释放路径。
         _st5 = {"mode": "2", "rooms": {"甲": {"active": True}},
                 "sw_lock": {"owner": "甲", "queue": ["乙"], "acquired_at": time.time()}}
         with open(os.path.join(tmp, "mode_state.json"), "w", encoding="utf-8") as f:
             json.dump(_st5, f, ensure_ascii=False)
         _rel5 = mg._release_sw_after_report("甲", "done")
-        check("H1 持锁房间 done → released", (_rel5 or {}).get("released") is True, _rel5)
+        check("H1 上报终态不自行释放（released=False）",
+              (_rel5 or {}).get("released") is False, _rel5)
         _after5 = json.load(open(os.path.join(tmp, "mode_state.json"), encoding="utf-8"))
-        check("H2 释放后 owner 不再是甲",
-              (_after5.get("sw_lock") or {}).get("owner") != "甲", _after5.get("sw_lock"))
+        check("H2 上报终态不改 owner（只有 room-end 才归还）",
+              (_after5.get("sw_lock") or {}).get("owner") == "甲",
+              _after5.get("sw_lock"))
         _st5b = {"mode": "2", "rooms": {"甲": {"active": True}, "乙": {"active": True}},
                  "sw_lock": {"owner": "乙", "queue": ["甲"], "acquired_at": time.time()}}
         with open(os.path.join(tmp, "mode_state.json"), "w", encoding="utf-8") as f:
             json.dump(_st5b, f, ensure_ascii=False)
         _rel5b = mg._release_sw_after_report("甲", "done")
-        check("H3 排队房间 done → 从队列移除",
-              (_rel5b or {}).get("queue_removed") is True, _rel5b)
+        check("H3 上报终态不自行摘队列（没有 queue_removed 路径）",
+              (_rel5b or {}).get("queue_removed") is not True, _rel5b)
         check("H4 非终态上报不释放",
               mg._release_sw_after_report("甲", "modeling") is None)
 

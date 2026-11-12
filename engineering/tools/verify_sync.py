@@ -65,7 +65,9 @@ RUNTIME_DIRS = {'reports', 'heartbeats', 'load_cases', 'physics_runs',
                 # webots_runs/<run_id>/ 是报告与证据落点（model_manifest /
                 #   conversion_report / experiment_report / logs / evidence），
                 #   属于运行现场，不是代码。
-                'webots_runs'}
+                'webots_runs',
+                # 监控器运行数据目录
+                'monitor_runs'}
 BIN_EXT = ('.sldprt', '.sldasm', '.slddrw', '.dwg', '.dxf', '.step', '.stp',
            '.igs', '.stl', '.pdf', '.png', '.jpg', '.jpeg', '.zip', '.7z')
 

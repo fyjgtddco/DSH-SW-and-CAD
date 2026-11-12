@@ -58,6 +58,64 @@ test('A2. 孙代也占名额（只有子代理结束才释放）', () => {
   assert.deepEqual(ids.sort(), ['a', 'a1']);
 });
 
+// ══════════════════════════════════════════════════════════════════════════
+// A3. 【BUG-1 回归】inactive 子代理不占名额（2026-11-12 减速器任务）
+// ══════════════════════════════════════════════════════════════════════════
+// 现场：9 件零件全建完，出图屋开不出来。报「并发已达上限（6 / 6）」，
+// 但那 6 个全是早就收工的历史子代理。宿主 slot 在 finishDisposal 就归还了，
+// 只有我们自己的闸门还在按 catalog 全量计数 —— 越用越满，重启也不清空。
+test('A3. 已收工的 inactive 子代理不占名额（BUG-1：名额只增不减）', () => {
+  const rows = [
+    { kind: 'child', id: 'old1', parentId: 'R', activity: 'inactive' },
+    { kind: 'child', id: 'old2', parentId: 'R', activity: 'inactive' },
+    { kind: 'child', id: 'old3', parentId: 'R', activity: 'inactive' },
+    { kind: 'child', id: 'old4', parentId: 'R', activity: 'inactive' },
+    { kind: 'child', id: 'old5', parentId: 'R', activity: 'inactive' },
+    { kind: 'child', id: 'old6', parentId: 'R', activity: 'inactive' },
+  ];
+  const g = evaluateConcurrency(rows, 'R', 'R', 3);
+  assert.equal(g.active, 0, '全是 inactive → 一个名额都不占');
+  assert.equal(g.allowed, true, '必须放行；否则历史子代理会把上限永久占满');
+  assert.equal(g.counted_by, 'activity');
+});
+
+test('A4. running 的子代理照样计数并拦（不能为了修复把闸门废掉）', () => {
+  const rows = [
+    { kind: 'child', id: 'old1', parentId: 'R', activity: 'inactive' },
+    { kind: 'child', id: 'run1', parentId: 'R', activity: 'running' },
+    { kind: 'child', id: 'run2', parentId: 'R', activity: 'running' },
+    { kind: 'child', id: 'run3', parentId: 'R', activity: 'running' },
+  ];
+  const g = evaluateConcurrency(rows, 'R', 'R', 3);
+  assert.equal(g.active, 3);
+  assert.equal(g.allowed, false, '3 个 running 已到上限 3，第 4 个必须拦');
+  assert.match(g.message, /另有 1 个已收工子代理/,
+    '提示里要说清 inactive 不占名额，避免用户白重启 DSH');
+});
+
+test('A5. running 的孙代也计数（祖先的 Activation 还开着）', () => {
+  const rows = [
+    { kind: 'child', id: 'a', parentId: 'R', activity: 'running', hasChildren: true },
+    { kind: 'child', id: 'a1', parentId: 'a', activity: 'running' },
+    { kind: 'child', id: 'a2', parentId: 'a', activity: 'inactive' },
+  ];
+  const { ids, running } = countOccupiedChildren(rows, 'R');
+  assert.deepEqual(ids.sort(), ['a', 'a1']);
+  assert.equal(running.length, 2, 'running 与 ids 在有 activity 时应当一致');
+});
+
+test('A6. 旧宿主（没有 activity 字段）回退拓扑口径，不放行失控', () => {
+  const rows = [
+    { kind: 'child', id: 'a', parentId: 'R' },
+    { kind: 'child', id: 'a1', parentId: 'a', hasChildren: true },
+    { kind: 'child', id: 'a2', parentId: 'a' },
+    { kind: 'diagnostic', id: 'x', parentId: 'R' },
+  ];
+  const occ = countOccupiedChildren(rows, 'R');
+  assert.equal(occ.mode, 'topology');
+  assert.deepEqual(occ.ids.sort(), ['a', 'a1']);
+});
+
 test('B. 配置优先级：运行期覆盖 > 环境变量 > 默认', () => {
   const oldEnv = { ...process.env };
   try {
