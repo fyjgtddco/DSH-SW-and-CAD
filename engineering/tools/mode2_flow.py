@@ -3088,6 +3088,7 @@ def _main_body(argv):
     p.add_argument("--work-dir", default=None)
 
     p = sub.add_parser("stage-status", help="查看十阶段推进情况")
+    p.add_argument("--fidelity", choices=("full", "compressed", "structured", "pointer"))
     p.add_argument("--work-dir", default=None)
 
     p = sub.add_parser("ask", help="登记一道按需提问（必须挂阶段 + 写理由）")
@@ -3295,7 +3296,8 @@ ooms.json"，
     elif args.cmd == "mark-stage-done":
         r = mark_stage_done(args.stage, args.artifact, wd, actor=_actor)
     elif args.cmd == "stage-status":
-        r = stage_status(wd)
+        from memory_gate import fidelity_view
+        r = fidelity_view(stage_status(wd), args.fidelity, "mode2_flow.py stage-status")
     elif args.cmd == "ask":
         r = record_question(args.topic, args.stage, args.reason, wd, actor=_actor)
     elif args.cmd == "answer-question":

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "pages": [
+    {"id":"wf.mechanics_result","type":"Constraint","side":"main","scope":"task","source":"state:workflow_state.json#/mechanics_result","min_fidelity":"Structured","degrade_path":["Full","Compressed","Structured"],"dirty_if":"checkpoint","optional":true},
+    {"id":"lc.gate_load_case","type":"Constraint","side":"main","scope":"task","source":"load_case","min_fidelity":"Full","degrade_path":["Full"],"dirty_if":"checkpoint","optional":true},
+    {"id":"mode.rooms","type":"Plan","side":"main","scope":"task","source":"state:mode_state.json#/rooms","min_fidelity":"Structured","degrade_path":["Full","Compressed","Structured"],"dirty_if":"checkpoint","optional":true},
+    {"id":"reg.parts","type":"Evidence","side":"main","scope":"task","source":"task:load_cases/part_registry.json","min_fidelity":"Pointer","degrade_path":["Full","Compressed","Structured","Pointer"],"dirty_if":"checkpoint","optional":true},
+    {"id":"mon.part.<part>","type":"Evidence","side":"monitor","scope":"part","source":"monitor:part","min_fidelity":"Pointer","degrade_path":["Full","Compressed","Structured","Pointer"],"dirty_if":"building_or_validating","verify":"model_sha256_and_saved_stamp"},
+    {"id":"mon.owner","type":"Plan","side":"monitor","scope":"task","source":"monitor:owner","min_fidelity":"Structured","degrade_path":["Full","Compressed","Structured"],"dirty_if":"claimed"}
+  ]
+}

@@ -47,7 +47,14 @@ class Scenario(unittest.TestCase):
                 self.assertEqual(call("attach", drained=True)["state"], "quarantined")
                 with self.assertRaises(Fault):
                     call("begin", **b, lease=lease, command="other")
-                self.assertEqual(call("recover", drained=True, reason="独立确认 SW 和 worker 已停止")["state"], "ready")
+                with self.assertRaisesRegex(Fault, "DIRTY_PAGES_PENDING"):
+                    call("recover", drained=True, reason="独立确认 SW 和 worker 已停止")
+                pages = call("page-status")
+                with self.assertRaisesRegex(Fault, "DIRTY_PAGES_PENDING"):
+                    call("recover", drained=True, reason="核实已排空", dirty_pages=pages["dirty_pages"],
+                         observed_rev=pages["revision"] - 1)
+                self.assertEqual(call("recover", drained=True, reason="独立确认 SW 和 worker 已停止",
+                                      dirty_pages=pages["dirty_pages"], observed_rev=pages["revision"])["state"], "ready")
             finally:
                 m.close()
 
@@ -187,6 +194,49 @@ class Scenario(unittest.TestCase):
         self.assertEqual(call("board", task="T")["parts"][0]["state"], "stale")
         with self.assertRaisesRegex(Fault, "ROOMS_NOT_VERIFIED"):
             call("verify-task", task="T")
+
+    def audit_fixture(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        m = Coordinator(root / "state.db", root)
+        self.addCleanup(m.close)
+        call = lambda op, **d: m.call(op, {"epoch": "h"} | d)
+        call("attach", drained=True)
+        call("plan", task="T", root=str(root), rooms=[
+            {"name": r, "type": "model", "parts": [r]} for r in ("A", "B")])
+        return m, call
+
+    def test_event_table_exists(self):
+        m, _ = self.audit_fixture()
+        self.assertEqual(m.db.execute("PRAGMA table_info(events)").fetchall()[0][1], "rev")
+
+    def test_state_and_event_atomic(self):
+        m, call = self.audit_fixture()
+        before = m.state["rev"]
+        m.db.execute("CREATE TRIGGER reject_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'test'); END")
+        import sqlite3
+        with self.assertRaises(sqlite3.IntegrityError):
+            call("request", task="T", room="A", session="A", ticket="A")
+        self.assertEqual(json.loads(m.db.execute("SELECT body FROM state").fetchone()[0])["rev"], before)
+        self.assertEqual(m.db.execute("SELECT MAX(rev) FROM events").fetchone()[0], before)
+
+    def test_audit_cursor_and_task(self):
+        m, call = self.audit_fixture()
+        call("request", task="T", room="A", session="A", ticket="A")
+        one = call("audit", task="T", limit=1)
+        two = call("audit", task="T", since_rev=one["next_since_rev"], limit=1)
+        self.assertTrue(one["has_more"])
+        self.assertGreater(two["events"][0]["rev"], one["events"][0]["rev"])
+        self.assertFalse(two["has_more"])
+        self.assertEqual(call("audit", task="Other")["events"], [])
+        self.assertNotIn("lease", json.dumps(two))
+
+    def test_concurrent_event_revisions(self):
+        m, call = self.audit_fixture()
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(2) as pool:
+            list(pool.map(lambda r: call("request", task="T", room=r, session=r, ticket=r), ("A", "B")))
+        events = [r[0] for r in m.db.execute("SELECT rev FROM events ORDER BY rev")]
+        self.assertEqual(events, list(range(1, m.state["rev"] + 1)))
 
     def test_http_and_mock_dsh_job(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -38,6 +38,12 @@
  *
  * 因此：先试真实父类；拿不到就用本地等价实现（不触发压缩，安全降级）。
  */
+import { execFile as memoryExec } from 'node:child_process';
+import { promisify as memoryPromisify } from 'node:util';
+import memoryPath from 'node:path';
+import { appendFile as memoryAppend, mkdir as memoryMkdir } from 'node:fs/promises';
+
+const runMemory = memoryPromisify(memoryExec);
 let BasicCompactionEngine;
 let PARSENT_MODE = 'real';
 try {
@@ -233,6 +239,25 @@ class EngineeringCompactionEngine extends BasicCompactionEngine {
     const id = identityOf(agent);
     const session = agent && agent.session;
 
+    const memoryDir = resolveStateDir();
+    const memoryTools = process.env.DSH_MEMORY_TOOLS || memoryDir;
+    const memoryPython = process.env.DSH_PYTHON || 'python';
+    const memoryBudget = String(this.config?.memoryContract?.compactionBudget ??
+                                process.env.DSH_MEMORY_COMPACTION_BUDGET ?? 6000);
+    const prepareMemory = async () => {
+      const { stdout: memoryRaw } = await runMemory(memoryPython,
+      ['-B', memoryPath.join(memoryTools, 'memory_gate.py'), 'compaction-prep',
+       '--state-dir', memoryDir, '--budget', memoryBudget], {
+        timeout: 15000, maxBuffer: 1024 * 1024, windowsHide: true, signal,
+        env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+      });
+      const memory = JSON.parse(memoryRaw);
+      if (!memory.ok) throw new Error(memory.error || 'PAGE_CHECK_FAILED');
+      return memory;
+    };
+    const beforeMemory = await prepareMemory();
+
+
     // ── ① 抽 L0（压缩前的真相，模型碰不到）────────────────────────────
     const rawSpan = inputToText(input);
     const fresh = extractFacts(rawSpan, { source: 'compaction' });
@@ -363,6 +388,16 @@ class EngineeringCompactionEngine extends BasicCompactionEngine {
     }
 
     // ── ⑥ 落账本（红框数据源）────────────────────────────────────────
+    const memory = await prepareMemory();
+    if (memory.task !== beforeMemory.task) throw new Error('PAGE_TASK_SCOPE_MISMATCH');
+    const memoryBlock = memory.task ? '\n<engineering-memory>\n' + memory.summary + '\n</engineering-memory>' : '';
+    if (memoryBlock) {
+      outChars = summaryBlocks.reduce((n, b) => n + String(b?.text || '').length, 0) + memoryBlock.length;
+      if (inputChars > 0 && outChars >= inputChars) {
+        throw new Error('PAGE_MINIMUM_OVER_BUDGET: 工程页与摘要合计无法缩短上下文');
+      }
+      summaryBlocks = [...summaryBlocks, { type: 'text', text: memoryBlock }];
+    }
     const stats = factsStats(merged);
     const sections = sliceSections(restored.text);
     try {
@@ -393,6 +428,18 @@ class EngineeringCompactionEngine extends BasicCompactionEngine {
 
     // 事实集写回（单调累积，但**按会话分文件**，见上面 readFacts 的修复说明）
     try { writeFacts(merged, id.target); } catch (e) {}
+    if (memory.task && /^[a-zA-Z0-9_-]{1,180}$/.test(memory.task) && id.target) {
+      // 父类还没有替换上下文，所以这里只记录 prepared。
+      try {
+        const dir = memoryPath.join(memoryDir, 'trace');
+        await memoryMkdir(dir, { recursive: true });
+        await memoryAppend(memoryPath.join(dir, memory.task + '.jsonl'), JSON.stringify({
+          schema: 1, task: memory.task, at: Date.now(), event: 'compaction.prepared',
+          session: id.target, bytes: memory.bytes, coverage: memory.coverage, minimum: memory.minimum,
+        }) + '\n', 'utf8');
+      } catch (err) { console.warn('ClawVM compaction trace: ' + err.message); }
+    }
+
 
     return Object.assign({}, result, { summary: summaryBlocks });
   }

@@ -798,6 +798,27 @@ python "<根>\tools\mode_gate.py" sw-monitor status
    不要删 SQLite 来「清锁」；
 4. 回滚要先排空监控模式的所有工作，再停宿主入口 —— **禁止双轨同时放行**。
 
+### 2026-11-13 更新：COM 门卫版
+
+新版把"发许可"升级为"由门卫亲自执行 COM"——模型不再自己驱动 SolidWorks。
+
+| 能力 | 变化 |
+|------|------|
+| **门卫执行** | 新增 `com_gate.py`；白名单操作 `sketch/circle/rectangle/line/end_sketch/extrude/cut/gear/helix_gear`；实际 COM 对象留在门卫启动的独立进程 |
+| **提交即保存** | `com-build` 返回 running 只代表入场；成功返回 `state:saved, closed:true, documents:0, pid, sha256` |
+| **保存后才上看板** | 门卫保存 → 核对文件 → 确认关档，才写零件看板并交接 FIFO |
+| **记忆契约** | `memory_gate.py` / `page_contract.py` / `pages_manifest.json`：四档摘要（full/compressed/structured/pointer）+ 磁盘检查点 + 脏页检测 |
+| **审计与重放** | `POST /v1/audit`（`next_since_rev` 翻页）+ `trace_replay.py`（只记哈希，不记正文） |
+| **超时回收** | 默认 45 分钟（`--com-timeout`），只针对提交后实际运行的作业；超时先停 worker 再回收进程句柄 |
+
+> 🔴 **启用门卫前必须关掉所有 SolidWorks 实例。** 门卫要求"没有任何不受它管理的
+> SLDWORKS 在运行"，否则 `attach` 返回 `UNMANAGED_SW_RUNNING`（正确行为）。
+> 首次还要显式传 `--solidworks-exe <真实路径>`，它会校验该路径存在且文件名是 `sldworks.exe`。
+
+> ⚠️ **本版白名单只覆盖独立零件建模。** 装配、工程图、几何读回、真实 SW Simulation
+> 尚无对应固定处理器，启用门卫时这些路线要**明确阻塞**，不能两套入口并用
+> （教程 0 节 D）。
+
 ### 契约文档
 
 - [engineering/tools/sw_monitor/docs/DeepSeek接入教程.md](engineering/tools/sw_monitor/docs/DeepSeek接入教程.md) —— 接入顺序、每条路由、示例

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import re
 from collections import Counter
 from contextlib import contextmanager
 import hashlib
@@ -13,7 +15,7 @@ import secrets
 import sqlite3
 import subprocess
 import sys
-from threading import BoundedSemaphore, Condition
+from threading import BoundedSemaphore, Condition, Thread
 import time
 
 
@@ -21,13 +23,18 @@ class Fault(Exception):
     pass
 
 
+def fault_code(value):
+    match = re.match(r"^[A-Z][A-Z0-9_]+", value) if isinstance(value, str) else None
+    return match.group() if match else None
+
+
 def need(test, code):
     if not test:
         raise Fault(code)
 
 
-def name(value):
-    need(isinstance(value, str) and 0 < len(value) <= 180
+def name(value, max_length=180):
+    need(isinstance(value, str) and 0 < len(value) <= max_length
          and value == value.strip() and not any(ord(c) < 32 for c in value), "INVALID_NAME")
     return value
 
@@ -84,16 +91,59 @@ LABELS = dict(not_started="未开始", queued="等待 SW", building="正在建",
               blocked="验收受阻", disconnected="宿主失联", stale="文件或凭据已变更")
 
 
+def _contract_dir(tools):
+    """找出 page_contract.py / pages_manifest.json 所在目录。
+
+    两种部署形态都要支持（2026-11-13 合入时实测踩到）：
+      ① 独立交付包：monitor.py 在包根，工程侧文件在
+         <包>/工程模式接入包/engineering/tools/；
+      ② 仓库 / 安装副本内嵌：monitor.py 在 <工程模式根>/tools/sw_monitor/，
+         而 page_contract.py 就在上一级 <工程模式根>/tools/。
+    原先只认 ①，于是内嵌部署下兜底路径拼成
+      tools/sw_monitor/工程模式接入包/engineering/tools/
+    → FileNotFoundError，selfcheck 9 项全 ERROR。
+    """
+    cands = []
+    if tools:
+        cands.append(Path(tools))
+    here = Path(__file__).parent
+    cands.append(here.parent)          # ② 内嵌：tools/
+    cands.append(here)
+    cands.append(here / "工程模式接入包" / "engineering" / "tools")   # ① 独立包
+    for c in cands:
+        try:
+            if (c / "page_contract.py").is_file() and (c / "pages_manifest.json").is_file():
+                return c
+        except OSError:
+            continue
+    return cands[0] if cands else here
+
+
+def load_contract(tools):
+    src = _contract_dir(tools)
+    spec = importlib.util.spec_from_file_location("_dsh_page_contract", src / "page_contract.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, module.manifest(src / "pages_manifest.json")
+
+
 class Coordinator:
-    def __init__(self, database, workspace, tools=None, simulation=None):
+    def __init__(self, database, workspace, tools=None, simulation=None, *, com_runner=None, com_probe=None):
         self.workspace = Path(workspace).resolve(strict=True)
         self.tools = tools
         self.simulation = simulation
+        self.contract, self.pages = load_contract(tools if tools and
+            (Path(tools) / "defense_gate.py").is_file() and
+            (Path(tools) / "page_contract.py").is_file() else None)
+        self.com_runner, self.com_probe = com_runner, com_probe
+        self.com_busy = False
         self.cv = Condition()
         self.heartbeat = 0.0
         self.db = sqlite3.connect(database, isolation_level=None, check_same_thread=False)
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY, body TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS events (rev INTEGER PRIMARY KEY, op TEXT NOT NULL, payload TEXT NOT NULL, ts REAL NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS event_tasks (task TEXT NOT NULL, rev INTEGER NOT NULL, PRIMARY KEY(task, rev))")
         row = self.db.execute("SELECT body FROM state WHERE id=1").fetchone()
         self.state = json.loads(row[0]) if row else {
             "schema": 1, "epoch": None, "frozen": True, "rev": 0, "serial": 0,
@@ -101,15 +151,57 @@ class Coordinator:
         }
         need(self.state["schema"] == 1, "STATE_SCHEMA_UNSUPPORTED")
         if self.state["owner"] and self.state["tickets"][self.state["owner"]]["state"] == "claimed":
-            self.state["frozen"] = True
-            self._save(self.state)
+            restarted = self._snapshot()
+            restarted["frozen"] = True
+            t = restarted["tickets"][restarted["owner"]]
+            for job in t.get("com_jobs", {}).values():
+                if job["result"]["state"] == "running":
+                    job["result"].update(state="quarantined", error="MONITOR_RESTARTED_DURING_COM")
+            with self.cv:
+                self._commit(restarted, "restart", t)
         self.review_slots = BoundedSemaphore(2)
 
     def close(self):
         self.db.close()
 
-    def _save(self, s):
-        self.db.execute("INSERT OR REPLACE INTO state VALUES (1, ?)", (json.dumps(s, ensure_ascii=False),))
+    def _save(self, s, op, context):
+        old = self.state
+        changed = {k for k, task in s["tasks"].items() if old["tasks"].get(k) != task}
+        tickets = []
+        for k, t in s["tickets"].items():
+            prev = old["tickets"].get(k)
+            if prev != t:
+                changed.add(t["task"])
+                tickets.append({f: t.get(f) for f in ("task", "room", "seq", "state", "current")})
+        if context.get("task") in s["tasks"]:
+            changed.add(context["task"])
+        if old["frozen"] != s["frozen"] or op == "recover":
+            changed.update(s["tasks"])
+        payload = {"tasks": sorted(changed), "tickets": tickets,
+                   "frozen": s["frozen"], "scope": {k: context[k] for k in
+                   ("task", "room", "part", "command") if isinstance(context.get(k), str)}}
+        if op == "recover":
+            payload["dirty_pages"] = context.get("dirty_pages", [])
+            payload["observed_rev"] = context.get("observed_rev")
+        if op.startswith("com-"):
+            payload["state"] = context.get("state")
+            payload["fault"] = fault_code(context.get("error"))
+            if op == "com-complete" and context.get("state") == "saved":
+                t = s["tickets"][context["ticket"]]
+                job = t["com_jobs"][context["command"]]
+                payload["model_sha256"] = context.get("sha256")
+                payload["spec_sha256"] = self.contract.fingerprint(
+                    {k: job["input"][k] for k in ("material", "steps")})
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.execute("INSERT OR REPLACE INTO state VALUES (1, ?)", (json.dumps(s, ensure_ascii=False),))
+            self.db.execute("INSERT INTO events VALUES (?, ?, ?, ?)",
+                            (s["rev"], op, json.dumps(payload, ensure_ascii=False), time.time()))
+            self.db.executemany("INSERT INTO event_tasks VALUES (?, ?)", [(t, s["rev"]) for t in changed])
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
 
     def _online(self):
         return self.heartbeat > 0 and time.monotonic() - self.heartbeat < 15
@@ -123,7 +215,9 @@ class Coordinator:
             return
         if s["owner"]:
             owner = s["tickets"][s["owner"]]
-            if owner["state"] != "reserved" or time.time() < owner["claim_by"]:
+            idle_claim = (self.com_runner and owner["state"] == "claimed" and
+                          owner["current"] is None)
+            if (owner["state"] != "reserved" and not idle_claim) or time.time() < owner["claim_by"]:
                 return
             owner["state"] = "expired"
             s["owner"] = None
@@ -133,10 +227,10 @@ class Coordinator:
             first.update(state="reserved", claim_by=time.time() + 45)
             s["owner"] = first["ticket"]
 
-    def _commit(self, s):
+    def _commit(self, s, op="tick", context=None):
         if s != self.state:
             s["rev"] = self.state["rev"] + 1
-            self._save(s)
+            self._save(s, op, context or {})
             self.state = s
             self.cv.notify_all()
 
@@ -184,6 +278,17 @@ class Coordinator:
     def _attach(self, s, d, recover=False):
         epoch = name(d.get("epoch"))
         if recover:
+            actual = self._dirty_pages(s)
+            need(d.get("dirty_pages", []) == actual, "DIRTY_PAGES_PENDING")
+            if actual:
+                need(type(d.get("observed_rev")) is int and d["observed_rev"] == s["rev"],
+                     "DIRTY_PAGES_PENDING")
+        elif s["epoch"] != epoch:
+            need(not self._dirty_pages(s), "DIRTY_PAGES_PENDING")
+        if self.com_runner and (recover or s["epoch"] != epoch):
+            need(not self.com_busy, "COM_WORKER_STILL_RUNNING")
+            self.com_probe()
+        if recover:
             need(d.get("drained") is True and len(name(d.get("reason"))) >= 5, "RECOVERY_PROOF_REQUIRED")
             need(s["frozen"] or not self._online(), "HOST_STILL_ACTIVE")
             if s["owner"]:
@@ -228,7 +333,7 @@ class Coordinator:
                  (kind == "other" or bool(parts)), "INVALID_PARTS")
             parts = [name(p) for p in parts]
             need(len(set(parts)) == len(parts), "DUPLICATE_PART")
-            rooms[room] = {"type": kind, "parts": {p: {"gen": 0, "phase": "not_started"} for p in parts},
+            rooms[room] = {"type": kind, "parts": {p: {"gen": 0, "phase": "not_started", **self._part_contract()} for p in parts},
                            "review": None, "closed": False}
         model_names = [pn for r in rooms.values() if r["type"] == "model" for pn in r["parts"]]
         need(len({n.casefold() for n in model_names}) == len(model_names), "DUPLICATE_MODEL_NAME")
@@ -266,6 +371,8 @@ class Coordinator:
                 return self._ticket_status(s, self._ticket(s, d))
             need(not room["closed"] and not room.get("failure") and room["type"] != "purchased",
                  "ROOM_NOT_SW_ELIGIBLE")
+            if self.com_runner:
+                need(room["type"] == "model", "COM_ROOM_UNSUPPORTED")
             need(not any(t["state"] in ("queued", "reserved", "claimed")
                          and (t["task"], t["room"]) == (d["task"], d["room"])
                          for t in s["tickets"].values()), "ROOM_ALREADY_QUEUED")
@@ -287,7 +394,7 @@ class Coordinator:
                 return self._ticket_status(s, t)
             need(s["owner"] == t["ticket"] and t["state"] in ("reserved", "claimed"), "NOT_GRANTED")
             if t["state"] == "reserved":
-                t.update(state="claimed", lease=secrets.token_urlsafe(32))
+                t.update(state="claimed", lease=secrets.token_urlsafe(32), claim_by=time.time() + 45)
             return self._ticket_status(s, t) | {"lease": t["lease"]}
         if op == "release":
             old = self._ticket(s, d)
@@ -300,6 +407,7 @@ class Coordinator:
             self._advance(s)
             return {"state": "released"}
         if op in ("begin", "end", "part-start", "part-saved", "part-failed"):
+            need(not self.com_runner, "COM_GATE_REQUIRED")
             t = self._claimed(s, d)
             cmd = name(d.get("command"))
             if op == "begin":
@@ -326,7 +434,7 @@ class Coordinator:
                 need(p["phase"] != "building", "PART_ALREADY_BUILDING")
                 gen = p["gen"] + 1
                 p.clear()
-                p.update(gen=gen, phase="building", command=cmd)
+                p.update(gen=gen, phase="building", command=cmd, **self._part_contract())
                 room.update(review=None, closed=False)
             else:
                 need(type(d.get("gen")) is int and d["gen"] == p["gen"]
@@ -340,7 +448,7 @@ class Coordinator:
                             if (rn, pn) != (d["room"], d["part"]) and row.get("file"):
                                 need(os.path.normcase(row["file"]) != os.path.normcase(str(f)), "FILE_ALREADY_ASSIGNED")
                     p.update(phase="validating", file=str(f), saved_at=time.time(),
-                             stamp=file_stamp(f), command=None)
+                             stamp=file_stamp(f), sha256=digest(f), command=None)
                 else:
                     p.update(phase="failed", detail=name(d.get("reason")), command=None)
             return {"gen": p["gen"], "state": p["phase"]}
@@ -349,7 +457,12 @@ class Coordinator:
                          x["state"] in ("queued", "reserved", "claimed")
                          for x in s["tickets"].values()), "SW_TICKET_NOT_SETTLED")
             if op == "room-failed":
-                room.update(closed=False, failure=name(d.get("reason")))
+                reason = name(d.get("reason"))
+                room.update(closed=False, failure=reason)
+                for p in room["parts"].values():
+                    if p["phase"] in ("building", "validating") and not self._current_result(p.get("review"))["passed"]:
+                        p.update(phase="failed", detail=reason, command=None)
+                        p.pop("review", None)
                 return {"state": "failed"}
             pn = d.get("part")
             need(pn is None or (name(pn) in room["parts"] and room["type"] == "model"), "PART_UNKNOWN")
@@ -432,7 +545,9 @@ class Coordinator:
                     state = "disconnected"
                 elif state == "not_started" and waiting:
                     state = "queued"
-                rows.append({"name": pn, "room": rn, "room_type": room["type"],
+                page = self._part_page(d["task"], rn, pn, p, part_verdict["passed"])
+                rows.append({k: page[k] for k in ("fidelity", "min_fidelity", "degrade_path", "dirty")} |
+                            {"name": pn, "room": rn, "room_type": room["type"],
                              "state": state, "label": LABELS[state], "generation": p["gen"],
                              "detail": p.get("detail") or "；".join(part_verdict["blockers"]) or LABELS[state],
                              "file": p.get("file"), "has_report": part_verdict["passed"],
@@ -442,8 +557,10 @@ class Coordinator:
         return {"task": d["task"], "revision": s["rev"], "parts": rows, "rooms": rooms,
                 "summary": {"counts": counts, "total": len(rows), "done": counts.get("done", 0)},
                 "pulse_alive": online, "quarantined": s["frozen"], "generated_at": time.time(),
-                "sw": {"owner": {k: owner[k] for k in ("task", "room", "state")} if owner else None,
-                       "queue": [{k: q[k] for k in ("task", "room")} for q in self._queue(s)]}}
+                "sw": {"owner": ({k: owner[k] for k in ("task", "room", "state")} |
+                                 {"command": owner.get("current")}) if owner else None,
+                       "queue": [{k: q[k] for k in ("task", "room")} | {"position": i}
+                                 for i, q in enumerate(self._queue(s), 1)]}}
 
     def _review(self, op, d):
         with self.cv:
@@ -499,7 +616,7 @@ class Coordinator:
                 subject["review"] = result
                 if not result["passed"]:
                     new_task["rooms"][rn]["closed"] = False
-            self._commit(now)
+            self._commit(now, op, d)
         return {k: v for k, v in result.items() if k not in ("files", "registry_rows")}
 
     def _provider(self, op, d, task, targets):
@@ -528,7 +645,230 @@ class Coordinator:
         finally:
             self.review_slots.release()
 
+    def _com(self, op, d):
+        from com_gate import validated_steps
+        need(self.com_runner is not None, "COM_GATE_NOT_CONFIGURED")
+        with self.cv:
+            s = self._snapshot()
+            self._tick(s)
+            self._commit(s)
+            t = self._ticket(s, d)
+            cmd = name(d.get("command"))
+            need(isinstance(d.get("lease"), str) and secrets.compare_digest(
+                t.get("lease", ""), d["lease"]), "LEASE_DENIED")
+            previous = t.get("com_jobs", {}).get(cmd)
+            if op == "com-status":
+                deadline = self._deadline(d)
+                need(previous is not None, "COM_JOB_UNKNOWN")
+                while previous["result"]["state"] == "running":
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    self.cv.wait(left)
+                    previous = self._ticket(self.state, d)["com_jobs"][cmd]
+                return previous["result"]
+            fields = {k: d.get(k) for k in ("part", "gen", "file", "material", "steps")}
+            if previous:
+                need(fields == previous["input"], "COM_REPLAY_CONFLICT")
+                return previous["result"]
+            t = self._claimed(s, d)
+            task, room = self._room(s, d)
+            need(not self.com_busy and t["current"] is None, "COM_WORKER_BUSY")
+            need(room["type"] == "model", "COM_ROOM_UNSUPPORTED")
+            pn = name(d.get("part"))
+            p = room["parts"].get(pn)
+            need(p is not None and type(d.get("gen")) is int and d["gen"] == p["gen"],
+                 "STALE_GENERATION_OR_PART")
+            steps = validated_steps(d.get("steps"))
+            material = name(d.get("material"))
+            file = name(d.get("file"), 1024)
+            need(not any(c in file for c in '<>"|?*'), "INVALID_FILE")
+            rel = Path(file)
+            need(not rel.drive and not rel.root, "INVALID_FILE")
+            need(all(seg not in (".", "..") and seg == seg.rstrip(" .") and ":" not in seg
+                     for seg in rel.parts if seg != rel.anchor), "INVALID_FILE")
+            raw = Path(task["root"]) / rel
+            parent = inside(task["root"], str(raw.parent))
+            target = parent / raw.name
+            need(parent.is_dir() and target.suffix.casefold() == ".sldprt"
+                 and not os.path.lexists(target), "NEW_OUTPUT_REQUIRED")
+            for rn, other in task["rooms"].items():
+                for part, row in other["parts"].items():
+                    if (rn, part) != (d["room"], pn) and row.get("file"):
+                        need(Path(row["file"]) != target, "FILE_ALREADY_ASSIGNED")
+            gen = p["gen"] + 1
+            p.clear()
+            p.update(gen=gen, phase="building", command=cmd, **self._part_contract())
+            room.update(review=None, closed=False)
+            t["current"] = cmd
+            accepted = {"state": "running", "command": cmd, "gen": gen, "part": pn,
+                        "started_at": time.time()}
+            t.setdefault("com_jobs", {})[cmd] = {"input": fields, "result": accepted}
+            work = {"op": "build", "file": str(target), "root": task["root"],
+                    "room": d["room"], "material": material, "steps": steps}
+            self._commit(s, "com-build", d | accepted)
+            self.com_busy = True
+            try:
+                Thread(target=self._run_com, args=(dict(d), work, accepted), daemon=True).start()
+            except Exception:
+                self.com_busy = False
+                s = self._snapshot()
+                s["frozen"] = True
+                self._commit(s)
+                raise
+            return accepted
+
+    def _run_com(self, d, work, accepted):
+        cmd = d["command"]
+        path = Path(work["file"])
+        error, cleanup, stamp, report = None, None, None, None
+        try:
+            report = self.com_runner(work)
+            need(report.get("closed") is True and report.get("documents") == 0
+                 and type(report.get("pid")) is int, "CLOSE_NOT_CONFIRMED")
+            stamp = file_stamp(path)
+            need(not path.is_symlink() and path.resolve() == path and digest(path) == report["sha256"]
+                 and file_stamp(path) == stamp, "COM_OUTPUT_CHANGED")
+        except Exception as e:
+            error = (str(e) or type(e).__name__)[:700]
+            try:
+                self.com_runner.recover_owned(error)
+            except Exception as e:
+                cleanup = (str(e) or type(e).__name__)[:500]
+        with self.cv:
+            try:
+                s = self._snapshot()
+                self._tick(s)
+                t = self._ticket(s, d)
+                _, room = self._room(s, d)
+                p = room["parts"][d["part"]]
+                result = dict(accepted, finished_at=time.time())
+                if error:
+                    result.update(state="quarantined" if cleanup else "failed", error=error,
+                                  recovery_error=cleanup, recovered=cleanup is None)
+                    if os.path.lexists(path):
+                        result["unverified_file"] = str(path)
+                    p.update(phase="failed", detail=error, command=None)
+                    if cleanup:
+                        s["frozen"] = True
+                else:
+                    result.update(report, state="saved", file=str(path))
+                    p.update(phase="validating", file=str(path), saved_at=time.time(),
+                             stamp=stamp, sha256=report["sha256"], command=None)
+                t["com_jobs"][cmd]["result"] = result
+                if not cleanup:
+                    t.update(current=None, state="released")
+                    s["owner"] = None
+                    # Heartbeat loss remains visible. A drained worker has no lease to carry over.
+                    if not s["frozen"]:
+                        self._advance(s)
+                self._commit(s, "com-complete", d | result)
+            except Exception as e:
+                # Keep the original ticket in-flight if durable commit fails.
+                print(f"COM completion commit failed: {e!r}", file=sys.stderr)
+                self.state["frozen"] = True
+                t = self.state["tickets"][d["ticket"]]
+                t["com_jobs"][cmd]["result"].update(state="quarantined", error="COM_COMMIT_FAILED")
+            finally:
+                self.com_busy = False
+                self.cv.notify_all()
+
+    def _part_contract(self):
+        row = self.pages["mon.part.<part>"]
+        return {k: row[k] for k in ("min_fidelity", "degrade_path")}
+
+    def _part_page(self, task, room, name, part, passed):
+        spec = self.pages["mon.part.<part>"]
+        phase = part["phase"]
+        fidelity = "Full" if passed else "Structured" if part.get("file") else "Pointer"
+        fidelity = self.contract.FIDELITY[min(self.contract.FIDELITY.index(fidelity),
+                                              self.contract.FIDELITY.index(spec["min_fidelity"]))]
+        file = part.get("file")
+        observed = None
+        if file and not passed:
+            try:
+                observed = file_stamp(Path(file))
+            except OSError:
+                pass
+        return {"id": "mon.part:" + self.contract.canonical([task, room, name]),
+                "task": task, "room": room, "part": name, "phase": phase, "generation": part["gen"],
+                "type": spec["type"], "scope": spec["scope"],
+                "source": part.get("file") or "POST /v1/page-status",
+                "fingerprint_kind": "model" if part.get("sha256") else "page",
+                "details": {k: part[k] for k in ("file", "saved_at", "sha256", "stamp") if k in part},
+                "checks": (part.get("review") or {}).get("checks", {}) if passed else {},
+                "sha256": part.get("sha256") or self.contract.fingerprint(
+                    {k: part.get(k) for k in ("phase", "gen", "command", "stamp", "file")}),
+                "file_stamp_matches": observed == part.get("stamp") if file and not passed else None,
+                "fidelity": fidelity, **self._part_contract(),
+                "dirty": phase in ("building", "validating") and not passed}
+
+    def _page_rows(self, s, task=None):
+        rows = []
+        for tid, t in s["tasks"].items():
+            if task is not None and task != tid:
+                continue
+            for rn, room in t["rooms"].items():
+                for pn, p in room["parts"].items():
+                    rows.append(self._part_page(tid, rn, pn, p, self._current_result(p.get("review"))["passed"]
+                                if room["type"] == "model" else self._room_result(room)["passed"]))
+        owner = s["tickets"].get(s["owner"])
+        spec = self.pages["mon.owner"]
+        rows.append({"id": "mon.owner", "task": owner["task"] if owner else None,
+                     "type": spec["type"], "scope": spec["scope"], "fidelity": "Structured",
+                     "min_fidelity": spec["min_fidelity"], "degrade_path": spec["degrade_path"],
+                     "source": "POST /v1/page-status", "phase": owner["state"] if owner else "unowned",
+                     "dirty": bool(owner and owner["state"] == "claimed"),
+                     "room": owner["room"] if owner else None,
+                     "command": owner.get("current") if owner else None})
+        return rows
+
+    def _dirty_pages(self, s):
+        return sorted(row["id"] for row in self._page_rows(s) if row["dirty"])
+
+    def _inspect_pages(self, op, d):
+        with self.cv:
+            s = self._snapshot()
+            self._tick(s)
+            self._commit(s)
+            need(d.get("epoch") == s["epoch"] or op == "page-status", "HOST_EPOCH")
+            task = d.get("task")
+            if op == "page-status":
+                if task is not None:
+                    name(task)
+                rows = self._page_rows(s, task)
+                return {"task": task, "revision": s["rev"], "pages": rows,
+                        "dirty_pages": sorted(row["id"] for row in rows if row["dirty"])}
+            name(task)
+            cursor, limit = d.get("since_rev", 0), d.get("limit", 100)
+            need(type(cursor) is int and 0 <= cursor <= s["rev"] and
+                 type(limit) is int and 1 <= limit <= 500, "AUDIT_CURSOR_INVALID")
+            records = self.db.execute(
+                "SELECT e.rev,e.op,e.payload,e.ts FROM event_tasks t JOIN events e ON e.rev=t.rev "
+                "WHERE t.task=? AND t.rev>? ORDER BY t.rev LIMIT ?", (task, cursor, limit + 1)).fetchall()
+            events = []
+            for rev, kind, payload, ts in records[:limit]:
+                row = json.loads(payload)
+                row["tasks"] = [task]
+                row["tickets"] = [x for x in row["tickets"] if x["task"] == task]
+                if row["scope"].get("task") != task:
+                    row["scope"] = {}
+                    row.pop("fault", None)
+                    row.pop("state", None)
+                    row.pop("model_sha256", None)
+                    row.pop("spec_sha256", None)
+                row["dirty_pages"] = [page for page in row.get("dirty_pages", [])
+                                      if page == "mon.owner" and any(x["task"] == task for x in row["tickets"])
+                                      or page.startswith("mon.part:") and json.loads(page[9:])[0] == task]
+                events.append({"rev": rev, "op": kind, "payload": row, "ts": ts})
+            return {"events": events, "revision": s["rev"], "has_more": len(records) > limit,
+                    "next_since_rev": events[-1]["rev"] if events else cursor}
+
     def call(self, op, d):
+        if op in ("audit", "page-status"):
+            return self._inspect_pages(op, d)
+        if op in ("com-build", "com-status"):
+            return self._com(op, d)
         if op == "wait-lock":
             return self._wait_lock(d)
         if op in ("review-room", "review-part", "verify-task", "close-room"):
@@ -572,7 +912,7 @@ class Coordinator:
             s = self._snapshot()
             out = self._mutate(s, op, d)
             self._advance(s)
-            self._commit(s)
+            self._commit(s, op, d)
             return out
 
 
@@ -631,7 +971,7 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(raw)
             need(isinstance(data, dict), "OBJECT_REQUIRED")
             op = self.path[4:]
-            if op in ("wait-lock", "wait-rooms"):
+            if op in ("wait-lock", "wait-rooms", "com-status"):
                 need(self.server.wait_slots.acquire(blocking=False), "WAIT_CAPACITY")
                 try:
                     result = {"ok": True} | self.server.monitor.call(op, data)
@@ -641,10 +981,22 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"ok": True} | self.server.monitor.call(op, data)
         except (Fault, OSError, ValueError) as e:
             result = {"ok": False, "error": str(e) or type(e).__name__}
+            if result["error"] == "DIRTY_PAGES_PENDING":
+                page_status = self.server.monitor.call("page-status", {})
+                result.update(dirty_pages=page_status["dirty_pages"], revision=page_status["revision"])
             status = 409 if status == 200 else status
         except Exception as e:
+            # 【可观测性修复 2026-11-13】业务拒绝码（Fault）可能被包在别的
+            #   异常里冒出来（例如 com_probe 在 _attach 里被调用，异常穿过
+            #   Condition 上下文）。原实现一律吞成 MONITOR_INTERNAL_ERROR，
+            #   使用者只看到"内部错误"，真实原因（UNMANAGED_SW_RUNNING /
+            #   COM_WORKER_STILL_RUNNING …）全丢 —— 排查时极难定位。
+            code = fault_code(str(e)) or fault_code(getattr(e, "code", "") or "")
             print(f"handler failure: {e!r}", file=sys.stderr)
-            status, result = 500, {"ok": False, "error": "MONITOR_INTERNAL_ERROR"}
+            if code:
+                status, result = 409, {"ok": False, "error": code}
+            else:
+                status, result = 500, {"ok": False, "error": "MONITOR_INTERNAL_ERROR"}
         body = json.dumps(result, ensure_ascii=False).encode()
         try:
             self.send_response(status)
@@ -667,24 +1019,34 @@ def main():
     parser.add_argument("--port", type=int, default=18779)
     parser.add_argument("--dsh-tools", type=Path)
     parser.add_argument("--simulation-verifier", type=Path)
+    parser.add_argument("--solidworks-exe", type=Path, required=True)
+    parser.add_argument("--com-timeout", type=int, default=2700,
+                        help="Seconds for a submitted COM job (including SW startup)")
     args = parser.parse_args()
+    need(args.dsh_tools and 1 <= args.com_timeout <= 3600, "COM_SETTINGS_INVALID")
+    exe = args.solidworks_exe.resolve(strict=True)
+    need(exe.is_file() and exe.name.casefold() == "sldworks.exe", "SOLIDWORKS_EXE_INVALID")
+    from com_gate import OwnedSolidWorks, machine_mutex
     args.data.mkdir(parents=True, exist_ok=True)
     if args.dsh_tools:
         args.dsh_tools = args.dsh_tools.resolve(strict=True)
         need((args.dsh_tools / "defense_gate.py").is_file(), "DSH_TOOLS_INVALID")
+        load_contract(args.dsh_tools)
     if args.simulation_verifier:
         args.simulation_verifier = args.simulation_verifier.resolve(strict=True)
         need(args.simulation_verifier.is_file(), "SIMULATION_VERIFIER_INVALID")
-    with process_lock(args.data / "monitor.lock"):
+    with machine_mutex(r"Global\DSH_SW_COM_Service_v1"), process_lock(args.data / "monitor.lock"):
         token_file = args.data / "host.token"
         if not token_file.exists():
             with token_file.open("x", encoding="ascii") as f:
                 f.write(secrets.token_urlsafe(48) + "\n")
         token = token_file.read_text(encoding="ascii").strip()
         need(len(token) >= 40 and token.isascii(), "TOKEN_FILE_INVALID")
+        sw = OwnedSolidWorks(str(exe), str(args.dsh_tools), args.com_timeout)
         monitor = Coordinator(args.data / "monitor.sqlite3", args.workspace_root,
                               str(args.dsh_tools) if args.dsh_tools else None,
-                              str(args.simulation_verifier) if args.simulation_verifier else None)
+                              str(args.simulation_verifier) if args.simulation_verifier else None,
+                              com_runner=sw, com_probe=sw.probe)
         with HTTP(("127.0.0.1", args.port), Handler) as server:
             server.token, server.monitor = token, monitor
             print(f"DSH monitor http://127.0.0.1:{server.server_port} | token: {token_file}", flush=True)

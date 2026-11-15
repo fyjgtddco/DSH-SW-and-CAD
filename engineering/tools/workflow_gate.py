@@ -5804,6 +5804,10 @@ def cmd_recover():
     _root_guard = _require_root_session("recover")
     if _root_guard:
         return _root_guard
+    from memory_gate import lifecycle_guard
+    _memory_guard = lifecycle_guard()
+    if _memory_guard:
+        return _memory_guard
     # ── 【2026-10-28 重构】优先用 mode_gate 的权威看板 ──────────────────
     # 原实现自己维护一套僵尸判定：active 且无 subagent 登记 → zombie → 建议 reset。
     # 实测后果：主对话漏调 subagent-assign（三个小屋全漏），recover 把仍在跑
@@ -5977,6 +5981,10 @@ def cmd_reset():
     _root_guard = _require_root_session("reset")
     if _root_guard:
         return _root_guard
+    from memory_gate import lifecycle_guard
+    _memory_guard = lifecycle_guard()
+    if _memory_guard:
+        return _memory_guard
     state = _fresh_state()
     save_state(state)
     _rooms_cleared = None
@@ -6608,7 +6616,13 @@ def _main_body():
         print(json.dumps(cmd_work_dir(sys.argv[2] if len(sys.argv) > 2 else None),
                          ensure_ascii=False, indent=2))
     elif cmd in ("gate-summary", "gate_summary", "summary"):
-        print(json.dumps(cmd_gate_summary(), ensure_ascii=False, indent=2))
+        import argparse as _argparse
+        from memory_gate import fidelity_view
+        _ap = _argparse.ArgumentParser()
+        _ap.add_argument("--fidelity", choices=("full", "compressed", "structured", "pointer"))
+        _ns = _ap.parse_args(sys.argv[2:])
+        print(json.dumps(fidelity_view(cmd_gate_summary(), _ns.fidelity, "workflow_gate.py gate-summary"),
+                         ensure_ascii=False, indent=2))
     # ── 【A9 修复】只读：输出【脚本读盘生成】的状态行 ──────────────────────
     # 摘要/压缩前跑一次，把它原样贴进摘要；模型只写叙述，不写事实。
     elif cmd in ("state-line", "state_line"):
@@ -6675,7 +6689,12 @@ def _main_body():
         if _m2c is None:
             print(json.dumps({"ok": False, "error": _m2e}, ensure_ascii=False, indent=2))
             sys.exit(1)
-        _r = _m2c.stage_status(_m2_work_dir())
+        import argparse as _argparse
+        from memory_gate import fidelity_view
+        _ap = _argparse.ArgumentParser()
+        _ap.add_argument("--fidelity", choices=("full", "compressed", "structured", "pointer"))
+        _ns = _ap.parse_args(sys.argv[2:])
+        _r = fidelity_view(_m2c.stage_status(_m2_work_dir()), _ns.fidelity, "mode2_flow.py stage-status")
         print(json.dumps(_r, ensure_ascii=False, indent=2))
         sys.exit(0 if _r.get("ok") else 1)
     elif cmd in ("pre-delivery", "predelivery"):

@@ -252,6 +252,10 @@
                   · 波 3 一次出图很多件（10 张图 + DWG + CADX）时，可再拆成 2 个子代理
                     （零件图 / 总装图）分别串行跑，别让一个屋扛全部。
 
+                【记忆契约】压缩遵守 memory_gate.py compaction-prep 返回的保真红线。
+                reset/recover 前先过 page-check --dirty；脏页须落盘并建立检查点。
+                载荷、约束、授权和台账以当前任务磁盘文件为准；Evidence 指针需回读核实。
+                
                 【并行D】房间表以编制为准，select 给几个就开几个（空=全完成）。
                 波1 = select 返回的**全部建模房间**（数量由总计子代理决定，禁写死 3/5）：
                   close-all 关 SW 并确认无进程 → 各房间 room-start → 同一条回复连续 subagent_fork 全部，

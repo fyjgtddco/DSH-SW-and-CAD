@@ -27,7 +27,15 @@ export async function createMonitorHost({ url = 'http://127.0.0.1:18779', tokenF
       throw new TransportError('MONITOR_UNREACHABLE', { cause: error });
     }
     if (result.error === 'WAIT_CAPACITY') throw new TransportError('WAIT_CAPACITY');
-    if (!response.ok || result.ok !== true) throw new Error(result.error || 'MONITOR_REJECTED');
+    if (!response.ok || result.ok !== true) {
+      const error = new Error(result.error || 'MONITOR_REJECTED');
+      error.code = result.error;
+      if (result.error === 'DIRTY_PAGES_PENDING') {
+        error.dirty_pages = result.dirty_pages;
+        error.revision = result.revision;
+      }
+      throw error;
+    }
     return result;
   }
 
@@ -50,11 +58,12 @@ export async function createMonitorHost({ url = 'http://127.0.0.1:18779', tokenF
 
   function startWaitJob(jobs, { owner, kind, payload }) {
     if (!jobs || typeof jobs.start !== 'function') throw new Error('DSH_JOBS_UNAVAILABLE');
-    if (kind !== 'wait-lock' && kind !== 'wait-rooms') throw new Error('INVALID_WAIT_JOB');
+    if (!['wait-lock', 'wait-rooms', 'com-status'].includes(kind)) throw new Error('INVALID_WAIT_JOB');
     if (!owner) throw new Error('DSH_JOB_OWNER_REQUIRED');
     return jobs.start({
       kind: 'command', owner,
-      label: kind === 'wait-lock' ? '等待外部监控器分配 SW 锁' : '等待外部监控器确认房间收尾',
+      label: { 'wait-lock': '等待 COM 门卫分配 SW 锁', 'wait-rooms': '等待外部监控器确认房间收尾',
+        'com-status': '等待 COM 建模、保存和关档' }[kind],
       run: () => {
         const abort = new AbortController();
         let settled = false;
@@ -64,7 +73,8 @@ export async function createMonitorHost({ url = 'http://127.0.0.1:18779', tokenF
               try {
                 const result = await rpc(kind, { ...payload, timeout: 20 }, abort.signal);
                 if (abort.signal.aborted) break;
-                if (!['queued', 'waiting', 'paused', 'offline', 'quarantined'].includes(result.state)) {
+                if (kind === 'com-status' && result.state !== 'running') return JSON.stringify(result);
+                if (!['queued', 'waiting', 'paused', 'offline', 'quarantined', 'running'].includes(result.state)) {
                   return JSON.stringify(result);
                 }
                 if (['paused', 'offline', 'quarantined'].includes(result.state)) {
@@ -100,8 +110,65 @@ export async function createMonitorHost({ url = 'http://127.0.0.1:18779', tokenF
     });
   }
 
+  function startComBuildJob(jobs, { owner, task, room, session, recipe }) {
+    if (!jobs || typeof jobs.start !== 'function' || !owner || !task || !room || !session) {
+      throw new Error('DSH_COM_JOB_SCOPE_REQUIRED');
+    }
+    const scope = { task, room, session, ticket: randomUUID() };
+    const command = randomUUID();
+    const input = Object.fromEntries(['part', 'gen', 'file', 'material', 'steps'].map(key => [key, recipe[key]]));
+    return jobs.start({
+      kind: 'command', owner, label: 'COM 门卫：排队、建模、保存和关档',
+      run: () => {
+        const abort = new AbortController();
+        let lease;
+        let submitting = false;
+        const retry = async (op, payload) => {
+          while (!abort.signal.aborted) {
+            try { return await rpc(op, payload, abort.signal); }
+            catch (error) {
+              if (!(error instanceof TransportError) || abort.signal.aborted) throw error;
+              await sleep(1000, undefined, { signal: abort.signal });
+            }
+          }
+          throw new Error('COM_WAIT_CANCELLED');
+        };
+        const done = (async () => {
+          try {
+            let state = await retry('request', scope);
+            while (['queued', 'quarantined', 'offline'].includes(state.state)) {
+              if (state.state !== 'queued') await sleep(1000, undefined, { signal: abort.signal });
+              state = await retry('wait-lock', { ...scope, timeout: 20 });
+            }
+            if (state.state !== 'reserved') return JSON.stringify({ ok: false, ...state });
+            ({ lease } = await retry('claim', scope));
+            if (abort.signal.aborted) throw new Error('COM_WAIT_CANCELLED');
+            const scoped = { ...scope, lease, command };
+            submitting = true;
+            state = await retry('com-build', { ...input, ...scoped });
+            while (state.state === 'running') {
+              state = await retry('com-status', { ...scoped, timeout: 20 });
+            }
+            return JSON.stringify({ ...state, ok: state.state === 'saved' });
+          } catch (error) {
+            return JSON.stringify({ ok: false, state: abort.signal.aborted ? 'cancelled' : 'attention',
+              error: error.message, command });
+          } finally {
+            // A lost submit response can mean that SW is already running. Only the broker may release it.
+            if (!submitting) {
+              const op = lease ? 'release' : 'cancel';
+              try { await rpc(op, { ...scope, lease, drained: true }, AbortSignal.timeout(2000)); }
+              catch { /* queued ticket expires on reaching the front; an idle claim also expires */ }
+            }
+          }
+        })();
+        return { done, cancel: () => abort.abort() };
+      },
+    });
+  }
+
   return {
-    epoch, rpc, startHeartbeat, startWaitJob,
+    epoch, rpc, startHeartbeat, startWaitJob, startComBuildJob,
     stopHeartbeat() { clearInterval(heartbeat); heartbeat = undefined; },
   };
 }

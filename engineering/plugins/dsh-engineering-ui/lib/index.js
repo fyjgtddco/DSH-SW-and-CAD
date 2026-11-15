@@ -80,6 +80,7 @@ import { installJobWaitGuard } from './job-wait-guard.js';
 // 【外部监控器接入】SW 使用权/排队/等待/逐零件看板的唯一权威在外部服务。
 // 本模块只做宿主桥（token+epoch 留在宿主内存，Python 侧不可见）。
 import { MonitorBridge, CONFIG_NAME as SW_MONITOR_CONFIG_NAME } from './sw-monitor.js';
+import { installMemoryTrace, memoryPageRoute } from './memory-contract.js';
 // 【A4】错误码归一 + 退避（纯函数模块，可脱离宿主单测）
 import { classifyModelError, backoffMsOf } from './model-errors.js';
 // 【BUG-A1/A11/A14/B1 修复】收尾守卫的"可判定事实"层（纯函数、无副作用）。
@@ -5535,6 +5536,22 @@ export function apply(ctx) {
   // 作用域：只有【工程模式】的会话才注入（用户明确要求）。
   //   判据优先用会话头的 agentPreset，缺失时回落扫事件（与 client 半一致）。
   const PERSONA_SECTION = 'dsh-engineering-ui:user-persona';
+
+  const memoryConfig = () => {
+    const tools = findToolsDir();
+    const python = resolvePython();
+    if (!tools || !python) throw new Error('PAGE_TOOLS_UNAVAILABLE');
+    return { tools, python, stateDir: process.env.DSH_STATE_DIR || tools };
+  };
+  disposers.push(ctx.webServer.register(memoryPageRoute(guardRoute, send, memoryConfig)));
+  disposers.push(installMemoryTrace(ctx, (exec) => {
+    const agent = exec?.agent;
+    if (!isEngineeringAgent(agent)) return null;
+    const { stateDir } = memoryConfig();
+    const task = swMonitorBridge?.currentTask();
+    const session = String(agent.session?.id || agent.id || '');
+    return { stateDir, task, session };
+  }));
 
   /** 该 agent 是否为工程模式会话。 */
   function isEngineeringAgent(agent) {

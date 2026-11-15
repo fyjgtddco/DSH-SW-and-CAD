@@ -42,7 +42,7 @@ const OPS = new Set([
   'board', 'wait-rooms', 'wait-lock',
   'review-part', 'review-room', 'close-room', 'verify-task',
   'reopen-room', 'room-failed', 'plan',
-  'status', 'attach', 'recover',
+  'status', 'attach', 'recover', 'page-status', 'audit',
 ]);
 
 /** 需要 task 作用域的操作（监控器按 task 隔离房间与票据）。 */
@@ -51,7 +51,7 @@ const NEEDS_TASK = new Set([
   'part-start', 'part-saved', 'part-failed',
   'board', 'wait-rooms', 'wait-lock', 'plan',
   'review-part', 'review-room', 'close-room', 'verify-task',
-  'reopen-room', 'room-failed',
+  'reopen-room', 'room-failed', 'audit',
 ]);
 
 /** 需要长时间阻塞的操作（HTTP 等待窗给足，其余给短窗）。 */
@@ -169,12 +169,14 @@ export class MonitorBridge {
   }
 
   /** 首次接管：attach 且要求 drained。返回监控器状态（ready / quarantined）。 */
-  async attach({ drained = false, recover = false, reason = '' } = {}) {
+  async attach({ drained = false, recover = false, reason = '', dirty_pages, observed_rev } = {}) {
     const host = await this.connect();
     if (!host) return { state: 'unattached', error: this.lastError };
     const payload = { drained: !!drained };
     if (recover) {
       payload.reason = String(reason || '').trim();
+      payload.dirty_pages = dirty_pages;
+      payload.observed_rev = observed_rev;
       if (payload.reason.length < 5) {
         throw new Error('恢复必须写明原因（至少 5 个字符），这条要求是监控器侧的硬约束');
       }
@@ -209,6 +211,7 @@ export class MonitorBridge {
         drained: payload.drained === true,
         recover: op === 'recover',
         reason: payload.reason,
+        dirty_pages: payload.dirty_pages, observed_rev: payload.observed_rev,
       });
       if (this.attached) this.startHeartbeat();
       return out;
@@ -219,7 +222,7 @@ export class MonitorBridge {
       e.code = 'MONITOR_UNAVAILABLE';
       throw e;
     }
-    if (!this.attached) {
+    if (!this.attached && op !== 'page-status') {
       // 接管前必须先 attach(drained)。这里不做"自动 drained"的默认放行：
       // 没确认排空就 attach，等于让监控器在旧命令还在跑的时候放心发锁。
       const e = new Error('MONITOR_NOT_ATTACHED: 监控器尚未 attach(drained)');
@@ -244,6 +247,13 @@ export class MonitorBridge {
         throw e;
       }
       body = Object.assign({}, body, { task });
+    }
+    if (op === 'audit' || op === 'page-status') {
+      const current = this.currentTask();
+      if (op === 'audit' && (!current || body.task !== current) ||
+          op === 'page-status' && body.task && body.task !== current) {
+        throw new Error('PAGE_TASK_SCOPE_MISMATCH');
+      }
     }
     const out = await host.rpc(op, body);
     if (op === 'release' && body.room) this.tickets.delete(String(body.room));

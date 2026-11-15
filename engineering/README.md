@@ -371,6 +371,25 @@ room-board 自报 `hold_mode=room`，实际 **8 对构建区间重叠**，最长
 `wait-rooms --timeout 900` 上一动不动，退出即被收尾守卫判"没干活"。
 → 现在排队时命令立刻返回 **`job_id`**，等待发生在 DSH 后台任务里。
 
+### 2026-11-13 更新：COM 门卫版（ClawVM 接入）
+
+新版监控器把"发许可"升级成"由门卫亲自执行 COM"，模型不再自己驱动 SolidWorks。
+
+| 变化 | 说明 |
+|---|---|
+| 新增 `com_gate.py` | 白名单建模：只执行 `sketch/circle/rectangle/line/end_sketch/extrude/cut/gear/helix_gear`，实际 COM 对象留在门卫启动的独立进程里 |
+| `com-build` / `com-status` | 替代旧的 `permit/done`。旧入口在新版监控器上会被拒绝 |
+| 保存即提交 | 门卫保存 → 核对文件 → 确认关档，才写零件看板并交接 FIFO |
+| 记忆契约 | 新增 `memory_gate.py` / `page_contract.py` / `pages_manifest.json`，四档摘要 + 磁盘检查点 + 脏页检测 |
+| 审计与重放 | `POST /v1/audit`（按 `next_since_rev` 翻页）+ `trace_replay.py` |
+| 宿主路由 | 新增 `GET /dsh-engineering-ui/page-table`（走既有 `guardRoute`） |
+
+**本版白名单只覆盖独立零件建模**：装配、工程图、几何读回、真实 SW Simulation
+仍无对应固定处理器，启用门卫时这些路线要**明确阻塞**，不能两套入口并用。
+
+> ⚠️ 旧 `sw-monitor-permit/done` 建模入口必须迁到 `com-build/com-status` 后再切换，
+> 不能只替换监控器而让旧 DSH 继续建模（教程 0 节 D）。
+
 ### 现在谁负责
 
 | 关注点 | 入口 | 位置 |

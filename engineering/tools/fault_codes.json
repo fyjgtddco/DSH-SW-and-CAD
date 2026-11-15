@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "codes": [
+    {
+      "code": "DIRTY_PAGES_PENDING",
+      "side": "both",
+      "scope": "task",
+      "category": "durability",
+      "cause": "脏页尚未建立检查点，或恢复清单/修订不匹配。",
+      "replay_hint": "重放 page-status 后发生状态更新再 recover。"
+    },
+    {
+      "code": "PAGE_MANIFEST_INVALID",
+      "side": "both",
+      "scope": "task",
+      "category": "integrity",
+      "cause": "页面清单缺字段、重复或降档序列非法。",
+      "replay_hint": "加载同一份清单并去掉或重复页面 ID。"
+    },
+    {
+      "code": "PAGE_CHECK_FAILED",
+      "side": "main",
+      "scope": "task",
+      "category": "durability",
+      "cause": "无法读取权威页面或监控器。",
+      "replay_hint": "断开监控后执行 page-check。"
+    },
+    {
+      "code": "PAGE_MINIMUM_OVER_BUDGET",
+      "side": "main",
+      "scope": "task",
+      "category": "durability",
+      "cause": "保真下限集合大于摘要预算。",
+      "replay_hint": "缩小 compaction-prep 预算。"
+    },
+    {
+      "code": "PAGE_CHANGED_DURING_CHECKPOINT",
+      "side": "main",
+      "scope": "task",
+      "category": "concurrency",
+      "cause": "建立检查点时源文件变化。",
+      "replay_hint": "并发写入权威状态并做检查点。"
+    },
+    {
+      "code": "ROOT_SESSION_REQUIRED",
+      "side": "main",
+      "scope": "session",
+      "category": "authority",
+      "cause": "当前会话不是允许的主会话。",
+      "replay_hint": "由子会话调用 reset。"
+    },
+    {
+      "code": "PART_ALREADY_BUILT",
+      "side": "main",
+      "scope": "part",
+      "category": "dedup",
+      "cause": "设计台账和磁盘已存在该件。",
+      "replay_hint": "使用相同零件版本再次申请。"
+    }
+  ]
+}

@@ -1,0 +1,133 @@
+{
+  "schema": 1,
+  "codes": [
+    {
+      "code": "DIRTY_PAGES_PENDING",
+      "side": "both",
+      "scope": "task",
+      "category": "durability",
+      "cause": "脏页尚未建立检查点，或恢复清单/修订不匹配。",
+      "replay_hint": "重放 page-status 后发生状态更新再 recover。"
+    },
+    {
+      "code": "PAGE_MANIFEST_INVALID",
+      "side": "both",
+      "scope": "task",
+      "category": "integrity",
+      "cause": "页面清单缺字段、重复或降档序列非法。",
+      "replay_hint": "加载同一份清单并去掉或重复页面 ID。"
+    },
+    {
+      "code": "TICKET_SCOPE",
+      "side": "monitor",
+      "scope": "ticket",
+      "category": "concurrency",
+      "cause": "票据与任务、房间或会话不一致。",
+      "replay_hint": "用其他会话的票调用 claim。"
+    },
+    {
+      "code": "LEASE_DENIED",
+      "side": "monitor",
+      "scope": "ticket",
+      "category": "concurrency",
+      "cause": "未持有有效票或已过期。",
+      "replay_hint": "用错误 lease 调 com-build。"
+    },
+    {
+      "code": "EVIDENCE_CHANGED",
+      "side": "monitor",
+      "scope": "part",
+      "category": "integrity",
+      "cause": "验收输入文件或凭据发生变化。",
+      "replay_hint": "验收后修改模型或台账。"
+    },
+    {
+      "code": "STALE_GENERATION",
+      "side": "monitor",
+      "scope": "part",
+      "category": "concurrency",
+      "cause": "事件中的零件版本不是当前版本。",
+      "replay_hint": "在重建后重放旧保存事件。"
+    },
+    {
+      "code": "STALE_GENERATION_OR_PART",
+      "side": "monitor",
+      "scope": "part",
+      "category": "concurrency",
+      "cause": "COM 请求的零件不存在或版本旧。",
+      "replay_hint": "用旧 generation 提交 com-build。"
+    },
+    {
+      "code": "RECOVERY_PROOF_REQUIRED",
+      "side": "monitor",
+      "scope": "task",
+      "category": "lifecycle",
+      "cause": "未提交可信排空确认和恢复理由。",
+      "replay_hint": "隔离时省略 drained/reason。"
+    },
+    {
+      "code": "COM_GATE_REQUIRED",
+      "side": "monitor",
+      "scope": "ticket",
+      "category": "authority",
+      "cause": "旧命令记账入口在 COM 门卫模式禁用。",
+      "replay_hint": "接管后调用 begin 或 part-saved。"
+    },
+    {
+      "code": "COM_OPERATION_DENIED",
+      "side": "monitor",
+      "scope": "part",
+      "category": "authority",
+      "cause": "操作未进入门卫白名单。",
+      "replay_hint": "提交 Dispatch 或任意宏。"
+    },
+    {
+      "code": "COM_TIMEOUT",
+      "side": "monitor",
+      "scope": "part",
+      "category": "lifecycle",
+      "cause": "COM worker 超过执行期限。",
+      "replay_hint": "模拟阻塞 worker 后观察回收和排队。"
+    },
+    {
+      "code": "COM_COMMIT_FAILED",
+      "side": "monitor",
+      "scope": "part",
+      "category": "durability",
+      "cause": "完成事件和状态未能一起落盘。",
+      "replay_hint": "注入 SQLite 写入失败。"
+    },
+    {
+      "code": "COM_REPLAY_CONFLICT",
+      "side": "monitor",
+      "scope": "part",
+      "category": "concurrency",
+      "cause": "同一作业号被重放但参数不同。",
+      "replay_hint": "修改参数后重放同 command。"
+    },
+    {
+      "code": "CLOSE_NOT_CONFIRMED",
+      "side": "monitor",
+      "scope": "part",
+      "category": "lifecycle",
+      "cause": "未能验证已关闭建模文档。",
+      "replay_hint": "让 CloseDoc 返回但文档仍存在。"
+    },
+    {
+      "code": "SW_INSTANCE_CHANGED_OR_MULTIPLE",
+      "side": "monitor",
+      "scope": "task",
+      "category": "authority",
+      "cause": "当前实例与服务持有身份不一致。",
+      "replay_hint": "模拟第二个 SW 进程。"
+    },
+    {
+      "code": "AUDIT_CURSOR_INVALID",
+      "side": "monitor",
+      "scope": "task",
+      "category": "integrity",
+      "cause": "事件分页参数超界。",
+      "replay_hint": "请求负数 since_rev。"
+    }
+  ]
+}

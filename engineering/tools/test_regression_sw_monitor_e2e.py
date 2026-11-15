@@ -167,10 +167,44 @@ class FakeHost(BaseHTTPRequestHandler):
         pass
 
 
+def _summary(ok):
+    print("\n" + "=" * 70)
+    print("  PASS=%d  FAIL=%d" % (PASS, FAIL))
+    if FAILS:
+        for f in FAILS:
+            print("  - " + f)
+    return 0 if (ok and FAIL == 0) else 1
+
+
+def _sldworks_running():
+    """本机是否有 SLDWORKS.exe 在跑。
+
+    COM 门卫要求"没有任何不受它管理的 SLDWORKS 在运行"才能接管
+    （com_gate.OwnedSolidWorks._check → UNMANAGED_SW_RUNNING）。
+    开发机常开着 SW，这时 attach 会被正确拒绝 —— 那是安全行为，不是缺陷，
+    所以本测试遇到这种情况【显式跳过】并说明怎么补跑。
+    """
+    try:
+        import subprocess as _sp
+        out = _sp.run(["tasklist", "/FI", "IMAGENAME eq SLDWORKS.exe",
+                       "/FO", "CSV", "/NH"],
+                      capture_output=True, text=True, timeout=15,
+                      encoding="mbcs", errors="replace")
+        return "SLDWORKS.EXE" in (out.stdout or "").upper()
+    except Exception:
+        return False
+
+
 def main():
     print("=" * 70)
     print("外部监控器 · 端到端接入（真实 monitor.py + 假宿主）")
     print("=" * 70)
+    if _sldworks_running() and not os.environ.get("DSH_TEST_ALLOW_SW_RUNNING"):
+        print("  [SKIP] 本机有 SLDWORKS.exe 在运行。")
+        print("         COM 门卫按设计拒绝接管（UNMANAGED_SW_RUNNING）——")
+        print("         这是安全行为，不是缺陷。关闭所有 SolidWorks 后重跑本测试。")
+        print("         （临时强制跑：set DSH_TEST_ALLOW_SW_RUNNING=1）")
+        return 0
 
     tmp = tempfile.mkdtemp(prefix="swmon_e2e_")
     root = os.path.join(tmp, "ws")
@@ -178,10 +212,23 @@ def main():
     tools = HERE
     port = free_port()
     data = os.path.join(tmp, "data")
+    # 【2026-11-13 COM 门卫版】monitor.py 现在**强制**要求 --solidworks-exe，
+    #   且做两道 fail-closed 校验（防止门卫去启动一个不存在的进程却不报错）：
+    #     ① 路径必须真实存在；
+    #     ② 文件名必须正好是 sldworks.exe。
+    #   本测试只验证"锁 / 票据 / 看板"的接线契约，不真的建模 —— 所以造一个
+    #   同名占位文件即可。真实 COM 行为由 selfcheck-com.py 覆盖（3/3）。
+    _sw_dir = os.path.join(tmp, "fake_sw")
+    os.makedirs(_sw_dir, exist_ok=True)
+    _sw_exe = os.environ.get("DSH_TEST_SOLIDWORKS_EXE") or os.path.join(
+        _sw_dir, "sldworks.exe")
+    if not os.path.isfile(_sw_exe):
+        with open(_sw_exe, "wb") as _f:
+            _f.write(b"MZ")   # 占位；本测试不会真的执行它
     proc = subprocess.Popen(
         [sys.executable, "-B", os.path.join(HERE, "sw_monitor", "monitor.py"),
          "--data", data, "--workspace-root", tmp, "--port", str(port),
-         "--dsh-tools", tools],
+         "--dsh-tools", tools, "--solidworks-exe", _sw_exe],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         encoding="utf-8", errors="replace")
     fake = None
@@ -232,6 +279,16 @@ def main():
         # 先让监控器 attach（否则 request 会被 HOST_EPOCH 拒）
         atr = post(mon_url + "/v1/attach",
                    {"epoch": FakeHost.epoch, "drained": True}, token)
+        # 【COM 门卫版】attach 会拒绝"系统上已有不受它管理的 SLDWORKS
+        #   （UNMANAGED_SW_RUNNING）"—— 这是正确行为（教程 1.3：开始前
+        #   把手工文档正常保存并退出）。开发机常开着 SW，所以这里【明确跳过】
+        #   而不是判失败：本测试验的是接线契约，不是 SW 环境。
+        #   真正要验独占行为时，请先关掉所有 SolidWorks 再跑。
+        if "UNMANAGED_SW_RUNNING" in str(atr):
+            print("  [SKIP] 本机已有不受管的 SLDWORKS 在运行，"
+                  "attach 按设计拒绝（UNMANAGED_SW_RUNNING）。"
+                  "\n         关闭所有 SolidWorks 后重跑本测试即可覆盖该段。")
+            return _summary(True)
         check("监控器 attach 成功", atr.get("state") == "ready", atr)
         # 登记任务与房间（监控器要求先 plan）
         plr = post(mon_url + "/v1/plan",
@@ -286,12 +343,7 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
         os.environ.pop("DSH_SW_MONITOR_HOST", None)
 
-    print("\n" + "=" * 70)
-    print("  PASS=%d  FAIL=%d" % (PASS, FAIL))
-    if FAILS:
-        for f in FAILS:
-            print("  - " + f)
-    return 0 if FAIL == 0 else 1
+    return _summary(True)
 
 
 if __name__ == "__main__":

@@ -5400,7 +5400,7 @@ def cmd_sw_monitor_status():
     return {"ok": True, "monitor": info}
 
 
-def cmd_sw_monitor_attach(drained=False, recover=False, reason=""):
+def cmd_sw_monitor_attach(drained=False, recover=False, reason="", dirty_rev=None):
     """接管/恢复。drained 必须由调用方在【确认排空后】显式声明。
 
     这里不做"没 drained 就自动当 drained"的默认放行 —— 那正是教程
@@ -5408,8 +5408,18 @@ def cmd_sw_monitor_attach(drained=False, recover=False, reason=""):
     """
     try:
         client = _monitor()
+        from memory_gate import lifecycle_guard
+        guard = lifecycle_guard(remote=False)
+        if guard:
+            return guard
+        pages = client.call("page-status")
+        dirty = pages["dirty_pages"]
+        if dirty and (not recover or dirty_rev != pages["revision"]):
+            return {"ok": False, "gate": "DIRTY_PAGES_PENDING", "dirty_pages": dirty,
+                    "revision": pages["revision"], "hint": "确认排空并核对后，recover 传 --dirty-rev <revision>"}
         out = client.call("attach" if not recover else "recover",
-                          {"drained": bool(drained), "reason": reason})
+                          {"drained": bool(drained), "reason": reason, "dirty_pages": dirty,
+                           "observed_rev": pages["revision"]})
     except Exception as e:
         return _monitor_error(e)
     _refresh_sw_lock_mirror()
@@ -5514,11 +5524,11 @@ def MonitorError_out(exc):
         return {"ok": False, "error": "监控器调用异常"}
 
 
-def cmd_sw_monitor_recover(reason):
+def cmd_sw_monitor_recover(reason, dirty_rev=None):
     """故障恢复：接管前必须确认旧命令与 CAD 子进程已彻底排空。"""
     if not str(reason or "").strip():
         return {"ok": False, "error": "recover 必须写明原因（监控器侧硬约束）"}
-    return cmd_sw_monitor_attach(drained=True, recover=True, reason=reason)
+    return cmd_sw_monitor_attach(drained=True, recover=True, reason=reason, dirty_rev=dirty_rev)
 
 def _build_windows_path():
     try:
@@ -8654,7 +8664,7 @@ _CMD_FLAGS = {
     "room-board": ("--room", "--json", "--wait"),
     "whoami": ("--session-id",),
     # "sw-wait" 已删除（等锁改由 DSH 后台 job 承担）。
-    "sw-monitor": ("--drained", "--reason", "--rooms-json"),
+    "sw-monitor": ("--drained", "--reason", "--rooms-json", "--dirty-rev"),
     "room-lease": ("--heartbeat", "--ttl"),
 }
 # 短别名 → 长名（校验前归一化，避免 "-f" 被当成未知参数）
@@ -8939,7 +8949,11 @@ def main():
                 _i = args.index("--reason")
                 if _i + 1 < len(args):
                     _why = args[_i + 1]
-            result = cmd_sw_monitor_recover(_why)
+            _rev = None
+            if "--dirty-rev" in args:
+                _i = args.index("--dirty-rev") + 1
+                _rev = int(args[_i]) if _i < len(args) and args[_i].isdigit() else -1
+            result = cmd_sw_monitor_recover(_why, dirty_rev=_rev)
         elif _sub == "plan":
             _rooms = None
             if "--rooms-json" in args:
