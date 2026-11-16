@@ -55,6 +55,10 @@ $UI_SRC    = Join-Path $Root "engineering\plugins\$UI_NAME"
 #   cannot resolve and the whole engineering preset fails to load.
 $COMPACT_NAME = 'dsh-engineering-compaction'
 $COMPACT_SRC  = Join-Path $Root "engineering\plugins\$COMPACT_NAME"
+# [2026-11-16] Guarded memory compaction backend (replaces $COMPACT_NAME in the
+#   preset's compaction group). It is still a preset child only, never a bundle.
+$GUARD_NAME   = 'dsh-engineering-memory-guarded'
+$GUARD_SRC    = Join-Path $Root "engineering\plugins\$GUARD_NAME"
 
 $script:Log = New-Object System.Text.StringBuilder
 $script:Bad = 0
@@ -138,7 +142,7 @@ foreach ($prof in $targets) {
     #   The engine never enters dsh.profile.bundles (a context may hold only one
     #   ctx.compaction); it exists only as a preset child. We just make sure the
     #   files are on disk so the preset row resolves by package name.
-    foreach ($pair in @(@{ n = $UI_NAME; s = $UI_SRC }, @{ n = $COMPACT_NAME; s = $COMPACT_SRC })) {
+    foreach ($pair in @(@{ n = $UI_NAME; s = $UI_SRC }, @{ n = $COMPACT_NAME; s = $COMPACT_SRC }, @{ n = $GUARD_NAME; s = $GUARD_SRC })) {
         if (-not (Test-Path $pair.s)) { Say ("  [skip] " + $pair.n + " (source missing)"); continue }
         $dst = Join-Path $NodeModules $pair.n
         if (-not (Test-Path $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }
@@ -170,6 +174,11 @@ foreach ($prof in $targets) {
     $deps = [ordered]@{}
     foreach ($p in $pkg.dependencies.PSObject.Properties) { $deps[$p.Name] = $p.Value }
     $deps[$UI_NAME]   = ('file:./node_modules/' + $UI_NAME)
+    # [2026-11-16] Both compaction backends are declared as dependencies so the
+    #   preset row resolves by package name. Neither goes into dsh.profile.bundles
+    #   (a context may hold only one ctx.compaction; they are preset children).
+    $deps[$COMPACT_NAME] = ('file:./node_modules/' + $COMPACT_NAME)
+    $deps[$GUARD_NAME]   = ('file:./node_modules/' + $GUARD_NAME)
 
     $bundles = @()
     foreach ($b in $pkg.dsh.profile.bundles) { $bundles += $b }
@@ -200,7 +209,11 @@ foreach ($prof in $targets) {
         @{ n = 'package.json'; p = $ProfilePkg },
         @{ n = 'cordis.patch.yml'; p = $ProfilePatch },
         @{ n = ('node_modules\' + $UI_NAME + '\package.json'); p = (Join-Path $NodeModules ($UI_NAME + '\package.json')) },
-        @{ n = ('node_modules\' + $UI_NAME + '\preset-engineering.patch.yml'); p = (Join-Path $NodeModules ($UI_NAME + '\preset-engineering.patch.yml')) }
+        @{ n = ('node_modules\' + $UI_NAME + '\preset-engineering.patch.yml'); p = (Join-Path $NodeModules ($UI_NAME + '\preset-engineering.patch.yml')) },
+        # [2026-11-16] the preset's compaction child resolves by this package name;
+        #   if it is missing the whole engineering preset fails to load.
+        @{ n = ('node_modules\' + $GUARD_NAME + '\package.json'); p = (Join-Path $NodeModules ($GUARD_NAME + '\package.json')) },
+        @{ n = ('node_modules\' + $GUARD_NAME + '\lib\guarded.js'); p = (Join-Path $NodeModules ($GUARD_NAME + '\lib\guarded.js')) }
     )
     foreach ($c in $checks) {
         if (Test-Path $c.p) { Say ("  [OK] " + $c.n) } else { Say ("  [MISSING] " + $c.n + " -> " + $c.p); $script:Bad++ }

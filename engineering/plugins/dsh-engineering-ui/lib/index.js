@@ -2305,6 +2305,21 @@ export function apply(ctx) {
   //   · 一个只读 JSONL 解析不值得引入跨包耦合与版本约束。
   //   契约只有两个文件名，见 dsh-engineering-compaction/lib/history.js。
   const COMPACT_HISTORY_FILE = 'compaction_history.jsonl';
+  // ══ 【2026-11-16 新压缩器账本】compaction_history_v2.jsonl ════════════════
+  // 工程模式的压缩后端已从 dsh-engineering-compaction 换成了
+  // dsh-engineering-memory-guarded。新后端把每次提交写进【独立的一份账本】：
+  //   <state_dir>/compaction_history_v2.jsonl   ← schema=2，只增不改
+  //
+  // 为什么不覆盖写旧文件：
+  //   · 两份记录的字段语义不同（旧的记 L0 数值回填，新的记尺寸依赖图提交），
+  //     混写会互相污染，回退旧后端时也分不清哪条是谁写的；
+  //   · 用户明确要求「后面的历史不消失」——旧账本必须原样留着。
+  //
+  // 所以这里【同时读两份并按时间合并】，面板因此不会因为换后端而变空白：
+  //   · 换了后端之后的新记录来自 v2；
+  //   · 换之前的历史仍然从 v1 读出来，一条都不会消失。
+  const COMPACT_HISTORY_V2_FILE = 'compaction_history_v2.jsonl';
+  const COMPACT_ENGINE_V2_FILE = 'compaction_engine_v2.json';
 
   /** 解析压缩账本所在目录（与 Python _store.state_dir() 同优先级）。 */
   function compactionStateDir() {
@@ -2584,18 +2599,29 @@ export function apply(ctx) {
     const o = opts || {};
     const dir = compactionStateDir();
     if (!dir) return { ok: false, entries: [], error: '未找到工程模式状态目录' };
-    const p = path.join(dir, COMPACT_HISTORY_FILE);
+    // ══ 【2026-11-16】同时读 v1（旧后端）与 v2（新后端）两份账本 ══════════
+    // 用户要求「后面的历史不消失」：换压缩后端只影响【以后怎么写】，
+    //   已经落盘的历史一条都不能丢，所以两份都读、合并后再排序过滤。
+    const p1 = path.join(dir, COMPACT_HISTORY_FILE);
+    const p2 = path.join(dir, COMPACT_HISTORY_V2_FILE);
     let raw;
+    let v1Exists = false;
+    let v2Exists = false;
     try {
-      if (!fs.existsSync(p)) {
-        return { ok: true, entries: [], stateDir: dir, exists: false, engine: readCompactionEngine() };
+      const has1 = fs.existsSync(p1);
+      const has2 = fs.existsSync(p2);
+      v1Exists = has1;
+      v2Exists = has2;
+      if (!has1 && !has2) {
+        return { ok: true, entries: [], stateDir: dir, exists: false, engine: readCompactionEngine(),
+                 engines: { v1: false, v2: false } };
       }
-      raw = fs.readFileSync(p, 'utf8');
+      raw = (has1 ? fs.readFileSync(p1, 'utf8') : '') + (has2 ? fs.readFileSync(p2, 'utf8') : '');
     } catch (e) {
       return { ok: false, entries: [], stateDir: dir, error: String((e && e.message) || e) };
     }
     let entries = [];
-    for (const line of raw.split(/\\r?\\n/)) {
+    for (const line of raw.split(/\r?\n/)) {
       const s = line.trim();
       if (!s) continue;
       try {
@@ -2606,8 +2632,18 @@ export function apply(ctx) {
     if (o.root) entries = entries.filter((r) => String(r.root || '') === String(o.root));
     if (o.target) entries = entries.filter((r) => String(r.target || '') === String(o.target));
     const limit = Number.isFinite(o.limit) && o.limit > 0 ? Math.floor(o.limit) : 400;
+    // ══ 【2026-11-16】按时间倒序（最新在上）════════════════════════════════
+    // 用户要求「最上面的是最先更新的历史，然后就是后面的历史不消失但是被刷下去」。
+    // 排序放在宿主侧统一做，避免每个渲染入口各排一次（漏一处就错）。
+    // 同一毫秒用原序号兜底，保证顺序稳定、不会凭运气抖动。
+    entries = entries
+      .map((r, i) => ({ r, i }))
+      .sort((a, b) => (Number(b.r.at) || 0) - (Number(a.r.at) || 0) || b.i - a.i)
+      .map((x) => x.r);
     const total = entries.length;
-    if (entries.length > limit) entries = entries.slice(entries.length - limit);
+    // 截断保留【最新】的 limit 条（旧实现 slice(end-limit) 是按合并前顺序取尾部，
+    //   合并两份账本后会取错，必须改成"倒序取头部"）。
+    if (entries.length > limit) entries = entries.slice(0, limit);
     // 每个会话的累计计数（红框里「压缩 3 次」这种徽标要用）
     const counts = {};
     for (const e of entries) {
@@ -2618,6 +2654,9 @@ export function apply(ctx) {
       c.numbers += Number(e.l0_numbers || 0) + Number(e.l0_materials || 0);
       counts[k] = c;
     }
+    // 每个会话累计的「保留数值条数」= 新旧两代的同义口径：
+    //   旧后端= L0 抽取的机械数值条数；新后端= 活动尺寸约束条数。
+    //   两者都记在 l0_numbers 里，所以上面那行累加对新后端同样成立。
     return {
       ok: true,
       stateDir: dir,
@@ -2627,6 +2666,8 @@ export function apply(ctx) {
       counts: Object.keys(counts).map((k) => counts[k]),
       // 引擎是否被加载过（面板用它区分"引擎没起来"和"还没到阈值"）
       engine: readCompactionEngine(),
+      // 两代账本各自是否存在：面板据此提示"上一代历史还在，只是不再新增"
+      engines: { v1: v1Exists, v2: v2Exists },
     };
   }
 

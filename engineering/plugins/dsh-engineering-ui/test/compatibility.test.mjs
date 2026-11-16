@@ -216,14 +216,20 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
     //   /sw-monitor-permit  每条 SW 命令的一次性许可（排队→job id 在这里产生）
     //   /sw-monitor-done    命令收尾记账（end / release）
     // 这三条是"锁权威切换"的落点，少一条就等于回到了进程内锁。
-    assert.equal(h.routes.size, 36,
-      '路由数量应为 36（33 + 监控器 3 条）');
+    // ── 【2026-11-16 补齐】+1(page-table) = 37 ────────────────────────────
+    //   /page-table 是【COM 门卫版】合入时新增的只读路由（记忆契约的页面表，
+    //   由 lib/memory-contract.js 的 memoryPageRoute 注册）。当时漏改这条断言，
+    //   导致 test:compatibility 长期红 —— 而它恰恰是"路由注册完整性"的唯一守门人，
+    //   红了就没人看，等于这道门失效。
+    assert.equal(h.routes.size, 37,
+      '路由数量应为 37（33 + 监控器 3 条 + page-table 1 条）');
     // ── 清单必须与 lib/index.js 的 ctx.webServer.register 一一对应 ──────
     // 漏写一条 → 路由存在但没被这条断言保护；多写一条 → 直接失败。
     for (const p of [
       '/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
       '/dsh-engineering-ui/parts-board',
       '/dsh-engineering-ui/compaction-history',
+      '/dsh-engineering-ui/page-table',
       '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
       '/dsh-engineering-ui/pending-child', '/dsh-engineering-ui/result-child',
       '/dsh-engineering-ui/answer', '/dsh-engineering-ui/verify-subagent',
@@ -253,6 +259,7 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/agents', '/dsh-engineering-ui/log',
       '/dsh-engineering-ui/parts-board',
       '/dsh-engineering-ui/compaction-history',
+      '/dsh-engineering-ui/page-table',
       '/dsh-engineering-ui/ask', '/dsh-engineering-ui/ask-child',
       '/dsh-engineering-ui/pending-child', '/dsh-engineering-ui/result-child',
       '/dsh-engineering-ui/answer', '/dsh-engineering-ui/verify-subagent',

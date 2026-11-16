@@ -115,8 +115,17 @@ test('preset 【已启用】本插件，且只挂在 engineering 的 compaction 
   //   profile 的 node_modules，并写进 dependencies（但【不】进 bundles）。
   const p = path.resolve(HERE, '..', '..', 'dsh-engineering-ui', 'preset-engineering.patch.yml');
   const y = fs.readFileSync(p, 'utf8');
-  assert.ok(y.includes("name: 'dsh-engineering-compaction'"),
-    'preset 的 compaction 组应引用本插件');
+  // ── 【2026-11-16 更新】后端已换成 dsh-engineering-memory-guarded ────────
+  //   用户要求「放在工程模式插件内部和记忆压缩插件内部，和工程模式配套，
+  //   只有工程模式可以替代内部的压缩插件；非工程模式一页是可以使用这个插件的」。
+  //   于是 preset 的 compaction 子项 name 从本包改成受约束记忆压缩器。
+  //   本包源码与测试保留（可回退），但【不再被 preset 引用】——
+  //   这条断言因此改为"本包不得再被引用，且同一组里只能有一个压缩后端"。
+  assert.ok(!y.includes("name: 'dsh-engineering-compaction'"),
+    'preset 的 compaction 组已切到 dsh-engineering-memory-guarded，不应再引用本包'
+    + '（同时挂两个压缩后端会被 loader 拒绝）');
+  assert.ok(y.includes("name: 'dsh-engineering-memory-guarded'"),
+    'preset 的 compaction 组应引用受约束记忆压缩器');
   assert.ok(!y.includes("name: '@deepseek-ai/dsh-compaction-basic'"),
     '同一个 compaction 组里不能同时装两个压缩服务（重复注册会被拒）');
 

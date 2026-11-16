@@ -1,0 +1,548 @@
+/**
+ * dsh-engineering-memory-guarded — 【受约束的工程记忆压缩器】
+ * ==========================================================================
+ * 只在 engineering 预设下加载（见 preset-engineering.patch.yml 的 compaction 组），
+ * 用来【替换】@deepseek-ai/dsh-compaction-basic。所以它是「工程模式专用」的：
+ * 其它预设读的是它们自己的 compaction-basic，两边互不串台。
+ *
+ * ── 它和旧压缩器的差别（不是升级，是换设计）─────────────────────────────
+ *   旧 dsh-engineering-compaction：调 LLM 写分层摘要（L0 数值抽取 + 强制回填）。
+ *   本插件：**不调 LLM 写摘要**，改用确定性快照 ——
+ *     · 活动约束（用户明确给出的尺寸）结构保真；
+ *     · 派生值必须声明 parents，上游一改就级联撤下；
+ *     · 摘要内容是插件算出来的，模型改不了；
+ *     · 提交要过独立审核（重新读回已落盘会话，核对真实替换事件）。
+ *   代价与旧插件互补：旧插件保「长段推理」，本插件保「尺寸真相 + 可恢复 + 可验哈希」。
+ *   本插件不做旧插件的 L0 数值回填 —— 两类记录写两份独立账本，UI 侧合并展示，
+ *   所以工程模式的压缩面板不会因为换后端而变空白（见 lib/ledger.js）。
+ *
+ * ── 加载失败时的行为（关键）─────────────────────────────────────────────
+ *   preset 里任何一行加载失败，整个 engineering 预设都会挂掉，用户看到的是
+ *   「工程模式从列表里消失」。旧压缩器已经踩过这个坑并做了动态导入 + 本地兜底。
+ *   这里沿用同一策略：父类拿不到就退化成空壳（不压缩，但会话照常跑），
+ *   绝不因为"压缩功能坏了"把整个工程模式拖垮。
+ */
+
+import { randomUUID } from 'node:crypto';
+import { dirname, isAbsolute } from 'node:path';
+import { applyChange, digest, directChanges, exportGraph, isResumeOriginal, messageText, needsDimensionIntent, openJournal, snapshot } from './guarded-memory.js';
+import { apply as installAudit } from './guarded-audit.js';
+import { appendLedgerEntry } from './ledger.js';
+
+const TOOL = 'engineering_memory_request';
+
+/**
+ * 父类解析：先试真实 @deepseek-ai/dsh-compaction-basic，拿不到就用本地空壳。
+ *
+ * 为什么不用静态 import：profile 的 node_modules 里通常没有 @deepseek-ai/*
+ *   （pnpm autoInstallPeers=false），裸静态 import 一旦解析失败就是【模块加载期】
+ *   抛错 —— 那会直接把整个 preset 挂掉，连兜底的机会都没有。
+ */
+let BasicCompactionEngine;
+let ENGINE_MODE = 'real';
+try {
+  const m = await import('@deepseek-ai/dsh-compaction-basic');
+  BasicCompactionEngine = m.default;
+  if (typeof BasicCompactionEngine !== 'function') throw new Error('default export is not a class');
+} catch (e) {
+  ENGINE_MODE = 'fallback';
+  try {
+    const cordis = await import('@deepseek-ai/cordis');
+    const Service = cordis.Service || (cordis.default && cordis.default.Service);
+    if (typeof Service === 'function') {
+      BasicCompactionEngine = class FallbackCompaction extends Service {
+        constructor(ctx) { super(ctx, 'compaction'); this.config = {}; }
+        async compactIfNeeded() { return null; }
+        async compactRegion() { throw new Error('engineering memory compaction unavailable: @deepseek-ai/dsh-compaction-basic not resolvable'); }
+        async compactNow() { throw new Error('engineering memory compaction unavailable: @deepseek-ai/dsh-compaction-basic not resolvable'); }
+        async summarize() { throw new Error('engineering memory compaction unavailable: @deepseek-ai/dsh-compaction-basic not resolvable'); }
+      };
+    }
+  } catch (e2) { /* 连 cordis 都没有 → 保留 undefined，下面兜底 */ }
+  if (typeof BasicCompactionEngine !== 'function') {
+    BasicCompactionEngine = class NoopCompaction {
+      constructor() { this.config = {}; }
+      async compactIfNeeded() { return null; }
+      async compactRegion() { throw new Error('compaction unavailable'); }
+      async compactNow() { throw new Error('compaction unavailable'); }
+      async summarize() { throw new Error('compaction unavailable'); }
+    };
+  }
+}
+
+export const engineMode = () => ENGINE_MODE;
+
+const toolParameters = {
+  type: 'object', additionalProperties: false, required: ['action'],
+  properties: {
+    action: { type: 'string', enum: ['read', 'correct', 'derive', 'invalidate'] },
+    id: { type: 'string' }, value: { type: 'string' },
+    parents: { type: 'array', items: { type: 'string' } },
+  },
+};
+
+function selectedSpan(agent) {
+  const { session } = agent;
+  const seqs = session.surface.nodes;
+  const first = session.eventAt(seqs[0])?.type === 'system/message' ? seqs[1] : seqs[0];
+  return first !== undefined ? { start: first, end: seqs.at(-1) } : null;
+}
+
+function activePins(state) {
+  const live = new Map();
+  for (const pin of state.pins) {
+    for (const seq of pin.shadowed) live.delete(seq);
+    live.set(pin.seq, pin);
+  }
+  return [...live.values()];
+}
+
+function recentPages(messages, previous, revised, redacted = new Set()) {
+  const pages = new Map(previous.filter(page => page.kind === 'user' || page.kind === 'user-evidence')
+    .map(page => [page.id, page]));
+  for (const message of messages) {
+    if (message.source?.kind !== 'user' || message.role !== 'user') continue;
+    const text = messageText(message);
+    if (text && !pages.has(message.id)) pages.set(message.id, { kind: 'user', id: message.id, text });
+  }
+  const result = [...pages.values()].map(page => redacted.has(page.id) || (revised && /\p{N}/u.test(page.text ?? ''))
+    ? { kind: 'user-evidence', id: page.id } : page);
+  // 没有依赖边可循的旧数值只能降为来源指针；无关、无数字的用户指令仍然逐字保留。
+  if (revised) return result;
+  const activity = messages.filter(message => message.role === 'assistant' && messageText(message).trim()).at(-1);
+  if (activity) result.push({ kind: 'activity', id: activity.id, excerpt: [...messageText(activity)].slice(-420).join('') });
+  const refs = messages.filter(message => message.role === 'tool' && message.id).slice(-8).map(message => message.id);
+  if (refs.length) result.push({ kind: 'tool-evidence', messageIds: refs });
+  return result;
+}
+
+/**
+ * 沿 agent.parent 往上找根会话，并取到子代理的显示名（房间名）。
+ *
+ * 为什么需要 root / label：UI 要把压缩历史按「主对话 / 各个子代理」分开显示
+ *   （用户截图里的两条黄圈）。账本里没有这两个字段的话，前端就只能拿到一串
+ *   裸 sessionId，分不清哪条属于哪个房间。
+ */
+function identityOf(agent) {
+  const out = { target: '', root: '', label: '', preset: '' };
+  try {
+    const session = agent && agent.session;
+    out.target = String((session && session.id) || (agent && agent.id) || '');
+    try { out.preset = String((session && session.header && session.header.agentPreset) || ''); } catch (e) {}
+  } catch (e) {}
+  try {
+    let cur = agent; let guard = 0; let root = out.target;
+    while (cur && guard < 32) {
+      guard += 1;
+      const parent = cur.parent || cur.parentAgent || null;
+      if (!parent) break;
+      const pid = String((parent.session && parent.session.id) || parent.id || '');
+      if (pid) root = pid;
+      cur = parent;
+    }
+    out.root = root;
+  } catch (e) { out.root = out.target; }
+  try {
+    const label = agent && (agent.label || agent.title || (agent.session && agent.session.title));
+    out.label = String(label || '');
+  } catch (e) {}
+  if (!out.label) out.label = out.target.slice(0, 8);
+  return out;
+}
+
+export class GuardedCompaction extends BasicCompactionEngine {
+  #sessions = new Map();
+  #running = new Set();
+
+  constructor(ctx, config) {
+    super(ctx, config);
+    // Cordis 通过代理暴露服务：私有方法里的 this 必须绑在自有实例上，
+    // 否则父类内部回调（compactRegion 等）拿到的是代理，私有字段全部读不到。
+    this.compactRegion = this.compactRegion.bind(this);
+    this.compactNow = this.compactNow.bind(this);
+    this.summarize = this.summarize.bind(this);
+
+    ctx.on('agent/pre-step', async ({ agent, messages, signal }, next) => {
+      const entry = this.#entry(agent);
+      const decision = await next();
+      if (decision.kind !== 'enter') return decision;
+      signal.throwIfAborted();
+      for (const message of decision.messages ?? messages) {
+        if (message.source?.kind !== 'user') continue;
+        const text = messageText(message);
+        const changes = directChanges(text);
+        if (changes.length) entry.corrections.set(message.id, changes.map(change => ({
+          ...change, evidence: message.id, evidenceText: text,
+        })));
+        else if (needsDimensionIntent(text)) {
+          const state = entry.journal.state();
+          // 「!继续原尺寸」= 用户收回变更，解除暂停；其它"我要换尺寸"= 先追问 ID/值/单位。
+          entry.journal.save({ ...state, needsDimensions: !isResumeOriginal(text) });
+        }
+      }
+      await this.#prepare(entry, signal);
+      return decision;
+    });
+
+    ctx.on('agent/request', async ({ agent, signal }, next) => {
+      const entry = this.#entry(agent);
+      await this.#prepare(entry, signal);
+      const result = await next();
+      this.#check(entry, entry.agent.session.deriveMessages());
+      return result;
+    });
+
+    ctx.on('llm/stream', (options, next) => {
+      const entry = this.#sessions.get(options.sessionId);
+      if (!entry) return next();
+      this.#check(entry, options.messages);
+      const engine = this;
+      return (async function* guardedStream() {
+        options.signal?.throwIfAborted();
+        // 第一次校验放在生成器外，确保"发给模型前"就拦下；这里再校验一次是为了
+        // 记录真实发出的请求消息所用检查点（reads.jsonl 的口径）。
+        const pins = engine.#check(entry, options.messages);
+        entry.journal.recordRead(pins);
+        yield* next();
+      })();
+    });
+
+    if (ctx.tools && typeof ctx.tools.guard === 'function') {
+      ctx.tools.guard(exec => {
+        const entry = exec.agent && this.#sessions.get(exec.agent.session.id);
+        if (!entry) return undefined;
+        const state = entry.journal.state();
+        if (this.#running.has(entry.agent.session.id) || state.pending) {
+          return 'MEMORY_COMPACTION_PENDING: 工程记忆还在压缩或审核，稍后恢复此会话。';
+        }
+        if (exec.name === TOOL) return undefined;
+        if (state.needsDimensions) return 'MEMORY_DIMENSIONS_REQUIRED: 先向用户确认尺寸 ID、数值和单位。';
+        const { session } = entry.agent;
+        const seq = session.surface.nodes.findLast(seq => session.eventAt(seq)?.type === 'assistant/message');
+        const last = seq === undefined ? undefined : session.eventAt(seq).data.message;
+        if (last?.content.some(block => {
+          if (block.type !== 'tool-call' || block.name !== TOOL) return false;
+          try { return JSON.parse(block.arguments).action !== 'read'; }
+          catch { return true; }
+        })) return 'MEMORY_CHANGE_IN_BATCH: 尺寸修改请求须先单独提交和审核。';
+        return undefined;
+      });
+    }
+
+    ctx.on('agent/disposed', ({ agent }) => {
+      if (this.#sessions.get(agent.session.id)?.agent === agent) this.#sessions.delete(agent.session.id);
+    });
+
+    if (ctx.tools && typeof ctx.tools.register === 'function') {
+      ctx.tools.register({
+        name: TOOL,
+        description: '只读查看工程尺寸关系图，或向插件提交更正请求。correct 仅接受用户本轮明确指定的尺寸和值。derive 登记有依赖的暂定计算值，invalidate 撤下算错的派生值及全部下游。完成更正前暂停使用旧尺寸。',
+        parameters: toolParameters,
+        output: {
+          schema: { type: 'object', additionalProperties: false, required: ['text'], properties: { text: { type: 'string' } } },
+          render: (_args, result) => [{ type: 'text', text: result.text }],
+        },
+        execute: async (args, exec) => {
+          exec.signal.throwIfAborted();
+          if (!exec.agent) throw new Error('MEMORY_AGENT_REQUIRED');
+          return this.#request(this.#entry(exec.agent), args);
+        },
+      });
+    }
+  }
+
+  #entry(agent) {
+    const { session } = agent;
+    const existing = this.#sessions.get(session.id);
+    if (existing?.agent === agent) return existing;
+    const path = this.ctx.sessionPersistence.locate(session.header)?.path;
+    if (!path || !isAbsolute(path)) throw new Error('MEMORY_SESSION_STORAGE_UNSUPPORTED');
+    const entry = { agent, journal: openJournal(dirname(path), session.id), corrections: new Map() };
+    this.#sessions.set(session.id, entry);
+    return entry;
+  }
+
+  get #audit() {
+    const audit = this.ctx.get('engineeringCompactionAudit');
+    if (!audit) throw new Error('MEMORY_AUDITOR_UNAVAILABLE');
+    return audit;
+  }
+
+  #request(entry, { action, id, value, parents }) {
+    const state = entry.journal.state();
+    if (action === 'read') return { text: JSON.stringify(exportGraph(state.graph)) };
+    if (state.pending || this.#running.has(entry.agent.session.id)) throw new Error('MEMORY_COMPACTION_PENDING');
+    if (state.needsDimensions && action !== 'correct') throw new Error('MEMORY_USER_EVIDENCE_REQUIRED');
+    let change = { kind: action, id, value, parents };
+    let messageId;
+    if (action === 'correct') {
+      const messages = entry.agent.session.deriveMessages();
+      const user = messages.findLast(message => message.role === 'user' && message.source?.kind === 'user');
+      const matched = directChanges(messageText(user)).find(item => item.id === id && item.value === value);
+      if (!matched || state.consumed.includes(user.id)) {
+        throw new Error('MEMORY_USER_EVIDENCE_REQUIRED: 请用户明确输入 !尺寸 <ID> = <值及单位>。');
+      }
+      change = { ...matched, evidence: user.id, evidenceText: messageText(user) };
+      messageId = user.id;
+    }
+    this.#begin(entry, [change], messageId ? [messageId] : []);
+    return { text: '请求通过规则检查，下一步先压缩并审核，审核通过才更新活动记忆。' };
+  }
+
+  #begin(entry, changes = [], consumed = [], range = null) {
+    const { journal } = entry;
+    const state = journal.state();
+    if (state.pending) return state.pending;
+    const pending = { id: randomUUID(), changes, consumed, graph: changes.reduce(applyChange, state.graph), range };
+    journal.save({ ...state, pending });
+    return pending;
+  }
+
+  #check(entry, messages) {
+    const state = entry.journal.state();
+    if (state.pending || this.#running.has(entry.agent.session.id)) throw new Error('MEMORY_COMPACTION_PENDING');
+    try {
+      const pins = activePins(state);
+      for (const pin of pins) entry.journal.load(pin.candidate);
+      this.#audit.read(pins, messages);
+      return pins;
+    } catch (error) {
+      this.#begin(entry);
+      throw error;
+    }
+  }
+
+  async #finish(entry, signal) {
+    const { journal, agent } = entry;
+    const state = journal.state();
+    if (!state.pending?.candidate) return false;
+    const pin = await this.#audit.commit(agent.session, journal, state.pending, signal);
+    signal?.throwIfAborted();
+    // 审核的持久化读与 agent 的私有 pin 都成功后才释放；任何一步失败都保持 pending，
+    // 下一次 #prepare 会重做，绝不在中间态放行模型请求。
+    journal.save({ ...state, graph: state.pending.graph, pending: null,
+      needsDimensions: state.needsDimensions && !state.pending.changes.some(change => change.kind === 'user'),
+      consumed: [...new Set([...state.consumed, ...state.pending.consumed])],
+      pins: [...state.pins, pin],
+    });
+    this.#recordLedger(entry, pin);
+    return true;
+  }
+
+  /**
+   * 落账本 —— UI 的压缩历史数据源（用户图一 / 图二的两条黄圈）。
+   *
+   * fail-open：记账失败绝不影响压缩提交本身。账本里的 label / root 让前端能把
+   *   记录分到「主对话」或「某个子代理」名下；summary_excerpt 供点开看详情。
+   */
+  #recordLedger(entry, pin) {
+    try {
+      const id = identityOf(entry.agent);
+      const excerpt = this.#excerptOf(entry, pin);
+      appendLedgerEntry({
+        at: Number(pin.at) || Date.now(),
+        target: id.target,
+        root: id.root,
+        label: id.label,
+        preset: id.preset,
+        engine: 'dsh-engineering-memory-guarded',
+        mode: ENGINE_MODE,
+        action: 'compaction',
+        attempt: String(pin.attempt || ''),
+        message: String(pin.message || ''),
+        constraints: Number(pin.constraints) || 0,
+        input_chars: Number(pin.inputChars) || 0,
+        output_chars: Number(pin.outputChars) || 0,
+        saved_chars: Math.max(0, (Number(pin.inputChars) || 0) - (Number(pin.outputChars) || 0)),
+        l0_numbers: Number(pin.constraints) || 0,
+        l0_materials: 0,
+        l0_restored: 0,
+        hash: String(pin.hash || ''),
+        summary_excerpt: excerpt,
+      });
+    } catch (e) { /* 记账失败不能影响压缩 */ }
+  }
+
+  /**
+   * 从候选快照里提取一段可读摘要（给面板点开看）。
+   *
+   * 候选快照的正文是 MARKER 行 + JSON（见 guarded-memory.snapshot）。这里把它
+   * 还原成「活动约束 / 派生值 / 保留的原文页」三段可读文本 —— 面板点开就能看到
+   * 这次压缩到底保住了什么，而不是只有一个数字。
+   */
+  #excerptOf(entry, pin) {
+    try {
+      if (!pin?.candidate) return '';
+      const { body } = entry.journal.load(pin.candidate);
+      const json = body.slice(body.indexOf('\n') + 1);
+      const parsed = JSON.parse(json);
+      const lines = [];
+      const constraints = Object.entries(parsed.activeConstraints || {});
+      const derived = Object.entries(parsed.derived || {});
+      if (constraints.length) {
+        lines.push('活动约束 ' + constraints.length + ' 条：');
+        for (const [id, node] of constraints) lines.push('  ' + id + ' = ' + node.value + '（用户给定）');
+      }
+      if (derived.length) {
+        lines.push('派生值 ' + derived.length + ' 条：');
+        for (const [id, node] of derived) {
+          lines.push('  ' + id + ' = ' + node.value + (node.parents?.length ? '  ← ' + node.parents.join(', ') : ''));
+        }
+      }
+      const pages = Array.isArray(parsed.pages) ? parsed.pages : [];
+      const kept = pages.filter(page => page.kind === 'user' || page.kind === 'user-evidence');
+      const activity = pages.find(page => page.kind === 'activity');
+      const refs = pages.find(page => page.kind === 'tool-evidence');
+      lines.push('保留用户原文 ' + kept.length + ' 页' + (refs && refs.messageIds ? '，工具证据 ' + refs.messageIds.length + ' 条' : ''));
+      for (const page of kept) {
+        const text = String(page.text || '').replace(/\s+/g, ' ').slice(0, 120);
+        if (text) lines.push('  · ' + text);
+      }
+      if (activity?.excerpt) lines.push('最近进展摘录：' + String(activity.excerpt).replace(/\s+/g, ' ').slice(0, 200));
+      return lines.join('\n').slice(0, 1600);
+    } catch (e) { return ''; }
+  }
+
+  async #prepare(entry, signal) {
+    const { journal, agent, corrections } = entry;
+    if (this.#running.has(agent.session.id)) throw new Error('MEMORY_COMPACTION_PENDING');
+    let state = journal.state();
+    if (state.pending?.candidate && state.pending.hostId) {
+      const closed = agent.session.snapshotEvents().some(event => event.type === 'compaction/end' &&
+        event.data.compactionId === state.pending.hostId && !('error' in event.data));
+      if (closed) {
+        try { await this.#finish(entry, signal); }
+        catch (error) {
+          signal.throwIfAborted();
+          this.ctx.logger.warn('工程记忆提交复核未通过，将重新压缩：' + error.message);
+        }
+        state = journal.state();
+      }
+    }
+    if (!state.pending) {
+      const consumed = [...corrections.keys()].filter(id => !state.consumed.includes(id));
+      const changes = consumed.flatMap(id => corrections.get(id));
+      if (changes.length) this.#begin(entry, changes, consumed);
+      else {
+        try { this.#check(entry, agent.session.deriveMessages()); return; }
+        catch (error) {
+          if (!journal.state().pending) throw error;
+        }
+      }
+    }
+    state = journal.state();
+    const range = state.pending.changes.length || state.pending.failure
+      ? selectedSpan(agent) : state.pending.range ?? selectedSpan(agent);
+    if (!range && state.pending.changes.length && state.pins.length === 0) {
+      const pending = state.pending;
+      const hash = journal.backup({ kind: 'bootstrap', attempt: pending.id, graph: pending.graph });
+      this.#audit.bootstrap(journal, pending, hash);
+      journal.save({ ...state, graph: pending.graph, pending: null, needsDimensions: false,
+        consumed: [...state.consumed, ...pending.consumed] });
+    } else {
+      if (!range) throw new Error('MEMORY_RECOVERY_NO_SAFE_RANGE');
+      const nodes = agent.session.surface.nodes;
+      const target = nodes.includes(range.start) && nodes.includes(range.end) ? range : selectedSpan(agent);
+      if (!target) throw new Error('MEMORY_RECOVERY_NO_SAFE_RANGE');
+      await this.compactRegion(target.start, target.end, agent, signal);
+    }
+    for (const id of journal.state().consumed) corrections.delete(id);
+  }
+
+  async #run(agent, signal, operation) {
+    const entry = this.#entry(agent);
+    const key = agent.session.id;
+    if (this.#running.has(key)) throw new Error('MEMORY_COMPACTION_PENDING');
+    this.#running.add(key);
+    try {
+      signal?.throwIfAborted();
+      const result = await operation(entry);
+      if (result !== null && !await this.#finish(entry, signal)) throw new Error('MEMORY_AUDIT_NOT_PREPARED');
+      return result;
+    } catch (error) {
+      const state = entry.journal.state();
+      if (state.pending) entry.journal.save({ ...state, pending: { ...state.pending,
+        failure: signal?.aborted ? 'MEMORY_INTERRUPTED' : String(error.cause?.message ?? error.message).slice(0, 300),
+      } });
+      throw error;
+    } finally { this.#running.delete(key); }
+  }
+
+  async compactRegion(start, end, agent, signal) {
+    return this.#run(agent, signal, entry => {
+      this.#begin(entry, [], [], { start, end });
+      return super.compactRegion(start, end, agent, signal);
+    });
+  }
+
+  async compactNow(agent, signal, sourceCommandId) {
+    return this.#run(agent, signal, () => super.compactNow(agent, signal, sourceCommandId));
+  }
+
+  async summarize(input, agent, signal) {
+    const entry = this.#entry(agent);
+    const { journal } = entry;
+    const { session } = agent;
+    const pending = this.#begin(entry);
+    const state = journal.state();
+    const hostId = session.snapshotEvents().findLast(event => event.type === 'compaction/start')?.data.compactionId;
+    if (!hostId) throw new Error('MEMORY_HOST_TRANSACTION_MISSING');
+    const source = journal.backup({ kind: 'input', attempt: pending.id, hostId, messages: input.messages });
+    journal.save({ ...state, pending: { ...pending, hostId, source, candidate: null } });
+    // 让出一次事件循环，暂停/停止能在这里生效，避免"点了停还在写候选"。
+    await new Promise(resolve => setImmediate(resolve));
+    signal?.throwIfAborted();
+    let previous = [];
+    for (const pin of activePins(state)) {
+      try {
+        const { body } = journal.load(pin.candidate);
+        previous.push(...JSON.parse(body.slice(body.indexOf('\n') + 1)).pages);
+      } catch {
+        // 只从备份的原始输入里恢复用户要求，绝不从损坏的摘要里恢复。
+        try { previous.push(...recentPages(journal.load(pin.source).messages, [], false)); }
+        catch { throw new Error('MEMORY_RECOVERY_BACKUP_INVALID'); }
+      }
+    }
+    if (pending.source && pending.hostId !== hostId) {
+      try { previous.push(...recentPages(journal.load(pending.source).messages, [], false)); }
+      catch { /* 当前宿主区间与既有已核实检查点仍是恢复来源 */ }
+    }
+    const redacted = new Set(state.pins.flatMap(pin => pin.redacted ?? []));
+    const pages = recentPages(input.messages, previous, pending.changes.length > 0, redacted);
+    const textFor = items => snapshot(pending.id, pending.graph, items);
+    const meter = this.ctx.tokenMeter;
+    const price = text => meter.estimateMessage({ role: 'user', content: [{ type: 'text', text }] });
+    const inputCost = input.messages.filter(message => message.role !== 'system')
+      .reduce((sum, message) => sum + meter.estimateMessage(message), 0);
+    const limit = Math.min(12000, Math.max(0, inputCost - 75));
+    let body = textFor(pages);
+    for (let index = pages.length - 1; price(body) > limit && index >= 0; index--) {
+      if (pages[index].kind === 'user' || pages[index].kind === 'user-evidence') continue;
+      pages.splice(index, 1);
+      body = textFor(pages);
+    }
+    if (price(body) > limit) throw new Error('MEMORY_MINIMUM_OVER_BUDGET');
+    const candidate = journal.backup({ kind: 'candidate', body, graph: pending.graph }, {
+      label: identityOf(agent).label, root: identityOf(agent).root,
+    });
+    journal.save({ ...state, pending: { ...pending, hostId, source, candidate } });
+    signal?.throwIfAborted();
+    const { provider, model } = session.requestHeader()?.config ?? {};
+    if (!provider || !model) throw new Error('MEMORY_ROUTE_MISSING');
+    return { provider, model, summary: [{ type: 'text', text: body }] };
+  }
+}
+
+export const inject = ['sessionPersistence', 'sessions', 'llm', 'tokenMeter', 'tools', 'systemPrompt'];
+
+export async function apply(ctx, config) {
+  await ctx.plugin(installAudit);
+  await ctx.inject(['engineeringCompactionAudit'], async scope => {
+    scope.systemPrompt.section({
+      name: 'engineering:memory-v2',
+      order: 700,
+      text: () => '工程记忆只读。用 engineering_memory_request 查看当前尺寸及依赖，或单独发起更正。听到"我要换尺寸"但缺 ID、值或单位时，先追问。优先用稳定尺寸 ID，例如 shaft.diameter。用户可输入 !尺寸 shaft.diameter = 24 mm。派生值须登记依赖且重新验算，等待更新通过审核再建模。',
+    });
+    await scope.plugin(GuardedCompaction, config);
+  });
+}

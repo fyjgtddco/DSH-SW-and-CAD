@@ -47,6 +47,43 @@ cd <preset目录>
 
 ---
 
+## 压缩后端：受约束记忆压缩（2026-11-16 换代）
+
+> 用户要求：「放在工程模式插件内部和 `DSH-工程记忆压缩插件` 内部，和工程模式配套，
+> **只有工程模式可以替代内部的压缩插件**；非工程模式一页是可以使用这个插件的」。
+> 另加两条 UI 要求：「不同的子代理对话对应不同的压缩历史」「最上面的是最先更新的历史，
+> 后面的历史不消失但是被刷下去」。
+
+### 改了什么
+
+| 文件 | 改动 |
+|---|---|
+| `plugins/dsh-engineering-memory-guarded/` | **新增**：引擎 / 会话日志 / 审核插件 / 账本，28 个用例 |
+| `plugins/dsh-engineering-ui/preset-engineering.patch.yml` | `compaction-engineering.name` → `dsh-engineering-memory-guarded`；`isolate` 加 `engineeringCompactionAudit: true` |
+| `plugins/dsh-engineering-ui/lib/index.js` | `/compaction-history` **同时读 v1 + v2 两份账本**，合并后按 `at` 倒序 |
+| `plugins/dsh-engineering-ui/lib/client.js` | 改为直接用宿主排好的顺序（不再自己 `reverse`）；空态文案指向新后端 |
+| `install-0.2.0.ps1` / `sync-to-dsh.ps1` | 新包纳入复制清单 + `dependencies`（**绝不进 bundles**） |
+| `plugins/dsh-engineering-compaction/…` | 源码保留可回退；相关 wiring 测试改为断言"**不再被 preset 引用**" |
+
+### 三条不能破的约束
+
+1. **同一上下文只能有一个 `ctx.compaction`。** 两个压缩后端不能同时挂在 preset 里，
+   也不能把新包挂到宿主层（`cordis.patch.yml` 保持 `- insert: []`，且不进 profile bundles）。
+2. **换后端不能让历史变空白。** 宿主侧必须同时读 `compaction_history.jsonl`（v1）
+   与 `compaction_history_v2.jsonl`（v2）——少读一份，面板就会"看起来清空了"。
+3. **排序口径只留宿主一处。** 前端不得再 `reverse()`（旧实现是为抵消"账本尾部最新"
+   的存储顺序，换后端后该假设已不成立）。截断也必须是"倒序后取头部"。
+
+### 已验证（2026-11-16 本机）
+
+- ✅ 新包 28/28 用例（指令识别 / 依赖级联 / 备份哈希 / 双账本合并 / 最新在上 / 只增不改）
+- ✅ `sync-to-dsh.ps1` + `verify_sync.py`：安装副本与仓库 SHA-256 完全一致
+- ✅ 两个 profile 的 `package.json` 均已声明 `dsh-engineering-memory-guarded`，
+  且 `dsh.profile.bundles` 里**没有**它
+- ⚠️ 真实会话里的压缩 / 审核 / 恢复流程需**重启 DSH** 后验收（压缩是进程级）
+
+---
+
 ## Webots 仿真接入（2026-11-05，可选 / 默认关闭）
 
 外部交付补丁 `f04ac75a` 已并入本仓库，改为**挂在工程模式主流程上**而不是独立跑。
@@ -446,7 +483,9 @@ engineering/
 │   ├── sw_monitor_client.py   # ★ Python 侧接入点（permit/done/board）
 │   └── examples/              # 建模样例
 └── plugins/
-    └── dsh-engineering-ui/            # 三栏 UI + 提问卡片 + 守卫 + 提问记账
+    ├── dsh-engineering-ui/            # 三栏 UI + 提问卡片 + 守卫 + 提问记账
+    ├── dsh-engineering-memory-guarded/ # ★ 当前压缩后端（受约束记忆压缩 + 账本）
+    └── dsh-engineering-compaction/     # 上一代压缩器（保留可回退，preset 已不引用）
 ```
 
 ---

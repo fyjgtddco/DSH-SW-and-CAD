@@ -3967,6 +3967,9 @@ window.__ModuleLoader__.load({
                   threshold: j.threshold || null,
                   exists: j.exists !== false,
                   stateDir: j.stateDir || '',
+                  // 两代账本各自的落盘情况：面板用它区分"新后端还没压过"
+                  // 与"整个账本目录都没读到"（见下面空态文案）。
+                  engines: j.engines || null,
                   err: null
                 });
               } else {
@@ -4007,6 +4010,14 @@ window.__ModuleLoader__.load({
       if (tab === 'agent' && selectedId) {
         shown = shown.filter(function (e) { return String(e.target || '') === selectedId; });
       }
+
+      // ── 【布局 v13 · 2026-11-16】最新的在最上面 ─────────────────────────
+      // 用户要求（图一/图二）：
+      //   「最上面的是最先更新的历史，然后就是后面的历史不消失但是被刷下去那种」
+      // 宿主侧（/compaction-history）已经把两份账本合并并按 at 倒序，
+      //   这里【不再自己排】，只做截断 —— 排序口径只留一份，避免两处不一致。
+      //   旧记录不删除，只是被新记录挤到下面，滚动可见。
+      var ordered = shown.slice(0, 200);
 
       // ── 【布局 v12】右列整页：顶部一句话摘要 + 可点开的记录行 ─────────────
       // 用户要求「压缩历史那个页面要自适应」：
@@ -4056,6 +4067,12 @@ window.__ModuleLoader__.load({
         //   ① engine 为空 → 压缩引擎没加载（preset 那行没解析到 / 包没装）；
         //   ② engine 存在但 mode=fallback → 父类没解析到，压缩被降级成空壳；
         //   ③ engine 正常 → 只是这条会话还没到阈值。
+        //
+        // 【2026-11-16】换后端后多了一种新情况：工程模式的压缩后端已经换成
+        //   dsh-engineering-memory-guarded，它【不写旧标记文件】
+        //   （compaction_engine.json 是旧插件构造时写的）。若仍拿旧标记判空，
+        //   面板会一直红字报"引擎未加载"，而实际上新引擎好得很。
+        //   所以这里先看两代账本是否存在，再决定文案。
         var eng = D.engine || null;
         var th = D.threshold || null;
         var why;
@@ -4065,8 +4082,8 @@ window.__ModuleLoader__.load({
         //   现在把阈值也一并展示，用户能自己判断"是没到阈值"还是"真坏了"。
         if (!eng) {
           why = '压缩引擎未加载：没有读到 compaction_engine.json。'
-              + '请确认 preset 的 compaction 子项解析到 dsh-engineering-compaction，'
-              + '且该插件已随 DSH 重启加载过（引擎标记在它构造时写）。';
+              + '请确认 preset 的 compaction 子项解析到 dsh-engineering-memory-guarded'
+              + '（旧版是 dsh-engineering-compaction），且该插件已随 DSH 重启加载过。';
         } else if (eng.mode && eng.mode !== 'real') {
           why = '压缩引擎已加载但处于【降级模式】（' + eng.mode + '）：'
               + '父类 @deepseek-ai/dsh-compaction-basic 未解析到，本轮不会产生压缩记录。';
@@ -4075,6 +4092,12 @@ window.__ModuleLoader__.load({
           why = '引擎已就绪（mode=real），只是【还没有压缩过】：'
               + (_tv ? ('当前阈值 ' + Math.round(_tv / 1000) + 'K token，上下文到阈值才会自动压缩并记账。')
                      : '等上下文使用量到阈值后会自动压缩并记账。');
+        }
+        // 新引擎的账本是「有压缩才建文件」。若 engine 标记还是旧的，
+        // 这里额外说明一句，免得用户以为面板坏了。
+        if (D.engines && typeof D.engines === 'object' && D.engines.v2 === false) {
+          why += '（当前后端 dsh-engineering-memory-guarded 采用「压缩成功才落账」的策略，'
+               + '所以历史文件在第一次压缩后才会出现，这是正常现象。）';
         }
         return h('div', { className: 'eng-cp' }, cap,
           h('div', { className: 'eng-cp-empty' }, why));
@@ -4087,7 +4110,9 @@ window.__ModuleLoader__.load({
 
       // 每条记录渲染成一行（窄容器自动折行）；点行展开摘要正文。
       //   openAt 记的是"哪一条被点开"，同一时刻只展开一条（避免长文本堆叠）。
-      var rows = shown.slice(-200).reverse().map(function (e, i) {
+      // 宿主已按「最新在上」排好；这里直接用 ordered，不再 reverse（旧实现
+      //   reverse() 是为抵消"账本尾部是最新"的存储顺序，换后端后该假设已不成立）。
+      var rows = ordered.map(function (e, i) {
         var nums = Number(e.l0_numbers || 0) + Number(e.l0_materials || 0);
         var restored = Number(e.l0_restored || 0);
         var at = Number(e.at) || 0;

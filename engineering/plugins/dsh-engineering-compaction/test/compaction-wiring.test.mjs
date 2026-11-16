@@ -46,8 +46,11 @@ function repoTest(name, fn) {
   test(name, { skip: MISSING_REPO ? '本副本没有仓库对照源（装在 profile node_modules 下）' : false }, fn);
 }
 
-repoTest('① preset 的 compaction 子项引用本插件', () => {
-  assert.ok(PRESET.includes("name: 'dsh-engineering-compaction'"));
+repoTest('① preset 的 compaction 子项引用【受约束记忆压缩器】（2026-11-16 换后端）', () => {
+  // 用户要求换后端且「后面的历史不消失」：本包源码保留可回退，但不再被 preset 引用。
+  assert.ok(!PRESET.includes("name: 'dsh-engineering-compaction'"),
+    '已切到 dsh-engineering-memory-guarded，同组不得再挂本包');
+  assert.ok(PRESET.includes("name: 'dsh-engineering-memory-guarded'"));
   assert.ok(!PRESET.includes("name: '@deepseek-ai/dsh-compaction-basic'"),
     '同一 compaction 组不能挂两个压缩服务');
 });

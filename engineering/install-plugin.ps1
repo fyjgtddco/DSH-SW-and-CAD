@@ -1,4 +1,4 @@
-﻿# DSH 工程模式预设 — 一键安装脚本
+# DSH 工程模式预设 — 一键安装脚本
 #   1. 【问题2 修复】不再注入自定义权限预设（SW单行模式已移除），
 #      改为清理历史残留，权限只保留 DSH 标准三档
 #   2. 把 dsh-engineering-ui 与 dsh-engineering-compaction 复制进 profile 的 node_modules
@@ -11,6 +11,9 @@ $ErrorActionPreference = "Stop"
 $PresetRoot = Split-Path $MyInvocation.MyCommand.Path
 $PluginSrc  = Join-Path $PresetRoot "plugins\dsh-engineering-ui"
 $CompactSrc = Join-Path $PresetRoot "plugins\dsh-engineering-compaction"
+# [2026-11-16] Guarded memory compaction backend (what the preset's compaction
+#   child now points at). Same rule: files + dependency only, never a bundle.
+$GuardSrc   = Join-Path $PresetRoot "plugins\dsh-engineering-memory-guarded"
 $DshHome    = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
 $WebProfile = Join-Path $DshHome "profiles\web"
 $WebModules = Join-Path $WebProfile "node_modules"
@@ -18,6 +21,7 @@ $PatchFile  = Join-Path $WebProfile "cordis.patch.yml"
 $ProfilePkg = Join-Path $WebProfile "package.json"
 $PluginDst  = Join-Path $WebModules "dsh-engineering-ui"
 $CompactDst = Join-Path $WebModules "dsh-engineering-compaction"
+$GuardDst   = Join-Path $WebModules "dsh-engineering-memory-guarded"
 
 function Say($msg, $color) { Write-Host $msg -ForegroundColor $color }
 
@@ -59,13 +63,17 @@ if (Test-Path $PatchFile) {
 }
 
 # 2. copy plugins
-Say "[2/3] Installing dsh-engineering-ui + dsh-engineering-compaction ..." Yellow
+Say "[2/3] Installing dsh-engineering-ui + dsh-engineering-compaction + dsh-engineering-memory-guarded ..." Yellow
 if (-not (Test-Path $PluginSrc)) {
   Say "      [X] plugin source missing: $PluginSrc" Red
   exit 1
 }
 if (-not (Test-Path $CompactSrc)) {
   Say "      [X] compaction source missing: $CompactSrc" Red
+  exit 1
+}
+if (-not (Test-Path $GuardSrc)) {
+  Say "      [X] guarded compaction source missing: $GuardSrc" Red
   exit 1
 }
 if (Test-Path $PluginDst) { Remove-Item $PluginDst -Recurse -Force }
@@ -78,6 +86,10 @@ if (Test-Path $CompactDst) { Remove-Item $CompactDst -Recurse -Force }
 New-Item -ItemType Directory -Path $CompactDst -Force | Out-Null
 Copy-Item (Join-Path $CompactSrc "*") -Destination $CompactDst -Recurse -Force
 Say "      copied CMP -> $CompactDst" Green
+if (Test-Path $GuardDst) { Remove-Item $GuardDst -Recurse -Force }
+New-Item -ItemType Directory -Path $GuardDst -Force | Out-Null
+Copy-Item (Join-Path $GuardSrc "*") -Destination $GuardDst -Recurse -Force
+Say "      copied GUARD -> $GuardDst" Green
 
 # 3. register in profile
 Say "[3/3] Registering plugin in profile package.json ..." Yellow
@@ -86,6 +98,7 @@ $deps = [ordered]@{}
 foreach ($p in $pkg.dependencies.PSObject.Properties) { $deps[$p.Name] = $p.Value }
 $deps["dsh-engineering-ui"] = "file:./node_modules/dsh-engineering-ui"
 $deps["dsh-engineering-compaction"] = "file:./node_modules/dsh-engineering-compaction"
+$deps["dsh-engineering-memory-guarded"] = "file:./node_modules/dsh-engineering-memory-guarded"
 $bundles = @()
 foreach ($b in $pkg.dsh.profile.bundles) { $bundles += $b }
 if ($bundles -notcontains "dsh-engineering-ui") {

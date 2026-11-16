@@ -545,6 +545,10 @@
             isolate:
               compaction: true
               toolResultPruner: true
+              # 新一代压缩器要 provide('engineeringCompactionAudit')（独立审核插件）。
+              # 不放进 isolate 的话，审核服务会落到外层作用域，与压缩器不在同一个
+              # 隔离上下文里，commit 复核读不到自己的 journal。
+              engineeringCompactionAudit: true
             config:
               # ── 【2026-11-08】换成工程模式专用压缩器 ────────────────────────
               # 用户要求：「压缩历史的插件是在工程模式下面的，只在工程模式里面触发，
@@ -559,8 +563,34 @@
               # 它继承 @deepseek-ai/dsh-compaction-basic，只覆盖 summarize() ——
               # 选区/锁/事件/计量全部沿用父类，替换压缩器不会破坏会话存档。
               # 配置项与父类完全一致（阈值口径见下方注释）。
+              # ══ 【2026-11-16 换成受约束记忆压缩器】══════════════════════════
+              # 用户要求：「放在工程模式插件内部和 DSH-工程记忆压缩插件 内部，
+              #   和工程模式配套，只有工程模式可以替代内部的压缩插件历史；
+              #   非工程模式一页是可以使用这个插件的」。
+              #
+              # 因此 name 从 dsh-engineering-compaction 改成
+              # dsh-engineering-memory-guarded：
+              #   · 它只在【本 preset 的 compaction 子项】里出现，天然只在
+              #     engineering 会话上下文生效 —— 标准/极简等其它预设读的是
+              #     它们自己的 compaction-basic，绝不会串台；
+              #   · 同一上下文只能有一个 ctx.compaction，所以这是"替换"而不是
+              #     "并存"，不能同时挂两个压缩后端。
+              #
+              # 新一代引擎做什么（详见该包 README）：
+              #   · 不调 LLM 写摘要，改用确定性快照：活动尺寸约束 + 依赖图 +
+              #     用户原文页；模型改不了摘要内容；
+              #   · 派生值必须登记 parents，上游一改就级联撤下；
+              #   · 提交要过独立审核（重新读回已落盘会话核对真实替换事件）；
+              #   · 断点可恢复（agent.previous.json + pending 重做）。
+              # 每个会话的压缩历史写独立账本 compaction_history_v2.jsonl，
+              # 与旧插件的 compaction_history.jsonl 在【同一个 state_dir】，
+              # UI 侧合并展示（图一/图二那两条黄圈），换后端不会让面板变空。
+              #
+              # ⚠️ 注释必须写在【- id: 上方】。tools/check_preset_keys.py 只在
+              #   `- id: compaction-engineering` 之后 8 行内找 `config:`，
+              #   把大段注释塞在两者之间会让它报"没有 config:"（实测踩过）。
               - id: compaction-engineering
-                name: 'dsh-engineering-compaction'
+                name: 'dsh-engineering-memory-guarded'
                 config:
                   # ══ 【A14 修复】阈值必须跟【实际窗口】成比例，不能钉死在 ~100K ══
                   # 现场（2026-11-07 会话）：6 次压缩触发点全落在

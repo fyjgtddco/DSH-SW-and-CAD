@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 # sync-to-dsh.ps1 - sync Engineering-Mode CODE changes into the DSH install
 # =============================================================================
 # WHY: Engineering Mode lives in two places on disk:
@@ -156,6 +156,10 @@ $UiSrc = Join-Path $Root 'engineering\plugins\dsh-engineering-ui'
 #   It does NOT go into dsh.profile.bundles: a context may hold only one
 #   ctx.compaction, so mounting it at the host layer is duplicate registration.
 $CompactSrc = Join-Path $Root 'engineering\plugins\dsh-engineering-compaction'
+# [2026-11-16] Guarded memory compaction backend. preset-engineering.patch.yml
+#   now points the compaction child at this package name instead. Same rules:
+#   files only (preset child), never a dsh.profile.bundles entry.
+$GuardSrc = Join-Path $Root 'engineering\plugins\dsh-engineering-memory-guarded'
 $ProfilesDir = Join-Path $DshHome 'profiles'
 if (-not (Test-Path $UiSrc)) {
     Say ("  [WARN] plugin source missing: " + $UiSrc) 'Yellow'
@@ -207,6 +211,10 @@ if (-not (Test-Path $UiSrc)) {
                     if (-not $deps.Contains('dsh-engineering-compaction')) {
                         $deps['dsh-engineering-compaction'] = 'file:./node_modules/dsh-engineering-compaction'
                     }
+                    # [2026-11-16] the guarded backend the preset now references.
+                    if (-not $deps.Contains('dsh-engineering-memory-guarded')) {
+                        $deps['dsh-engineering-memory-guarded'] = 'file:./node_modules/dsh-engineering-memory-guarded'
+                    }
                     $bundles = @()
                     if ($obj.dsh -and $obj.dsh.profile -and $obj.dsh.profile.bundles) {
                         foreach ($b in $obj.dsh.profile.bundles) { $bundles += $b }
@@ -248,6 +256,57 @@ if (-not (Test-Path $UiSrc)) {
         #   Its only job: make the preset row resolvable by package name.
         if (Test-Path $CompactSrc) {
             Copy-Tree $CompactSrc (Join-Path $nm 'dsh-engineering-compaction') ('compaction@' + $prof)
+        }
+        # [2026-11-16] Guarded backend: files only, never a bundle entry.
+        if (Test-Path $GuardSrc) {
+            Copy-Tree $GuardSrc (Join-Path $nm 'dsh-engineering-memory-guarded') ('guard@' + $prof)
+        }
+
+        # ---- dependency declaration backfill (always, not only with -Register) ----
+        # 现场（2026-11-16）：文件已经铺进 node_modules，但 profile 的
+        #   package.json 里没有 'dsh-engineering-memory-guarded'，于是 preset 那行
+        #   按包名解析失败 → 整个 engineering 预设加载失败（表现就是工程模式消失）。
+        #   旧实现只在 -Register 分支里补依赖，日常同步不会补 —— 这是一个静默缺口。
+        #   现在改成：只要文件铺成功就核对一遍依赖，缺则补（原始文件先备份）。
+        $needDeps = @()
+        if (Test-Path $pkg) {
+            $ptxt = [System.IO.File]::ReadAllText($pkg)
+            foreach ($depName in @('dsh-engineering-compaction', 'dsh-engineering-memory-guarded')) {
+                if ($ptxt -notmatch [regex]::Escape('"' + $depName + '"')) { $needDeps += $depName }
+            }
+        }
+        if ($needDeps.Count -gt 0) {
+            if ($DryRun) {
+                Say ("  [dry] would declare dependency: " + ($needDeps -join ', ')) 'DarkGray'
+            } else {
+                try {
+                    Copy-Item $pkg ($pkg + '.bak-sync-' + $Stamp) -Force
+                    $script:Stats.backed++
+                    $raw = [System.IO.File]::ReadAllText($pkg)
+                    $obj2 = $raw | ConvertFrom-Json
+                    $deps2 = [ordered]@{}
+                    foreach ($q in $obj2.dependencies.PSObject.Properties) { $deps2[$q.Name] = $q.Value }
+                    foreach ($depName in $needDeps) {
+                        $deps2[$depName] = 'file:./node_modules/' + $depName
+                    }
+                    $bundles2 = @()
+                    if ($obj2.dsh -and $obj2.dsh.profile -and $obj2.dsh.profile.bundles) {
+                        foreach ($b2 in $obj2.dsh.profile.bundles) { $bundles2 += $b2 }
+                    }
+                    $out2 = [ordered]@{}
+                    $out2['name'] = $obj2.name
+                    $out2['private'] = $true
+                    if ($obj2.pnpm) { $out2['pnpm'] = $obj2.pnpm }
+                    $out2['dependencies'] = $deps2
+                    $out2['dsh'] = [ordered]@{ profile = [ordered]@{ bundles = $bundles2 } }
+                    [System.IO.File]::WriteAllText($pkg,
+                        ($out2 | ConvertTo-Json -Depth 12) + "`n",
+                        (New-Object System.Text.UTF8Encoding($false)))
+                    Say ("  [OK] declared dependency: " + ($needDeps -join ', ')) 'Green'
+                } catch {
+                    Say ("  [WARN] dependency backfill failed for '" + $prof + "': " + $_.Exception.Message) 'Yellow'
+                }
+            }
         }
     }
 }

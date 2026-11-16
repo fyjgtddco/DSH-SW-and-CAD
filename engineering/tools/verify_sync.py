@@ -164,6 +164,21 @@ PAIRS = [
     (os.path.join(REPO, "engineering", "plugins", "dsh-engineering-ui"),
      os.path.join(DSH, "profiles", "desktop", "node_modules", "dsh-engineering-ui"),
      "plugin@desktop"),
+    # ── 【2026-11-16】两个压缩后端。它们都是 preset 的 compaction 子项
+    #    （按包名解析，文件必须真的落在 profile 的 node_modules 里），
+    #    漏检的后果是"面板显示完全同步，但 preset 那行解析不到 → 工程模式消失"。
+    (os.path.join(REPO, "engineering", "plugins", "dsh-engineering-memory-guarded"),
+     os.path.join(DSH, "profiles", "web", "node_modules", "dsh-engineering-memory-guarded"),
+     "guard@web"),
+    (os.path.join(REPO, "engineering", "plugins", "dsh-engineering-memory-guarded"),
+     os.path.join(DSH, "profiles", "desktop", "node_modules", "dsh-engineering-memory-guarded"),
+     "guard@desktop"),
+    (os.path.join(REPO, "engineering", "plugins", "dsh-engineering-compaction"),
+     os.path.join(DSH, "profiles", "web", "node_modules", "dsh-engineering-compaction"),
+     "compaction@web"),
+    (os.path.join(REPO, "engineering", "plugins", "dsh-engineering-compaction"),
+     os.path.join(DSH, "profiles", "desktop", "node_modules", "dsh-engineering-compaction"),
+     "compaction@desktop"),
 ]
 
 print("=" * 78)

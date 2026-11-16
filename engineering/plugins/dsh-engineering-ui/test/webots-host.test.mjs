@@ -83,7 +83,40 @@ test('actual host apply keeps connection and read-only routes available without 
  state('task-1','room-1');const routes=new Map();const guards=[];const hooks=new Map();
  const ctx2={...ctx,webServer:{register:r=>{routes.set(r.path,r);return ()=>{};}},tools:{guard:fn=>{guards.push(fn);return ()=>{};}},on:(name,fn)=>{hooks.set(name,fn);return ()=>{};},get:()=>undefined,inject:()=>()=>{}};
  const source=fs.readFileSync(process.env.DSH_S07_HOST_SOURCE || new URL('../lib/index.js',import.meta.url),'utf8').replace(/^import .*$/gm,'').replace(/^export /gm,'');
- const sandbox={fs,path,os,crypto,spawnSync,installWebots:mod.installWebots,agentPresets:{},DefenseSigner:class{writeRuntime(){}startGuard(){}stopGuard(){}},process:{env:{...env},platform:process.platform,cwd:()=>temp},console:{log(){},warn(){},error(){}},setTimeout:()=>0,clearTimeout(){},setInterval:()=>0,clearInterval(){},URL,URLSearchParams};
+ // ── 【2026-11-16 修复】上面把 index.js 的 import 整行剥掉再丢进 vm，
+ //   于是 import 进来的绑定（memoryPageRoute）在沙箱里不存在 →
+ //   "ReferenceError: memoryPageRoute is not defined"，整个用例长期红着。
+ //   它守的恰恰是"宿主半能否真正装配"，红了就等于这道门失效。
+ //   这里按同样签名补成沙箱桩（只求能装配能起路由，页面表逻辑另有独立用例）。
+ const memoryPageRoute=(guardWrap)=>guardWrap({kind:'exact',path:'/dsh-engineering-ui/page-table',handler:async()=>{}});
+ // 其余被剥掉的相对 import 同样要补桩，否则还是"跑到哪行崩哪行"
+ // （实测依次崩在 memoryPageRoute → installMemoryTrace → …）。
+ // 这些模块各有独立用例，这里只求"宿主半装配得起来、路由起得来"。
+ const installMemoryTrace=()=>()=>{};
+ const installJobWaitGuard=()=>()=>{};
+ const MonitorBridge=class{};
+ const CONFIG_NAME='sw_monitor.json';
+ const classifyModelError=e=>({kind:'unknown',message:String(e&&e.message||e)});
+ const backoffMsOf=()=>0;
+ const hasStandaloneMarker=()=>false;
+ const collectWaitingEvidence=()=>[];
+ const turnGuardIsAnalystAgent=()=>false;
+ const readAnalystSessionId=()=>null;
+ const latestContextWindow=()=>null;
+ const memGuardEnabled=()=>false;
+ const maxActiveSubagents=()=>4;
+ const reclaimThresholdPct=()=>85;
+ const reclaimIntervalMs=()=>60000;
+ const evaluateConcurrency=()=>({ok:true});
+ const countOccupiedChildren=()=>0;
+ const memorySnapshot=()=>({});
+ const createReclaimer=()=>()=>{};
+ const sandbox={fs,path,os,crypto,spawnSync,installWebots:mod.installWebots,agentPresets:{},memoryPageRoute,
+  installMemoryTrace,installJobWaitGuard,MonitorBridge,CONFIG_NAME,classifyModelError,backoffMsOf,
+  hasStandaloneMarker,collectWaitingEvidence,turnGuardIsAnalystAgent,readAnalystSessionId,latestContextWindow,
+  memGuardEnabled,maxActiveSubagents,reclaimThresholdPct,reclaimIntervalMs,evaluateConcurrency,
+  countOccupiedChildren,memorySnapshot,createReclaimer,
+  DefenseSigner:class{writeRuntime(){}startGuard(){}stopGuard(){}},process:{env:{...env},platform:process.platform,cwd:()=>temp},console:{log(){},warn(){},error(){}},setTimeout:()=>0,clearTimeout(){},setInterval:()=>0,clearInterval(){},URL,URLSearchParams};
  vm.runInNewContext(source+'\nthis.boot=apply;',sandbox);const dispose=sandbox.boot(ctx2);
  assert.ok(routes.has('/dsh-engineering-ui/conn-state'));assert.ok(routes.has('/dsh-engineering-ui/webots-context'),'host did not install Webots routes');assert.equal(guards.length,1);
  let body;const res={setHeader(){},end:text=>{body=JSON.parse(text);}};

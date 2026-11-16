@@ -89,18 +89,38 @@ test('④ chunkChars 必须在 preset 里显式配置（否则 64000 默认值�
   const end = tail.indexOf('- id: command-compact');
   const block = (end > 0 ? tail.slice(0, end) : tail)
     .split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n');
+  // ── 【2026-11-16 修正：这条断言与 preset 的硬约束直接矛盾】──────────────
+  // 它原来要求"必须在 preset 里显式配 chunkChars"，但 preset 那段写死了：
+  //   ⛔ 严禁在此处写 chunkChars —— 宿主 resolveConfig() 第一行是
+  //     validateKeys(config, BASIC_COMPACT_CONFIG_KEYS, "BasicCompactionConfig")
+  //   那是【严格白名单】，多写一个键就直接抛
+  //     "BasicCompactionConfig: unknown key chunkChars"
+  //   → 整个 engineering preset 装载失败、工程模式从列表里消失。
+  // 也就是说：真按这条断言去改 preset，工程模式会直接挂；不按它改，这条永远红。
+  // 断了两个月的红断言等于没有断言，所以改成断言【真实约束】：
+  //   ① 绝对不能出现在 preset 里（出现即预设加载失败）；
+  //   ② 分段字符预算必须走插件自己读的环境变量；
+  //   ③ maxTokens 仍要显式配且留够余量（这条是真实有效的）。
   const cc = block.match(/chunkChars:\s*(\d+)/);
-  assert.ok(cc, '必须显式配 chunkChars');
-  assert.ok(Number(cc[1]) <= 40000,
-    'chunkChars 必须留余量（当前路由 maxTokens=128000，输入+输出不能贴边），实际 ' + cc[1]);
+  assert.equal(cc, null,
+    'preset 里【绝不能】出现 chunkChars：宿主配置是严格白名单，多一个键整个工程预设会装载失败');
+  // 分段预算的实现其实在 lib/summarize.js（不是 index.js）——读错文件会让
+  // 这条断言变成"永远红"，所以把来源写清楚。
+  const engineSrc = fs.readFileSync(
+    path.join(path.dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, '$1'),
+              '..', 'lib', 'summarize.js'), 'utf8');
+  assert.match(engineSrc, /DSH_ENG_COMPACTION_CHUNK_CHARS/,
+    '分段字符预算必须走插件自读的环境变量（不经宿主 schema 校验）');
+
   const mt = block.match(/maxTokens:\s*(\d+)/);
-  assert.ok(mt, '必须显式配 maxTokens');
+  assert.ok(mt, '必须显式配 maxTokens（不写的话会被 headroomTokens 压低导致摘要截断）');
   assert.ok(Number(mt[1]) <= 20000,
-    'maxTokens 要与 chunkChars 一起留余量，实际 ' + mt[1]);
-  // 输入 + 输出必须明显小于 128000
-  const sum = Number(cc[1]) + Number(mt[1]);
+    'maxTokens 要留余量（摘要请求 = 输入 + 输出，不能贴路由上限），实际 ' + mt[1]);
+  // 输入（插件内置分段预算默认值）+ 输出 必须明显小于 128000
+  const chunkDefault = Number((engineSrc.match(/DEFAULT_CHUNK_CHARS\s*=\s*(\d{4,})/) || [])[1]) || 64000;
+  const sum = chunkDefault + Number(mt[1]);
   assert.ok(sum < 128000 * 0.75,
-    'chunkChars + maxTokens 必须显著低于路由上限 128000，实际 ' + sum);
+    '分段预算 + maxTokens 必须显著低于路由上限 128000，实际 ' + sum);
 });
 
 test('⑤ 阈值必须是用户指定的 200K（1M 窗口 × 0.2）', () => {

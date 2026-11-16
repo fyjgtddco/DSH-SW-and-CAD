@@ -582,14 +582,22 @@ DSH-SW-and-CAD-main/
 │   │   ├── load_cases/           # 载荷工况（gate_load_case.json）
 │   │   ├── reports/              # 防线凭据 + 房间报告
 │   │   └── test_regression_*.py  # 31 个回归测试
-│   └── plugins/dsh-engineering-ui/  # UI 插件
-│       ├── lib/index.js          # Host 半（HTTP 路由 / 提问桥接 / 防线签名）
-│       ├── lib/client.js         # 浏览器半（三栏工作区）
-│       ├── lib/defense-sign.js   # HMAC 凭据签名
-│       ├── lib/job-wait-guard.js # ★ job_output 长等待守卫（防"卡死"，见下）
-│       ├── preset-engineering.patch.yml  # ★ 运行时真正加载的人设
-│       ├── lib/webots.js         # ★ Webots 只读宿主门（归属校验 + 4 条路由）
-│       └── test/                 # 15 个插件测试
+│   └── plugins/
+│       ├── dsh-engineering-ui/   # UI 插件
+│       │   ├── lib/index.js      # Host 半（HTTP 路由 / 提问桥接 / 防线签名）
+│       │   ├── lib/client.js     # 浏览器半（三栏工作区 + 压缩历史页）
+│       │   ├── lib/defense-sign.js   # HMAC 凭据签名
+│       │   ├── lib/job-wait-guard.js # ★ job_output 长等待守卫（防"卡死"，见下）
+│       │   ├── preset-engineering.patch.yml  # ★ 运行时真正加载的人设
+│       │   ├── lib/webots.js     # ★ Webots 只读宿主门（归属校验 + 4 条路由）
+│       │   └── test/             # 插件测试
+│       ├── dsh-engineering-memory-guarded/  # ★ 当前压缩后端（受约束记忆压缩）
+│       │   ├── lib/guarded.js        # 引擎：确定性快照 / 审核 / 断点恢复
+│       │   ├── lib/guarded-memory.js # 会话日志 + 尺寸依赖图 + SHA-256
+│       │   ├── lib/guarded-audit.js  # 独立审核插件
+│       │   ├── lib/ledger.js         # 压缩历史账本（UI 数据源）
+│       │   └── test/                 # 28 个用例
+│       └── dsh-engineering-compaction/  # 上一代压缩器（保留可回退，不再被 preset 引用）
 ├── profiles/                     # 宿主层 patch 模板
 └── third-party-patched/          # 打过补丁的第三方插件
 ```
@@ -663,6 +671,49 @@ python -m venv $env:USERPROFILE\.dsh\engineering-webots\venv
 
 `fake` / `fixture` / `synthetic` / 静态校验 / 空接触 **都不等于物理 PASS**；
 `OUTCOME_UNKNOWN` **禁止重发动作**。详见 [engineering/docs/webots-mcp/](engineering/docs/webots-mcp/)。
+
+## 🧠 工程记忆：受约束压缩（只在本模式生效）
+
+> 2026-11-16 接入。工程模式的压缩后端换成 **`dsh-engineering-memory-guarded`**，
+> 上一代 `dsh-engineering-compaction` 源码保留可回退，但**同一上下文只能挂一个**——
+> 两个都挂会被 loader 拒绝（重复注册 `ctx.compaction`）。
+
+| | 上一代 | 现在 |
+|---|---|---|
+| 摘要由谁写 | LLM 分层摘要 + L0 数值强制回填 | **插件自己算**（确定性快照），模型没有写摘要的入口 |
+| 记住什么 | 大量机械数值 | 活动尺寸约束 + **依赖图** + 用户原文页 |
+| 改尺寸 | 只是数字变了 | 上游一改，**全部下游派生值级联撤下** |
+| 能不能验 | 不能 | 提交要过**独立审核**，发给模型前再验哈希 |
+| 崩溃恢复 | 无 | 有（`pending` + `agent.previous.json`） |
+
+**只有本模式生效**：它是 preset 的 `compaction` 子项，标准/极简模式读的是它们自己的
+`compaction-basic`；本包的 `cordis.patch.yml` 保持 `- insert: []`，也**不进** profile bundles。
+
+### 用户怎么登记尺寸
+
+```
+!尺寸 shaft.diameter = 20 mm           ← 明确登记
+请把 shaft.diameter 改为 24 mm。        ← 同等效力
+我要换尺寸                              ← 只表达意图：工具暂停，等补全 ID/值/单位
+!继续原尺寸                             ← 收回变更
+```
+
+模型只有一个只读工具 `engineering_memory_request`（`read` / `correct` / `derive` / `invalidate`），
+且 `correct` **必须有用户原文佐证**。用户给定的约束，模型改不动（`MEMORY_USER_CONSTRAINT_PROTECTED`）。
+
+### 压缩历史（图一 / 图二的黄圈）
+
+| 位置 | 内容 |
+|---|---|
+| **主子代理各自的链** | 左列选中哪个子代理，右列「压缩历史」就切到哪条链（`target === 会话 id`） |
+| **主对话的链** | 「会话视图 → 工程模式」页签里的那一页（`target === root`） |
+| **顺序** | **最新在最上面**；旧记录不删除、只被刷下去 |
+| **数据源** | v2 账本 `compaction_history_v2.jsonl` + v1 旧账本，UI **合并**后倒序展示 |
+
+> 💡 换后端**不会**让历史变空白：宿主侧同时读两份账本。
+> 新后端采用「压缩成功才落账」，所以新账本文件在第一次压缩后才会出现 —— 这是正常的。
+
+详见 [engineering/plugins/dsh-engineering-memory-guarded/README.md](engineering/plugins/dsh-engineering-memory-guarded/README.md)。
 
 ## 🩹 防"卡死"：`job_output` 长等待守卫
 
@@ -845,6 +896,7 @@ python "<根>\tools\mode_gate.py" sw-monitor status
 
 | 提交 / 日期 | 说明 |
 |-------------|------|
+| 2026-11-16 | **压缩后端换代：受约束记忆压缩**（`dsh-engineering-memory-guarded`）。摘要不再交给模型，改由插件按尺寸依赖图确定性生成；派生值必须声明 parents，上游一改级联撤下；提交过独立审核 + 发模型前验哈希；断点可恢复。**压缩历史双账本合并**（v1 旧 + v2 新），最新在最上面、旧记录不消失，主子代理各自成链。新包 28 项用例全绿；同步脚本新增依赖声明自动补齐（实测过"文件到位但 package.json 没声明 → 整个工程预设加载失败"的静默缺口） |
 | 2026-11-12 | **外部监控器接管 SW 使用权**（进程内锁整体删除 ~700 行）+ **总理子代理整体删除** + 后台等待任务（`job_id`）+ 逐零件看板换数据源 + 交付总闸改问 `verify-task`。回归 72/72、插件 37 文件、monitor 自检 5/5 |
 | 2026-10-28 | **总计子代理真实化**（`analyst-bind` + 身份校验）+ 总理子代理同波启动与监工 + `room-board` 状态可信化（`waiting_sw` / `unbound`）+ 子代理禁令（`ROOT_SESSION_REQUIRED`）+ 插件自动平台登记 |
 | `e12d665` | 为移动端 DSH Go 做适配性调整 |
