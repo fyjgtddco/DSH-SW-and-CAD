@@ -207,11 +207,17 @@ export class MonitorBridge {
     if (!OPS.has(op)) throw new Error('UNKNOWN_MONITOR_OP: ' + op);
     if (op === 'status') return this.status();
     if (op === 'attach' || op === 'recover') {
+      // ⚠️ reason / dirty_pages / observed_rev 必须原样透传。
+      //   2026-11-16 现场：recover 一直返回"恢复必须写明原因（至少 5 个字符）"，
+      //   而调用方明明写了 --reason。排查发现是这一层把 reason 丢成了 undefined，
+      //   attach() 的默认值 '' 于是触发长度校验。统一 String() 兜底，杜绝
+      //   undefined / null 穿到监控器侧。
       const out = await this.attach({
         drained: payload.drained === true,
         recover: op === 'recover',
-        reason: payload.reason,
-        dirty_pages: payload.dirty_pages, observed_rev: payload.observed_rev,
+        reason: payload.reason == null ? '' : String(payload.reason),
+        dirty_pages: payload.dirty_pages,
+        observed_rev: payload.observed_rev,
       });
       if (this.attached) this.startHeartbeat();
       return out;

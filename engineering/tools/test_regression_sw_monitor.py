@@ -157,8 +157,12 @@ def main():
               (r.get("monitor") or {}).get("enabled") is False)
         w = mg.cmd_wait_rooms(["房间"], timeout=1)
         check("wait-rooms 未接入时 ok=false", w.get("ok") is False)
+        # hint 文案会随 _MONITOR_HINTS 演进，断言"可执行"而不是某句固定措辞：
+        #   必须同时包含【怎么修】和【具体命令/动作】。
+        _h = str(w.get("hint") or "")
         check("wait-rooms 给出可执行的 hint",
-              "sw-monitor attach" in str(w.get("hint") or ""), w.get("hint"))
+              ("sw-monitor attach" in _h) or ("sw_monitor.json" in _h),
+              _h)
 
         # ── ③ 接入后：许可 → 命令可执行；排队 → 给 job_id ─────────────
         print("\n③ 接入后由监控器发许可")

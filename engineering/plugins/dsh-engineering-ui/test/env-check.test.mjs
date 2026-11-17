@@ -89,8 +89,13 @@ test('③ 没有可用 Python 时必须给出【可操作】结论，不得假�
 
 test('④ resolvePython 必须校验版本并且认 py -3', () => {
   assert.ok(HOST_SRC.includes('PYTHON_MIN_MINOR'), '缺少最低版本常量');
-  const i = HOST_SRC.indexOf('let pyCache');
-  const seg = HOST_SRC.slice(i, i + 4000);
+  // 【2026-11-17】原先用固定字符窗口（indexOf('let pyCache') 之后 4000 字符）。
+  //   结果只要在附近插注释/新函数就会把窗口里该有的内容挤出去 → 假失败。
+  //   改成按【函数边界】取段：从 probePythonExe 到 pythonCandidates 结束。
+  const i = HOST_SRC.indexOf('function probePythonExe');
+  const j = HOST_SRC.indexOf('function resolvePython');
+  assert.ok(i > 0 && j > i, '找不到探针函数边界');
+  const seg = HOST_SRC.slice(i, j);
   assert.ok(/sys\.version_info/.test(seg), '探针必须真的问解释器要版本');
   assert.ok(/import win32com\.client/.test(seg), '探针必须验证 pywin32 真的能 import');
   assert.ok(/out\.push\('py'/.test(seg), "候选里必须有 py（Windows 官方启动器，会挑最新 3.x）");
@@ -149,9 +154,15 @@ test('⑩ 所有 Python 子进程必须强制 UTF-8（否则设置页中文全�
   assert.ok(HOST_SRC.includes('PYTHONIOENCODING'), '必须设置 PYTHONIOENCODING=utf-8');
   assert.ok(HOST_SRC.includes('PYTHONUTF8'), '必须设置 PYTHONUTF8=1（旧版本兼容）');
   assert.ok(/function pyEnv\(\)/.test(HOST_SRC), '应有统一的 pyEnv() 助手');
-  // 每一处 spawnSync 调 python 的地方都必须带 env: pyEnv()
-  const calls = HOST_SRC.match(/spawnSync\([\s\S]{0,400}?\}\)/g) || [];
-  const pyCalls = calls.filter((c) => /spawnSync\(py|spawnSync\(pre\[0\]/.test(c));
+  // 每一处调 python 的地方都必须带 env: pyEnv()
+  // 【2026-11-17】现在有两条通道：spawnSync（启动期/同步兜底）与
+  //   execFileAsync（路由内异步）。两者都必须带 env: pyEnv()，
+  //   否则中文照样会变成问号方块 —— 断言必须同时盯住两条。
+  const syncCalls = HOST_SRC.match(/spawnSync\([\s\S]{0,400}?\}\)/g) || [];
+  const asyncCalls = HOST_SRC.match(/execFileAsync\([\s\S]{0,400}?\}\)/g) || [];
+  const calls = syncCalls.concat(asyncCalls);
+  const pyCalls = calls.filter((c) =>
+    /spawnSync\(py|spawnSync\(pre\[0\]|execFileAsync\(py|execFileAsync\(pre\[0\]/.test(c));
   assert.ok(pyCalls.length >= 4, '应至少找到 4 处 Python 调用，实际 ' + pyCalls.length);
   for (const c of pyCalls) {
     assert.ok(c.includes('env: pyEnv()'),

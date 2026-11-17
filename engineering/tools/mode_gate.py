@@ -5303,6 +5303,37 @@ def _monitor():
     return _c
 
 
+#: 每个监控器错误码对应的【可执行】处置建议。
+#: 为什么需要它：所有 MonitorError 原先共用一句通用 hint（"先启动监控器"），
+#:   于是 UNMANAGED_SW_RUNNING / DIRTY_PAGES_PENDING / NOT_ATTACHED 这些
+#:   完全不同的问题都给出同一行提示 —— 使用者照着做一遍，问题照旧。
+#:   2026-11-16 现场：recover 因 SW 开着被拒，提示却让他"先启动监控器"。
+_MONITOR_HINTS = {
+    "UNMANAGED_SW_RUNNING":
+        "本机有不受门卫管理的 SLDWORKS 在运行。请先在 SolidWorks 里正常保存并"
+        "完全退出该实例（门卫要求接管时没有其他 SW 实例），再重试。"
+        "用 tasklist /FI \"IMAGENAME eq SLDWORKS.exe\" 确认已无进程。",
+    "COM_WORKER_STILL_RUNNING":
+        "还有 COM 工作进程/作业在跑。等它结束，或按超时回收流程处理后重试。",
+    "DIRTY_PAGES_PENDING":
+        "有未核对的脏页。先 python <tools>\\memory_gate.py page-checkpoint 记录"
+        "内容指纹；确认排空后用 recover --reason \"<说明>\" --dirty-rev <revision> 重试。",
+    "MONITOR_NOT_ATTACHED":
+        "监控器尚未接管。执行 python mode_gate.py sw-monitor attach --drained。",
+    "MONITOR_NOT_CONFIGURED":
+        "未接入外部监控器（缺 sw_monitor.json）。先启动监控器再 attach --drained。",
+    "MONITOR_BRIDGE_UNREACHABLE":
+        "连不上 DSH 宿主桥。确认 DSH 在运行且工程 UI 插件已装配；"
+        "若端口不对，设 DSH_WEB_URL=http://127.0.0.1:<GUI 地址栏里的端口>。",
+    "RECOVERY_REQUIRED":
+        "监控器需要受保护的恢复流程。用 sw-monitor recover --reason \"<真实排空说明>\" 执行。",
+    "SW_MACHINE_BUSY":
+        "本机已有另一个监控器实例持有全局互斥量。先结束旧的 monitor.py 进程再启动。",
+    "SOLIDWORKS_EXE_INVALID":
+        "启动参数 --solidworks-exe 不合法：路径须真实存在，且文件名必须是 sldworks.exe。",
+}
+
+
 def _monitor_error(exc):
     """把监控器异常翻译成门禁统一返回体。"""
     try:
@@ -5310,11 +5341,14 @@ def _monitor_error(exc):
         extra = getattr(exc, "extra", None) or {}
     except Exception:
         code, extra = "MONITOR_ERROR", {}
+    hint = _MONITOR_HINTS.get(
+        str(code),
+        ("SW 使用权由外部监控器（DSH-SW-Monitor）统一分配。"
+         "旧进程内锁已删除，不存在回退路径。"
+         "先启动监控器并执行 python mode_gate.py sw-monitor attach --drained。"))
     out = {"ok": False, "gate": "SW_MONITOR", "code": code,
            "error": str(exc),
-           "hint": ("SW 使用权由外部监控器（DSH-SW-Monitor）统一分配。"
-                    "旧进程内锁已删除，不存在回退路径。"
-                    "先启动监控器并执行 python mode_gate.py sw-monitor attach --drained。")}
+           "hint": hint}
     try:
         out.update({k: v for k, v in extra.items() if k not in out})
     except Exception:

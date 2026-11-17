@@ -192,10 +192,12 @@ def _post(path, payload, timeout):
     except (urllib.error.URLError, OSError):
         raise MonitorError(
             "MONITOR_BRIDGE_UNREACHABLE",
-            "连不上 DSH 宿主桥（%s）。监控器接管期间这是硬失败："
-            "请确认 DSH 正在运行且工程 UI 插件已装配，不要改用旧锁路径。"
-            "若端口不对，设置 DSH_WEB_URL=http://127.0.0.1:<实际端口> 后重试。"
-            % (_origin()[0],)) from None
+            "连不上 DSH 宿主桥（%s，来源=%s）。监控器接管期间这是硬失败。"
+            "排查顺序：① 确认 DSH 正在运行且工程 UI 插件已装配；"
+            "② 若来源是 fallback，说明宿主没把真实端口传给子进程 —— "
+            "GUI 地址栏里的端口才是真的，设 DSH_WEB_URL=http://127.0.0.1:<该端口> 后重试；"
+            "③ 不要改用旧锁路径。"
+            % (_origin()[0], _origin()[1])) from None
     try:
         return json.loads(raw.decode("utf-8"))
     except ValueError:

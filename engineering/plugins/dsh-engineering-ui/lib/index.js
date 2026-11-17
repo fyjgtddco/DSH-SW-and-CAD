@@ -71,6 +71,7 @@ import os from 'node:os';
 //   用 spawnSync 而非 spawn：探测最长 120s，同步等待语义更简单，
 //   且设置页是低频人工操作，不占用事件循环热点。
 import { spawnSync } from 'node:child_process';
+import { execFile as execFileCb } from 'node:child_process';
 // 【三大防线 · 签名式信任根】仅工程模式装配；密钥只存宿主内存。
 import { DefenseSigner } from './defense-sign.js';
 // 【卡死修复 · 宿主层】job_output 长等待守卫。纯本地实现、零外部依赖：
@@ -635,6 +636,18 @@ async function parentOf(ctx, childId) {
 
 export function apply(ctx) {
   const disposers = [];
+
+  // 【2026-11-17】启动期预热 Python 选择（异步，不阻塞装配）。
+  //   背景：resolvePython() 过去要在请求路径里起 2 个 Python 进程做探测，
+  //   叠加 parts-board 的自死锁，用户看到的就是"每次开面板卡几十秒"。
+  //   现在把探测挪到这里 + 定时刷新，HTTP 请求只吃缓存。
+  try {
+    const kick = () => { Promise.resolve().then(() => warmPythonCache()).catch(() => {}); };
+    kick();
+    const warmTimer = setInterval(kick, PY_CACHE_MS - 30000);
+    if (warmTimer && typeof warmTimer.unref === 'function') warmTimer.unref();
+    disposers.push(() => { try { clearInterval(warmTimer); } catch (e) {} });
+  } catch (e) { /* 预热失败不影响主流程 */ }
 
   // ── cwd prompt 变量 · 已彻底移除 ──────────────────────────────────────
   // 历史：0.2.1 移除了 dsh-agent-loop 对 cwd 变量的注册，而工程模式人设首行
@@ -2947,7 +2960,11 @@ export function apply(ctx) {
         }
         const py = resolvePython();
         if (!py) return send(res, 200, { ok: false, error: '未找到可用的 Python 解释器' });
-        const r = spawnSync(py, [script, 'parts-board'], {
+        // 【2026-11-17 致命修复】这里原先是 spawnSync —— 同步阻塞事件循环，
+        //   而 parts-board 的 Python 侧要【回连宿主】问监控器，于是自己等自己，
+        //   30 秒超时后才返回，期间所有会话的 HTTP（含历史加载）全部冻住。
+        //   详见上面 execFileAsync 的注释。改为异步后事件循环不被占用。
+        const r = await execFileAsync(py, [script, 'parts-board'], {
           encoding: 'utf8', timeout: 90000, cwd: dir, windowsHide: true, env: pyEnv(),
         });
         const out = String((r && r.stdout) || '');
@@ -4657,6 +4674,9 @@ export function apply(ctx) {
   const PYTHON_MIN_MAJOR = 3;
   const PYTHON_MIN_MINOR = 6;
   let pyCache = null, pyCacheAt = 0;
+  // 【2026-11-17】预热结果：由 warmPythonCache() 异步填好，请求路径直接命中，
+  //   不再在 HTTP 请求里起 Python 探测进程。
+  let pyWarm = null, pyWarmAt = 0;
   const PY_CACHE_MS = 5 * 60 * 1000;
 
   /** 把 '3.13.15' 解析成 [3,13]；解析不了返回 null。 */
@@ -4673,18 +4693,51 @@ export function apply(ctx) {
     return c === 'py' ? ['-3'] : [];
   }
 
-  /** 用某解释器跑一次探针，返回 {exe, version, ok, pywin32, error}。 */
-  function probePythonExe(c) {
+  /**
+   * probePythonExe 的【同步】版本。
+   *
+   * 只在两处使用：
+   *   ① resolvePython(true) 详情模式（设置页「环境检查」显式触发，调用方已是 async）；
+   *   ② 缓存与预热都失效时的兜底（正常路径走 pyCache / pyWarm，命中即不探测）。
+   * 深探测（含 pywin32 import）留在异步版，避免把事件循环冻住。
+   */
+  function probePythonExeSync(c) {
     const pre = [c].concat(pyArgsFor(c));
-    let version = null, error = null, pywin32 = null;
+    let version = null, error = null;
     try {
       const r = spawnSync(pre[0], pre.slice(1).concat(['-c',
         'import sys;print("%d.%d.%d" % sys.version_info[:3])']),
         { encoding: 'utf8', timeout: 15000, windowsHide: true, env: pyEnv() });
-      if (r && r.status === 0) {
+      if (r && r.status === 0) version = String((r.stdout || '')).trim() || null;
+      else error = 'exit=' + (r && r.status);
+    } catch (e) { error = String((e && e.message) || e); }
+    const ver = parsePyVersion(version);
+    const okVer = !!ver && (ver[0] > PYTHON_MIN_MAJOR ||
+      (ver[0] === PYTHON_MIN_MAJOR && ver[1] >= PYTHON_MIN_MINOR));
+    return { exe: c, version, ok: okVer, pywin32: null, error };
+  }
+
+  /**
+   * 用某解释器跑一次探针，返回 {exe, version, ok, pywin32, error}。
+   *
+   * 【2026-11-17】改成 async —— 它会在路由里被 resolvePython() 间接调用，
+   *   而每个候选要起 2 个 Python 进程（版本探测 + pywin32 探测）。
+   *   原来的同步版在缓存过期时会把事件循环冻住数秒，叠加 parts-board 的
+   *   自死锁就变成"每次开面板都卡几十秒"。
+   *   缓存（pyCache）把它压成每 5 分钟一次，但首次/过期那一刻仍然是同步的，
+   *   而用户点开面板的时机完全不可控 —— 必须异步化。
+   */
+  async function probePythonExe(c) {
+    const pre = [c].concat(pyArgsFor(c));
+    let version = null, error = null, pywin32 = null;
+    try {
+      const r = await execFileAsync(pre[0], pre.slice(1).concat(['-c',
+        'import sys;print("%d.%d.%d" % sys.version_info[:3])']),
+        { encoding: 'utf8', timeout: 15000, windowsHide: true, env: pyEnv() });
+      if (r && r.ok) {
         version = String((r.stdout || '')).trim() || null;
       } else {
-        error = 'exit=' + (r && r.status) + ' ' +
+        error = 'exit=' + (r && r.error && r.error.code) + ' ' +
           String(((r && r.stderr) || '') + ((r && r.stdout) || '')).trim().slice(0, 200);
       }
     } catch (e) {
@@ -4695,10 +4748,10 @@ export function apply(ctx) {
       (ver[0] === PYTHON_MIN_MAJOR && ver[1] >= PYTHON_MIN_MINOR));
     if (okVer) {
       try {
-        const r2 = spawnSync(pre[0], pre.slice(1).concat(['-c',
+        const r2 = await execFileAsync(pre[0], pre.slice(1).concat(['-c',
           'import win32com.client;print("ok")']),
           { encoding: 'utf8', timeout: 15000, windowsHide: true, env: pyEnv() });
-        pywin32 = !!(r2 && r2.status === 0);
+        pywin32 = !!(r2 && r2.ok);
       } catch (e) { pywin32 = false; }
     }
     return { exe: c, version, ok: okVer, pywin32, error };
@@ -4713,10 +4766,95 @@ export function apply(ctx) {
   // 修法：给子进程注入 PYTHONIOENCODING=utf-8 / PYTHONUTF8=1，
   //   让 Python 自己就用 UTF-8 输出（与 Python 侧 sys.stdout.reconfigure
   //   双保险；后者在旧版本 Python 上可能不可用）。
+  /**
+   * 宿主端口：**必须显式注入**给 Python 子进程。
+   *
+   * ── 现场（2026-11-16 图二右下角「零件」面板）────────────────────────────
+   * 子代理能正常读到监控器（quarantined=false / SW 占用者可见），但右下角
+   * 零件面板报：
+   *   读取失败: 连不上 DSH 宿主桥 (http://127.0.0.1:19387)
+   * 而 GUI 实际在 54023。
+   *
+   * ── 根因 ────────────────────────────────────────────────────────────────
+   * parts-board 路由用 spawnSync 起 mode2_flow.py，env 来自 pyEnv()。
+   * pyEnv() 只做 Object.assign({}, process.env) —— 也就是说【完全依赖
+   * 宿主进程自己有没有 DSH_WEB_URL】。
+   * 而 sw_monitor_client 的解析顺序是
+   *   DSH_SW_MONITOR_HOST → DSH_WEB_URL → DSH_WEB_URL_ALT → DSH_WEB_PORT
+   *   → 固定端口 19387
+   * 宿主进程里这个变量缺失时，子进程一路落到固定 19387 → 连不上。
+   * 我之前只修了 Python 侧的解析顺序，没修「谁来喂这个变量」—— 同一件事
+   * 的另一半。测试里 env 是手动设的，所以又没抓到。
+   *
+   * ── 修法 ────────────────────────────────────────────────────────────────
+   * 插件自己知道端口（ctx.webServer.port，防线签名器早就在用），
+   * 直接写进子进程环境，不再赌宿主有没有注入。
+   */
+  function hostPort() {
+    try {
+      const p = ctx && ctx.webServer && ctx.webServer.port;
+      const n = Number(p);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function hostOrigin() {
+    const p = hostPort();
+    return p ? ('http://127.0.0.1:' + p) : null;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  //  【2026-11-17 致命修复】宿主路由禁止再用 spawnSync
+  // ══════════════════════════════════════════════════════════════════════
+  // ── 现场（用户报障「一直在载入历史，换会话也要 10 秒」）──────────────────
+  //   GET /parts-board                   → 30,287 ms（同步阻塞，且还在轮回）
+  //   GET /compaction-history（本来 268ms）→ 30,297 ms ← 被上面那条堵住了
+  //   两条【并发】请求同时各 30 秒：说明不是"这条慢"，而是"整个宿主被冻住"。
+  //
+  // ── 为什么会自己堵死自己 ────────────────────────────────────────────────
+  //   pyEnv() 会把 DSH_WEB_URL 注入 Python 子进程（那是 2026-11-16 的修复，
+  //   让 Python 能解析到宿主的真实端口）。而 mode2_flow.py parts-board 的做法是
+  //   【回连宿主】的 /dsh-engineering-ui/sw-monitor-op 去问监控器。
+  //   时序因此变成：
+  //     ① 宿主处理 /parts-board，调 spawnSync 起 Python（事件循环被冻住）
+  //     ② Python 要回连宿主 127.0.0.1:<port> —— 但宿主冻着，accept 不了
+  //     ③ Python 侧 CALL_TIMEOUT_S = 30，等满 30 秒超时返回 degraded
+  //     ④ spawnSync 返回，宿主才解冻
+  //   实测复现：宿主空闲时 parts-board 232ms；宿主忙时同一条 29,349ms。
+  //   这就是"一直在载入历史"的直接原因 —— 任何一次的同步 Python 调用，
+  //   都会把【所有会话】的 HTTP 一起冻住，包括历史加载。
+  //
+  // ── 修法 ────────────────────────────────────────────────────────────────
+  //   路由里改为 async 调用（execFile 异步版），事件循环全程不被占用，
+  //   Python 的回连就能被正常处理。spawnSync 保留给【非路由】的启动期/守卫路径。
+  function execFileAsync(file, args, options) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (value) => { if (!settled) { settled = true; resolve(value); } };
+      try {
+        execFileCb(file, args, options || {}, (error, stdout, stderr) => {
+          done({ ok: !error, error, stdout: String(stdout || ''), stderr: String(stderr || '') });
+        });
+      } catch (e) {
+        done({ ok: false, error: e, stdout: '', stderr: String((e && e.message) || e) });
+      }
+    });
+  }
+
   function pyEnv() {
     const env = Object.assign({}, process.env);
     env.PYTHONIOENCODING = 'utf-8';
     env.PYTHONUTF8 = '1';
+    // 【2026-11-16 修复】把宿主真实端口喂给子进程。
+    //   优先级说明：DSH_SW_MONITOR_HOST 是显式覆盖（测试/多实例用），
+    //   已存在就不动；否则用宿主实测端口覆盖 DSH_WEB_URL。
+    const origin = hostOrigin();
+    if (origin) {
+      if (!env.DSH_SW_MONITOR_HOST) env.DSH_WEB_URL = origin;
+      env.DSH_WEB_PORT = String(hostPort());
+    }
     return env;
   }
 
@@ -4747,25 +4885,61 @@ export function apply(ctx) {
    * 找到【真的能跑】的 Python 解释器（>= 3.6）。
    * @param {boolean} detail true = 详情模式（每次真探测、返回全部候选，供环境检查页）
    * @returns {string|null|object} 详情模式返回 {chosen, tried}
+   *
+   * ──【2026-11-17】同步/异步双通道 ──────────────────────────────────────
+   * 探测本身已经异步化（probePythonExe），但 resolvePython 保留【同步】签名：
+   *   它被几十处同步代码调用，整体改 async 会牵动整个文件。
+   * 同步版的安全前提是：
+   *   ① 正常路径命中 pyCache（5 分钟），根本不探测 —— 零阻塞；
+   *   ② 缓存未命中时用【廉价的浅探测】挑第一个跑得起来的（见 warmPythonCache）。
+   * 真正会起 2 个 Python 进程的深探测只在 warmPythonCache()（async）里做，
+   *   启动时预热一次、之后每 5 分钟刷新一次，永远不发生在请求路径上。
    */
   function resolvePython(detail) {
     const cands = pythonCandidates();
+    // ── 缓存优先（无论哪种模式）：命中就不该有任何子进程 ──────────────────
+    // 【2026-11-17】原先 detail 分支写在最前面，导致「环境检查」每次都会
+    //   同步起 N 个 Python 进程；虽然那条路由已异步化，但只要顺序不对，
+    //   任何新增调用方都会把同步探测带进请求路径。顺序即契约。
+    const cached = (pyCache !== null && (Date.now() - pyCacheAt) < PY_CACHE_MS) ? pyCache : null;
     if (detail) {
-      const tried = cands.map(probePythonExe);
+      // 详情模式要"全部候选的真实结论"，只能真探测（调用方必须是异步路径）。
+      if (cached) return { chosen: cached, tried: [{ exe: cached, ok: true, cached: true }] };
+      const tried = cands.map((c) => probePythonExeSync(c));
       const hit = tried.filter((t) => t.ok)[0] || null;
       return { chosen: hit ? hit.exe : null, tried };
     }
-    if (pyCache !== null && (Date.now() - pyCacheAt) < PY_CACHE_MS) return pyCache;
+    if (cached) return cached;
+    // 缓存失效：优先用预热结果（由 warmPythonCache 异步填好），没有再退回同步浅探测。
+    if (pyWarm && (Date.now() - pyWarmAt) < PY_CACHE_MS) {
+      pyCache = pyWarm; pyCacheAt = Date.now();
+      return pyCache;
+    }
     pyCache = null;
     for (const c of cands) {
-      if (probePythonExe(c).ok) { pyCache = c; break; }
+      if (probePythonExeSync(c).ok) { pyCache = c; break; }
     }
     pyCacheAt = Date.now();
     return pyCache;
   }
 
+  /** 异步预热：把"到底用哪个 Python"这件事挪出请求路径。 */
+  async function warmPythonCache() {
+    try {
+      const cands = pythonCandidates();
+      if (!cands.length) return;
+      let hit = null;
+      for (const c of cands) {
+        if ((await probePythonExe(c)).ok) { hit = c; break; }
+      }
+      if (hit) { pyWarm = hit; pyWarmAt = Date.now(); pyCache = hit; pyCacheAt = Date.now(); }
+    } catch (e) { /* 预热失败不影响正常路径 */ }
+  }
+
   /** 触发一次真实探测（会调 Python，可能连接 SW/CAD）。 */
-  function runConnProbe(target) {
+  // 【2026-11-17】改为 async：它同样会回连宿主（conn-probe 走 sw_bridge，
+  //   而 pyEnv() 注入了 DSH_WEB_URL），同步调用会把事件循环冻住 → 自死锁。
+  async function runConnProbe(target) {
     const dir = findToolsDir();
     if (!dir) return { ok: false, error: '未定位到 tools 目录' };
     const bridge = path.join(dir, 'sw_bridge.py');
@@ -4781,7 +4955,7 @@ export function apply(ctx) {
     //   （慢、且可能把 SW 窗口拉到前台）。
     if (target) args.push('--target', target);
     try {
-      const r = spawnSync(py, args, {
+      const r = await execFileAsync(py, args, {
         encoding: 'utf8', timeout: 120000, cwd: dir,
         windowsHide: true, env: pyEnv(),
       });
@@ -4819,7 +4993,8 @@ export function apply(ctx) {
   //   设置页是浏览器，读不到 Python 的 stdout；必须由宿主把它转成 HTTP。
   //   但**判定逻辑一行都不在 JS 里** —— 全部委托给 tools/env_check.py，
   //   保证「设置页看到的」和「Agent 跑出来的」是同一套结论（同一个事实源）。
-  function runEnvCheck(args, timeoutMs) {
+  // 【2026-11-17】async：env_check 会调 Python 且可能耗时数十秒，同步会把宿主冻住。
+  async function runEnvCheck(args, timeoutMs) {
     const dir = findToolsDir();
     if (!dir) return { ok: false, error: '未定位到 tools 目录' };
     const script = path.join(dir, 'env_check.py');
@@ -4841,7 +5016,7 @@ export function apply(ctx) {
       };
     }
     try {
-      const r = spawnSync(py, [script].concat(args || []), {
+      const r = await execFileAsync(py, [script].concat(args || []), {
         encoding: 'utf8', timeout: timeoutMs || 120000, cwd: dir, windowsHide: true,
         env: pyEnv(),
       });
@@ -4874,7 +5049,7 @@ export function apply(ctx) {
     path: PREFIX + '/env-check',
     handler: async (req, res) => {
       try {
-        return send(res, 200, runEnvCheck(['probe'], 180000));
+        return send(res, 200, await runEnvCheck(['probe'], 180000));
       } catch (error) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
@@ -4887,7 +5062,7 @@ export function apply(ctx) {
     path: PREFIX + '/env-prompt',
     handler: async (req, res) => {
       try {
-        const r = runEnvCheck(['prompt', '--json'], 180000);
+        const r = await runEnvCheck(['prompt', '--json'], 180000);
         if (!r || r.ok === false || !r.prompt) {
           // 连 env_check 都跑不了时，也要给用户一段【能自救】的说明，不能空手
           const detail = resolvePython(true);
@@ -4906,7 +5081,8 @@ export function apply(ctx) {
   })));
 
   /** 读/写本机设置（交付目录、各软件路径）—— 转发 tools/settings.py。 */
-  function runSettings(args) {
+  // 【2026-11-17】async：同上，避免同步阻塞宿主事件循环。
+  async function runSettings(args) {
     const dir = findToolsDir();
     if (!dir) return { ok: false, error: '未定位到 tools 目录' };
     const script = path.join(dir, 'settings.py');
@@ -4916,7 +5092,7 @@ export function apply(ctx) {
     const py = resolvePython();
     if (!py) return { ok: false, error: '没有找到 Python 3.6+ 解释器' };
     try {
-      const r = spawnSync(py, [script].concat(args), {
+      const r = await execFileAsync(py, [script].concat(args), {
         encoding: 'utf8', timeout: 60000, cwd: dir, windowsHide: true,
         env: pyEnv(),
       });
@@ -4939,7 +5115,7 @@ export function apply(ctx) {
     path: PREFIX + '/settings',
     handler: async (req, res) => {
       if (req.method === 'GET') {
-        try { return send(res, 200, runSettings(['report'])); }
+        try { return send(res, 200, await runSettings(['report'])); }
         catch (error) { return send(res, 200, { ok: false, error: String((error && error.message) || error) }); }
       }
       if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'GET or POST only' });
@@ -4956,7 +5132,7 @@ export function apply(ctx) {
         return send(res, 400, { ok: false, error: '不允许的设置项: ' + key,
                                 allowed: ALLOWED });
       }
-      return send(res, 200, runSettings(['set', key, value]));
+      return send(res, 200, await runSettings(['set', key, value]));
     }
   })));
 
@@ -5011,7 +5187,7 @@ export function apply(ctx) {
           error: "target 必须是 'sw' | 'cad' | 'abaqus' | 'webots' | 'all'" });
       }
       try {
-        const r = runConnProbe(target === 'all' ? null : target);
+        const r = await runConnProbe(target === 'all' ? null : target);
         return send(res, 200, r);
       } catch (error) {
         return send(res, 200, { ok: false, error: String((error && error.message) || error) });
@@ -5104,7 +5280,8 @@ export function apply(ctx) {
       const py = resolvePython();
       if (!py) return send(res, 200, { ok: false, error: '未找到可用的 Python 解释器' });
       try {
-        const r = spawnSync(py, [bridge, 'conn-launch', '--target', target], {
+        // 【2026-11-17】同上：异步执行，别把整个宿主冻住（conn-launch 最长 240s）
+        const r = await execFileAsync(py, [bridge, 'conn-launch', '--target', target], {
           encoding: 'utf8', timeout: 240000, cwd: dir, windowsHide: true, env: pyEnv(),
         });
         const out = String((r && r.stdout) || '');
