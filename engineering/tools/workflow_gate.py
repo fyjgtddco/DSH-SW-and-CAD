@@ -61,22 +61,31 @@ except Exception:  # 模块缺失时降级为"不强制"，绝不锁死流程
     _cc = None
 
 # ══════════════════════════════════════════════════════════════════════════
-# 【模式二新流程 · 代码级强制契约】mode2_flow
+# 【2026-11-18 · 十阶段 → 七阶段】分析引擎固定为 seven_v03
 # ══════════════════════════════════════════════════════════════════════════
-# 用户要求：「所有改动都要写在代码里面，强制执行的」「不能是写在提示词里面的」。
+# 用户要求：「先删除十阶段分析所有的原本的文件，然后按照七阶段文档加功能」。
 #
-# mode2_flow 承载原本只写在 SKILL.md 里的流程约束，并升级为**会返回失败、
-# 能阻断流程**的代码契约：
-#   · 提问数量硬约束（强 10~50 / 弱 5~10）
-#   · 按需提问（必须先分析到该阶段 + 必须写理由，禁止一股脑全问）
-#   · 十阶段按序推进
-#   · 子代理编制只能由【总计子代理】决定（取消固定 3 个）
-#   · 零件验收：监控器逐件核验（材料/物理/领域凭据 + 哈希 + run_id）
-#   · 相邻尺寸不一致 → 必须升级父代理
-#   · 交付前总闸
+# 已【删除】的十阶段强制契约（不再是"禁用"，是删除）：
+#   · 十阶段按序推进（begin-stage / mark-stage-done / stage-status / refresh-stage）
+#   · 题数硬约束（强 10~50 / 弱 5~10）与按需提问台账（ask / answer-question）
+#   · 总计子代理自报身份（analyst-bind / analyst-guard / analyst-heartbeat）
+#   · set-subagent-plan 这个"由模型自己登记编制"的入口
+#
+# 取而代之（代码级，不靠提示词）：
+#   · 每个新任务在 init 时【由服务端配置】固定 analysis_engine=seven_v03；
+#   · 同时记录 seven_stage_root_session_id（真实根会话 ID）——
+#     七阶段插件的 attach 要求调用者就是它；
+#   · 房间草案只能来自 seven_stage_gate.read_design()（宿主写的凭证文件），
+#     模型无法自报 ticket / revision / 分析者会话 ID；
+#   · select / 恢复开工 / 交付前一律用【已保存 ticket】重查，设计一变即失效。
 #
 # 注意：模块导入失败时 **不降级为"不强制"** —— 而是让门禁明确报错。
 #   理由：这些是用户点名要强制的东西，静默降级等于没做。
+ANALYSIS_ENGINE = "seven_v03"
+
+#: workflow_state 里记录真实根会话 ID 的键（七阶段 attach 的唯一入口凭据）
+SEVEN_STAGE_ROOT_KEY = "seven_stage_root_session_id"
+
 _m2 = None
 _m2_error = None
 try:
@@ -90,7 +99,8 @@ def _m2_require():
     """取 mode2_flow 模块；不可用时返回 (None, 错误说明)。
 
     为什么不像 _cc 那样降级：choice_contract 只提供题面，缺了还能走；
-    而 mode2_flow 是用户要求的【强制约束本体】，缺了必须显式暴露。
+    而 mode2_flow 是用户要求的【下游强制约束本体】（七阶段凭证复核 /
+    房间编制 / 交付总闸），缺了必须显式暴露。
     """
     if _m2 is None:
         return None, ("模式二强制契约模块 mode2_flow 不可用（%s）—— "
@@ -109,6 +119,118 @@ def _m2_work_dir(state=None):
     except Exception:
         pass
     return None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 【2026-11-18 · 七阶段引擎】真实根会话 ID + 引擎固定
+# ══════════════════════════════════════════════════════════════════════════
+def _trusted_root_session_id():
+    """取【由宿主取得的】真实根会话 ID。
+
+    优先级（前两个可信，后两个只用于兼容老宿主）：
+      ① DSH_ROOT_SESSION_ID   —— 宿主注入的真实根会话 id（首选）
+      ② DSH_SESSION_ID        —— 当前会话 id；在根会话里它就等于根
+      ③ DSH_PARENT_SESSION_ID —— 当前处在子代理里时，用它回溯一级
+      ④ 读不到 → None（调用方 fail-closed，绝不猜）
+
+    为什么不能用模型自报：见七阶段交接文档「信任根」一节 ——
+    模型自报的 planner / root 一律不采信，凭证只认宿主写的那份状态文件。
+    """
+    for _k in ("DSH_ROOT_SESSION_ID", "DSH_SESSION_ID", "DSH_PARENT_SESSION_ID"):
+        try:
+            _v = str(os.environ.get(_k) or "").strip()
+        except Exception:
+            _v = ""
+        if _v:
+            return _v
+    return None
+
+
+def _ensure_seven_stage_root(state):
+    """把真实根会话 ID 钉进任务状态；返回其值（取不到 → None）。
+
+    只在 init 调用一次。后续 attach 时插件会核对「调用者 == 这个 id」，
+    因此这里写错就等于整个七阶段流程无法启动 —— 失败必须显式暴露，
+    不能像旧 analyst-bind 那样由模型自己报一个 id。
+    """
+    sid = _trusted_root_session_id()
+    if not sid:
+        state["seven_stage_root_missing"] = True
+        state[SEVEN_STAGE_ROOT_KEY] = None
+        return None
+    state["seven_stage_root_missing"] = False
+    state[SEVEN_STAGE_ROOT_KEY] = sid
+    return sid
+
+
+def _engine_gate():
+    """select / 恢复开工 / 交付前的引擎闸门。
+
+    旧引擎已删除，因此只接受 analysis_engine == seven_v03。
+    返回 {"ok": True} 或 {"ok": False, "gate": ..., "error": ...}。
+    """
+    st = load_state()
+    eng = str(st.get("analysis_engine") or "").strip()
+    if not eng:
+        return {"ok": False, "gate": "ANALYSIS_ENGINE_UNSET",
+                "error": ("当前任务没有登记 analysis_engine —— "
+                          "请先重新执行 init（新任务一律固定为 %s）。"
+                          % ANALYSIS_ENGINE)}
+    if eng != ANALYSIS_ENGINE:
+        return {"ok": False, "gate": "ANALYSIS_ENGINE_MISMATCH",
+                "error": ("当前任务的 analysis_engine=%r，本版只支持 %r；"
+                          "十阶段引擎已删除，旧任务请用旧版本工具链收尾。"
+                          % (eng, ANALYSIS_ENGINE)),
+                "expected": ANALYSIS_ENGINE}
+    if not str(st.get(SEVEN_STAGE_ROOT_KEY) or "").strip():
+        return {"ok": False, "gate": "SEVEN_STAGE_ROOT_SESSION_MISSING",
+                "error": ("任务状态里没有 %s —— 七阶段插件无法核对真实根会话，"
+                          "分析流程无法启动。请重新 init（宿主须注入 DSH_SESSION_ID）。"
+                          % SEVEN_STAGE_ROOT_KEY),
+                "how": ["确认宿主注入了 DSH_SESSION_ID / DSH_ROOT_SESSION_ID；",
+                        "在【根会话】里重新执行 init，再走两段 provide_context。"]}
+    return {"ok": True, "engine": eng, "task_id": st.get("task_id"),
+            "root_session_id": st.get(SEVEN_STAGE_ROOT_KEY)}
+
+
+def state_engine():
+    """当前任务登记的引擎（读不到返回 None）。只读。"""
+    try:
+        return load_state().get("analysis_engine") or None
+    except Exception:
+        return None
+
+
+def _seven_stage_state():
+    """只读：当前任务的七阶段插件状态（宿主写的状态文件）。读不到返回 {}。
+
+    用于把"分析到哪一步 / 还有没有待办 / 是否已结束"如实转给门禁，
+    而不是让模型口头声称"分析完了"。
+    """
+    try:
+        _wf = load_state()
+        _tid = _wf.get("task_id")
+        _sd = os.environ.get("DSH_SEVEN_STAGE_STATE_DIR") or ""
+        if not _tid or not _sd or not os.path.isabs(_sd):
+            return {}
+        _p = os.path.join(_sd, "%s.json" % _tid)
+        if not os.path.exists(_p):
+            return {}
+        with open(_p, "r", encoding="utf-8-sig") as _f:
+            _s = json.load(_f) or {}
+        _records = _s.get("records") or []
+        return {"phase": _s.get("phase"), "revision": _s.get("revision"),
+                "cursor": _s.get("cursor"), "steps_done": len(_records),
+                "steps_total": 63,
+                "open_question": (_s.get("question") or {}).get("id"),
+                "jobs": sorted((_s.get("jobs") or {}).keys()),
+                "failures": sorted((_s.get("failures") or {}).keys()),
+                "members": sorted((_s.get("members") or {}).keys()),
+                "ended": sorted((_s.get("ended") or {}).keys()),
+                "state_file": _p}
+    except Exception as _e:
+        return {"read_error": repr(_e)}
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 【2026-10-28 重构】根会话校验：编排命令禁止在【子代理】里执行
@@ -1180,12 +1302,12 @@ def _ask_depth_question(task_desc):
         "【参数需求强度】本次设计是否需要严格把关参数"
         "（载荷/尺寸/公差/材料都要有据可依）？",
         "  可选：",
-        "    · 强需求：需要严格校核，参数要有设计依据（提问数允许 10 ~ 50 题）",
-        "    · 不强：先出大致结构即可，细节由你按经验定（提问数允许 5 ~ 10 题）",
+        "    · 强需求（详细范围）：需要严格校核，参数要有设计依据",
+        "    · 不强（精简范围）：先出大致结构即可，细节由你按经验定",
         "",
-        "⚠️ 题数区间由代码硬性校验（mode2_flow.validate_question_budget）：",
-        "   强需求 10~50、弱需求 5~10（**可以恰好等于上下界**），超界或不足都会被拒绝。",
-        "⚠️ 并且【取消了一股脑全问】：改为 AI 分析到需要时才按需提问。",
+        "⚠️ 【2026-11-18 七阶段】本题只决定【设计范围】的详略，**不再决定题数**：",
+        "   十阶段的「强 10~50 / 弱 5~10」题数硬约束已随引擎删除。",
+        "   现在的真人澄清由七阶段插件按【明确决策缺口】触发（question→capture→interpret）。",
     ])
 
 
@@ -3296,6 +3418,19 @@ def cmd_init(task_desc):
     state["step"] = "mode_confirm_asked"
     state["task"] = task_desc
     state["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    # ══ 【2026-11-18 · 七阶段】新任务一律固定分析引擎 ══════════════════
+    # 用户要求：「给每个新任务固定分析引擎」。这里由**服务端配置**决定，
+    # 不是模型参数，也不接受命令行覆盖 —— 否则模型可以自己"退回旧引擎"。
+    # 旧任务（升级前建立）按它们已记录的引擎收尾，新任务一律 seven_v03。
+    state["analysis_engine"] = ANALYSIS_ENGINE
+    state.pop("engine_override", None)
+    _root_sid = _ensure_seven_stage_root(state)
+    if not _root_sid:
+        # 宿主没注入会话 id → 七阶段 attach 无法核对，整个分析流程起不来。
+        # fail-closed：把原因写进状态，init 的返回体会显式告警。
+        state["seven_stage_blocked"] = ("SEVEN_STAGE_ROOT_SESSION_MISSING: "
+                                        "宿主未注入 DSH_SESSION_ID / DSH_ROOT_SESSION_ID，"
+                                        "七阶段插件无法核对真实根会话。")
     # ── 【FL-02 修复】记录本次流程的起始时刻，供 select 做时序校验 ────────
     # 实测缺陷：workflow_state.json 里的残留状态（上一次正常流程留下的
     #   step=mechanics_done）可让新的 select 直接通过，跳过 init 与两段提问。
@@ -3355,6 +3490,9 @@ def cmd_init(task_desc):
     except Exception:
         pass
     return {"ok": True, "step": "mode_confirm_asked", "task": task_desc,
+            "analysis_engine": state.get("analysis_engine"),
+            "seven_stage_root_session_id": state.get(SEVEN_STAGE_ROOT_KEY),
+            "seven_stage_blocked": state.get("seven_stage_blocked"),
             # ── 【模式二新流程 · 第一步】确认模式 + 并行策略 + 是否 AI 自主 ──
             # 这是"流程重排"的落点：init 直接给出**新的第一步**，
             # 而不是旧的"第 0 题参数需求强度"（那已后移到第 2 步）。
@@ -3560,25 +3698,26 @@ def cmd_provide_context(context_text):
         #     但不能超过10题。所有的问题都要交给AI自己分析。」
         #
         # 因此：
+        # ══ 【2026-11-18 · 七阶段】不再有题数配额 ══════════════════════
+        # 旧实现这里调 mode2_flow.set_depth 登记"强 10~50 / 弱 5~10"的题数区间，
+        # 并要求每题挂到十阶段的某个阶段上。七阶段引擎把真人澄清
+        # （question → capture → interpret）整体交给了宿主插件：
+        #   · 何时问，由插件登记的**明确决策缺口**决定，不看配额；
+        #   · 原话必须来自宿主消息（模型自己写的文本无法冒充真人原话）；
+        #   · 答完后由总计子代理 interpret 分类并回退到受影响的最早小步。
+        # 因此这里只保留"设计范围（详细/精简）"的选择，题数校验整段删除。
         _m2mod, _m2err = _m2_require()
         _budget = None
         if _m2mod is not None:
-            _wd2 = _m2_work_dir(state)
-            _sd = _m2mod.set_depth(depth, _wd2)
-            if not _sd.get("ok"):
-                # set_depth 失败（例如已按另一口径问过题）→ fail-closed
-                return {"ok": False, "gate": "MODE2_DEPTH_REJECTED",
-                        "step": "context_asked", "error": _sd.get("error"),
-                        "hint": ("参数需求强度一经登记不得更改；"
-                                 "如需重来请先 workflow_gate.py reset。")}
-            _budget = {"min": _sd["min"], "max": _sd["max"],
-                       "label": _sd["label"], "asked": 0}
-            _budget.pop("candidate_pool", None)
-            _budget["note"] = (
-                "%s：提问数必须落在 [%d,%d]。问题由总计子代理在十阶段分析中"
-                "现场生成 —— 分析到哪个阶段、确实缺信息才问，"
-                "每问一题都要写到对应阶段并写理由（mode2_flow.record_question）。"
-                % (_sd["label"], _sd["min"], _sd["max"]))
+            _budget = {
+                "engine": ANALYSIS_ENGINE,
+                "label": ("详细设计范围（强需求）" if depth == "full"
+                          else "精简设计范围（弱需求）"),
+                "asked": None, "min": None, "max": None,
+                "note": ("七阶段引擎不设题数配额：真人澄清由插件的 "
+                         "question → capture → interpret 三段接管，"
+                         "以插件登记的明确决策缺口为准。"),
+            }
 
         return {
             "ok": True,
@@ -3586,90 +3725,77 @@ def cmd_provide_context(context_text):
             "param_depth": depth,
             "param_depth_label": "强需求(全量)" if depth == "full" else "不强(精简)",
             "question_count": total,
-            # ── 【模式二新流程】题数硬约束（强 10~50 / 弱 5~10）──────────────
+            # ── 【2026-11-18 · 七阶段】不再有题数配额 ────────────────────────
+            # 旧字段 question_budget / budget_enforced_by / budget_error 保留键名，
+            # 但内容改为七阶段语义（engine + 澄清链路），且**不再有 min/max**。
             "question_budget": _budget,
-            "budget_enforced_by": ("mode2_flow.validate_question_budget"
-                                   if _budget else None),
+            "budget_enforced_by": None,     # 十阶段的题数校验已删除
             "budget_error": _m2err,
-            # 按需提问：不固定题数，只约束区间（强 10~50 / 弱 5~10）。
-            # 问题由总计子代理现场生成，没有预设题库。
+            "analysis_engine": ANALYSIS_ENGINE,
             "mandatory_contract": {
                 "enforced": bool(_cc is not None),
                 "stage": "context",
                 "mode": "on_demand",
-                "required_questions": None,   # 已废弃：不再有固定题数
-                "question_budget": _budget,
-                    "must_use": "ask_user_question",
-                "rule": ((
-                    "问题没有预设题库 —— 由总计子代理在十阶段分析中现场生成。"
-                    "分析到哪个阶段、确实缺哪项信息，才问那一项；"
-                    "每题必须挂到已推进的阶段并写理由（mode2_flow.py ask --stage --reason），"
-                    "并逐题用 answer-question 记录用户真实答复。"
-                    "总题数必须落在 [%d,%d] 区间内。禁止用正文文字代替提问。"
-                    "★ 答复一落盘，该阶段的产物会被标记为【过期(stale)】："
-                    "必须 refresh-stage 重做并提交新产物，"
-                    "否则 stage-status 判未完成、set-subagent-plan/select 均被拒。")
-                    % ((_budget["min"] if _budget else 10),
-                       (_budget["max"] if _budget else 50))),
+                "required_questions": None,   # 七阶段没有固定题数
+                "clarify_contract": ("question → capture → interpret"),
+                "must_use": "ask_user_question",
+                "rule": (
+                    "七阶段不设题数区间：真人澄清由插件按【明确决策缺口】触发。"
+                    "总计子代理用 action=question 登记缺口（写清当前决策/所需信息/"
+                    "为什么缺/不知道时怎么取得）；真实主对话把问题转给用户，"
+                    "再用 action=capture 采集【宿主消息里的用户原话】；"
+                    "总计子代理最后 action=interpret 分类并回退到受影响的最早小步。"
+                    "禁止用正文文字代替提问，禁止模型自己编写「用户答复」。"
+                    "★ 答完且分类不是 no_change 时，插件 revision+1、下游凭据作废，"
+                    "已登记的建模编制也随之失效，必须重新 register-design。"),
             },
             "message": nl.join([
-                "已识别参数需求强度: 【%s】→ 提问数必须落在 %d ~ %d 题之间。"
-                % ("强需求" if depth == "full" else "不强",
-                   (_budget["min"] if _budget else 10),
-                   (_budget["max"] if _budget else 50)),
+                "已识别设计范围: 【%s】（七阶段没有题数配额，澄清按决策缺口触发）"
+                % ("详细" if depth == "full" else "精简"),
                 "",
                 "─" * 62,
-                "【模式二新流程 · 第 3 步：启动总计子代理（不要再一股脑问题）】",
+                "【模式二 · 第 3 步：创建总计子代理并接上七阶段插件】",
                 "─" * 62,
                 "",
-                "★ 用户要求：『取消之前的一股脑全部问，交由 AI 在分析机械时，",
-                "  思考到那里，然后就问对应的问题』。因此：",
+                "★ 分析已整体交给独立插件，工具名 engineering_seven_stage。",
+                "  会话谱系：主对话 --fork--> 总计子代理 --launch--> 知识/设计/反驳",
                 "",
-                "  1) ★ 用 subagent_fork 真正创建【总计子代理】——不是主对话自己跑阶段：",
-                "       subagent_fork(description=\"总计子代理（十阶段分析）\", prompt=<见下>)",
-                "     它开工第一件事必须绑定自己的身份（代码强制，主对话无法代劳）：",
-                "       python mode2_flow.py analyst-bind",
-                "       （自动读取它自己的 DSH_SESSION_ID；之后主对话再调阶段命令会被",
-                "         ANALYST_ACTOR_REQUIRED 拒绝）",
+                "  1) ★ 用 subagent_fork 真正创建【总计子代理】（不必自己跑分析）：",
+                "       subagent_fork(description=\"总计子代理（七阶段分析）\", prompt=<只让它等 attach>)",
                 "",
-                "  2) 总计子代理按【十阶段流水线】分析本任务：",
-                "       TaskUnderstanding → FunctionalDecomposition → PhysicsReasoning",
-                "       → PrincipleSynthesis → MechanismSynthesis → RecursivePartReasoning",
-                "       → PartSynthesis → EngineeringValidation → DesignIteration",
-                "       → ExplainableDesignOutput",
-                "     推进阶段（必须按序，跳阶段会被拒）：",
-                "       python mode2_flow.py begin-stage TaskUnderstanding",
+                "  2) 主对话立刻 attach（只有真实根会话能做，代码强制）：",
+                "       engineering_seven_stage(taskId=<task_id>, action=\"attach\",",
+                "         dataJson='{\"planner\":\"<总计子代理 sessionId>\",\"messageIds\":[\"<原始需求消息ID>\"]}')",
                 "",
-                "  3) 分析到【确实缺某个信息】时才提问（不许开头一股脑抛题）。",
-                "     子代理不能直接调 ask_user_question，必须走宿主代问桥：",
-                "       python \"<根>\\tools\\ask_user.py\" --room 总计子代理 --child <自己的 sessionId> \\",
-                "              --header <标题> --question <问题> --option <选项> ...",
-                "     答案以 stdout JSON 返回后，再落盘：",
-                "       python mode2_flow.py answer-question <seq> \"<答复原文>\"",
+                "  3) 总计子代理收到通知 → action=launch，插件用宿主原生 startActivation",
+                "     建三个二级会话（maxDepth=2），每个角色先 action=bind 再干活。",
                 "",
-                "  4) 总计子代理分析完后，用它自己的身份登记【本轮开几个子代理】：",
-                "       python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
-                "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
-                "     数量不再固定为 3 —— 由它按分析结论决定。",
+                "  4) 之后按 action=status 的 stepContract 逐步推进 63 个小步：",
+                "       1.x 现场 → 2.x 工件工艺 → 3.x 需求验收 → 4.x 功能路线",
+                "       → 5.x 骨架载荷 → 6.x 逐件设计 → 7.x 整合反驳",
+                "     每步都必须有【知识(真实联网来源) + 设计 + 独立复审】三件套。",
                 "",
-                "  5) 零件验收由监控器逐件核验（无需任何汇总代理），"
-                "与建模小屋同波同时启动、持续盯 room-board。",
+                "  5) 真人缺口：总计 action=question → 主对话把问题给用户 →",
+                "     主对话 action=capture（只认宿主 user 消息）→ 总计 action=interpret。",
                 "",
-                "查看进度：python workflow_gate.py stage-status",
-                "查看题数：python workflow_gate.py mode2 questions --final",
+                "  6) 收尾：总计 action=propose_rooms 提交房间草案，四角色依次 end；",
+                "     主对话再 python mode2_flow.py register-design 登记编制。",
+                "",
+                "查看进度：python workflow_gate.py seven-status",
+                "查看凭证：python mode2_flow.py recheck-design",
             ]),
             "question_budget": _budget,
-            "next_command": ("请按上面的【按需提问】流程推进：先启动总计子代理，"
-                             "分析到确实缺信息时再用 mode2_flow.py ask 提问。\n"
-                             "全部提问完成后，把用户回答汇总后调用：\n"
+            "next_command": ("请按上面的【七阶段】流程推进：先创建总计子代理并 attach，"
+                             "由它 launch 三个角色跑完 63 个小步。\n"
+                             "分析收尾后（四角色都已 end），把本轮澄清的答案汇总后调用：\n"
                              "  python \"<工程模式根目录>\\tools\\workflow_gate.py\" "
                              "provide_context \"<全部回答原文>\"\n"
                              "⚠️ 是命令行脚本，不是 DSH 工具（BUG-03）。"),
-            # ── 【模式二新流程】把下一步（总计子代理）也一并交代清楚 ────────
+            # ── 把下一步（力学估算 + select 前置）也一并交代清楚 ────────────
             "next_after_mechanics": (
-                "力学估算通过后，**第一步改为确认模式 + 固定两问（并行/单行、是否AI自主）**，"
-                "随后必须由【总计子代理】按十阶段流水线分析并决定开几个子代理 —— "
-                "见 mode2_flow.py 的 begin-stage / set-subagent-plan。"),
+                "力学估算通过后，**第一步改为确认模式 + 固定两问（并行/单行、是否AI自主）**；"
+                "在 select 之前必须已完成：七阶段 ready + 真实根会话执行过 "
+                "mode2_flow.py register-design（房间草案来自 roomProposal）。"),
         }
 
     # ── 第二段：收齐背景信息，做力学估算 ─────────────────────────────
@@ -3686,21 +3812,17 @@ def cmd_provide_context(context_text):
     #   · 若已达到区间，正常放行。
     # 这样既保留了"不因门禁细节卡死新用户"，又把"跳过按需提问"这件事显式化，
     # 避免"以为问了 10 题、实际只问了 1 题"的错觉。
+    # ══ 【2026-11-18 · 七阶段】题数校验整体删除 ══════════════════════════
+    # 旧实现这里用 mode2_flow.question_report 比对"强 ≥10 / 弱 ≥5"的下界，
+    # 没达标就挂一条 question_budget_warning。七阶段引擎没有题数概念
+    # （真人澄清按决策缺口触发），这条校验已不再有意义，改为只回传
+    # 插件的真实进展，供上游判断"分析到哪一步"。
     _budget_warn = None
-    try:
-        _m2_mod, _m2_err2 = _m2_require()   # 用模块级入口，避免局部别名遮蔽
-        if _m2_mod is None:
-            raise RuntimeError(_m2_err2)
-        _qr = _m2_mod.question_report(None) or {}
-        _min = int(_lim.get("min") or 0)
-        if _min and _asked < _min:
-            _budget_warn = (
-                "按需提问尚未达标：已登记 %d 题，本档要求至少 %d 题。"
-                "本次已放行（不阻断），但请补足提问或用 "
-                "mode2_flow.py ask 逐条登记，否则 select 之后的审计会判不通过。"
-                % (_asked, _min))
-    except Exception:
-        _budget_warn = None
+    _seven_progress = _seven_stage_state() or None
+    if _seven_progress and _seven_progress.get("read_error"):
+        _budget_warn = ("七阶段状态读取失败（%s）—— 无法确认分析进度，"
+                        "请检查 DSH_SEVEN_STAGE_STATE_DIR。"
+                        % _seven_progress.get("read_error"))
     # 第0题答案 + 第二段答案拼在一起，保证力学估算能看到全部关键词
     merged = ((state.get("depth_answer") or "") + " " + (context_text or "")).strip()
     state["context"] = merged
@@ -3874,11 +3996,11 @@ def _archive_finished(state, done_count, total, message):
                     _ls3 += [
                         "",
                         "任务【不得】宣告完成。请先补齐上述各项：",
-                        "  ① 十阶段分析走完（mode2_flow.py stage-status 查看缺哪些）；",
-                        "  ② 按需提问且题数达标（强 10~50 / 弱 5~10）；",
-                        "  ③ 由总计子代理登记子代理编制（set-subagent-plan）；",
+                        "  ① 七阶段分析走完并交出凭证（mode2_flow.py seven-status 查看）；",
+                        "  ② 真人澄清的原话都已被 interpret（不留待办消息）；",
+                        "  ③ 房间草案已由真实根会话登记（mode2_flow.py register-design）；",
                         "  ④ 每个零件保存后由监控器记账（part-saved），验收时核对三大防线凭据；",
-                        "  ⑤ 跑相邻尺寸一致性（check-consistency）；不一致必须交父代理干涉。",
+                        "  ⑤ 台账审计与邻接尺寸由监控器 verify-task 一次算完。",
                         "",
                         "（确需放行：设 DSH_DEFENSE_BYPASS=1，会留痕到 reports/defense_bypass.json）",
                     ]
@@ -4450,18 +4572,33 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
     #      未给出编制时，**不允许**创建任何建模小屋（下面会拦）。
     _m2mod, _m2err = _m2_require()
     _m2_block = None
+    # ══ 【2026-11-18 · 七阶段】引擎闸门（先于任何下游动作）══════════════
+    # 用户要求：「在 select 实际写所有权、房间启动、监控器登记等动作之前先校验引擎」。
+    # 旧引擎已删除，因此这里只认 seven_v03 + 真实根会话 ID 已登记；
+    # 不通过时【不改任何状态】，直接返回可操作的拒绝体。
+    _eng = _engine_gate()
+    if not _eng.get("ok"):
+        return {"ok": False, "gate": _eng.get("gate"), "step": "mechanics_done",
+                "error": _eng.get("error"),
+                "analysis_engine": state.get("analysis_engine"),
+                "expected_engine": ANALYSIS_ENGINE,
+                "how": _eng.get("how") or [
+                    "python \"<根>\\tools\\workflow_gate.py\" init \"<任务>\"  （会固定引擎）",
+                    "确认宿主注入了 DSH_SESSION_ID / DSH_ROOT_SESSION_ID。",
+                ]}
     if _m2mod is not None:
         _wd3 = _m2_work_dir(state)
         state["mode2_flow"] = {
             "confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "mode": "② 大型复杂器械/多零件装配体",
+            "analysis_engine": ANALYSIS_ENGINE,
             "ai_autonomy": choice,           # A/B/C = 是否 AI 自主设计
             "parallel": parallel,            # D/E   = 并行 / 单行
             "plan_file": _m2mod.plan_path(_wd3),
+            "seven_stage_root_session_id": state.get(SEVEN_STAGE_ROOT_KEY),
         }
-        # 编制是否已由总计子代理登记 —— 决定本次 select 能否放行"创建小屋"
+        # 编制是否已登记（由【真实根会话】调 register-design 写入）—— 决定能否开小屋
         _sp = _m2mod.get_subagent_plan(_wd3)
-
         _task_now3 = state.get("task_id")
         _sp_ok = bool(_sp.get("ok"))
         _sp_stale = False
@@ -4470,60 +4607,43 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
             if not _sp_task or str(_sp_task) != str(_task_now3):
                 _sp_stale = True
                 _sp_ok = False
-        _q_stale = False
-        _q_report = None
+        # ── 七阶段凭证重查（比对已保存 ticket）──────────────────────────
+        # 这是"设计被用户改答后必须重做"的唯一机器判据：
+        #   · 插件 revision+1 → read_design 算出的 ticket 变化 → 这里对不上；
+        #   · 凭证本身失效（缺步、缺复审、有未解释原话）也会在这里暴露。
+        _seven = {}
         try:
-            _q_report = _m2mod.question_report(_wd3)
-            _qp = _m2mod.load_plan(_wd3) or {}
-            _qp_task = _qp.get("task_id")
-            if _q_report and (_q_report.get("asked") or 0) > 0:
-                if not _qp_task or (_task_now3 and str(_qp_task) != str(_task_now3)):
-                    _q_stale = True
-        except Exception:
-            _q_report = None
-        # ── 【Bug② 修复】把阶段新鲜度（stale/等答复）一并带进 select 的判据 ──
-        _stage_block = {}
-        try:
-            _st_now = _m2mod.stage_status(_wd3)
-            _stage_block = {
-                "ready": bool(_st_now.get("complete")),
-                "stale": _st_now.get("stale") or [],
-                "stale_rows": [r.get("stage") for r in (_st_now.get("rows") or [])
-                               if r.get("stale")],
-                "awaiting_answer": _st_now.get("awaiting_answer") or [],
-                "missing": _st_now.get("missing") or [],
-                "done_count": _st_now.get("done_count"),
-                "total": _st_now.get("total"),
-            }
-        except Exception as _ste:
-            _stage_block = {"ready": None, "error": repr(_ste)}
-        # ── 【2026-10-28 重构】总计子代理必须是【真实子代理】（analyst-bind）──
-        try:
-            _an_now = _m2mod.analyst_status(_wd3)
-        except Exception as _ane:
-            _an_now = {"ok": False, "bound": False, "error": repr(_ane)}
+            _seven = _m2mod.recheck_design(_wd3)
+        except Exception as _sve:
+            _seven = {"ok": False,
+                      "gate": "SEVEN_STAGE_RECHECK_ERROR",
+                      "error": repr(_sve)}
+        _seven_ok = bool(_seven.get("ok"))
+        _seven_rev = _seven.get("revision")
+        _seven_ticket = _seven.get("ticket")
+        _sp_ticket = (_sp or {}).get("seven_stage_ticket")
+        _seven_ticket_match = (not _seven_ok) or (not _sp_ok) or (
+            str(_sp_ticket or "") == str(_seven_ticket or ""))
         _m2_block = {
             "plan_file": _m2mod.plan_path(_wd3),
-            "analyst": _an_now,
-            "analyst_ready": bool(_an_now.get("bound")),
+            "analysis_engine": ANALYSIS_ENGINE,
+            "seven_stage_ok": _seven_ok,
+            "seven_stage_error": (None if _seven_ok else _seven.get("error")),
+            "seven_stage_revision": _seven_rev,
+            "seven_stage_ticket": _seven_ticket,
+            "seven_stage_analyst": _seven.get("analyst_session_id"),
+            "seven_progress": _seven_stage_state(),
             "subagent_plan_ready": _sp_ok,
             "subagent_plan_stale": _sp_stale,
-            # 注意：下面还有一个 "stages"（阶段 id 列表，历史字段）。
-            # 阶段新鲜度必须用【不同键名】，否则会被后者覆盖 —— 实测踩到过：
-            # 覆盖后 stale 判据永远读不到，select 照常放行过期产物。
-            "stage_freshness": _stage_block,
-            "question_ledger_stale": _q_stale,
-            "question_report": _q_report,
             "subagent_plan_error": (None if _sp.get("ok") else _sp.get("error")),
+            "plan_ticket": _sp_ticket,
+            "ticket_matches_plan": bool(_seven_ticket_match),
             "authority": _m2mod.SUBPLAN_AUTHORITY,
-            "stages": [s[0] for s in _m2mod.STAGES],
-            "rule": ("子代理数量不再固定为 3 —— 必须由【真实的 %s 子代理】先走十阶段分析，"
-                     "再调 mode2_flow.py set-subagent-plan 登记编制。"
-                     "零件验收不再由任何代理「上报」，而是由外部监控器按"
-                     "part-saved 事件 + 三大防线逐件核验；"
-                     "总计子代理未创建（未 analyst-bind）或未登记编制前，"
-                     "都不得创建任何建模小屋。"
-                     % (_m2mod.SUBPLAN_AUTHORITY,)),
+            "rule": ("子代理数量不固定 —— 必须由【真实根会话】先让七阶段插件"
+                     "read_design 交出房间草案，再调 mode2_flow.py register-design "
+                     "登记编制。零件验收由外部监控器按 part-saved 事件 + "
+                     "三大防线逐件核验；七阶段凭证未通过或编制未登记前，"
+                     "不得创建任何建模小屋。"),
         }
     save_state(state)
     _sync_mode_gate(choice, parallel)
@@ -4631,7 +4751,8 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
                     rooms = [(r["name"], r.get("type") or "structural") for r in _planned]
                     state["subagent_config"]["rooms"] = rooms
                     state["subagent_config"]["total_rooms"] = len(rooms)
-                    state["subagent_config"]["rooms_source"] = "总计子代理（mode2_flow.set-subagent-plan）"
+                    state["subagent_config"]["rooms_source"] = ("七阶段插件 read_design"
+                                                               "（roomProposal）")
                     state["subagent_config"]["rooms_rationale"] = _sp_ok.get("rationale")
                     # 每个房间的零件范围也以编制为准（覆盖硬编码的 _room_parts_scope）
                     state["subagent_config"]["room_parts"] = {
@@ -4990,21 +5111,26 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
             "step": "mechanics_done",
             "error": "子代理编制属于上一轮任务（或缺少 task_id），拒绝放行。",
             "subagent_plan": _m2_block,
-            "how": ["让总计子代理为本任务重新登记编制：",
-                    "  python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
-                    "--rationale \"<分解理由>\" --decided-by \"总计子代理\""],
+            "how": ["让真实根会话为本任务重新登记编制：",
+                    "  python mode2_flow.py register-design",
+                    "（编制只能来自七阶段 read_design 的房间草案；"
+                    "旧的 set-subagent-plan 已删除）"],
         }
 
-    # ★ 提问台账属于上一轮任务 → 视为"从未按需提问"，同样不放行
+    # ★ 提问台账属于上一轮任务 → 同样不放行
+    # 【2026-11-18】七阶段的"台账"就是插件状态文件里的 facts（真人口径）。
+    #   残留的旧计划文件若带着 question_ledger_stale，说明这是十阶段遗留现场，
+    #   直接按"本任务未开始分析"处理。
     if _m2_block and _m2_block.get("question_ledger_stale"):
         return {
             "ok": False,
-            "gate": "MODE2_QUESTION_LEDGER_STALE",
+            "gate": "SEVEN_STAGE_ANALYSIS_PENDING",
             "step": "mechanics_done",
-            "error": ("提问台账里是上一轮任务的问题记录，不能当作本轮已问过。"),
+            "error": ("本任务的七阶段分析尚未开始（残留的是上一轮的十阶段提问台账）。"),
             "question_report": _m2_block.get("question_report"),
-            "how": ["请对本任务重新走按需提问：",
-                    "  python mode2_flow.py ask \"<问题>\" --stage <阶段> --reason \"<理由>\""],
+            "how": ["按七阶段流程重新分析本任务：",
+                    "  主对话 engineering_seven_stage action=attach →",
+                    "  总计子代理 action=launch → 跑完 63 小步 → register-design"],
         }
 
     # ★ 【截图第 5 条】载荷为估算值却未经用户复核 → 拒绝开工。
@@ -5064,54 +5190,74 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
                 "本闸校验的是门禁状态文件里的 load_is_estimate / load_confirmed_at，"
                 "这两个字段只有 confirm-load 命令会写。"),
         }
-    # ── 【Bug② 修复 · 补充拦截】已登记编制但阶段产物过期 → 同样拒绝开工 ──
-    # set-subagent-plan 的前置会拦"登记那一刻"的 stale；但用户之后仍可能改答，
-    # 于是编制还在、阶段却过期了。此时放行 = 拿着过期结论去建模。
+    # ── 【2026-11-18 · 七阶段】真人澄清未清 → 拒绝开工 ────────────────────
+    # 旧实现这里拦的是"十阶段产物过期（stale）"。七阶段的等价判据是：
+    #   · 还有未作答的 question（插件里的 question.id 非空）；
+    #   · 有已捕获但未 interpret 的真人原话（facts 里缺 interpretation）；
+    #   · 有角色上报的 failures / 仍有未完成 job。
+    # 任何一项存在 → 编制所依据的输入仍可能变，据此开工就是拿过期结论建模。
     if _m2_block and _m2_block.get("subagent_plan_ready"):
-        _st = _m2_block.get("stage_freshness") or {}
-        if (_st.get("stale") or []):
+        _pr = _m2_block.get("seven_progress") or {}
+        _pend = []
+        if _pr.get("open_question"):
+            _pend.append("待真人作答的决策缺口 %s" % _pr.get("open_question"))
+        if _pr.get("jobs"):
+            _pend.append("未完成岗位任务 %s" % "、".join(_pr.get("jobs") or []))
+        if _pr.get("failures"):
+            _pend.append("角色故障 %s" % "、".join(_pr.get("failures") or []))
+        if _pend:
             return {
                 "ok": False,
-                "gate": "MODE2_STAGES_STALE",
+                "gate": "SEVEN_STAGE_ANALYSIS_PENDING",
                 "step": "mechanics_done",
-                "error": ("【模式二强制】编制所依据的十阶段产物已过期（%s）—— "
-                          "用户答复改变了设计输入，禁止据此开工。"
-                          % "、".join(_st.get("stale") or [])),
-                "stale_stages": _st.get("stale"),
-                "awaiting_answer": _st.get("awaiting_answer") or [],
-                "how": (["1) 逐阶段重做（会要求提交与过期前不同的新产物）："]
-                        + ["     python mode2_flow.py refresh-stage %s" % _sid
-                           for _sid in (_st.get("stale_rows") or [])][:12]
-                        + ["2) 若还有『产物依赖未答题目』，先回答："
-                           "python mode2_flow.py answer-question <seq> \"<答复>\"",
-                           "3) 重做完成后再次执行 select。"]),
+                "error": ("【模式二强制】七阶段分析仍有未完成项（%s）—— "
+                          "禁止据此开工。" % "；".join(_pend)),
+                "seven_progress": _pr,
+                "how": ["1) 总计子代理：action=status 看当前 stepContract；",
+                        "2) 有待答问题时：真实根会话 question → capture，"
+                        "总计子代理再 interpret；",
+                        "3) 有角色故障时：action=retry（限次）或 action=partial；",
+                        "4) 全部清空后再 select。"],
                 "plan_file": _m2_block.get("plan_file"),
             }
 
-    # ── 【2026-10-28 重构】总计子代理没真正创建 → 一律不许开工 ────────────
-    # 实测缺陷：主对话自己跑完十阶段、自己写 --decided-by "总计子代理"，
-    #   然后 select 直接放行 → 总计子代理从未存在过。
-    # 现在 analyst-bind 未执行就没有 analyst.session_id，这里 fail-closed。
-    if _m2_block and not _m2_block.get("analyst_ready"):
+    # ══ 【2026-11-18 · 七阶段】分析凭证未通过 → 拒绝开小屋 ═══════════════
+    if _m2_block and not _m2_block.get("seven_stage_ok"):
         return {
             "ok": False,
-            "gate": "MODE2_ANALYST_REQUIRED",
+            "gate": "SEVEN_STAGE_HANDOFF_REQUIRED",
             "step": "mechanics_done",
-            "error": ("【模式二强制】总计子代理尚未真实创建（plan 里没有 analyst.session_id）——"
-                      "拒绝放行创建建模小屋。"),
-            "why": ("十阶段分析、按需提问、子代理编制都必须发生在【总计子代理】内部；"
-                    "主对话自己跑阶段、自己写 --decided-by 不算 —— "
-                    "analyst-bind 会记录它的真实 sessionId，阶段命令只认这个身份。"),
+            "error": ("【模式二强制】七阶段分析凭证未通过 —— 拒绝放行创建建模小屋："
+                      + str(_m2_block.get("seven_stage_error") or "")),
+            "why": ("房间草案只能来自七阶段插件的 read_design（宿主写的凭证文件）。"
+                    "63 个小步、四角色完成理由、独立复审结论、房间草案指纹缺一不可；"
+                    "模型口头声称「分析完了」不算。"),
+            "seven_progress": _m2_block.get("seven_progress"),
             "how": [
-                "1) 主对话用 subagent_fork 创建【总计子代理】，prompt 要求它：",
-                "     · 第一步运行 python mode2_flow.py analyst-bind",
-                "     · 按序跑十阶段（begin-stage / mark-stage-done）",
-                "     · 缺信息时用 ask_user.py --room 总计子代理 --child <自己的 sessionId> 提问",
-                "     · 完成后 set-subagent-plan --decided-by \"总计子代理\"",
-                "2) 等它结束（wait_agent / list_agents），再回来执行 select。",
+                "1) 真实主对话：用 subagent_fork 创建一级【总计子代理】；",
+                "2) 真实主对话：调 engineering_seven_stage action=attach"
+                "（taskId + planner=总计子代理的真实 sessionId）；",
+                "3) 总计子代理：action=launch 启动知识/设计/反驳三个二级会话；",
+                "4) 三个角色各自 action=bind，然后按 status 的 stepContract 逐步提交；",
+                "5) 总计子代理：action=propose_rooms 提交房间草案，再按角色顺序 end；",
+                "6) 回到根会话：python mode2_flow.py register-design 登记编制后再 select。",
             ],
-            "analyst": _m2_block.get("analyst"),
             "plan_file": _m2_block.get("plan_file"),
+        }
+
+    if _m2_block and not _m2_block.get("ticket_matches_plan"):
+        return {
+            "ok": False,
+            "gate": "SEVEN_STAGE_DESIGN_CHANGED",
+            "step": "mechanics_done",
+            "error": ("七阶段设计版本与已登记编制不一致（登记 %r → 当前 %r）—— "
+                      "用户改答后下游结论已作废，必须重新登记编制。"
+                      % (_m2_block.get("plan_ticket"), _m2_block.get("seven_stage_ticket"))),
+            "why": ("插件在用户改答后 revision+1，受影响最早小步及其下游消息凭据全部作废。"
+                    "继续按旧编制开房间 = 拿过期结论建模。"),
+            "how": ["真实根会话：python mode2_flow.py register-design 重新登记；",
+                    "然后重新执行 select（房间表会按最新草案重建）。"],
+            "subagent_plan": _m2_block,
         }
 
     if _m2_block and not _m2_block.get("subagent_plan_ready"):
@@ -5119,26 +5265,18 @@ def cmd_select(choice, parallel=None, unknown=None, brief=False):
             "ok": False,
             "gate": "MODE2_SUBAGENT_PLAN_REQUIRED",
             "step": "mechanics_done",
-            "error": ("【模式二强制】尚未由【%s】登记子代理编制，"
-                      "拒绝放行创建建模小屋。" % (_m2mod.SUBPLAN_AUTHORITY
-                                                  if _m2mod else "总计子代理")),
-            "why": ("子代理数量不再固定 —— 必须由总计子代理先按十阶段流水线分析，"
-                    "再登记本轮要开几个房间、每个房间负责哪些零件。"
-                    "否则会退回代码默认房间表，改造等于没生效。"),
+            "error": ("【模式二强制】尚未登记子代理编制 —— 拒绝放行创建建模小屋。"),
+            "why": ("房间数量与零件范围必须来自七阶段的分析结论（roomProposal），"
+                    "不能退回代码默认房间表，也不能由模型自己写 --decided-by 冒充。"),
             "subagent_plan": _m2_block,
-            "stages": (list(_m2mod.STAGES) if _m2mod else []),
             "how": [
-                "1) 先启动【总计子代理】，按十阶段按序分析（跳阶段会被拒）：",
-                "     python mode2_flow.py begin-stage TaskUnderstanding",
-                "2) 分析到确实缺信息时才提问（不允许开头一股脑抛题）：",
-                "     python mode2_flow.py ask \"<问题>\" --stage <阶段> --reason \"<为什么现在问>\"",
-                "3) 分析完登记编制（decided_by 必须是『总计子代理』）：",
-                "     python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
-                "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
-                "4) 再回来执行 select（房间表完全按编制生成，不再追加固定角色）。",
+                "1) 让七阶段插件跑到 ready（三个角色 + 总计 + 真实根都 end）；",
+                "2) 在【真实根会话】里执行：",
+                "     python mode2_flow.py register-design",
+                "3) 再回来执行 select（房间表完全按草案生成，不再追加固定角色）。",
             ],
             "plan_file": _m2_block.get("plan_file"),
-            "next_command": ("完成上述 1~3 步后，重新执行：\n"
+            "next_command": ("完成上述步骤后，重新执行：\n"
                              "  python \"<工程模式根目录>\\tools\\workflow_gate.py\" "
                              "select %s,%s" % (choice, parallel)),
         }
@@ -6520,12 +6658,16 @@ def _main_body():
                               "reset": "清空并重新开始：python %s reset" % _me,
                               # ── 【模式二新流程】强制契约命令 ──────────────
                               "mode2 <子命令>": "【模式二强制契约】透传 mode2_flow.py："
-                                                "set-depth / begin-stage / mark-stage-done / "
-                                                "ask / questions / set-subagent-plan / "
-                                                "（总理子代理相关子命令已删除）；"
+                                                "register-design / recheck-design / seven-status / "
+                                                "subagent-plan / rooms-template / room-types / "
+                                                "parts-board / export-docx / pre-delivery"
+                                                "（十阶段子命令已删除）；"
                                                 "python %s mode2 --help 查看全部" % _me,
-                              "stage-status": "【模式二】查看十阶段推进情况："
-                                              "python %s stage-status" % _me,
+                              "register-design": "【七阶段】真实根会话登记房间编制（唯一入口）："
+                                                 "python %s register-design" % _me,
+                              "seven-status": "【七阶段】查看分析凭证 + 编制是否就绪"
+                                              "（stage-status 为旧别名）："
+                                              "python %s seven-status" % _me,
                               "pre-delivery": "【模式二】交付前总闸自检（缺项会列出）："
                                               "python %s pre-delivery" % _me,
                               "workspace": "【目录】看本任务目录的分层与可清理体积："
@@ -6684,17 +6826,46 @@ def _main_body():
             sys.exit(1)
         _rc = _m2c.main(sys.argv[2:])
         sys.exit(_rc)
-    elif cmd in ("stage-status", "stages"):
+    elif cmd in ("seven-status", "stage-status", "stages"):
+        # 【2026-11-18】stage-status 旧名保留为别名（外部脚本还在调），
+        # 但返回体换成了七阶段证据：引擎、根会话、凭证、编制、进度。
         _m2c, _m2e = _m2_require()
         if _m2c is None:
             print(json.dumps({"ok": False, "error": _m2e}, ensure_ascii=False, indent=2))
             sys.exit(1)
-        import argparse as _argparse
-        from memory_gate import fidelity_view
-        _ap = _argparse.ArgumentParser()
-        _ap.add_argument("--fidelity", choices=("full", "compressed", "structured", "pointer"))
-        _ns = _ap.parse_args(sys.argv[2:])
-        _r = fidelity_view(_m2c.stage_status(_m2_work_dir()), _ns.fidelity, "mode2_flow.py stage-status")
+        _eng = _engine_gate()
+        _plan = {}
+        try:
+            _plan = _m2c.load_plan(_m2_work_dir()) or {}
+        except Exception:
+            _plan = {}
+        _r = {
+            "ok": True,
+            "analysis_engine": state_engine(),
+            "expected_engine": ANALYSIS_ENGINE,
+            "engine_gate": _eng,
+            "seven_progress": _seven_stage_state(),
+            "registered": _plan.get("seven_stage"),
+            "subagent_plan": {
+                "ready": bool(_plan.get("subagent_plan")),
+                "count": (_plan.get("subagent_plan") or {}).get("count"),
+                "ticket": (_plan.get("subagent_plan") or {}).get("seven_stage_ticket"),
+                "revision": (_plan.get("subagent_plan") or {}).get("seven_stage_revision"),
+            },
+            "plan_file": _plan and _m2c.plan_path(_m2_work_dir()),
+        }
+        print(json.dumps(_r, ensure_ascii=False, indent=2))
+        sys.exit(0 if _eng.get("ok") else 1)
+    elif cmd in ("register-design", "register_design"):
+        # 【2026-11-18 · 七阶段】真实根会话把 read_design 的房间草案登记为编制。
+        _m2c, _m2e = _m2_require()
+        if _m2c is None:
+            print(json.dumps({"ok": False, "error": _m2e}, ensure_ascii=False, indent=2))
+            sys.exit(1)
+        _inc = ("--include-records" in sys.argv[2:])
+        _r = _m2c.register_design_plan(
+            _m2_work_dir(), include_records=_inc,
+            actor=os.environ.get("DSH_SESSION_ID"))
         print(json.dumps(_r, ensure_ascii=False, indent=2))
         sys.exit(0 if _r.get("ok") else 1)
     elif cmd in ("pre-delivery", "predelivery"):

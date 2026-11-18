@@ -267,7 +267,7 @@ def is_purchased_room(name, state=None):
     类型来源按优先级：
       ① mode_state.rooms[房间].type（room-start 时或人工写入）
       ② 编制里的类型（mode2_plan / select 返回的 rooms[].type）——
-         「总计子代理」在 set-subagent-plan 时就能把某房间标成外购，
+         七阶段 roomProposal 在 register-design 时就能把某房间标成外购，
          不必等 room-start 才生效，否则房间表与豁免口径会短暂不一致。
       ③ 房间名里直接带"外购/标准件/采购件"
     """
@@ -5513,8 +5513,8 @@ def cmd_sw_monitor_plan(rooms_json=None):
         except Exception:
             rooms = None
     if not rooms:
-        return {"ok": False, "error": "没有可登记的编制：请先 mode2_flow.py "
-                                      "set-subagent-plan --rooms-json ..."}
+        return {"ok": False, "error": "没有可登记的编制：请先让七阶段插件交出房间草案，"
+                                      "再由真实根会话执行 mode2_flow.py register-design"}
     try:
         out = client.call("plan", {"task": task, "root": wd,
                                    "simulation_required": False,
@@ -6058,6 +6058,31 @@ def _require_subagent_plan():
             "ok": False,
             "gate": "SUBAGENT_PLAN_REQUIRED",
             "error": "尚未登记子代理编制，禁止 room-start。",
+            # 【2026-11-18 · 七阶段】编制只能来自 read_design 的房间草案。
+            "how": ["1) 真实主对话 fork 总计子代理；",
+                    "2) 调 engineering_seven_stage action=attach；",
+                    "3) 总计子代理 action=launch，三角色 bind 后按步提交；",
+                    "4) 总计子代理 action=propose_rooms 并各自 end；",
+                    "5) 真实根会话执行 mode2_flow.py register-design。",
+                    "（十阶段的旧登记入口已删除，不能再拿它登记编制）"],
+        }
+    # ── 【2026-11-18 · 七阶段】编制必须与【当前设计版本】一致 ──────────────
+    # 旧实现只校验"编制属于本任务"。七阶段多一层：用户改答后插件 revision+1，
+    # 已登记的编制立刻作废 —— 否则房间会拿着过期结论开工。
+    try:
+        _rc = _m2.recheck_design(_mode2_work_dir())
+    except Exception as _rce:
+        _rc = {"ok": False, "gate": "SEVEN_STAGE_RECHECK_ERROR",
+               "error": repr(_rce)}
+    if not _rc.get("ok"):
+        return {
+            "ok": False,
+            "gate": _rc.get("gate") or "SEVEN_STAGE_HANDOFF_REQUIRED",
+            "error": ("七阶段交接凭证未通过 —— 禁止 room-start："
+                      + str(_rc.get("error") or "")),
+            "hint": ("让真实根会话重新执行 mode2_flow.py register-design "
+                     "（设计版本变过就必须重登记）。"),
+            "seven_stage": {k: _rc.get(k) for k in ("ticket", "revision", "error")},
         }
     # 编制必须属于【当前任务】—— 残留的旧编制同样不能拿来开工。
     _task_now = None

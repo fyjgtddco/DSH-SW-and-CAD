@@ -373,7 +373,9 @@ def main():
     for name, src, subs in (
         # prime-report / prime-verify / check-consistency / prime-board 已删除
         #   （随总理子代理一起移除），不再要求它们在 argparse 注册。
-        ("mode2_flow.py", m2_src, ["set-depth", "ask", "set-subagent-plan",
+        # 【2026-11-18 · 七阶段】十阶段的 CLI（set-depth / ask / set-subagent-plan /
+        #   stage-status / refresh-stage）已随引擎删除，换成七阶段入口。
+        ("mode2_flow.py", m2_src, ["register-design", "recheck-design", "seven-status",
                                    "parts-board", "export-docx",
                                    "check-docx", "pre-delivery", "rooms-template"]),
     ):
@@ -435,8 +437,12 @@ def main():
     # 需求1：流程重排 + 总计子代理
     wired(wgc2, "generate_subagent_config", 2, "子代理编制生成")
     wired(wgc2, "_m2_require", 3, "mode2_flow 契约模块接入")
-    # 需求2：编制由总计子代理决定 + 房间表采用编制
-    wired(m2c, "set_subagent_plan", 2, "总计子代理登记编制")
+    # 需求2：编制由七阶段房间草案决定 + 房间表采用编制
+    #   【2026-11-18】set_subagent_plan 已删除（编制只能来自 read_design）。
+    #   改锁【七阶段登记入口】确实被接线：register_design_plan 必须同时被
+    #   CLI 与 workflow_gate 侧引用，否则"登记了却没人读"就白搭。
+    wired(m2c, "register_design_plan", 2, "七阶段登记编制")
+    wired(m2c, "recheck_design", 2, "七阶段凭证复核")
     wired(m2c, "get_subagent_plan", 2, "读取编制")
     # 「总理子代理定义 / 统一核实」两条已删除：验收改由监控器 verify-task 完成。
     # 这里改为断言【监控器总核实确实接进了交付总闸】—— 换实现不等于取消检查。

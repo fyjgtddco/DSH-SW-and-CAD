@@ -116,6 +116,22 @@ def main():
                  "check_prime_consistency", "_persist_consistency",
                  "_persist_verify", "prime_reports"):
         check("mode2_flow 不再有 %s" % gone, not hasattr(mf, gone))
+    # 【2026-11-18 · 七阶段】十阶段引擎必须彻底消失（不是禁用，是删除）
+    for gone in ("begin_stage", "mark_stage_done", "stage_status", "refresh_stage",
+                 "record_question", "answer_question", "import_answers",
+                 "set_depth", "validate_question_budget", "QUESTION_LIMITS",
+                 "analyst_bind", "analyst_guard", "analyst_status",
+                 "analyst_liveness", "set_subagent_plan", "require_stages_complete",
+                 "STAGES", "STAGE_IDS", "STAGE_LABELS",
+                 "MODE2_ANALYST_REQUIRED"):
+        check("mode2_flow 不再有 %s（十阶段已删除）" % gone, not hasattr(mf, gone))
+    # 七阶段的新入口必须在
+    for need in ("register_design_plan", "recheck_design", "pre_delivery_check",
+                 "ANALYSIS_ENGINE", "SUBPLAN_AUTHORITY"):
+        check("mode2_flow 有 %s（七阶段入口）" % need, hasattr(mf, need))
+    check("ANALYSIS_ENGINE == seven_v03",
+          getattr(mf, "ANALYSIS_ENGINE", None) == "seven_v03",
+          getattr(mf, "ANALYSIS_ENGINE", None))
 
     section("4. 相邻尺寸 / 台账审计仍然在（能力没丢，只是换了执行者）")
     import part_registry as pr

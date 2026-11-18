@@ -59,6 +59,12 @@ $COMPACT_SRC  = Join-Path $Root "engineering\plugins\$COMPACT_NAME"
 #   preset's compaction group). It is still a preset child only, never a bundle.
 $GUARD_NAME   = 'dsh-engineering-memory-guarded'
 $GUARD_SRC    = Join-Path $Root "engineering\plugins\$GUARD_NAME"
+# [2026-11-18] Seven-stage analysis plugin -- Mode 2's ONLY analysis engine.
+#   The preset declares the row 'engineering-seven-stage' by package name, so the
+#   files must be on disk next to the UI plugin. lib/steps.json MUST ship with it
+#   (63 sub-steps); without it flow.js throws on import and the row fails to mount.
+$SEVEN_NAME   = 'dsh-engineering-seven-stage'
+$SEVEN_SRC    = Join-Path $Root "engineering\plugins\$SEVEN_NAME"
 
 $script:Log = New-Object System.Text.StringBuilder
 $script:Bad = 0
@@ -142,7 +148,7 @@ foreach ($prof in $targets) {
     #   The engine never enters dsh.profile.bundles (a context may hold only one
     #   ctx.compaction); it exists only as a preset child. We just make sure the
     #   files are on disk so the preset row resolves by package name.
-    foreach ($pair in @(@{ n = $UI_NAME; s = $UI_SRC }, @{ n = $COMPACT_NAME; s = $COMPACT_SRC }, @{ n = $GUARD_NAME; s = $GUARD_SRC })) {
+    foreach ($pair in @(@{ n = $UI_NAME; s = $UI_SRC }, @{ n = $COMPACT_NAME; s = $COMPACT_SRC }, @{ n = $GUARD_NAME; s = $GUARD_SRC }, @{ n = $SEVEN_NAME; s = $SEVEN_SRC })) {
         if (-not (Test-Path $pair.s)) { Say ("  [skip] " + $pair.n + " (source missing)"); continue }
         $dst = Join-Path $NodeModules $pair.n
         if (-not (Test-Path $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }
@@ -179,6 +185,10 @@ foreach ($prof in $targets) {
     #   (a context may hold only one ctx.compaction; they are preset children).
     $deps[$COMPACT_NAME] = ('file:./node_modules/' + $COMPACT_NAME)
     $deps[$GUARD_NAME]   = ('file:./node_modules/' + $GUARD_NAME)
+    # [2026-11-18] seven-stage: dependency only, never a bundle entry
+    #   (it registers ctx.tools + guards; mounting it at host layer would leak
+    #    its tool gate into every preset).
+    $deps[$SEVEN_NAME]   = ('file:./node_modules/' + $SEVEN_NAME)
 
     $bundles = @()
     foreach ($b in $pkg.dsh.profile.bundles) { $bundles += $b }
@@ -213,7 +223,12 @@ foreach ($prof in $targets) {
         # [2026-11-16] the preset's compaction child resolves by this package name;
         #   if it is missing the whole engineering preset fails to load.
         @{ n = ('node_modules\' + $GUARD_NAME + '\package.json'); p = (Join-Path $NodeModules ($GUARD_NAME + '\package.json')) },
-        @{ n = ('node_modules\' + $GUARD_NAME + '\lib\guarded.js'); p = (Join-Path $NodeModules ($GUARD_NAME + '\lib\guarded.js')) }
+        @{ n = ('node_modules\' + $GUARD_NAME + '\lib\guarded.js'); p = (Join-Path $NodeModules ($GUARD_NAME + '\lib\guarded.js')) },
+        # [2026-11-18] seven-stage: both the entry and the 63-step spec must exist,
+        #   otherwise the preset row cannot mount and engineering mode disappears.
+        @{ n = ('node_modules\' + $SEVEN_NAME + '\package.json'); p = (Join-Path $NodeModules ($SEVEN_NAME + '\package.json')) },
+        @{ n = ('node_modules\' + $SEVEN_NAME + '\lib\index.js'); p = (Join-Path $NodeModules ($SEVEN_NAME + '\lib\index.js')) },
+        @{ n = ('node_modules\' + $SEVEN_NAME + '\lib\steps.json'); p = (Join-Path $NodeModules ($SEVEN_NAME + '\lib\steps.json')) }
     )
     foreach ($c in $checks) {
         if (Test-Path $c.p) { Say ("  [OK] " + $c.n) } else { Say ("  [MISSING] " + $c.n + " -> " + $c.p); $script:Bad++ }

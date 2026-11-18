@@ -127,13 +127,14 @@ python "<根>\tools\workflow_gate.py" select C,E
 
 门禁第 2 步只问一个问题：**本次任务要不要严格把关参数？**
 
-| 你的回答 | 题数区间 | 说明 |
+| 你的回答 | 设计范围 | 说明 |
 |----------|----------|------|
-| **强需求**（严格校核） | **10 ~ 50** 题 | 载荷、尺寸、公差、材料都要有设计依据 |
-| **不强 / 精简** | **5 ~ 10** 题 | 先出大致结构，细节按工程经验定 |
+| **强需求**（严格校核） | **详细** | 载荷、尺寸、公差、材料都要有设计依据 |
+| **不强 / 精简** | **精简** | 先出大致结构，细节按工程经验定 |
 
-区间由 `mode2_flow.validate_question_budget()` 强制：超上限直接拒绝，
-收尾时未达下限同样拒绝交付 —— 既不许敷衍，也不许审问到死。
+> 🆕 **没有题数配额了。** 旧版「强需求 10~50 题 / 弱需求 5~10 题」的硬校验
+> （`validate_question_budget` / `QUESTION_LIMITS`）已随十阶段引擎一起删除。
+> 现在问几题由**决策缺口**决定，不由档位决定。
 
 ### 再决定「什么时候问哪一题」
 
@@ -142,26 +143,47 @@ python "<根>\tools\workflow_gate.py" select C,E
 </p>
 
 > 旧做法是开局把候选题目全部抛出，用户答到手软。
-> 现在改成**按需提问**：AI 先沿十阶段往下推，推到某个阶段发现缺信息，才问那一题，并写明理由。
+> 现在改成**按需提问**：AI 沿七阶段往下推，推到某一步发现缺信息，才问那一题，并写明理由。
 
-> 🆕 十阶段**不再由主对话自己跑**：它由一个真实子代理「总计子代理」推进
-> （开工先 `analyst-bind` 绑定自己的 sessionId），主对话只负责编排与建小屋。
-> 主对话若自己调 `begin-stage` 会被 `ANALYST_ACTOR_REQUIRED` 拒绝。
+**七阶段分析（63 个小步，2026-11-18 取代十阶段）**
 
-十阶段设计流水线（顺序即契约，跳阶段会被拒）：
+> 🔴 十阶段引擎**已整体删除**（不是禁用）。分析改由独立插件
+> `dsh-engineering-seven-stage` 承担，工具名 `engineering_seven_stage`。
+
+| 阶段 | 小步 | 主题 |
+|---|---|---|
+| 1 | 1.1 ~ 1.6 | 看懂真实现场，确定机器边界 |
+| 2 | 2.1 ~ 2.6 | 看懂工件与工艺，查清正常与异常 |
+| 3 | 3.1 ~ 3.8 | 把目标变成可验证的要求，决定怎样验收 |
+| 4 | 4.1 ~ 4.10 | 拆功能、比较路线，检查完整任务可行性 |
+| 5 | 5.1 ~ 5.9 | 搭内部骨架，确定载荷 / 运动 / 基准 / 接口 |
+| 6 | 6.1 ~ 6.12 | 逐件设计，补齐连接、螺钉、支撑与细节 |
+| 7 | 7.1 ~ 7.12 | 把机械 / 电控 / 安全 / 制造 / 装配 / 维修整合起来 |
+
+每一步都必须有「**知识（含真实联网来源）→ 设计 → 独立复审**」三件套；
+`7.12` 的复审必须 `pass`，否则读闸直接拒绝交接。
+
+**谁在跑它（会话谱系）**
 
 ```
-TaskUnderstanding      任务理解      结构化 TaskSpec：目标 / 环境 / 载荷 / 约束 / 未知量
-FunctionalDecomposition 功能分解      FunctionTree：子功能 + 输入输出 + 依赖
-PhysicsReasoning       物理推导      运动 / 力 / 转矩 / 能量 / 自由度 + 假定
-PrincipleSynthesis     工作原理探索  多个候选原理 + 淘汰理由
-MechanismSynthesis     机构综合      MechanismGraph：构件 + 连接 + 自由度
-RecursivePartReasoning 递归零件推导  PartRequirementGraph：每个零件为何存在
-PartSynthesis          零件设计与选型 标准件 / 自定义件 + 几何与接口定义
-EngineeringValidation  工程验证      PASS / FAIL / UNKNOWN + 证据
-DesignIteration        自主迭代      回退位置 + 版本 + 未解决问题
-ExplainableDesignOutput 可解释输出    完整设计报告 + 可追溯性
+主对话 ──subagent_fork──► 总计子代理 ──launch──► 知识子代理 ┐
+                                             ├─► 设计子代理 ├─ 真实二级会话
+                                             └─► 反驳子代理 ┘
 ```
+
+> 七阶段文档里的「主对话」= 这里的**总计子代理**（它编排、它提问、它提房间草案）；
+> 「真实根会话」= **DSH 主对话**（只有它能 `attach` / `capture` 真人原话）。
+
+| 步 | 谁 | 动作 |
+|---|---|---|
+| ① | 主对话 | `subagent_fork` 建总计子代理（初始 prompt 只让它等 attach） |
+| ② | 主对话 | `action=attach`（taskId + planner + 原始需求 messageIds） |
+| ③ | 总计子代理 | `action=launch` → 三个二级会话各自 `action=bind` |
+| ④ | 全体 | 按 `status` 的 `stepContract` 逐步提交（frame → knowledge → design → review → commit） |
+| ⑤ | 主对话 + 总计 | 真人缺口：`question` → **主对话 `capture`** → `interpret` |
+| ⑥ | 总计 → 主对话 | `propose_rooms` → 四角色 `end` → `mode2_flow.py register-design` |
+
+分析期间这批会话**只能用 `engineering_seven_stage` 一个工具**（其它一律 `SEVEN_STAGE_TOOL_GATE` 拒绝）。
 
 提问必须挂在已经推进到的阶段上：
 
@@ -213,13 +235,15 @@ python "<根>\tools\workflow_gate.py" mode2 ask "使用场合是什么" --stage 
 
 | 角色 | 干什么 | 边界 |
 |------|--------|------|
-| **主对话（大屋）** | 问答、编排、建小屋、收尾 | 不自己跑十阶段；只能调根会话命令 |
-| **总计子代理** | `analyst-bind` 后跑十阶段分析、按需提问、决定房间编制 | 只有它能写阶段与编制 |
+| **主对话（大屋）** | 问答、编排、建小屋、收尾 | 不自己跑分析；只能调根会话命令 |
+| **总计子代理** | attach 后 `launch` 三个角色、跑 63 小步、提房间草案 | 只准用 `engineering_seven_stage` |
+| **知识 / 设计 / 反驳** | 各司其职提交证据、方案与独立复审 | 只准用插件工具，禁 shell / 写盘 / 再委派 |
 | **建模小屋** | 各自建模、验证并上报进度 | 只做本房间 |
 
-房间数量**不再固定 3 个**：由总计子代理按分析结论登记（1 ~ 24 个），
+房间数量**不固定**：由七阶段的分析结论（`roomProposal`）决定（1 ~ 24 个），
 每个房间必须写清 `parts`（负责哪些零件）与 `why`（为什么需要它）。
-`set-subagent-plan --decided-by 总计子代理` 是硬要求，别人署名直接判越权。
+草案只能由总计子代理提交、由**真实根会话**用 `register-design` 落盘，
+模型无法自报 ticket / revision / 分析者会话 ID。
 
 ### 波次
 
@@ -271,8 +295,8 @@ python "<根>\tools\mode_gate.py" room-board --json
 
 1. **小屋不许越权**：建模小屋不能调 `mode_gate` / `workflow_gate` / `list_agents` /
    `subagent_fork`，只做本房间的建模与验证。
-   **唯一例外是总计子代理** —— 它只能用 `mode2_flow.py` 的阶段 / 提问 / 编制命令，
-   以及 `ask_user.py` 提问桥。
+   **唯一例外是总计子代理与三个分析角色** —— 它们只能用插件工具
+   `engineering_seven_stage`，其余一律被 `SEVEN_STAGE_TOOL_GATE` 拒绝。
 2. **根会话命令不外借**：`init` / `provide_context` / `select` / `confirm-assembly` /
    `recover` / `restart` / `reset` 只许主对话调用，子代理调一律返回 `ROOT_SESSION_REQUIRED`。
 
@@ -497,8 +521,9 @@ python "$T\_root.py"            # 不确定根目录？先跑这个自检
 | `check-part` / `verify-ownership` | 零件归属校验 / 总装前去重核对 |
 | `status` / `gate-summary` / `check` | 状态 / 总览 / 是否允许建模 |
 | `recover` / `restart <房间>` / `reset` | 恢复卡住 / 重做房间 / 清空重来 |
-| `mode2 <子命令>` | 十阶段契约：`begin-stage` / `ask` / `set-subagent-plan` / `parts-board` … |
-| `stage-status` / `pre-delivery` | 阶段进度 / 交付前总闸 |
+| `mode2 <子命令>` | 七阶段下游契约：`register-design` / `recheck-design` / `parts-board` … |
+| `register-design` | ★ 真实根会话登记房间编制（唯一入口） |
+| `seven-status` / `pre-delivery` | 七阶段凭证进度（`stage-status` 为旧别名）/ 交付前总闸 |
 
 > 除 `status` / `gate-summary` 这类只读命令外，**只许根会话调用**；
 > 子代理调 `init` / `select` / `reset` 会拿到 `ROOT_SESSION_REQUIRED`。
@@ -517,16 +542,20 @@ python "$T\_root.py"            # 不确定根目录？先跑这个自检
 | 看护 | `sw-guard-start` / `sw-guard-stop` / `sw-guard-status`（CPU / 内存 > 85% 立刻关 SW） |
 | 维护 | `doctor` / `rooms-reset` / `stale-artifacts` / `residue-check` / `platform-refresh` |
 
-### `mode2_flow.py` — 十阶段 / 编制 / 逐零件看板
+### `mode2_flow.py` — 七阶段凭证 / 编制 / 逐零件看板
+
+> 🔴 **十阶段命令（`analyst-bind` / `begin-stage` / `mark-stage-done` / `ask` /
+> `answer-question` / `refresh-stage` / `set-subagent-plan` / `set-depth`）已删除。**
+> 分析由插件 `engineering_seven_stage` 承担。
 
 | 子命令 | 用途 |
 |--------|------|
-| `analyst-bind` / `analyst-status` | 总计子代理绑定自己的 sessionId / 查看是否已绑定 |
-| `begin-stage` / `mark-stage-done` | 按序推进阶段 / 登记产物（只认总计子代理身份） |
-| `ask` / `answer-question` / `refresh-stage` | 按需提问 / 落盘答复 / 重做过期阶段 |
-| `set-subagent-plan --rooms-json ... --decided-by 总计子代理` | 登记本轮房间编制 |
+| `register-design` | ★ **真实根会话**读取七阶段凭证并登记本轮编制（唯一入口） |
+| `recheck-design` | 重查凭证并比对已保存 ticket（改答即失效） |
+| `seven-status` | 只读：引擎 / 根会话 / 凭证 / 编制是否就绪 |
 | `parts-board` | 逐零件进度表（**数据源 = 监控器 board**，右侧面板读的就是它） |
 | `export-docx` / `check-docx` / `pre-delivery` | 汇总 docx / 核实 docx / 交付前总闸（含监控器 `verify-task`） |
+| `rooms-template` / `room-types` | 房间字段模板 / 三处 room_type 一致性自检 |
 
 ### 其他脚本
 
@@ -569,7 +598,8 @@ DSH-SW-and-CAD-main/
 │   ├── tools/                    # ★ Python 工具链
 │   │   ├── workflow_gate.py      # 门禁大脑
 │   │   ├── mode_gate.py          # 房间状态机 + room-board + sw-monitor 运维
-│   │   ├── mode2_flow.py         # 十阶段契约 / 编制 / 总理
+│   │   ├── mode2_flow.py         # 七阶段凭证 / 房间编制 / 交付总闸
+│   │   ├── seven_stage_gate.py   # ★ 七阶段凭证只读读闸（信任根）
 │   │   ├── defense_gate.py       # 三大防线
 │   │   ├── sw_bridge.py          # SW 桥接执行器
 │   │   ├── swapi.py              # 高层建模 API
@@ -597,6 +627,11 @@ DSH-SW-and-CAD-main/
 │       │   ├── lib/guarded-audit.js  # 独立审核插件
 │       │   ├── lib/ledger.js         # 压缩历史账本（UI 数据源）
 │       │   └── test/                 # 28 个用例
+│       ├── dsh-engineering-seven-stage/  # ★ 七阶段分析插件（Mode 2 唯一分析引擎）
+│       │   ├── lib/index.js      # 工具 engineering_seven_stage + 会话谱系 + 工具闸
+│       │   ├── lib/flow.js       # 七阶段状态机（63 小步 / 异议 / 版本 / 结束记录）
+│       │   ├── lib/steps.json    # 步骤原文与每步验收项（sha256 是凭证的一部分）
+│       │   └── test/smoke.mjs    # 无服务正反向流程 + 交接门验证
 │       └── dsh-engineering-compaction/  # 上一代压缩器（保留可回退，不再被 preset 引用）
 ├── profiles/                     # 宿主层 patch 模板
 └── third-party-patched/          # 打过补丁的第三方插件
@@ -896,6 +931,8 @@ python "<根>\tools\mode_gate.py" sw-monitor status
 
 | 提交 / 日期 | 说明 |
 |-------------|------|
+| 2026-11-18 | **十阶段 → 七阶段（换引擎，不是加开关）**。`mode2_flow.py` 的十阶段流水线、题数硬约束、按需提问台账、`analyst-bind` 身份绑定、`set-subagent-plan` 编制入口**全部删除**；分析改由独立插件 `dsh-engineering-seven-stage`（63 小步 / 四角色 / `engineering_seven_stage` 工具）承担。门禁在 `init` 时固定 `analysis_engine=seven_v03` 并钉住真实根会话；`select` / `room-start` / `pre-delivery` 一律用 `seven_stage_gate.read_design` 复核凭证，改答后 ticket 变化即拒绝开工。8 个依赖旧引擎的回归测试删除，新增七阶段接线回归（71 项）与改造后的 rooms/roomtypes 回归（34 + 85 项） |
+| 2026-11-18 | **十阶段 → 七阶段（换引擎，不是加开关）**。`mode2_flow.py` 的十阶段流水线、题数硬约束、按需提问台账、`analyst-bind` 身份绑定、`set-subagent-plan` 编制入口**全部删除**；分析改由独立插件 `dsh-engineering-seven-stage`（63 小步 / 四角色 / `engineering_seven_stage` 工具）承担。门禁在 `init` 时固定 `analysis_engine=seven_v03` 并钉住真实根会话；`select` / `room-start` / `pre-delivery` 一律用 `seven_stage_gate.read_design` 复核凭证，改答后 ticket 变化即拒绝开工。8 个依赖旧引擎的回归删除，新增七阶段接线回归（71 项）+ 改造后的 rooms / roomtypes 回归（34 + 85 项） |
 | 2026-11-16 | **压缩后端换代：受约束记忆压缩**（`dsh-engineering-memory-guarded`）。摘要不再交给模型，改由插件按尺寸依赖图确定性生成；派生值必须声明 parents，上游一改级联撤下；提交过独立审核 + 发模型前验哈希；断点可恢复。**压缩历史双账本合并**（v1 旧 + v2 新），最新在最上面、旧记录不消失，主子代理各自成链。新包 28 项用例全绿；同步脚本新增依赖声明自动补齐（实测过"文件到位但 package.json 没声明 → 整个工程预设加载失败"的静默缺口） |
 | 2026-11-12 | **外部监控器接管 SW 使用权**（进程内锁整体删除 ~700 行）+ **总理子代理整体删除** + 后台等待任务（`job_id`）+ 逐零件看板换数据源 + 交付总闸改问 `verify-task`。回归 72/72、插件 37 文件、monitor 自检 5/5 |
 | 2026-10-28 | **总计子代理真实化**（`analyst-bind` + 身份校验）+ 总理子代理同波启动与监工 + `room-board` 状态可信化（`waiting_sw` / `unbound`）+ 子代理禁令（`ROOT_SESSION_REQUIRED`）+ 插件自动平台登记 |

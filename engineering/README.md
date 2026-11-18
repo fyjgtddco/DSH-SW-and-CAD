@@ -244,30 +244,62 @@ python physics_bridge.py fatigue <case.json> --stress 45   # 直接给应力
   映射为 CADX 标准层 `OUTLINE/THIN/CENTER/HIDDEN/DIM/TEXT/HATCH`，
   并补齐缺失的标准层 —— 消除每次出图的一堆 MISSING_LAYER WARNING
 
-### 统一问题集（17 题 · 单一事实来源）
+### 七阶段分析（2026-11-18 换代 · 十阶段已删除）
 
-> ⚠️ **旧版"固定 17 题题库（QUESTION_SPEC）"已删除**（2026-10 改造）。
-> 现在没有"标准题面"可照抄 —— 想提问就必须先分析。
+> 🔴 **不是禁用，是删除。** 旧的十阶段流水线、`QUESTION_SPEC` 题库、
+> 「强 10~50 / 弱 5~10」题数硬约束、按需提问台账
+> （`begin-stage` / `mark-stage-done` / `ask` / `answer-question` /
+> `refresh-stage`）、`analyst-bind` 身份绑定、`set-subagent-plan` 编制入口
+> **全部已从代码中移除**。留一个就等于没换代。
 
-**题数硬约束 + 按需提问**（定义在 `mode2_flow.py`，代码强制）：
+**现在的分析引擎是一个独立宿主插件**：`engineering/plugins/dsh-engineering-seven-stage`
 
-| 参数需求强度 | 允许题数（闭区间） |
+| 项 | 值 |
 |---|---|
-| 强需求 `full` | 10 ~ 50 |
-| 弱需求 `lite` | 5 ~ 10 |
+| 工具名 | `engineering_seven_stage` |
+| 规模 | **7 阶段 / 63 个小步**（`lib/steps.json`，sha256 是凭证的一部分） |
+| 角色 | 知识 `knowledge` · 设计 `design` · 反驳 `review` · 总计 `planner` · 真实根 `root` |
+| 每步必备 | 知识（**含真实联网来源**）+ 设计 + **独立复审**三件套 |
+| 返工上限 | 一轮 2 次，超限转 `evidence_wait`（要求补证，不是死锁） |
+| 改答后果 | `revision+1`，受影响最早小步及其下游凭据全部作废 |
 
-- 每道题必须挂在**已 `begin-stage` 的十阶段之一**上，并写明 `--reason`
-  （= "分析到那里才问"的机器判据），否则拒绝登记；
-- 题数由 `validate_question_budget` 校验，超界/收尾不足都拒绝交付；
-- 用户答复必须逐条落盘 `answer-question`，且会让受影响阶段的产物变为
-  `stale` —— 必须 `refresh-stage` 重做并提交**新产物**，产物写回旧文本会被拒绝。
+### 会话谱系（用户口径）
 
-### 波次调度（房间数量由总计子代理决定）
+```
+主对话 ──subagent_fork──► 总计子代理 ──launch──► 知识子代理 ┐
+                                             ├─► 设计子代理 ├─ 真实二级会话
+                                             └─► 反驳子代理 ┘
+```
+
+> 七阶段文档里的「主对话」= 这里的**总计子代理**（它编排、它提问、它提房间草案）；
+> 「真实根会话」= **DSH 主对话**（只有它能 `attach` / `capture` 真人原话）。
+
+| 步 | 谁 | 动作 | 代码判据 |
+|---|---|---|---|
+| ① | 主对话 | `subagent_fork` 建总计子代理 | 初始 prompt 只让它等 attach |
+| ② | 主对话 | `action=attach` | `ROOT_REQUIRED` + `REAL_DIRECT_CHILD_REQUIRED` |
+| ③ | 总计子代理 | `action=launch` | 三角色全 `bind` 才进 1.1 |
+| ④ | 全体 | 按 `stepContract` 提交 | `WRONG_PHASE` / `STALE_OR_WRONG_JOB` |
+| ⑤ | 主对话 + 总计 | `question` → `capture` → `interpret` | 原话只认宿主 user 消息 |
+| ⑥ | 总计 → 主对话 | `propose_rooms` → `end` → `register-design` | `read_design` 复核 63 步 |
+
+分析期间这批会话**只能用一个工具**，其它一律 `SEVEN_STAGE_TOOL_GATE` 拒绝
+（含 shell / 写文件 / 旧门禁 / 再委派 / 任意发信）。
+
+**真人澄清没有题数配额**：何时问由插件登记的**明确决策缺口**决定；
+用户答复由 `capture` 从宿主消息取原话（模型自写文本无效），
+再由总计子代理 `interpret` 分类为 `fact / preference / authorization /
+estimate / unknown / no_change`，并指明受影响的**最早**小步。
+
+### 波次调度（房间数量由七阶段房间草案决定）
 
 - **前置**：`provide_context` 第 2 段后 → 主对话 `subagent_fork` 创建
-  **【总计子代理】** → 它 `analyst-bind`、跑完十阶段、按需提问、
-  `set-subagent-plan` 登记编制；未完成时 `select` 直接返回
-  `MODE2_ANALYST_REQUIRED`。
+  **【总计子代理】** → 主对话 `attach` → 总计子代理 `launch` 三角色 →
+  跑完 63 小步 → `propose_rooms` → 四角色 `end` →
+  主对话 `mode2_flow.py register-design` 登记编制。
+  未完成时 `select` 返回 **`SEVEN_STAGE_HANDOFF_REQUIRED`**（凭证不可用）
+  或 **`MODE2_SUBAGENT_PLAN_REQUIRED`**（凭证有了没登记）；
+  用户中途改答且未重登记 → **`SEVEN_STAGE_DESIGN_CHANGED`**。
 - **第 1 波·独立爆发期**：编制里的**全部建模房间**同时启动
   （每个 fork 后立刻 `subagent-assign`）。**没有总理子代理** —— 零件建成由监控器
   按 `part-saved` 事件判定，逐件验收走 `review-part`。

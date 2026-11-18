@@ -29,6 +29,12 @@
 param(
     [switch]$DryRun,
     [switch]$Register,
+    # [2026-11-18] Copy-only sync cannot express DELETIONS. When the repo drops a
+    #   file (e.g. the ten-stage regression tests removed in the seven-stage
+    #   switch), the stale copy stays in the install and keeps running against
+    #   APIs that no longer exist. -Prune removes install-side files that do not
+    #   exist in the repo source tree (runtime state is always protected).
+    [switch]$Prune,
     [string[]]$Profile = @()
 )
 
@@ -62,7 +68,7 @@ $RuntimeDirs = @('reports', 'heartbeats', 'load_cases', 'physics_runs',
 
 function Say($m, $c = 'Gray') { Write-Host $m -ForegroundColor $c }
 
-$script:Stats = @{ copied = 0; skipped = 0; backed = 0; bytes = 0 }
+$script:Stats = @{ copied = 0; skipped = 0; backed = 0; bytes = 0; pruned = 0 }
 
 function Should-Skip([string]$Name) {
     if ($RuntimeNames -contains $Name) { return $true }
@@ -121,6 +127,62 @@ function Copy-Tree([string]$Src, [string]$Dst, [string]$Label) {
         $n++
     }
     Say ("  [OK] " + $Label + "  (" + $n + " file(s) synced -> " + $Dst + ")") 'Green'
+    if ($Prune) { Remove-Orphans $Src $Dst $Label }
+}
+
+# Remove files that exist in $Dst but NOT in $Src (i.e. the repo deleted them).
+# Guard rails, in this order:
+#   * runtime state / .bak / .pid / build artefacts are never touched;
+#   * only files inside the runtime dirs list are skipped too;
+#   * the file is backed up (.bak-prune-<stamp>) before removal so a wrong prune
+#     is one copy away from being undone;
+#   * $DryRun only reports.
+# Only SOURCE extensions are eligible. Everything else stays, even when the repo
+# no longer has it:
+#   * .json  is a runtime/config format here (mode2_plan.json, sw_monitor.json,
+#     compaction_engine.json, artifacts_registry.*.json, pages_manifest.json ...),
+#   * .jsonl/.db/.sqlite3/.token/.log/.txt are live session data,
+#   * deliverable binaries are never shipped at all.
+# Deleting a stale .json would destroy a running task's state; the reverse
+# mistake (leaving a stale .json behind) is harmless because every reader
+# validates its schema. So the safe direction is: prune code, never data.
+$PruneExts = @('.py', '.js', '.mjs', '.cjs', '.ts', '.md', '.yml', '.yaml',
+               '.ps1', '.sh', '.lsp', '.h', '.hpp', '.cpp', '.c')
+# Directories that hold live data regardless of file extension.
+$PruneProtectedDirs = @('compaction_facts', 'trace', 'sw_monitor', '运行数据',
+                        'reports', 'heartbeats', 'physics_runs', 'mode_logs',
+                        'seven_stage', '__pycache__', '.git')
+
+function Remove-Orphans([string]$Src, [string]$Dst, [string]$Label) {
+    if (-not (Test-Path $Src) -or -not (Test-Path $Dst)) { return }
+    $srcSet = @{}
+    Get-ChildItem -Path $Src -Recurse -File -Force -ErrorAction SilentlyContinue |
+        ForEach-Object { $srcSet[$_.FullName.Substring($Src.Length).TrimStart('\')] = $true }
+    $removed = 0
+    Get-ChildItem -Path $Dst -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        $rel = $_.FullName.Substring($Dst.Length).TrimStart('\')
+        if ($srcSet.ContainsKey($rel)) { return }
+        # (1) source extensions only
+        if ($PruneExts -notcontains $_.Extension.ToLower()) { return }
+        # (2) never a runtime / state file, whatever its extension
+        if (Should-Skip $_.Name) { return }
+        # (3) never inside a data directory
+        $parts = $rel -split '\\'
+        foreach ($p in $parts) {
+            if ($RuntimeDirs -contains $p) { return }
+            if ($PruneProtectedDirs -contains $p) { return }
+        }
+        if ($DryRun) {
+            Say ("    [prune-dry] " + $rel) 'DarkGray'
+        } else {
+            Copy-Item $_.FullName ($_.FullName + '.bak-prune-' + $Stamp) -Force
+            Remove-Item $_.FullName -Force
+            Say ("    [prune] " + $rel) 'Yellow'
+        }
+        $script:Stats.pruned++
+        $removed++
+    }
+    if ($removed -gt 0) { Say ("  [OK] " + $Label + "  (" + $removed + " orphan(s) pruned)") 'Yellow' }
 }
 
 Say "================================================" Cyan
@@ -160,6 +222,12 @@ $CompactSrc = Join-Path $Root 'engineering\plugins\dsh-engineering-compaction'
 #   now points the compaction child at this package name instead. Same rules:
 #   files only (preset child), never a dsh.profile.bundles entry.
 $GuardSrc = Join-Path $Root 'engineering\plugins\dsh-engineering-memory-guarded'
+# [2026-11-18] Seven-stage analysis plugin (Mode 2's ONLY analysis engine).
+#   preset-engineering.patch.yml declares the row 'engineering-seven-stage' by
+#   package name; if the package is not in node_modules the row cannot resolve
+#   and the WHOLE engineering preset fails to load (engineering mode vanishes).
+#   Files only -- never a dsh.profile.bundles entry (same rule as compaction).
+$SevenSrc = Join-Path $Root 'engineering\plugins\dsh-engineering-seven-stage'
 $ProfilesDir = Join-Path $DshHome 'profiles'
 if (-not (Test-Path $UiSrc)) {
     Say ("  [WARN] plugin source missing: " + $UiSrc) 'Yellow'
@@ -215,6 +283,10 @@ if (-not (Test-Path $UiSrc)) {
                     if (-not $deps.Contains('dsh-engineering-memory-guarded')) {
                         $deps['dsh-engineering-memory-guarded'] = 'file:./node_modules/dsh-engineering-memory-guarded'
                     }
+                    # [2026-11-18] seven-stage: dependency only (preset child row).
+                    if (-not $deps.Contains('dsh-engineering-seven-stage')) {
+                        $deps['dsh-engineering-seven-stage'] = 'file:./node_modules/dsh-engineering-seven-stage'
+                    }
                     $bundles = @()
                     if ($obj.dsh -and $obj.dsh.profile -and $obj.dsh.profile.bundles) {
                         foreach ($b in $obj.dsh.profile.bundles) { $bundles += $b }
@@ -261,6 +333,12 @@ if (-not (Test-Path $UiSrc)) {
         if (Test-Path $GuardSrc) {
             Copy-Tree $GuardSrc (Join-Path $nm 'dsh-engineering-memory-guarded') ('guard@' + $prof)
         }
+        # [2026-11-18] Seven-stage analysis plugin: files only, never a bundle.
+        #   Its lib/steps.json (63 sub-steps) MUST ship with it -- without it
+        #   flow.js throws on import and the preset row fails to mount.
+        if (Test-Path $SevenSrc) {
+            Copy-Tree $SevenSrc (Join-Path $nm 'dsh-engineering-seven-stage') ('seven@' + $prof)
+        }
 
         # ---- dependency declaration backfill (always, not only with -Register) ----
         # 现场（2026-11-16）：文件已经铺进 node_modules，但 profile 的
@@ -271,7 +349,7 @@ if (-not (Test-Path $UiSrc)) {
         $needDeps = @()
         if (Test-Path $pkg) {
             $ptxt = [System.IO.File]::ReadAllText($pkg)
-            foreach ($depName in @('dsh-engineering-compaction', 'dsh-engineering-memory-guarded')) {
+            foreach ($depName in @('dsh-engineering-compaction', 'dsh-engineering-memory-guarded', 'dsh-engineering-seven-stage')) {
                 if ($ptxt -notmatch [regex]::Escape('"' + $depName + '"')) { $needDeps += $depName }
             }
         }
@@ -359,6 +437,7 @@ Say "================================================" Cyan
 Say ("  done   copied=" + $script:Stats.copied +
      "  skipped=" + $script:Stats.skipped +
      "  backed_up=" + $script:Stats.backed +
+     "  pruned=" + $script:Stats.pruned +
      "  (" + [math]::Round($script:Stats.bytes / 1KB, 1) + " KB)") Cyan
 Say "================================================" Cyan
 if (-not $DryRun -and $script:Stats.copied -gt 0) {

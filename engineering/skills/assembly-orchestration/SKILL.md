@@ -85,7 +85,7 @@ provider: filesystem
 大屋（主对话）
   |  用户交互 | 门禁 | fork 编排 | 结果汇总 | 最终交付
   |
-  +---> [总计子代理] 十阶段分析 + 登记房间编制（analyst-bind / set-subagent-plan）
+  +---> [总计子代理] 七阶段分析（engineering_seven_stage）+ 主对话 register-design 登记编制
   |        | 产出：编制（rooms.json）—— **房间数由它决定**
   |        v
   +---> wave1（同一条回复一次性 fork 全部）：
@@ -373,7 +373,7 @@ assert_orientation(m, [(n, load_pr(n)) for n in planned], world_up=contract["wor
 
 > 🔴 **【2026-10-28】旧版这里写死了「第1波 = 结构件+传动机构+壳体机架 三个房间」的固定表**，
 > 该表**已废弃（deprecated）**，连同它那个"爆发期"式叫法一起停用。
-> 房间表的唯一来源 = `mode2_flow.py set-subagent-plan`
+> 房间表的唯一来源 = 七阶段插件的 roomProposal（主对话用 `mode2_flow.py register-design` 落盘）
 > 登记的编制（总计子代理产出）；`select` 的 `wave1` 只是把它读出来，**不追加任何固定房间**。
 > **代码默认表不得作为兜底。**
 
@@ -464,11 +464,16 @@ SW 使用权 = 外部监控器统一发放（进程级 FIFO 票据，不再是"�
 （【B2 修复】旧版铁律笼统写"禁止调用 mode_gate.py"，与 C 模式要求的
  "小屋进度旁路上报" 直接矛盾，导致 C 模式无法合规执行。现按命令语义区分。）
 
-> 🔴 **【2026-10-28】「总计子代理」是唯一例外**（它不是建模小屋，职责是十阶段分析）：
-> **允许**调 `mode2_flow.py` 的阶段 / 提问 / 编制命令 ——
-> `analyst-bind` / `begin-stage` / `mark-stage-done` / `ask` / `answer-question` /
-> `refresh-stage` / `set-subagent-plan` / `stage-status` / `questions`，
-> 以及 `tools/ask_user.py`（子代理**唯一**的提问桥；子代理直调 `ask_user_question` 必抛 `DELEGATED_CALLER`）。
+> 🔴 **【2026-11-18】「总计子代理」是唯一例外**（它不是建模小屋，职责是七阶段分析）：
+> **允许**调工具 `engineering_seven_stage` ——
+> `launch` / `bind` / `status` / `frame` / `calculate` / `explore` / `submit` /
+> `commit` / `rework` / `rewind` / `question` / `interpret` / `propose_rooms` /
+> `partial` / `yield` / `blocked` / `retry` / `end` / `read` / `export` / `deliver`，
+> 外加只读的 `mode2_flow.py seven-status` / `parts-board`。
+> ⚠️ 十阶段的 `analyst-bind` / `begin-stage` / `mark-stage-done` / `ask` /
+> `answer-question` / `refresh-stage` / `set-subagent-plan` 与 `ask_user.py` 提问桥
+> **已随引擎删除**；真人澄清改由插件 `question → capture → interpret` 三步完成
+> （`capture` 只能由**真实主对话**调，它才拿得到宿主 user 消息）。
 > 它**仍然禁止**调 `mode_gate.py` 的编排命令（room-start / room-end / subagent-assign / recover 等）——
 > 那是主对话的职责。**别的命令都不许由小屋碰。**
 
@@ -519,10 +524,10 @@ python "<工程模式根目录>\tools\mode_gate.py" whoami "<你的房间名>"
 }
 ```
 
-> 【A12 修复】`rooms.*` 也补上了 `type` 字段（与 `set-subagent-plan` 的编制同口径，
+> 【A12 修复】`rooms.*` 也补上了 `type` 字段（与 register-design 的编制同口径，
 > 取值见 `mode2_flow.py rooms-template` 的 `allowed_types`）。`part_ownership` 是
 > **只读产物**（由 `select` 生成、`verify-ownership` 核对），**不要手写**；要改房间/类型，
-> 唯一入口是总计子代理重跑 `set-subagent-plan`（缺 `type` 会被拒，模板用
+> 唯一入口是总计子代理重跑 `propose_rooms` 再 `register-design`（缺 `type` 会被拒，模板用
 > `python mode2_flow.py rooms-template --out rooms.json` 拿）。
 
 **大屋**：把每个房间的 keywords 写进小屋 prompt（"只允许产出这些零件"）。
@@ -647,7 +652,7 @@ python "<工程模式根目录>\tools\mode_gate.py" residue-check --clean  # 体
 ## 五、小屋配置模板（示例 · 非固定表，实际以编制为准）
 
 > 🔴 **【2026-10-28】** 下面只是**常见示例**，**不是默认编制**。
-> 实际房间表来自总计子代理的 `set-subagent-plan`（数量/细分由它决定），
+> 实际房间表来自七阶段 roomProposal（数量/细分由分析结论决定），
 > 可能与下面的 5 个房间完全不同 —— **禁止把本节当成固定房间表来开局**。
 
 ### 小屋1：结构件设计（示例）
@@ -709,7 +714,7 @@ python "<工程模式根目录>\tools\mode_gate.py" residue-check --clean  # 体
 ## 七、并行优化策略（三波式，代码级强制）
 
 并行模式由 workflow_gate.py select 按波次放行，AI 无法跳波。
-**房间表的唯一来源 = 总计子代理的编制**（`mode2_flow.py set-subagent-plan`），
+**房间表的唯一来源 = 七阶段 roomProposal**（主对话 `mode2_flow.py register-design` 落盘），
 **代码默认表不得作为兜底**。
 
 | 波次 | 名称 | 房间 | 启动方式 | 前置条件 |
@@ -802,7 +807,7 @@ SW 使用权（多屋并行时）：
 
 大屋执行流程（房间示例：结构件 / 传动机构 / 壳体机架 —— **由编制决定，非固定**）：
 1. [进度: 10%] init → 问两问 → provide_context #1/#2（模式、强度）
-2. [进度: 15%] **spawn 总计子代理**（analyst-bind → 十阶段 → 按需提问 → set-subagent-plan）
+2. [进度: 15%] **spawn 总计子代理**（attach → launch 三角色 → 63 小步 → propose_rooms → register-design）
    主对话只等它结束（`wait_agent` / `list_agents`）
 3. [进度: 20%] provide_context #3（力学估算）→ 问 A/B/C 与 D/E → select
 → wave1 = 编制全部建模房间

@@ -215,7 +215,7 @@
                 必须用 ask_user_question 系统工具、按门禁题面原样问；A/B/C 与 D/E 是两个独立问题，各问或同次问都可；
                 全没问/正文代替/只问其一→gate=MANDATORY_QUESTIONS_REQUIRED。
                 1) init "<任务>" → 确认模式 + ①D/E ②A/B/C 两问 2) 原样问 3) provide_context "<答>" → 返参数需求强度题
-                4) 原样问强度 5) 再 provide_context "<答>" → 要求【先 spawn 总计子代理】跑十阶段（题数：强 10~50 / 弱 5~10）
+                4) 原样问强度 5) 再 provide_context "<答>" → 要求【先 spawn 总计子代理】接七阶段（63 小步，无题数配额）
                 6) provide_context "<全部问答>" → 力学估算返 A/B/C+D/E
                   （该命令共调三次，状态机 mode_confirm_asked→depth_asked→context_asked→mechanics_done）
                   优先读用户写明载荷(100N/10kg)，冲击只影响动载系数；落盘 gate_load_case.json；
@@ -223,14 +223,18 @@
                 7) 分别问 A/B/C、D/E（两次独立调用）8) select C,E → 出子代理配置（wave1=编制里的全部建模房间）
                 9) 按返回建全部小屋。
 
-                🔴【总计子代理】必须是**真实子代理**：subagent_fork，description="总计子代理（十阶段分析）"。
-                  开工第一步 python "<根>\tools\mode2_flow.py" analyst-bind（自动取自己的 DSH_SESSION_ID，不用手写 id）；
-                  十阶段 begin-stage/mark-stage-done 与 set-subagent-plan **只能由它跑**；它结束回合后才 provide_context #3/select。
-                  缺信息提问只能用 python "<根>\tools\ask_user.py" --room "总计子代理" --child <自己的 sessionId> --header .. --question ..
-                  （子代理直调 ask_user_question 必抛 DELEGATED_CALLER）；禁自编答案。
-                  该桥已自动取 DSH_WEB_URL 选端口；若仍报 gate=ASK_BRIDGE_UNREACHABLE（3~6s 内快速失败），
-                  立即改用降级路径：把题列发父代理 → 父代理 ask_user_question 代问 → 回传后 answer-question 落账，禁干等。
-                  主对话直接调 mode2 阶段命令 → ANALYST_ACTOR_REQUIRED 拒绝；没 spawn 就 select → MODE2_ANALYST_REQUIRED。
+                🔴【七阶段分析 · 2026-11-18 取代十阶段】唯一入口是工具 engineering_seven_stage。
+                  会话谱系：主对话 --subagent_fork--> 总计子代理 --launch--> 知识/设计/反驳 三个二级会话。
+                  （七阶段文档里的「主对话」= 这里的【总计子代理】；「真实根会话」= DSH 主对话）
+                  · 主对话 subagent_fork 建总计子代理，初始 prompt 只让它"等 attach"，别先干活；
+                  · 主对话立刻 action=attach（taskId + planner=总计子代理真实 sessionId + 原始需求 messageIds）；
+                  · 总计子代理收到通知 → action=launch（插件用宿主原生 startActivation 建三个会话，maxDepth=2）；
+                  · 三角色各自 action=bind（一次性邀请码），然后按 status 的 stepContract 逐步提交；
+                  · 真人缺口：总计 question → 主对话 capture（只认宿主 user 消息）→ 总计 interpret；
+                  · 结束：总计 propose_rooms → 四角色依次 end(kind=complete, reason)；
+                  · 主对话最后 mode2_flow.py register-design 登记编制，才允许 select。
+                  分析会话只准用 engineering_seven_stage（其它工具一律 SEVEN_STAGE_TOOL_GATE 拒绝）。
+                  没走完/没登记就 select → SEVEN_STAGE_HANDOFF_REQUIRED；用户改答后不重登记 → SEVEN_STAGE_DESIGN_CHANGED。
 
                 【串行E】todo 列全 → 逐房间：mode_gate.py room-start(须在建 subagent 前) → subagent_fork → 等完成(list_agents)
                 → interrupt_agent → room-end。禁提前建多个 subagent，禁同开多 SW 实例。
@@ -241,7 +245,8 @@
                   几十万 token，再叠加自己的任务 → 直接 `ran out of room` / dead。
                   现场：wave3 出图小屋 e1de1737 启动后 10 分钟零产出即死，任务因此无法收尾。
                   规则：
-                  · **波 1（建模小屋 / 总计子代理）→ 用 subagent_fork**：
+                  · **波 1（建模小屋 / 总计子代理）→ 用 subagent_fork**
+                    （总计子代理必须 fork 且是真实直系子会话，插件会核对 parent）：
                     它们需要父会话里的需求结论、载荷数值、房间编制、尺寸裁决 —— 继承是必需的。
                   · **波 2（总装）/ 波 3（出图）→ 用 `subagent`（spawn，不继承历史）**：
                     这两步只依赖【磁盘上的产物】（parts/*.sldprt、reports/*.json、台账 docx），
@@ -875,6 +880,55 @@
                 PYTHONIOENCODING: utf-8
                 PYTHONUTF8: '1'
               failOnStartupError: false
+
+          # ── 七阶段分析插件（Mode 2 的唯一分析引擎）────────────────────────────────
+          # 【2026-11-18】十阶段分析引擎已整体删除，新任务一律 analysis_engine=seven_v03。
+          #
+          # 它是什么：一个独立的 Cordis 宿主插件，提供工具 engineering_seven_stage。
+          #   7 个阶段 / 63 个子步骤 / 4 个角色会话（知识·设计·反驳 + 总计）。
+          #
+          # 会话谱系（用户口径）：
+          #   主对话 ──(subagent_fork)──► 总计子代理 ──(startActivation)──► 知识 / 设计 / 反驳
+          #   总计子代理开工第一件事就是接上本插件（attach 由真实根会话发起），
+          #   然后由它 launch 出三个二级子代理；文档里的「主对话」= 总计子代理。
+          #
+          # 硬约束（改之前先看）：
+          #   · stateDir / workflowFile 必须是【绝对路径】；
+          #   · 状态目录与 workflow_state.json 必须由【同一个 DSH 进程】写；
+          #   · 分析期间本插件接管这些会话的工具许可（其它工具一律 deny）。
+          #
+          # 🔴 【2026-11-18 事故修复 · 配置默认值】
+          #   现场报错：webserver: duplicate exact route "/dsh-engineering-ui/agents"
+          #   根因：workerProvider/stateDir 之前写成 ''（空串），install() 见空串就
+          #     抛 SET_ABSOLUTE_SEVEN_STAGE_PATHS → 整个 preset 组合挂载失败 →
+          #     宿主重建组合 → 已经 apply 过的 dsh-engineering-ui 被二次 apply →
+          #     精确路由 "/dsh-engineering-ui/agents" 撞名。**一个可选插件的配置
+          #     缺失，把整个工程模式连坐了。**
+          #   现在两道保险：
+          #     ① 下面给出【可用的默认值】，零环境变量也能挂载；
+          #     ② 插件侧改成【降级挂载】（不注册任何钩子、只回一条可操作错误），
+          #        任何配置错误都不再抛异常连累其它插件。
+          #
+          # 默认值怎么来的（不写死任何本机路径）：
+          #   workflowFile = <工程模式权威状态目录>/workflow_state.json
+          #   该目录由宿主注入的 DSH_STATE_DIR 优先；没有就按 _store.py 的同一套
+          #   规则回落到 <DSH_HOME>/.agent-presets/engineering/tools —— 也就是
+          #   Python 侧 _store.state_dir() 会选的同一个地方。
+          #   stateDir 不显式给：插件按 dirname(workflowFile)/seven_stage 推导，
+          #   与 seven_stage_gate.state_dir_for() 逐字一致。
+          #
+          # workerProvider：默认 fork（宿主原生第二层会话，独立角色绑定）。
+          #   换成 spawn 前先确认工作会话仍加载同一套工具与限制。
+          - id: engineering-seven-stage
+            name: 'dsh-engineering-seven-stage'
+            config:
+              # 留空 = 交给插件自己解析（它按 DSH_SEVEN_STAGE_* → DSH_STATE_DIR
+              # → DSH_HOME/.agent-presets/engineering/tools → homedir()/.dsh
+              # 的顺序找，与 Python 侧 seven_stage_gate.state_dir_for() 逐字一致）。
+              # 只有部署方确实要覆盖时才设这两个环境变量。
+              workflowFile: !!js (process.env.DSH_SEVEN_STAGE_WORKFLOW_FILE || undefined)
+              stateDir: !!js (process.env.DSH_SEVEN_STAGE_STATE_DIR || undefined)
+              workerProvider: fork
 
           # ── 网络搜索 ────────────────────────────────────────────────────────────────
           # 用于查询技术标准、标准件参数、材料数据等

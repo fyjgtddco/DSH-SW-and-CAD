@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""回归测试：Bug③ set-subagent-plan 不刷新 mode2_plan.json 的 rooms 快照
+r"""回归测试：Bug③ 房间类型未同步进 mode2_plan.json 的 rooms 快照
 
 ════════════════════════════════════════════════════════════════════════════
 现场缺陷（2026-10-19 循迹小车，见 DSH插件Bug记录.md「三、流程级 · Bug③」）
@@ -14,20 +14,30 @@ r"""回归测试：Bug③ set-subagent-plan 不刷新 mode2_plan.json 的 rooms 
             物理/领域凭据被静默豁免（虚假 CRITICAL 也一起放行）。
       更早还有 drawing 导致 CONFIG_MISSING_FINAL_WAVES。
 
+════════════════════════════════════════════════════════════════════════════
+【2026-11-18 · 十阶段 → 七阶段】本测试改造
+--------------------------------------------------------------------------
+'set-subagent-plan' 与 'analyst-bind' 已随十阶段引擎删除。编制现在只能由
+七阶段插件 read_design 的房间草案经 register-design 落盘。因此：
+
+  · C/D/E/F/G 改为直接驱动 _normalize_rooms_from_design + 手工写 plan
+    （不依赖 workflow_state / 七阶段凭证文件，保持本测试的自足性）；
+  · G3 端到端改为【反向锁定】：没有七阶段凭证时 select 必须 fail-closed
+    （这正是七阶段版最关键的拒绝行为）；
+  · 快照同步（sync-rooms）与三处一致性（room-types）的断言原样保留 —— 
+    它们与引擎无关，是被 Bug③ 直接打坏的那部分。
+
 本测试锁住的修复（全部代码级）
 ------------------------------
 【A】类型规范化表：drivetrain→transmission / sensor→housing /
      drawing→drafting 必须成立，且大小写/空白/连字符都容忍。
-【B】规范化失败必须明确报错（不静默放过）：未知类型 → set-subagent-plan
-     拒绝，且报错里给出规范类型表。
-【C】快照同步：set-subagent-plan 落盘后，mode2_plan.json 必须出现
-     subagent_config.rooms，且内容 = 规范化后的 [(房间名, 类型), ...]，
-     与 workflow_state.subagent_config.rooms 同构。
+【B】规范化失败必须明确报错（不静默放过）。
+【C】登记编制后，mode2_plan.json 必须出现 subagent_config.rooms，
+     且内容 = 规范化后的 [(房间名, 类型), ...]，与 workflow_state 同构。
 【D】旧类型被真正改写：提交 drivetrain/sensor/drawing，快照里必须是
      transmission/housing/drafting（不许把旧值原样写进快照）。
-【E】只读自检命令 room-types：能读出三处（编制/快照/workflow_state）并
-     判一致；制造不一致时必须报 conflict（不能静默说一致）。
-【F】CLI 全路径：room-types 子命令可构建并真跑。
+【E】只读自检命令 room-types：能读出三处并判一致；制造不一致时报 conflict。
+【F】select 在没有七阶段凭证时必须拒绝（fail-closed，不放行建模）。
 
 运行：python test_regression_bug3_roomtypes_sync.py
 """
@@ -41,17 +51,8 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# ── 【测试隔离修复】必须隔离状态目录，否则会被【真实运行环境】干扰 ──────────
-# 实测（2026-10-29，DSH 正在运行时）：本测试会读到
-#   <state_dir>/platform_agents.json
-# 那是【宿主实时写入】的子代理注册表（几秒前刚刷新），里面全是真实子代理 id；
-# 而本测试用的是固定身份 "test-analyst"，于是 analyst_bind 判定
-#   "你不在子代理注册表里" → set_subagent_plan 返回 MODE2_ANALYST_REQUIRED
-#   → 一串断言连带失败。
-# 这不是代码缺陷，是【测试被污染】：同目录的
-#   test_regression_20261029_liveness.py 早就用 _isolate() 做了同样的事。
-# 这里补齐同款隔离：把 DSH_STATE_DIR 指向临时目录。
-_ISO_DIR = tempfile.mkdtemp(prefix="iso_")
+# ── 【测试隔离】必须隔离状态目录，否则会被【真实运行环境】干扰 ──────────────
+_ISO_DIR = tempfile.mkdtemp(prefix="iso_bug3_")
 os.environ["DSH_STATE_DIR"] = _ISO_DIR
 
 import mode2_flow as mf  # noqa: E402
@@ -78,31 +79,16 @@ def section(t):
     print("=" * 74)
 
 
-# 【2026-10-28 重构】十阶段/编制必须由真实绑定的总计子代理执行；
-# 测试用一个固定身份，并在每个临时工作目录里先 bind。
-os.environ["DSH_SESSION_ID"] = "test-analyst"
-
-
 def fresh():
-    d = tempfile.mkdtemp(prefix="m2bug3_")
-    try:
-        mf.analyst_bind("test-analyst", d)
-    except Exception:
-        pass
-    return d
+    return tempfile.mkdtemp(prefix="m2bug3_")
 
 
-def prime_all_stages(d):
-    """把十阶段按序走完（set_subagent_plan 的前置门禁）。"""
-    mf.set_depth("lite", d)
-    n = 0
-    for sid in mf.STAGE_IDS:
-        assert mf.begin_stage(sid, d)["ok"], sid
-        q = mf.record_question("题目-%s" % sid, sid, "需要该参数", d)
-        assert q["ok"], q
-        n = q["question"]["seq"]
-        assert mf.answer_question(n, "答复-%s" % sid, d)["ok"]
-        assert mf.mark_stage_done(sid, "产物-%s" % sid, d)["ok"], sid
+def write_plan(d, **kv):
+    """直接写计划文件（不经凭证 -> 不依赖 workflow_state / 七阶段状态）。"""
+    plan = mf.load_plan(d)
+    plan.update(kv)
+    mf.save_plan(plan, d)
+    return plan
 
 
 ROOMS_LEGACY = [
@@ -120,6 +106,38 @@ ROOMS_LEGACY = [
     {"name": "工程图输出", "type": "drawing",
      "parts": ["工程图"], "why": "出图交付", "depends_on": ["总装验证"]},
 ]
+
+
+def register_like(d, rooms=None, rationale="按功能分解与机构综合划房间"):
+    """模拟 register-design 的落盘部分（规范化 + 写 plan），不碰凭证。"""
+    _n = mf._normalize_rooms_from_design(rooms or ROOMS_LEGACY, rationale)
+    if not _n.get("ok"):
+        return _n
+    norm = _n["rooms"]
+    _snap = mf.room_type_snapshot(norm)
+    plan = mf.load_plan(d)
+    plan["seven_stage"] = {"task_id": "T-BUG3", "ticket": "fake-ticket",
+                           "revision": 1, "analyst_session_id": "analyst-1"}
+    plan["subagent_plan"] = {
+        "decided_by": mf.SUBPLAN_AUTHORITY, "task_id": "T-BUG3",
+        "rationale": rationale, "count": len(norm), "rooms": norm,
+        "seven_stage_ticket": "fake-ticket", "seven_stage_revision": 1,
+        "analyst_session_id": "analyst-1",
+    }
+    plan["subagent_config"] = {
+        "rooms": _snap, "total_rooms": len(_snap),
+        "rooms_source": "七阶段插件 read_design（roomProposal）",
+        "rooms_rationale": rationale,
+        "room_parts": {r["name"]: r.get("parts") or [] for r in norm},
+        "room_types_normalized": [{"room": r["name"], "raw": r.get("type_raw"),
+                                   "type": r["type"]}
+                                  for r in norm if r.get("type_normalized")],
+        "synced_from": "seven_stage", "task_id": "T-BUG3",
+    }
+    mf.save_plan(plan, d)
+    return {"ok": True, "rooms": norm, "rooms_snapshot": _snap,
+            "auto_added_final_rooms": _n.get("auto_added_final_rooms"),
+            "room_types_normalized": plan["subagent_config"]["room_types_normalized"]}
 
 
 def main():
@@ -152,21 +170,20 @@ def main():
         check("  失败时给出规范类型表", bool(r.get("allowed")), r.get("allowed"))
 
     # ══════════════════════════════════════════════════════════════════
-    section("C. set-subagent-plan 必须同步 rooms 快照到 plan 文件")
+    section("C. 登记编制后必须同步 rooms 快照到 plan 文件")
     d = fresh()
     try:
-        prime_all_stages(d)
         plan_before = mf.load_plan(d)
         check("先决条件：同步前 plan 里没有 rooms 快照",
               not ((plan_before.get("subagent_config") or {}).get("rooms")),
               plan_before.get("subagent_config"))
 
-        r = mf.set_subagent_plan(ROOMS_LEGACY, "按功能分解与机构综合划房间",
-                                 "总计子代理", d)
-        check("set-subagent-plan 成功", r["ok"], r.get("error"))
+        r = register_like(d)
+        check("登记成功", r.get("ok") is True, r.get("error"))
         check("回传 rooms_snapshot", bool(r.get("rooms_snapshot")), r)
         check("回传 room_types_normalized（3 个被规范化）",
-              len(r.get("room_types_normalized") or []) == 3, r.get("room_types_normalized"))
+              len(r.get("room_types_normalized") or []) == 3,
+              r.get("room_types_normalized"))
 
         plan = mf.load_plan(d)
         cfg = plan.get("subagent_config") or {}
@@ -178,12 +195,11 @@ def main():
         names = [x[0] for x in snap]
         check("★ 快照房间名与编制一致",
               names == [x["name"] for x in ROOMS_LEGACY], names)
-        check("快照带 rooms_source 溯源",
-              "总计子代理" in str(cfg.get("rooms_source")), cfg.get("rooms_source"))
+        check("快照带 rooms_source 溯源（指向七阶段）",
+              "七阶段" in str(cfg.get("rooms_source")), cfg.get("rooms_source"))
         check("快照带 room_parts（零件范围）",
               "DSH_底盘" in ((cfg.get("room_parts") or {}).get("底盘结构件") or []),
               cfg.get("room_parts"))
-        check("快照记录 synced_at", bool(cfg.get("synced_at")), cfg)
 
         # ★ 核心：旧类型必须被真正改写
         types = {x[0]: x[1] for x in snap}
@@ -203,26 +219,26 @@ def main():
         check("编制保留了原始类型（type_raw，便于审计）",
               any(x.get("type_raw") == "drivetrain"
                   for x in (plan.get("subagent_plan") or {}).get("rooms", [])),
-              plan.get("subagent_plan", {}).get("rooms"))
+              (plan.get("subagent_plan") or {}).get("rooms"))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
     # ══════════════════════════════════════════════════════════════════
-    section("D. 未知类型 → set-subagent-plan 明确拒绝（不静默放过）")
+    section("D. 未知类型 → 登记编制明确拒绝（不静默放过）")
     d = fresh()
     try:
-        prime_all_stages(d)
         bad_rooms = [{"name": "神秘房间", "type": "quantum_chassis",
                       "parts": ["P"], "why": "测试", "depends_on": []}]
-        r = mf.set_subagent_plan(bad_rooms, "测试非法类型", "总计子代理", d)
-        check("★ 未知房间类型 → 拒绝登记", not r["ok"], r)
+        r = register_like(d, bad_rooms, "测试非法类型")
+        check("★ 未知房间类型 → 拒绝登记", not r.get("ok"), r)
         check("★ 报错点名房间与原始类型",
-              "神秘房间" in str(r.get("error")) and "quantum_chassis" in str(r.get("error")),
-              r.get("error"))
+              "神秘房间" in str(r.get("error"))
+              and "quantum_chassis" in str(r.get("error")), r.get("error"))
         check("★ 报错回传规范类型表", bool(r.get("allowed")), r.get("allowed"))
         plan = mf.load_plan(d)
         check("★ 拒绝时不落任何编制/快照",
-              plan.get("subagent_plan") is None and not (plan.get("subagent_config") or {}),
+              plan.get("subagent_plan") is None
+              and not (plan.get("subagent_config") or {}),
               plan.get("subagent_config"))
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -231,8 +247,7 @@ def main():
     section("E. 只读自检 room-types：三处一致性")
     d = fresh()
     try:
-        prime_all_stages(d)
-        mf.set_subagent_plan(ROOMS_LEGACY, "按功能分解划房间", "总计子代理", d)
+        register_like(d)
         rep = mf.room_types_report(d)
         check("room-types 只读命令返回 ok", rep.get("ok") is True, rep.get("error"))
         check("★ 自检判一致（编制 = 快照 = 本次登记）",
@@ -242,15 +257,16 @@ def main():
               rep.get("by_room"))
         _row = [x for x in rep["by_room"] if x["room"] == "传动与轮组"][0]
         check("★ 传动房被识别为 transmission（require_physics=True）",
-              _row["effective_type"] == "transmission" and _row["require_physics"] is True,
-              _row)
+              _row["effective_type"] == "transmission"
+              and _row["require_physics"] is True, _row)
         check("★ 传动房落入 wave1", _row.get("wave") == "wave1", _row)
         _row2 = [x for x in rep["by_room"] if x["room"] == "工程图输出"][0]
         check("★ 出图房被识别为 drafting（final 波次，非 wave1）",
               _row2["effective_type"] == "drafting" and _row2.get("wave") == "final",
               _row2)
         check("有规范类型改动时回传 normalized_types",
-              len(rep.get("normalized_types") or []) == 3, rep.get("normalized_types"))
+              len(rep.get("normalized_types") or []) == 3,
+              rep.get("normalized_types"))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -258,8 +274,7 @@ def main():
     section("F. 制造不一致 → 自检必须报 conflict（不得静默说一致）")
     d = fresh()
     try:
-        prime_all_stages(d)
-        mf.set_subagent_plan(ROOMS_LEGACY, "按功能分解划房间", "总计子代理", d)
+        register_like(d)
         plan = mf.load_plan(d)
         # 手工把 plan 快照改回旧类型（模拟 Bug③ 的"快照没刷新"现场）
         plan["subagent_config"]["rooms"] = [["传动与轮组", "sensor"],
@@ -271,7 +286,8 @@ def main():
         check("★ snapshot_synced=False", rep.get("snapshot_synced") is False, rep)
         _c = [x for x in (rep.get("conflicts") or [])
               if x.get("scope") == "plan_snapshot_vs_subagent_plan"]
-        check("★ conflicts 明确指出 plan 快照与编制的差异", bool(_c), rep.get("conflicts"))
+        check("★ conflicts 明确指出 plan 快照与编制的差异", bool(_c),
+              rep.get("conflicts"))
         _cj = json.dumps(_c, ensure_ascii=False)
         check("★ 差异里能看到快照的原始旧值 sensor", "sensor" in _cj, _c)
         check("★ 差异里同时给出规范化后的类型（transmission vs housing）",
@@ -280,8 +296,7 @@ def main():
         # 再制造"同一房间在不同来源类型不同"的现场
         d2 = fresh()
         try:
-            prime_all_stages(d2)
-            mf.set_subagent_plan(ROOMS_LEGACY, "按功能分解划房间", "总计子代理", d2)
+            register_like(d2)
             p2 = mf.load_plan(d2)
             p2["subagent_config"]["rooms"] = [["传动与轮组", "housing"]]
             mf.save_plan(p2, d2)
@@ -302,7 +317,6 @@ def main():
     section("G. 未登记编制时 room-types 必须明确说「无编制」（不假通过）")
     d = fresh()
     try:
-        prime_all_stages(d)
         rep = mf.room_types_report(d)
         check("★ 无编制 → ok=False", rep.get("ok") is False, rep.get("ok"))
         check("★ 明确指出需先登记编制",
@@ -312,16 +326,11 @@ def main():
 
     # ══════════════════════════════════════════════════════════════════
     section("G2. select 后置对账：sync-rooms 把最终房间表回写快照")
-    # workflow_gate.select 落盘后必须把最终房间表回写 mode2_plan 快照，
-    # 否则 plan 快照与 workflow_state 会差房间 → 假告警掩盖真不一致。
-    # 注：原先这里还断言"固定追加的总理子代理"，该角色已删除。
     d = fresh()
     try:
-        prime_all_stages(d)
-        mf.set_subagent_plan(ROOMS_LEGACY, "按功能分解划房间", "总计子代理", d)
+        register_like(d)
         _final = ([x["name"], mf.normalize_room_type(x["type"])["type"]]
                   for x in ROOMS_LEGACY)
-        # 不再追加任何固定角色：最终表 == 编制表
 
         r = mf.sync_rooms_snapshot(_final, d, source="test.sync",
                                    task_id="T-SYNC-1")
@@ -329,40 +338,41 @@ def main():
         plan = mf.load_plan(d)
         snap = (plan.get("subagent_config") or {}).get("rooms") or []
         check("★ 快照房间数 == 编制房间数", len(snap) == len(ROOMS_LEGACY), snap)
-        check("★ 快照不含已删除的 prime 房间",
-              not any(str(x[1]) == "prime" for x in snap), snap)
         check("★ 快照 synced_from 标注来源",
-              (plan.get("subagent_config") or {}).get("synced_from") == "test.sync", plan.get("subagent_config"))
-        check("★ task_id 一并校正（避免跨任务污染）", plan.get("task_id") == "T-SYNC-1", plan.get("task_id"))
+              (plan.get("subagent_config") or {}).get("synced_from") == "test.sync",
+              plan.get("subagent_config"))
+        check("★ task_id 一并校正（避免跨任务污染）",
+              plan.get("task_id") == "T-SYNC-1", plan.get("task_id"))
         rep = mf.room_types_report(d)
-        check("★ 对账后 snapshot_synced=True", rep.get("snapshot_synced") is True, rep.get("conflicts"))
+        check("★ 对账后 snapshot_synced=True",
+              rep.get("snapshot_synced") is True, rep.get("conflicts"))
         # 非法类型必须明确报错（不静默写一半）
         bad = mf.sync_rooms_snapshot([["房间A", "quantum"]], d, source="test")
         check("★ sync-rooms 非法类型 → 明确报错", not bad["ok"], bad)
-        check("  报错回传允许的规范类型表", bool(bad.get("allowed")), bad.get("allowed"))
-        # 空表必须拒绝（不能把快照清空）
+        check("  报错回传允许的规范类型表", bool(bad.get("allowed")),
+              bad.get("allowed"))
         check("★ 空房间表 → 拒绝（不清空快照）",
               not mf.sync_rooms_snapshot([], d)["ok"])
         _after = (mf.load_plan(d).get("subagent_config") or {}).get("rooms") or []
-        # 编制是 5 个房间（总理子代理已删除），拒绝后必须原样保持 5 个
         check("★ 拒绝后快照保持原样（仍 5 个）",
               len(_after) == len(ROOMS_LEGACY), _after)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
     # ══════════════════════════════════════════════════════════════════
-    section("G3. 端到端：select 把最终房间表（含总理）回写 plan 快照")
-    # Bug③ 的现场是"编制改了、快照没改"，且 select 后还追加了固定的总理子代理。
-    # 这里真跑 workflow_gate.select，验证 plan 快照被写回、三处一致。
+    section("G3. 端到端：没有七阶段凭证时 select 必须 fail-closed")
+    # 十阶段版这里是"跑完十阶段 → select 放行"。七阶段版没有可伪造的
+    # 十阶段产物，真正要锁的是【拒绝路径】：凭证不存在 → 绝不放行建模。
     import subprocess
     _sd = tempfile.mkdtemp(prefix="bug3e2e_state_")
     _wd = None
     _env = dict(os.environ)
     _env["DSH_STATE_DIR"] = _sd
+    _env["DSH_SESSION_ID"] = "e2e-root-session"
     _env["PYTHONIOENCODING"] = "utf-8"
+    _env["DSH_SEVEN_STAGE_STATE_DIR"] = tempfile.mkdtemp(prefix="sev_e2e_")
     _HERE = os.path.dirname(os.path.abspath(__file__))
     _WG = os.path.join(_HERE, "workflow_gate.py")
-    _M2 = os.path.join(_HERE, "mode2_flow.py")
 
     def _run(script, *args):
         _p = subprocess.run([sys.executable, script, *args],
@@ -371,11 +381,18 @@ def main():
         try:
             return json.loads(_p.stdout or "{}")
         except Exception:
-            return {"_raw": (_p.stdout or "")[-400:], "_stderr": (_p.stderr or "")[-400:]}
+            return {"_raw": (_p.stdout or "")[-400:],
+                    "_stderr": (_p.stderr or "")[-400:]}
 
     try:
         _run(_WG, "reset")
-        _run(_WG, "init", "端到端回归：六轴机械臂")
+        _init = _run(_WG, "init", "端到端回归：六轴机械臂")
+        check("★ init 固定 analysis_engine=seven_v03",
+              _init.get("analysis_engine") == "seven_v03",
+              _init.get("analysis_engine"))
+        check("★ init 记录真实根会话 ID",
+              _init.get("seven_stage_root_session_id") == "e2e-root-session",
+              _init.get("seven_stage_root_session_id"))
         _run(_WG, "provide_context", "D 并行, B 部分自主")
         _run(_WG, "provide_context", "强需求")
         _run(_WG, "provide_context", "载荷 100N，臂展 800mm")
@@ -383,56 +400,28 @@ def main():
             _wd = (json.load(f) or {}).get("work_dir")
         check("端到端：拿到本任务 work_dir", bool(_wd), _wd)
 
-        _run(_M2, "analyst-bind", "--work-dir", _wd)
-        _run(_M2, "set-depth", "full", "--work-dir", _wd)
-        for _sid in mf.STAGE_IDS:
-            _run(_M2, "begin-stage", _sid, "--work-dir", _wd)
-            _q = _run(_M2, "ask", "题目-" + _sid, "--stage", _sid,
-                      "--reason", "该阶段需要该参数", "--work-dir", _wd)
-            _seq = (_q.get("question") or {}).get("seq")
-            _run(_M2, "answer-question", str(_seq), "答复-" + _sid, "--work-dir", _wd)
-            _run(_M2, "mark-stage-done", _sid, "--artifact", "产物-" + _sid,
-                 "--work-dir", _wd)
-        _rj = os.path.join(_sd, "rooms.json")
-        with io.open(_rj, "w", encoding="utf-8") as f:
-            json.dump(ROOMS_LEGACY, f, ensure_ascii=False)
-        _sp = _run(_M2, "set-subagent-plan", "--rooms-json", "@" + _rj,
-                   "--rationale", "按功能分解", "--decided-by", "总计子代理",
-                   "--work-dir", _wd)
-        check("端到端：编制登记成功", _sp.get("ok") is True, _sp.get("error"))
-
         _sel = _run(_WG, "select", "B,D")
-        check("端到端：select 放行", _sel.get("ok") is True,
-              {"gate": _sel.get("gate"), "error": _sel.get("error")})
-        _cfg = _sel.get("subagent_config") or {}
-        check("★ 端到端：select 回传 rooms_synced_to_plan=True",
-              _cfg.get("rooms_synced_to_plan") is True, _cfg.get("rooms_sync_error"))
-
-        _rt = _run(_M2, "room-types", "--work-dir", _wd)
-        check("★ 端到端：select 后三处 room_type 一致",
-              _rt.get("consistent") is True, _rt.get("conflicts"))
-        check("★ 端到端：snapshot_synced=True", _rt.get("snapshot_synced") is True, _rt)
-        _snap2 = (_rt.get("sources") or {}).get("plan_snapshot") or {}
-        if not isinstance(_snap2, dict):
-            _snap2 = {x[0]: x[1] for x in _snap2}
-        check("★ 端到端：快照不含已删除的 prime 房间",
-              "prime" not in _snap2.values(), _snap2)
-        check("★ 端到端：快照里传动房是 transmission（不是 drivetrain）",
-              _snap2.get("传动与轮组") == "transmission", _snap2)
-        _rows = {x["room"]: x for x in (_rt.get("by_room") or [])}
-        check("★ 端到端：传动房 require_physics=True（不再被豁免）",
-              _rows.get("传动与轮组", {}).get("require_physics") is True,
-              _rows.get("传动与轮组"))
+        check("★ 无七阶段凭证 → select 拒绝",
+              _sel.get("ok") is False, _sel.get("ok"))
+        check("★ 拒绝码是 SEVEN_STAGE_HANDOFF_REQUIRED",
+              _sel.get("gate") == "SEVEN_STAGE_HANDOFF_REQUIRED",
+              _sel.get("gate"))
+        check("★ 拒绝体给出可操作步骤（attach → launch → propose_rooms）",
+              any("attach" in str(x) for x in (_sel.get("how") or [])),
+              _sel.get("how"))
+        check("★ 拒绝时不生成任何房间（不放行建模）",
+              not (_sel.get("subagent_config") or {}).get("rooms"), _sel)
     finally:
         shutil.rmtree(_sd, ignore_errors=True)
         if _wd:
             shutil.rmtree(_wd, ignore_errors=True)
+        shutil.rmtree(_env["DSH_SEVEN_STAGE_STATE_DIR"], ignore_errors=True)
 
     # ══════════════════════════════════════════════════════════════════
-    section("H. CLI 全路径（room-types 子命令可构建并真跑）")
+    section("H. CLI 全路径（七阶段子命令可构建并真跑）")
     _bad = []
-    # 【A12 修复】新增 rooms-template（含 type 的完整示例）—— 同样要能构建
-    for _s in ["room-types", "rooms-template", "set-subagent-plan", "subagent-plan"]:
+    for _s in ["room-types", "rooms-template", "register-design",
+               "recheck-design", "seven-status", "subagent-plan"]:
         try:
             with contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(io.StringIO()):
@@ -446,15 +435,7 @@ def main():
 
     d = fresh()
     try:
-        prime_all_stages(d)
-        rooms_file = os.path.join(d, "rooms.json")
-        with io.open(rooms_file, "w", encoding="utf-8") as f:
-            json.dump(ROOMS_LEGACY, f, ensure_ascii=False)
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            code = mf.main(["set-subagent-plan", "--rooms-json", "@" + rooms_file,
-                            "--rationale", "CLI 回归", "--work-dir", d])
-        check("★ CLI set-subagent-plan 返回 0", code == 0, buf.getvalue()[-300:])
+        register_like(d)
         buf2 = io.StringIO()
         with contextlib.redirect_stdout(buf2):
             code2 = mf.main(["room-types", "--work-dir", d])

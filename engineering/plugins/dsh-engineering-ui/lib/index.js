@@ -2120,6 +2120,59 @@ export function apply(ctx) {
     }
   }
 
+  // ══ 【2026-11-18 · 七阶段接管】旧守卫让位的判据 ════════════════════
+  // 用户要求（合并交接第 7 条）：被七阶段插件接管的真实根 / 总计 / 二级会话
+  // 从旧催办文案退出，由新守卫管理；旧钩子要把"临时等待"与"真正结束"区分开。
+  //
+  // 判据（只看宿主写的状态文件，绝不看模型自述）：
+  //   ① 找到七阶段状态目录（DSH_SEVEN_STAGE_STATE_DIR，或与 workflow_state
+  //      同级的 seven_stage/ —— 与 mode2_flow / seven_stage_gate 同一套解析）；
+  //   ② 目录里存在某个任务文件，其 ended.root 为空（任务未终结）；
+  //   ③ 本会话 id 出现在该任务的 members / planner / root / childForRole 中。
+  // 任一不满足 → false（保守回退旧逻辑）。
+  //
+  // 为什么"未终结"才算接管：任务 ready/partial 且四个角色都办了结束理由后，
+  // 插件自己也不再管这些会话；这时旧守卫若还留着，会让"该结束的会话"被
+  // 反复拉回。判据跟着插件的生命周期走，不额外造一套。
+  function sevenStageStateDir() {
+    try {
+      const env = String(process.env.DSH_SEVEN_STAGE_STATE_DIR || '');
+      if (env && path.isAbsolute(env)) return env;
+      const toolsDir = (typeof findToolsDir === 'function') ? findToolsDir() : null;
+      if (toolsDir && path.isAbsolute(toolsDir)) {
+        return path.join(toolsDir, 'seven_stage');
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function sevenStageTakesOver(agent) {
+    try {
+      const sid = String((agent && agent.session && agent.session.id) || agent.id || '');
+      if (!sid) return false;
+      const dir = sevenStageStateDir();
+      if (!dir) return false;
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch (e) { return false; }
+      for (const name of names) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}\.json$/.test(name)) continue;
+        let st = null;
+        try { st = readJsonSafe(path.join(dir, name)); } catch (e) { st = null; }
+        if (!st || typeof st !== 'object') continue;
+        if (st.schema !== 'dsh-engineering/seven-stage-state@1') continue;
+        // 任务已终结（真实根办过结束）→ 插件不再管这批会话
+        if (st.ended && st.ended.root) continue;
+        const ids = new Set();
+        if (st.root) ids.add(String(st.root));
+        if (st.planner) ids.add(String(st.planner));
+        for (const v of Object.values(st.members || {})) ids.add(String(v));
+        for (const v of Object.values(st.childForRole || {})) ids.add(String(v));
+        if (ids.has(sid)) return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
   /**
    * 最近若干步里，模型是否【连续只说话、没调用任何工具】。
    * 这是"卡住"的结构证据：正常的推进一定会伴随工具调用或状态文件变化。
@@ -2162,6 +2215,24 @@ export function apply(ctx) {
       if (signal && signal.aborted) return;
       // 【Bug2 修复】只有 engineering 预设的会话才拦截结束。
       if (!isGuardSession(agent)) return;
+      // ── 【2026-11-18 · 七阶段接管】════════════════════════════════════
+      // 用户要求（合并交接第 7 条）：「让新守卫接管同一批会话」。
+      // 被七阶段插件接管的真实根 / 总计 / 三个二级会话，结束语义由插件
+      // 自己的 agent/turn-stopping 守卫判定（yield / blocked / end + 原因）。
+      // 旧守卫若同时催办，就会一边说"你还没干活"、一边说"请登记结束原因"，
+      // 两套文案互相打架 —— 实测那种环境下模型会反复空转。
+      //
+      // 判据不看模型自述：只认 seven_stage_state_dir 里是否存在一个
+      // 【未结束、且把本会话登记为成员】的任务，且 sessionId 命中。
+      // 读不到 / 解析失败一律返回 false（保守回退旧逻辑，绝不因此放行）。
+      try {
+        if (sevenStageTakesOver(agent)) {
+          guardState.delete(agent.id);
+          console.warn('[dsh-engineering-ui] guard 让位：【七阶段插件已接管】session=' + agent.id);
+          return;
+        }
+      } catch (e) {}
+
 
       // ── 【Bug3 修复】完成信号检测：任务真做完了就放行，不再拉回来 ──────
       const fin = detectTaskFinished(agent);

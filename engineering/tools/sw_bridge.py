@@ -3324,11 +3324,11 @@ def _verify_run_artifacts(script_path, result):
 # ══ 【本次修复·问题3】装配类任务必须先走【总计子代理】的代码级强制 ══════
 # 用户实测："还是有 AI 不会开总计子代理的，必须改成代码强制它们开"。
 #
-# 现有强制链（select / room-start / set-subagent-plan）确实存在，但它们都
+# 现有强制链（select / room-start / register-design）确实存在，但它们都
 #   假设"AI 已经进入 Mode 2 并调用门禁命令"。真实绕过路径是：
 #     AI 根本不做模式判定，直接 sw_bridge.py run <建模脚本> 开干 ——
 #     没有 declare 2、没有 select、没有 room-start，所有门禁一次都不触发。
-#   于是"总计子代理"从未被创建，十阶段分析、按需提问、编制登记全部落空。
+#   于是"总计子代理"从未被创建，七阶段分析、真人澄清、编制登记全部落空。
 #
 # 本函数把这条旁路堵上：只要本次运行【看起来是多零件/装配类任务】，
 #   就必须已经登记过子代理编制；否则拒绝执行建模脚本并给出明确指引。
@@ -3412,17 +3412,18 @@ def _mode2_preflight_for_run(script_path, room=None):
         "error": ("【模式二强制】检测到这是多零件/装配类任务（同目录已有 %d 个 .sldprt"
                   " 或脚本含装配语义），但【从未启动总计子代理】—— 拒绝直接建模。"
                   % _sldprt),
-        "why": ("用户明确要求：装配类任务必须先由【总计子代理】按十阶段流水线分析，"
-                "再登记要开几个建模房间。直接开模型 = 跳过全部质量门禁。"),
+        "why": ("用户明确要求：装配类任务必须先由【总计子代理】走完七阶段分析"
+                "（63 个小步 + 独立复审），再交出房间草案。"
+                "直接开模型 = 跳过全部质量门禁。"),
         "how": [
             "1) 先声明模式：python mode_gate.py declare 2",
-            "2) 启动【总计子代理】按十阶段分析（跳阶段会被拒）：",
-            "     python mode2_flow.py begin-stage TaskUnderstanding",
-            "     ... 依次走完 10 个阶段 ...",
-            "3) 登记编制（decided_by 必须是『总计子代理』）：",
-            "     python mode2_flow.py set-subagent-plan --rooms-json @rooms.json "
-            "--rationale \"<分解理由>\" --decided-by \"总计子代理\"",
-            "4) 门禁放行后 room-start，再回来执行建模脚本。",
+            "2) 真实主对话 fork【总计子代理】，再调 engineering_seven_stage action=attach；",
+            "3) 总计子代理 action=launch 启动知识/设计/反驳三个二级会话；",
+            "4) 三角色各 action=bind，按 status 的 stepContract 逐步提交；",
+            "5) 总计子代理 action=propose_rooms 提交房间草案并 end；",
+            "6) 真实根会话：python mode2_flow.py register-design 登记编制，",
+            "   然后 room-start，再回来执行建模脚本。",
+            "（十阶段的 begin-stage / set-subagent-plan 已删除，不能再用它们绕过）",
         ],
         "bypass": "确属单零件任务时，请在【空目录】或独立零件目录下建模（无其他 .sldprt）。",
     }
