@@ -57,7 +57,15 @@ import re
 
 #: steps.json 的版本指纹。改 steps.json 必须同步改这里 ——
 #: 否则「设计依据版本不匹配」会让所有存量任务失效（这是有意的硬约束）。
-_SPEC_HASH = "65d8374b61aed6e7f011060e7136b4d3289a34835b030a86f90aa8a4d83113ba"
+# 【2026-11-19 · BUG-7-B】规范哈希，可复现 —— 不要再手填。
+#   算法（与 lib/flow.js 的 specHash 完全一致，两边必须同源）：
+#     sha256( json.dumps({opening, crossCutting, version, steps},
+#                        ensure_ascii=False, separators=(",", ":")) )
+#   为什么改：旧值 65d8374b… 无法用任何可复现公式重算（是手填的），
+#   导致"改了 steps.json 就再也对不上"，只能连蒙带猜。现在任何人拿到
+#   文件都能三行算出同一个值，改模板时不需要再沟通。
+#   校验：python -c "import seven_stage_gate as g; print(g._SPEC_HASH)"
+_SPEC_HASH = "9f68011877d0c8f74971de4ad837d227ba71da2e3076b02268712e4e8ebdfdae"
 _ROLES = ("knowledge", "design", "review", "planner", "root")
 _STEPS = [f"{stage}.{n}" for stage, count in enumerate((6, 6, 8, 10, 9, 12, 12), 1)
           for n in range(1, count + 1)]

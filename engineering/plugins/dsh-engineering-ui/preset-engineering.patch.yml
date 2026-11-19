@@ -227,8 +227,15 @@
                   会话谱系：主对话 --subagent_fork--> 总计子代理 --launch--> 知识/设计/反驳 三个二级会话。
                   （七阶段文档里的「主对话」= 这里的【总计子代理】；「真实根会话」= DSH 主对话）
                   · 主对话 subagent_fork 建总计子代理，初始 prompt 只让它"等 attach"，别先干活；
-                  · 主对话立刻 action=attach（taskId + planner=总计子代理真实 sessionId + 原始需求 messageIds）；
+                  · 主对话立刻 action=attach（taskId + planner=总计子代理真实 sessionId）；
+                    messageIds 可省略 —— 省略或传 [] 都会自动取【最近一条真人原文】，别再照抄空数组外壳；
+                    多轮对话、必须锁定"最初那条需求"时才显式写原始需求的消息 id。
                   · 总计子代理收到通知 → action=launch（插件用宿主原生 startActivation 建三个会话，maxDepth=2）；
+                    ⚠️ launch 只有在【主对话 attach 已落地】之后才可能成功：attach 之前调用会得到
+                    TASK_NOT_ATTACHED / WRONG_WORKFLOW_ROOT。这两个码的意思是"还没接上"，不是"身份错了"，
+                    不要自己去翻源码或 grep 排障 —— 先问主对话 attach 落了没有（status 里 phase=setup 就是落了）。
+                    🚫 launch 之后【不要】再调 invite：launch 内部已经把三个角色会话建好并发了邀请码，
+                    此时状态机已推进到 frame，重复 invite 会拿到 WRONG_PHASE（现已改为幂等返回，不报错）。
                   · 三角色各自 action=bind（一次性邀请码），然后按 status 的 stepContract 逐步提交；
                   · 真人缺口：总计 question → 主对话 capture（只认宿主 user 消息）→ 总计 interpret；
                   · 结束：总计 propose_rooms → 四角色依次 end(kind=complete, reason)；
@@ -387,9 +394,13 @@
                   要它多做/改做，只能 room-fail + room-start + 重新 fork（prompt 里写全新要求）；
                   要观察它，用 room-board / room-report-read 读磁盘状态。别浪费回合一试再试 send_message。
                 ✅ 唯一权威：主进程脉冲 pulse（插件每 10s 由 DSH 主进程 setInterval 写，与子代理忙不忙无关）：
-                  python "<根>\tools\mode2_flow.py" analyst-guard   ← fork 之前【必须先跑】；活着会返回
-                                                                       gate=ANALYST_ALREADY_ALIVE 并拒绝
-                  python "<根>\tools\mode2_flow.py" analyst-status  ← 看 alive / alive_source / heartbeat_age_sec
+                  🚫 analyst-guard / analyst-status 【已随十阶段一起删除】（2026-11-18 七阶段换代），
+                     再调会直接报 argument cmd: invalid choice。总计子代理的身份改由七阶段插件
+                     按【真实会话谱系】核对（attach 时查 listDescendants），不需要任何自报身份的命令。
+                  现役只读判据：
+                  python "<根>\tools\workflow_gate.py" seven-status   ← phase / cursor / steps_done / jobs / members
+                  （该命令已修好：过去它在未设 DSH_SEVEN_STAGE_STATE_DIR 时恒返回空，见 fixes-20261119-seven-stage-slow-1of63.md）
+                  python "<根>\tools\mode_gate.py" room-board --json ← 建模房间的 board / pulse.alive
                   python "<根>\tools\mode_gate.py" room-board --json ← 顶层 pulse.alive 表示判据本身可不可信
                 判死规则：只有 pulse.alive=true 且 agent status=disposed 才算【确认已死】；
                 pulse.alive=false 只说明 DSH 进程停了（那时子代理也全没了，判死正确，但别据此说"某个子代理死了"）。

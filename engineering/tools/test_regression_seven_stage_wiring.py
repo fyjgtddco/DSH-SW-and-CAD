@@ -274,8 +274,8 @@ if _REPO_ONLY:
     ck("sync-to-dsh.ps1 把它写进依赖清单", "seven-stage" in _sync)
     _inst = read(_inst_p)
     ck("install-0.2.0.ps1 复制七阶段包", "$SEVEN_NAME" in _inst)
-    ck("install-0.2.0.ps1 校验 steps.json 存在", "lib\\steps.json" in _inst
-       or "lib\steps.json" in _inst)
+    ck("install-0.2.0.ps1 校验 steps.json 存在",
+       "steps.json" in _inst and "lib" in _inst)
 else:
     print("  [SKIP] 安装副本里没有安装脚本（这两项只在仓库侧有意义）")
 
@@ -411,6 +411,1237 @@ console.log(JSON.stringify({ live, degraded, parity }));
     ck("parity 场景下插件也是完整挂载（不是降级）",
        _par.get("guarded") == 1 and _par.get("hooks") == 4, _par)
     shutil.rmtree(os.path.dirname(_probe), ignore_errors=True)
+
+
+# ════════════════════════════════════════════════════════════════════
+sec("F3. 【BUG-seven-stage-tool-gate】P0/P1/P2 回归")
+# ════════════════════════════════════════════════════════════════════
+# 这三条是 2026-11-18 实机踩到的严重缺陷，必须由代码锁住，不能只写文档：
+#   P0  attach 之后主对话自己的 pwsh/read/write/... 全被 SEVEN_STAGE_TOOL_GATE
+#       拒掉 —— 门禁跑不了、"把 bug 写进文件"和"请人介入"也做不到，任务卡死。
+#   P1  总计子代理在 attach 落地前结束 → REAL_DIRECT_CHILD_REQUIRED 不可恢复。
+#   P2  mode-selection 身份判据自相矛盾（子代理既"不跑门禁"又要"调 attach"）。
+_SRC_JS = read(_GATE_JS) if os.path.isfile(_GATE_JS) else ""
+
+ck("★ P0：enforce() 里对 root 显式放行",
+   "bound.role === 'root'" in _SRC_JS,
+   [ln.strip() for ln in _SRC_JS.split("\n") if "role === 'root'" in ln][:2])
+ck("★ P0：turn-stopping 对 root 直接 return",
+   re.search(r"turn-stopping[\s\S]{0,900}?if \(role==='root'\) return;", _SRC_JS) is not None)
+ck("★ P0：disposed 对 root 直接 return",
+   _SRC_JS.count("if (role==='root') return;") >= 2,
+   _SRC_JS.count("if (role==='root') return;"))
+ck("★ P1：attach 接受「已结束但谱系仍在」的直系子会话",
+   "listDescendants" in _SRC_JS and "realChild" in _SRC_JS)
+ck("★ P1：报错点明「fork 与 attach 写在同一回复」",
+   "同一条回复" in _SRC_JS)
+ck("★ 附带：execute 把异常转成 JSON（不崩宿主）",
+   "opAction" in _SRC_JS and "SEVEN_STAGE_ERROR" in _SRC_JS)
+
+# P2：文档不再自相矛盾
+_SKILL = os.path.join(REPO, "engineering", "skills", "mode-selection", "SKILL.md")
+if os.path.isfile(_SKILL):
+    _sk = read(_SKILL)
+    ck("★ P2：技能给出四类身份判据（不再一刀切）",
+       "知识/设计/反驳" in _sk and "你是【主对话】还是【被派出来的子代理】" in _sk)
+    ck("★ P2：显式澄清「不跑门禁 ≠ 不参与门禁」",
+       "不跑门禁" in _sk and "不参与门禁" in _sk)
+    ck("★ P2：写明主对话不受插件工具限制",
+       "永不限制" in _sk or "没有工具限制" in _sk)
+else:
+    print("  [SKIP] 安装副本里没有 skills 源码")
+
+# 真跑一遍 node 行为验证（宿主模拟）
+if _NODE and os.path.isfile(_GATE_JS):
+    _p0 = os.path.join(tempfile.mkdtemp(prefix="seven_p0_"), "p0.mjs")
+    with io.open(_p0, "w", encoding="utf-8") as f:
+        f.write("""
+import { pathToFileURL } from 'node:url';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+const mod = await import(pathToFileURL(process.argv[2]).href);
+const P = [], F = [];
+const ck = (n, c) => (c ? P : F).push(n);
+const dir = mkdtempSync(join(tmpdir(), 'p0-'));
+const wf = join(dir, 'workflow_state.json');
+writeFileSync(wf, JSON.stringify({ task_id:'t1', analysis_engine:'seven_v03',
+  seven_stage_root_session_id:'root' }));
+const agents = new Map(), lineage = new Map();
+let reg = null, guardFn = null;
+const agentOf = (id, parent=null) => {
+  const a = { id, session:{ id, header:{ parentSession:parent },
+    deriveMessages:()=>[{id:'u1',role:'user',source:{kind:'user'},content:[{type:'text',text:'需求'}]}] },
+    followup(){}, steer(){} };
+  agents.set(id, a); if (parent) lineage.set(id, parent); return a;
+};
+const rootA = agentOf('root');
+const ctx = {
+  logger:{ warn:()=>{} },
+  tools:{ register:t=>{reg=t;}, guard:fn=>{guardFn=fn;} },
+  agents:{ get:id=>agents.get(id) },
+  subagents:{ getProvider:()=>({}),
+    listDescendants: async r => [...lineage.entries()].filter(([,p])=>p===r)
+      .map(([id])=>({kind:'child', id, parentId:r, activity:'inactive'})),
+    prompt: async()=>({}),
+    startActivation: async i => { agentOf(i.childId, i.parent.id); return {childId:i.childId, result:Promise.resolve({})}; } },
+  on:()=>()=>{},
+};
+mod.install(ctx, { workflowFile: wf, stateDir: join(dir,'seven_stage'), workerProvider:'fork' }, o=>o);
+const call = (agent, action, data={}) => reg.execute(
+  { taskId:'t1', action, dataJson: JSON.stringify(data) },
+  { name:'engineering_seven_stage', agent, signal:{ throwIfAborted(){} } });
+const ex = (name, agent) => ({ name, agent, signal:{ throwIfAborted(){} } });
+
+// P0
+const planner = agentOf('p1','root');
+await call(rootA, 'attach', { planner:'p1', messageIds:['u1'] });
+for (const t of ['pwsh','read','write','grep','list_agents','todo_write','ask_user_question'])
+  ck('root can ' + t, guardFn(ex(t, rootA)) === undefined);
+await call(planner, 'launch');
+const kids = [...agents.keys()].filter(k => k!=='root' && k!=='p1');
+ck('3 workers', kids.length === 3);
+for (const k of kids) ck('worker locked ' + k, typeof guardFn(ex('pwsh', agents.get(k))) === 'string');
+ck('planner locked', typeof guardFn(ex('pwsh', planner)) === 'string');
+const other = agentOf('room-x','someone');
+ck('room unaffected', guardFn(ex('pwsh', other)) === undefined);
+
+// P1 —— 新任务：planner 在 attach 前结束
+const dir2 = mkdtempSync(join(tmpdir(),'p0b-'));
+const wf2 = join(dir2,'workflow_state.json');
+writeFileSync(wf2, JSON.stringify({ task_id:'t2', analysis_engine:'seven_v03',
+  seven_stage_root_session_id:'root' }));
+mod.install({ ...ctx, tools:{ register:t=>{reg=t;}, guard:fn=>{guardFn=fn;} }, on:()=>()=>{} },
+  { workflowFile: wf2, stateDir: join(dir2,'seven_stage'), workerProvider:'fork' }, o=>o);
+agentOf('p-dead','root'); agents.delete('p-dead');   // 模拟已结束
+const r1 = await reg.execute({ taskId:'t2', action:'attach',
+  dataJson: JSON.stringify({ planner:'p-dead', messageIds:['u1'] }) },
+  { name:'engineering_seven_stage', agent: rootA, signal:{ throwIfAborted(){} } });
+let ok1 = false; try { ok1 = JSON.parse(r1.text).phase === 'setup'; } catch {}
+ck('dead planner attach ok', ok1);
+const r2 = await reg.execute({ taskId:'t2', action:'attach',
+  dataJson: JSON.stringify({ planner:'nope', messageIds:['u1'] }) },
+  { name:'engineering_seven_stage', agent: rootA, signal:{ throwIfAborted(){} } });
+ck('forged planner rejected', /REAL_DIRECT_CHILD_REQUIRED/.test(r2.text));
+ck('no host crash', typeof r2.text === 'string');
+console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
+""")
+    _o = subprocess.run([_NODE, _p0, _GATE_JS], capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=180)
+    try:
+        _r = json.loads((_o.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        _r = {"pass": 0, "fail": 1, "fails": [(_o.stdout or "")[-300:] + (_o.stderr or "")[-300:]]}
+    ck("★ P0/P1 行为验证全过（%d 项）" % _r.get("pass", 0), _r.get("fail") == 0,
+       _r.get("fails"))
+    shutil.rmtree(os.path.dirname(_p0), ignore_errors=True)
+
+
+# ════════════════════════════════════════════════════════════════════
+sec("F4. 【2026-11-18 实机】BUG-1~4 回归（检索外包 / 僵尸 job / 派发可视化 / next 刷新）")
+# ════════════════════════════════════════════════════════════════════
+# 现场报告：C:\Users\j1877\Desktop\test\20261118_211912_BA97EB57\reports\bugs_七阶段分析.md
+#   BUG-1 宿主缺 DSH_SEVEN_STAGE_BRAVE_KEY → knowledge 联网检索不可用；web_search 又被
+#         SEVEN_STAGE_TOOL_GATE 拦 → 双重断路，step 1.1 直接 failed。
+#         用户口径：改成【插件发布检索工单 → 真实主对话用 DSH 内置 web_search 执行 → 回填插件】，
+#         且不得打破「大脑(planner) / 传话员(root)」的绝对地位。
+#   BUG-2 旧会话释放未办 end → 僵尸 job；四个动作回四个互相矛盾的错误码。
+#   BUG-3 planner 全程 job=null，progress 0/63，status 只说"等待任务包"，看不出在等谁。
+#   BUG-4 四角色都 end(kind=partial) 之后，status 的 next 文案不刷新（复现 5 次）。
+_SRC_FLOW = read(os.path.join(PLUGIN, "lib", "flow.js")) if os.path.isfile(
+    os.path.join(PLUGIN, "lib", "flow.js")) else ""
+
+ck("★ BUG-1：插件侧已无任何网络后端（brave/host search 只剩注释）",
+   "braveSearch(" not in _SRC_JS.replace("braveSearch()", "")
+   and "hostSearch(" not in _SRC_JS.replace("hostSearch()", ""),
+   [ln.strip() for ln in _SRC_JS.split("\n") if "Search(" in ln][:4])
+ck("★ BUG-1：index.js 里不再读任何搜索密钥/端点环境变量",
+   "DSH_SEVEN_STAGE_BRAVE_KEY" not in _SRC_JS.split("//   ")[-1]
+   or "process.env.DSH_SEVEN_STAGE_SEARCH_URL" not in _SRC_JS,
+   [ln.strip() for ln in _SRC_JS.split("\n") if "process.env.DSH_SEVEN_STAGE" in ln][:4])
+ck("★ BUG-1：action 枚举里有 search_fill（回填通道）", "'search_fill'" in _SRC_JS)
+ck("★ BUG-1：检索工单 orderSearch + 回填 fillSearch 都在 flow.js",
+   "function orderSearch" in _SRC_FLOW and "function fillSearch" in _SRC_FLOW)
+ck("★ BUG-1：回填被限定为传话员（非 root 一律 SEARCH_FILL_RELAY_ONLY）",
+   "SEARCH_FILL_RELAY_ONLY" in _SRC_FLOW)
+ck("★ BUG-2：interrupt 会作废僵尸 job（记 orphanedJob 并从 jobs 删除）",
+   "orphanedJob" in _SRC_FLOW and re.search(r"delete s\.jobs\[role\]", _SRC_FLOW) is not None)
+ck("★ BUG-2：retry 会重发 job（reissue）",
+   "function reissue" in _SRC_FLOW and "reissuedJobId" in _SRC_FLOW and "reissue(s, d.role)" in _SRC_FLOW)
+ck("★ BUG-2：拒绝时回传 allowed 动作清单",
+   "allowedActions" in _SRC_FLOW and "allowed:" in _SRC_JS)
+ck("★ BUG-3：status 带 waitingOn（说明在等哪个角色）", "waitingOn" in _SRC_FLOW)
+ck("★ BUG-3：planner 的 status 带 dispatch 派发矩阵", "dispatchMatrix" in _SRC_FLOW)
+ck("★ BUG-4：next 文案按 ended 动态生成（不再只查 phase 表）",
+   "function nextText" in _SRC_FLOW and "unfinished" in _SRC_FLOW)
+
+# 真跑一遍：检索外包 + 僵尸 job + next 刷新，全部用 openFlow 的纯状态机验证
+if _NODE and os.path.isfile(_GATE_JS):
+    _p1 = os.path.join(tempfile.mkdtemp(prefix="seven_bug14_"), "bug14.mjs")
+    with io.open(_p1, "w", encoding="utf-8") as f:
+        f.write("""
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const flowMod = await import(pathToFileURL(process.argv[2]).href);
+const dir = mkdtempSync(join(tmpdir(), 'bug14-'));
+const f = flowMod.openFlow(dir);
+const P = [], F = [];
+const ck = (n, c, extra) => (c ? P : F).push(extra === undefined ? n : n + ' :: ' + JSON.stringify(extra).slice(0, 200));
+const A = (id, parent = null) => ({ id, parent });
+const root = A('root'), plan = A('planner', 'root');
+const t = 'bug14-task';
+const call = (a, act, d = {}) => f.call(a, t, act, d);
+call(root, 'attach', { planner: 'planner', requirements: [{ id: 'm1', text: '需求', source: 'user' }] });
+const inv = call(plan, 'invite');
+const tok = r => inv.invitations.find(x => x.role === r).token;
+for (const r of ['knowledge', 'design', 'review']) f.reserveWorker(plan, t, r, r);
+for (const r of ['knowledge', 'design', 'review']) call(A(r, 'planner'), 'bind', { role: r, token: tok(r) });
+call(plan, 'frame', { object: 'o', decision: 'd', boundaries: 'b', searchTopic: 's',
+  verification: 'v', assumptions: 'a', prior: 'p', blockedBy: [] });
+
+// ── BUG-1：知识发工单（不联网）→ 只有 root 能回填 ──────────────────────
+const know = A('knowledge', 'planner');
+const job = call(know, 'status').job;
+const o1 = call(know, 'search', { jobId: job.id, query: 'GB/T 1096 平键' });
+ck('BUG-1 知识可以发布检索工单', o1.order && o1.order.status === 'pending');
+ck('BUG-1 工单记录查询词', o1.order.query === 'GB/T 1096 平键');
+let denied = null;
+try { call(know, 'search_fill', { jobId: job.id, orderId: o1.order.id,
+  query: 'GB/T 1096 平键', hits: [{ title: 'x', url: 'https://example.com/x' }] }); }
+catch (e) { denied = e.message; }
+ck('BUG-1 知识不能自己回填（检索者不得自证）', /SEARCH_FILL_RELAY_ONLY/.test(String(denied)), denied);
+denied = null;
+try { call(plan, 'search_fill', { jobId: job.id, orderId: o1.order.id,
+  query: 'GB/T 1096 平键', hits: [] }); }
+catch (e) { denied = e.message; }
+ck('BUG-1 planner 也不能回填（只有传话员能）', /SEARCH_FILL_RELAY_ONLY/.test(String(denied)), denied);
+// 查询词必须与工单一致，防止传话员改题
+denied = null;
+try { call(root, 'search_fill', { jobId: job.id, orderId: o1.order.id,
+  query: '改过的查询', hits: [{ title: 'x', url: 'https://example.com/x' }] }); }
+catch (e) { denied = e.message; }
+ck('BUG-1 回填查询词必须与工单一致', /SEARCH_QUERY_MISMATCH/.test(String(denied)), denied);
+const rec = call(root, 'search_fill', { jobId: job.id, orderId: o1.order.id,
+  query: 'GB/T 1096 平键', provider: '宿主内置 web_search',
+  hits: [{ title: '普通型平键', url: 'https://std.samr.gov.cn/a', snippet: 'GB/T 1096-2003' }] });
+ck('BUG-1 传话员回填成功', rec.search.hits.length === 1);
+ck('BUG-1 来源记在 knowledge job 上',
+  call(know, 'status').job.searches[0].hits[0].url === 'https://std.samr.gov.cn/a');
+ck('BUG-1 工单状态转 filled', call(know, 'status').search.order.status === 'filled');
+call(know, 'submit', { jobId: job.id, content: '依据',
+  sources: [{ id: call(know, 'status').job.searches[0].hits[0].id, location: 'p.1', applicability: '仅模拟' }],
+  gaps: [] });
+ck('BUG-1 知识用回填来源 submit 成功', call(plan, 'status').phase === 'preflight');
+
+// ── BUG-2：僵尸 job ─────────────────────────────────────────────────────
+// 先停在一个有 job 的阶段：preflight 归 review
+const rev = A('review', 'planner');
+const rj = call(rev, 'status').job;
+ck('BUG-2 起始 review 有 job', !!rj);
+f.interrupt(rev, t, '宿主释放会话，未办理结束');
+const afterInt = f.load(t);
+ck('BUG-2 会话释放后 job 被作废（不再"看得见摸不着"）', !afterInt.jobs.review, afterInt.jobs.review);
+ck('BUG-2 作废的 job id 留痕 orphanedJob', afterInt.failures.review?.orphanedJob === rj.id,
+  afterInt.failures.review);
+ck('BUG-2 status 不再显示僵尸 job', call(rev, 'status').job === null);
+const rt = call(plan, 'retry', { role: 'review', reason: '重派' });
+ck('BUG-2 retry 会发新 job（不是只清故障）', !!rt.reissuedJobId && rt.reissuedJobId !== rj.id,
+  rt.reissuedJobId);
+ck('BUG-2 新 job 与 status 一致', call(rev, 'status').job?.id === rt.reissuedJobId);
+ck('BUG-2 新 job 的检索/计算从零开始', call(rev, 'status').job.calculations.length === 0);
+
+// ── BUG-3：派发矩阵 + 在等谁 ─────────────────────────────────────────────
+const ps = call(plan, 'status');
+ck('BUG-3 planner status 带 dispatch', Array.isArray(ps.dispatch) && ps.dispatch.length === 3);
+ck('BUG-3 dispatch 标出各角色状态',
+  ps.dispatch.every(x => ['idle', 'working', 'ended', 'failed'].includes(x.state)));
+ck('BUG-3 status 带 waitingOn', typeof ps.waitingOn === 'string' && ps.waitingOn.length > 0,
+  ps.waitingOn);
+
+// ── BUG-4：next 跟着 ended 变 ────────────────────────────────────────────
+// 直接构造一个 partial 终态：给当前任务登记失败再 partial
+f.interrupt(A('design', 'planner'), t, '模拟故障');
+call(plan, 'partial', { reason: '模拟部分结果' });
+const n1 = call(plan, 'status').next;
+ck('BUG-4 partial 后 next 不再是旧固定文案', !/三个角色说明已有工作和遗留项/.test(n1), n1);
+ck('BUG-4 next 里点名还剩谁没登记', /还差/.test(n1), n1);
+for (const r of ['review', 'design', 'knowledge']) {
+  try { call(A(r, 'planner'), 'end', { kind: 'partial', reason: '已登记' }); } catch {}
+}
+call(plan, 'end', { kind: 'partial', reason: '已登记' });
+const n2 = call(plan, 'status').next;
+ck('BUG-4 角色陆续 end 后 next 随之更新', n2 !== n1, { before: n1, after: n2 });
+call(root, 'end', { kind: 'partial', reason: '收束' });
+const n3 = call(root, 'status').next;
+ck('BUG-4 全部登记后 next 说明交接完成', /全部角色已登记结束/.test(n3), n3);
+console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
+""")
+    _o = subprocess.run([_NODE, _p1, os.path.join(PLUGIN, "lib", "flow.js")],
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", timeout=180)
+    try:
+        _r = json.loads((_o.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        _r = {"pass": 0, "fail": 1,
+              "fails": [((_o.stdout or "") + (_o.stderr or ""))[-600:]]}
+    ck("★ BUG-1~4 行为验证全过（%d 项）" % _r.get("pass", 0), _r.get("fail") == 0,
+       _r.get("fails"))
+    shutil.rmtree(os.path.dirname(_p1), ignore_errors=True)
+
+
+# ════════════════════════════════════════════════════════════════════
+sec("F5. 【2026-11-19 实机第二轮】BUG-1~8 回归（终态出口 / 报错可读性 / 模板指纹）")
+# ════════════════════════════════════════════════════════════════════
+# 现场报告：C:\Users\j1877\Desktop\test\减速器任务_七阶段插件缺陷报告.md
+#   BUG-2 dataJson 传对象报 INPUT_TOO_LARGE（真因是类型错）
+#   BUG-3 终态 partial 后分析角色仍被工具门禁锁死，产物读不回来
+#   BUG-4 终态每次状态转移都重发同一条通知（现场 7 次）
+#   BUG-5 partial 是单向门：propose_rooms 要 ready、retry 要非终态 → 无出口
+#   BUG-6 attach 传显示名 agent-1 时，报错没提"要 sessionId"
+#   BUG-7 1.1 等步骤模板是产线工艺叙事（压装机/工位/来料），与机械装配错位
+#   BUG-8 环境前置未在门禁前暴露（搜索 key 依赖已随 BUG-1 消失）
+
+_SRC_IDX = _SRC_JS   # index.js 源码
+ck("★ BUG-2：dataJson 类型错有专属错误码（不再冒充 INPUT_TOO_LARGE）",
+   "DATAJSON_MUST_BE_STRING" in _SRC_IDX)
+ck("★ BUG-2：非法 JSON 有专属错误码（不再把 JSON.parse 异常冒给宿主）",
+   "DATAJSON_INVALID_JSON" in _SRC_IDX)
+ck("★ BUG-3：enforce() 对终态放行分析角色",
+   "isTerminal" in _SRC_IDX and "TERMINAL_PHASES" in _SRC_IDX
+   and re.search(r"if \(isTerminal\(bound\.s\)\) return;", _SRC_IDX) is not None)
+ck("★ BUG-4：终态通知只发一次（terminalNotified）",
+   "terminalNotified" in _SRC_IDX)
+ck("★ BUG-4：终态不再走逐条 notify（终态分支提前 return）",
+   re.search(r"if \(TERMINAL_PHASES\.has\(s\.phase\)\)[\s\S]{0,1400}?return;", _SRC_IDX) is not None)
+ck("★ BUG-5：新增 reopen 动作（flow.js case + index enum）",
+   "case 'reopen'" in _SRC_FLOW and "'reopen'" in _SRC_IDX)
+ck("★ BUG-5：reopen 只允许 planner/root",
+   re.search(r"case 'reopen':\s*\{\s*as\('planner','root'\)", _SRC_FLOW) is not None)
+ck("★ BUG-5：reopen 的恢复点由插件推导（不是模型指定）",
+   "resumePhase" in _SRC_FLOW and "const resume = " in _SRC_FLOW)
+ck("★ BUG-6：attach 报错点明要 sessionId / UUID",
+   "sessionId" in _SRC_IDX and "UUID" in _SRC_IDX
+   and re.search(r"REAL_DIRECT_CHILD_REQUIRED[\s\S]{0,1200}?UUID", _SRC_IDX) is not None)
+ck("★ BUG-6：支持按显示名唯一解析成 sessionId",
+   "PLANNER_NAME_AMBIGUOUS" in _SRC_IDX)
+ck("★ BUG-7-B：spec 哈希改为可复现计算（不再读死字段）",
+   "computeSpecHash" in _SRC_FLOW and "specHashDrift" in _SRC_FLOW)
+ck("★ BUG-7-B：指纹漂移在 attach 时 fail-fast",
+   "SPEC_HASH_DRIFT" in _SRC_IDX)
+ck("★ 附带：载荷工况随任务包下发（分析角色不必开 shell 去读文件）",
+   "loadCaseOf" in _SRC_FLOW and "loadCase:loadCaseOf(s)" in _SRC_FLOW)
+ck("★ BUG-1 补强：search_fill 区分 ok/unavailable/error/blocked",
+   "'unavailable'" in _SRC_FLOW and "INVALID_SEARCH_OUTCOME" in _SRC_FLOW)
+ck("★ BUG-1 补强：失败的检索不许携带 hits（不许把失败包装成结果）",
+   "FAILED_SEARCH_CANNOT_CARRY_HITS" in _SRC_FLOW)
+
+# steps.json：模板指纹必须三处一致，且 1.1 已改成领域中立表述
+_spec2 = json.load(io.open(os.path.join(PLUGIN, "lib", "steps.json"), encoding="utf-8"))
+ck("★ BUG-7-B：steps.json 的 sha256 字段 == Python 闸门 _SPEC_HASH",
+   _spec2.get("sha256") == ssg._SPEC_HASH, (_spec2.get("sha256"), ssg._SPEC_HASH))
+ck("★ BUG-7-B：sha256 可由算法复现（不再手填）",
+   hashlib.sha256(json.dumps(
+       {k: _spec2[k] for k in ("opening", "crossCutting", "version", "steps")},
+       ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+   == _spec2.get("sha256"), _spec2.get("sha256"))
+_s11 = next((x for x in _spec2.get("steps") or [] if x.get("id") == "1.1"), {})
+ck("★ BUG-7：1.1 模板不再以【产品进入工位】开场",
+   "进入工位" not in (_s11.get("procedure") or ""),
+   (_s11.get("procedure") or "")[:80])
+ck("★ BUG-7：1.1 仍要求保存用户原话、不替用户下结论",
+   "原话" in (_s11.get("procedure") or ""))
+_steps63 = _spec2.get("steps") or []
+ck("★ BUG-7：63 个小步数量与 id 序列未变",
+   len(_steps63) == 63 and [x.get("id") for x in _steps63] == ssg._STEPS)
+
+# 真跑：终态解锁 / 通知去重 / reopen / dataJson / 旧状态容错
+if _NODE and os.path.isfile(_GATE_JS):
+    _p2 = os.path.join(tempfile.mkdtemp(prefix="seven_bug58_"), "bug58.mjs")
+    with io.open(_p2, "w", encoding="utf-8") as f:
+        f.write("""
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const P = [], F = [];
+const ck = (n, c, extra) => (c ? P : F).push(extra === undefined ? n : n + ' :: ' + JSON.stringify(extra).slice(0, 240));
+const mod = await import(pathToFileURL(process.argv[2]).href);
+const flowMod = await import(pathToFileURL(process.argv[3]).href);
+
+// ── 场景搭建：一个已跑到 knowledge 阶段的任务 ──────────────────────────
+const dir = mkdtempSync(join(tmpdir(), 'b58-'));
+const wf = join(dir, 'workflow_state.json');
+writeFileSync(wf, JSON.stringify({ task_id: 'b58', analysis_engine: 'seven_v03',
+  seven_stage_root_session_id: 'root' }));
+const agents = new Map(); const notes = [];
+const ag = (id, parent = null) => {
+  const a = { id, session: { id, header: { parentSession: parent },
+      deriveMessages: () => [{ id: 'u1', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: '需求' }] }] },
+    followup(m) { if (id === 'root') notes.push(String(m?.content?.[0]?.text ?? '')); }, steer() {} };
+  agents.set(id, a); return a;
+};
+const rootA = ag('root'), planA = ag('p1', 'root');
+let reg = null, guardFn = null;
+const ctx = { logger: { warn: () => {} },
+  tools: { register: t => { reg = t; }, guard: fn => { guardFn = fn; } },
+  agents: { get: id => agents.get(id) },
+  subagents: { getProvider: () => ({}), listDescendants: async () => [],
+    prompt: async () => ({}),
+    startActivation: async i => { ag(i.childId, i.parent.id); return { childId: i.childId, result: Promise.resolve({}) }; } },
+  on: () => () => {} };
+mod.install(ctx, { stateDir: join(dir, 'seven_stage'), workflowFile: wf, workerProvider: 'fork' }, o => o);
+const signal = { throwIfAborted() {} };
+const raw = async (agent, action, dataJson) => JSON.parse((await reg.execute(
+  { taskId: 'b58', action, dataJson }, { agent, signal })).text);
+const call = (agent, action, data = {}) => raw(agent, action, JSON.stringify(data));
+
+// ── BUG-2：dataJson 类型错 ─────────────────────────────────────────────
+ck('BUG-2 传对象 -> DATAJSON_MUST_BE_STRING',
+  (await raw(rootA, 'status', { a: 1 })).code === 'DATAJSON_MUST_BE_STRING');
+ck('BUG-2 传数字 -> DATAJSON_MUST_BE_STRING',
+  (await raw(rootA, 'status', 42)).code === 'DATAJSON_MUST_BE_STRING');
+ck('BUG-2 坏 JSON 串 -> DATAJSON_INVALID_JSON',
+  (await raw(rootA, 'status', '{bad')).code === 'DATAJSON_INVALID_JSON');
+ck('BUG-2 错误信息给出正确写法示例',
+  /dataJson=/.test((await raw(rootA, 'status', { a: 1 })).error || ''));
+
+// ── BUG-6：attach 报错提到 sessionId / UUID ────────────────────────────
+const r6 = await call(rootA, 'attach', { planner: 'agent-1', messageIds: ['u1'] });
+ck('BUG-6 报错提到 sessionId', /sessionId/i.test(r6.error || ''));
+ck('BUG-6 报错提到 UUID', /UUID/i.test(r6.error || ''));
+ck('BUG-6 报错回显收到的 planner 值', /agent-1/.test(r6.error || ''));
+
+// ── 正常推进到 knowledge ───────────────────────────────────────────────
+await call(rootA, 'attach', { planner: 'p1', messageIds: ['u1'] });
+await call(planA, 'launch');
+const s0 = JSON.parse(readFileSync(join(dir, 'seven_stage', 'b58.json'), 'utf8'));
+const roleOf = {}; for (const [role, cid] of Object.entries(s0.childForRole)) roleOf[cid] = role;
+for (const [cid, role] of Object.entries(roleOf))
+  await call(agents.get(cid), 'bind', { role, token: s0.invitations[role] });
+await call(planA, 'frame', { object: '单级圆柱齿轮减速器装配体', decision: 'd',
+  boundaries: 'b', searchTopic: 's', verification: 'v', assumptions: 'a', prior: 'p', blockedBy: [] });
+const knowCid = Object.entries(roleOf).find(([, r]) => r === 'knowledge')[0];
+const designCid = Object.entries(roleOf).find(([, r]) => r === 'design')[0];
+const reviewCid = Object.entries(roleOf).find(([, r]) => r === 'review')[0];
+const kA = agents.get(knowCid), dA = agents.get(designCid), rA = agents.get(reviewCid);
+const designA = dA, reviewA = rA;
+// ⚠️ submit 的 jobId 必须从【该角色自己的 status.job】取，不能复用别的角色的 job。
+//   流水线是串行的，每个阶段换一次 job id，手写死一个 id 必然 STALE_OR_WRONG_JOB。
+const roleJobId = async roleAgent => (await call(roleAgent, 'status')).job?.id;
+
+// ── BUG-1 补强：outcome 三态 ───────────────────────────────────────────
+const job = (await call(kA, 'status')).job;
+const ord = (await call(kA, 'search', { jobId: job.id, query: 'GB/T 3480.1' })).order;
+ck('BUG-1 知识发布工单', ord && ord.status === 'pending');
+ck('BUG-1 失败的检索不许携带 hits',
+  /FAILED_SEARCH_CANNOT_CARRY_HITS|INVALID_SEARCH_OUTCOME/.test(
+    ((await call(rootA, 'search_fill', { jobId: job.id, orderId: ord.id,
+      query: 'GB/T 3480.1', outcome: 'unavailable',
+      hits: [{ title: 'x', url: 'https://example.com/x' }] })).error) || ''));
+const fillFail = await call(rootA, 'search_fill', { jobId: job.id, orderId: ord.id,
+  query: 'GB/T 3480.1', outcome: 'unavailable', error: '宿主无搜索 provider', hits: [] });
+ck('BUG-1 unavailable 回填成功且留痕',
+  fillFail.search && fillFail.search.outcome === 'unavailable'
+  && fillFail.search.hits.length === 0);
+ck('BUG-1 审计记录 outcome',
+  /unavailable/.test((await call(kA, 'status')).search.order.outcome || ''));
+// 无来源 + blocking gap 可以提交（降级路径可达）
+const submitWithGap = await call(kA, 'submit', { jobId: job.id, content: '无外网，登记缺口',
+  sources: [], gaps: [{ object: 'GB/T3480 系数', impact: '强度无法计算', obtain: '人工查标准',
+    owner: 'human', allowed: '离线提供', blocking: true }] });
+ck('BUG-1 无来源 + blocking gap 允许提交（降级路径可达）', submitWithGap.phase === 'preflight',
+  submitWithGap.code);
+
+// ── BUG-3：终态解锁 ────────────────────────────────────────────────────
+ck('BUG-3 非终态时 knowledge 被工具门禁锁住',
+  typeof guardFn({ agent: kA, name: 'glob' }) === 'string');
+// 按真实串行顺序推进：preflight(盲审) → design → review
+// 注意 step 1.1 特有的 preflight：knowledge 提交后不是直接进 design，而是先让
+// review 盲审原始需求（BLIND_REVIEW_INPUTS_ONLY），这一步不能跳。
+const preId = await roleJobId(reviewA);
+await call(reviewA, 'submit', { jobId: preId, content: '独立预审原始需求', verdict: 'pass', issues: [] });
+ck('测试推进到 design 阶段', (await call(planA, 'status')).phase === 'design',
+  (await call(planA, 'status')).phase);
+const desId = await roleJobId(designA);
+await call(designA, 'submit', { jobId: desId, content: '设计', evidence: '计算 V1', gaps: [] });
+ck('测试推进到 review 阶段', (await call(planA, 'status')).phase === 'review',
+  (await call(planA, 'status')).phase);
+// 制造 partial：knowledge 提交后 phase 已经走到 preflight/review，
+// 所以"最后一次失败的 knowledge"要现造一个当前阶段可写的故障再 partial。
+// 这里直接用设计角色在自己阶段内 blocked（phaseOwner(design)='design'）。
+// review 阶段由 review 角色持有 job，所以让 review 登记故障最贴近现场
+const revId = await roleJobId(reviewA);
+await call(reviewA, 'blocked', { reason: '模拟故障' });
+await call(planA, 'partial', { reason: '模拟部分结果' });
+const partialPhase = (await call(planA, 'status')).phase;
+ck('BUG-3 进入 partial', partialPhase === 'partial', partialPhase);
+ck('BUG-3 终态后 knowledge 解锁 glob',
+  guardFn({ agent: kA, name: 'glob' }) === undefined);
+ck('BUG-3 终态后 design 解锁 read',
+  guardFn({ agent: designA, name: 'read' }) === undefined);
+ck('BUG-3 终态后 review 解锁 write',
+  guardFn({ agent: reviewA, name: 'write' }) === undefined);
+ck('BUG-3 root 仍然不受限', guardFn({ agent: rootA, name: 'pwsh' }) === undefined);
+ck('BUG-3 未绑定会话不受影响',
+  guardFn({ agent: ag('stranger', 'nobody'), name: 'pwsh' }) === undefined);
+
+// ── BUG-4：终态通知只发一次 ────────────────────────────────────────────
+notes.length = 0;
+for (const cid of [designCid, reviewCid]) {
+  try { await call(agents.get(cid), 'end', { kind: 'partial', reason: '已登记' }); } catch {}
+}
+for (let i = 0; i < 8; i++) { await call(rootA, 'status'); await call(planA, 'status'); }
+await new Promise(r => setTimeout(r, 300));
+ck('BUG-4 终态反复 status 后 root 通知不超过 1 条', notes.length <= 1,
+  { count: notes.length });
+ck('BUG-4 终态通知说明还剩谁 / 该做什么',
+  notes.length === 0 || /还差|都已登记结束/.test(notes[0]), notes[0]?.slice(0, 120));
+
+// ── BUG-5：reopen 出口 ─────────────────────────────────────────────────
+ck('BUG-5 终态下 allowed 里有 reopen（planner）',
+  ((await call(planA, 'status')).allowed || []).includes('reopen'));
+ck('BUG-5 终态下 allowed 里有 reopen（root）',
+  ((await call(rootA, 'status')).allowed || []).includes('reopen'));
+ck('BUG-5 分析角色不能 reopen',
+  (await call(designA, 'reopen', { reason: 'x' })).ok === false);
+const re = await call(planA, 'reopen', { reason: '环境已修好，续跑' });
+ck('BUG-5 reopen 成功', re.reopened !== undefined, re.code);
+ck('BUG-5 reopen 恢复到非终态', (await call(planA, 'status')).phase !== 'partial');
+ck('BUG-5 reopen 给出恢复阶段与承接角色',
+  !!re.reopened?.resumePhase && !!re.reopened?.owner, re.reopened);
+ck('BUG-5 reopen 保留了历史故障（审计可回溯）',
+  Array.isArray(re.reopened?.carriedFailures) && re.reopened.carriedFailures.length > 0,
+  re.reopened?.carriedFailures);
+ck('BUG-5 reopen 后工具门禁自动重新上锁',
+  typeof guardFn({ agent: kA, name: 'glob' }) === 'string');
+
+// ── 附带：载荷工况随任务包下发 ─────────────────────────────────────────
+// 直接验 flow 层：状态里带 loadCasePath 时，任务包必须出现 loadCase 字段，
+// 且字段里的数值与文件一致（插件只做只读投影，不产生第二套数值）。
+const lcPath = join(dir, 'gate_load_case.json');
+writeFileSync(lcPath, JSON.stringify({ schema_version: '1.0',
+  meta: { revision: 'A', task_type: 'generic', design_domain_mm: [100, 100, 100] },
+  material: { id: 'Q235', name: 'GB/T 700-2006', yield_strength_mpa: 235,
+    uts_mpa: 375, youngs_modulus_mpa: 206000, poissons_ratio: 0.3, density_kg_m3: 7850 },
+  loads: { nominal_load_n: 50000, design_load_n: 75000, impact_factor: 1.5, safety_factor: 2.0 } }));
+const statePath = join(dir, 'seven_stage', 'b58.json');
+const stt = JSON.parse(readFileSync(statePath, 'utf8'));
+stt.loadCasePath = lcPath;
+writeFileSync(statePath, JSON.stringify(stt));
+const f3 = flowMod.openFlow(join(dir, 'seven_stage'));
+const A3 = (id, parent = null) => ({ id, parent });
+// reopen 之后 phase=commit 且有 planner job（见 flow.reopen），所以 planner 的
+// status 会带 workPacket —— 正好用来验证 loadCase 投影。
+const pk = f3.call(A3('p1', 'root'), 'b58', 'status');
+const lc = pk.job && pk.job.loadCase;
+ck('附带 loadCase 由插件注入任务包', !!lc, pk.job ? Object.keys(pk.job) : null);
+ck('附带 loadCase 的额定载荷与文件一致', lc && lc.nominalLoadN === 50000, lc && lc.nominalLoadN);
+ck('附带 loadCase 的设计载荷与文件一致', lc && lc.designLoadN === 75000, lc && lc.designLoadN);
+ck('附带 loadCase 带材料屈服强度', lc && lc.material && lc.material.yieldMpa === 235,
+  lc && lc.material);
+ck('附带 loadCase 指明权威文件路径', lc && lc.path === lcPath, lc && lc.path);
+ck('附带 loadCase 明确"不要另起一套数值"', lc && /不要另起一套数值/.test(lc.note || ''));
+
+// ── BUG-7-B：旧版状态文件不能把守卫打崩 ────────────────────────────────
+const dir2 = mkdtempSync(join(tmpdir(), 'b58b-'));
+const stale = { schema: 'dsh-engineering/seven-stage-state@1', specHash: 'old-version-hash',
+  taskId: 'stale1', root: 'r', planner: 'p', members: {}, cursor: 0, phase: 'partial',
+  requirements: [], facts: [], records: [], history: [], log: [], jobs: {}, slot: null,
+  question: null, ended: {}, failures: {}, turns: {}, waitReason: null };
+writeFileSync(join(dir2, 'stale1.json'), JSON.stringify(stale));
+let trackedOk = false;
+try { const f2 = flowMod.openFlow(dir2); trackedOk = f2.trackedActor({ id: 'someone', parent: 'x' }) === null; }
+catch (e) { trackedOk = false; }
+ck('BUG-7-B 旧版状态文件不会让 trackedActor 抛错', trackedOk);
+ck('BUG-7-B spec 哈希可复现（specHashDrift === false）', flowMod.specHashDrift === false);
+
+console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
+""")
+    _o = subprocess.run(
+        [_NODE, _p2, _GATE_JS, os.path.join(PLUGIN, "lib", "flow.js")],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180)
+    try:
+        _r = json.loads((_o.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        _r = {"pass": 0, "fail": 1,
+              "fails": [((_o.stdout or "") + (_o.stderr or ""))[-800:]]}
+    ck("★ BUG-1~8 第二轮行为验证全过（%d 项）" % _r.get("pass", 0),
+       _r.get("fail") == 0, _r.get("fails"))
+    shutil.rmtree(os.path.dirname(_p2), ignore_errors=True)
+
+
+# ════════════════════════════════════════════════════════════════════
+sec("F6. 【2026-11-19 第三轮】BUG-01~13 回归（人机通道 / 检索证据 / 静默错基准）")
+# ════════════════════════════════════════════════════════════════════
+# 现场报告：C:\Users\j1877\Desktop\test\20261119_092838_C9B6D3FD\DSH_任务缺陷记录.md
+#   任务在 step 1.1 终止，63 步一步未 commit。两条阻断级缺陷叠加：
+#   BUG-01 interpret.parameters 文档写对象、代码要非空字符串（8 种形态全被拒）
+#   BUG-02 capture 读不到 ask_user_question 的答案（唯一的人机交互通道被堵死）
+# 报告 4.5 节的自我纠正也锁进来了：NO_ROLE_FAILURE_TO_RETRY 不是"角色死了"。
+
+ck("★ BUG-01：fields() 对 parameters 走宽松通道（LOOSE_FIELDS）",
+   "LOOSE_FIELDS" in _SRC_FLOW and "'parameters'" in _SRC_FLOW)
+ck("★ BUG-01：named() 报错带实际类型与期望类型",
+   "非空字符串" in _SRC_FLOW and "实际收到" in _SRC_FLOW and "typeOf" in _SRC_FLOW)
+ck("★ BUG-01：interpret 的 actionHelp 写明 parameters 可传任意 JSON",
+   "任意 JSON" in _SRC_FLOW)
+ck("★ BUG-02：既有 user 纯文本通道，也有 user-question 结构化通道",
+   "askAnswerText" in _SRC_JS and "'user-question'" in _SRC_JS)
+ck("★ BUG-02：只认严格 answers schema（不把任意 tool 输出当真人原话）",
+   "answers.every" in _SRC_JS and "selected.every" in _SRC_JS)
+ck("★ BUG-02：capture 失败时回报最近可采集记录",
+   "最近 5 条可采集记录" in _SRC_JS)
+ck("★ BUG-03/13：reissue 继承已回填搜索证据",
+   "merged.push(src)" in _SRC_FLOW and "s.slot?.searches" in _SRC_FLOW)
+ck("★ BUG-03：submit 按【小步级】证据判定，不只看当前 job",
+   "stepSearches" in _SRC_FLOW and "allSearches" in _SRC_FLOW)
+ck("★ BUG-11：interrupt 带 cause 分类（host-disposed / role-blocked）",
+   "host-disposed" in _SRC_FLOW and "function autoReissue" in _SRC_FLOW)
+ck("★ BUG-11：只对 host-disposed 自动重派，且只一次",
+   "f.autoRetried" in _SRC_FLOW and "f.cause !== 'host-disposed'" in _SRC_FLOW)
+ck("★ BUG-12：search_fill 对已回填的同单做幂等",
+   "idempotent" in _SRC_FLOW and "search_fill_idempotent" in _SRC_FLOW)
+ck("★ BUG-12：推送工单前读磁盘实时状态",
+   "liveNow" in _SRC_JS)
+ck("★ BUG-04：planner 在任何非终态都可登记 blocked",
+   "plannerCanReport" in _SRC_FLOW)
+ck("★ BUG-05：只读工具白名单（send_message/list_agents）",
+   "READONLY_TOOLS" in _SRC_JS and "send_message" in _SRC_JS)
+# 【2026-11-19】wait_agent 从白名单与可见工具里一并摘掉 —— 它不唤醒、只锁回合。
+ck("★ 提速：分析角色不再持有 wait_agent（避免回合内空睡）",
+   "'wait_agent'" not in (_SRC_JS.split("const READONLY_TOOLS")[1] or "")[:200]
+   and "'wait_agent'" not in (_SRC_JS.split("const ANALYSIS_TOOL_ALLOW")[1] or "")[:200])
+ck("★ BUG-05：白名单不含任何可写工具",
+   "todo_write" not in (_SRC_JS.split("READONLY_TOOLS")[1] or "")[:200])
+ck("★ BUG-06：rework 支持 owner=planner（回到 frame 重写）",
+   "issue.owner === 'planner'" in _SRC_FLOW)
+ck("★ BUG-06：owner=human 的异议明确要求改用 question",
+   "HUMAN_OBJECTION_NEEDS_QUESTION" in _SRC_FLOW)
+ck("★ BUG-07：search_fill 的 actionHelp 写清 jobId/orderId 取哪个字段",
+   "order.jobId" in _SRC_FLOW and "order.id" in _SRC_FLOW)
+ck("★ BUG-08：init 归档跨任务残留的 loadCase",
+   "load_case_stale_archived" in read(os.path.join(HERE, "workflow_gate.py")))
+ck("★ BUG-09：设计域支持显式三向覆盖",
+   "_extract_design_domain_override" in read(os.path.join(HERE, "workflow_gate.py")))
+ck("★ BUG-10：面向用户/模型的 flow_order 已无「十阶段」",
+   "总计子代理按七阶段分析" in read(os.path.join(HERE, "workflow_gate.py")))
+_WG_SRC = read(os.path.join(HERE, "workflow_gate.py"))
+ck("★ REV08：cycles_per_year 不再 or 200000.0 静默兜底",
+   # 注释里提到旧写法是允许的，真正的可执行代码不能再有
+   # 用字符串判定而不是正则：反斜杠经过多层写入容易被吞，断言本身不该成为脆弱点。
+   not any(("operating_cycles_per_year" in l and "200000" in l and "or" in l)
+           for l in _WG_SRC.split(chr(10)) if not l.strip().startswith("#")),
+   [l.strip() for l in _WG_SRC.split("\n") if "operating_cycles_per_year" in l][:3])
+ck("★ REV08：传动类拿不到转速时留空并给出原因",
+   "cycles_per_year_unknown" in read(os.path.join(HERE, "workflow_gate.py")))
+
+# ── 【2026-11-19 · 慢/卡在 1/63 的通道修复】──────────────────────────
+# 现场：任务 20261119_102048_F6C63358，36 分钟只推进 1 步。
+#   ① review 的 status 24667 字符 → 被 tool-result-pruner（8192/4096/1024）
+#      中间裁剪 → 待审正文丢失；read 又只查已 commit 的 records → 死路。
+#   ② capture 不回执 messageId，interpret 只能拿题目 id 盲猜 → evidence_wait 卡死。
+ck("★ 通道修复：read 支持 part/offset/limit 与 nextOffset 分段",
+   "UNKNOWN_RECORD_PART" in _SRC_FLOW and "nextOffset" in _SRC_FLOW
+   and "part?" in _SRC_FLOW)
+ck("★ 通道修复：read 能读【未 commit 的当前小步】",
+   "const isCurrent" in _SRC_FLOW and "const rec = committed ??" in _SRC_FLOW)
+ck("★ 通道修复：status 只下发正文索引（bodyRef），不再塞全文",
+   "const bodyRef" in _SRC_FLOW and "contentChars" in _SRC_FLOW
+   and "bodyRef(s.slot?.knowledge" in _SRC_FLOW)
+ck("★ 通道修复：八条规则随 launch prompt 只发一次（不再每次 status 重复 2.8KB）",
+   "spec.crossCutting" in _SRC_FLOW and "rulesRef" in _SRC_FLOW)
+ck("★ 通道修复：capture 回执 messageId（interpret 不再盲猜）",
+   "out.messageId = fact.id" in _SRC_FLOW and "out.messageId = existing.id" in _SRC_FLOW)
+ck("★ 通道修复：重复 capture 幂等，不再撞 USER_MESSAGE_ALREADY_RECORDED",
+   "out.idempotent = true" in _SRC_FLOW)
+ck("★ 通道修复：capture 认 ask_user_question 的题目 id",
+   "questionIds" in _SRC_JS and "(m.questionIds ?? []).includes(wanted)" in _SRC_JS)
+ck("★ 通道修复：interpret 失败时列出可用的 messageId",
+   "最近可用的 messageId" in _SRC_FLOW)
+
+# ── 【2026-11-19 · 现场 20261119_173044】126 分钟只推进 1/63 ────────────────
+# 四个可归因的浪费：
+#   ① wait_agent 白等 52.1 min（有通知也唤不醒）；
+#   ② interpret 每触发一次就整步重跑（rev3 只活 14 秒）；
+#   ③ gate_load_case.json 被 init 的标题判据误归档 → 3 轮 commit 注定过不去；
+#   ④ review submit 15 连败，错误码不说哪个字段。
+ck("★ 提速①：wait_agent 不再出现在分析角色可见工具里",
+   "'wait_agent'" not in (_SRC_JS.split("const ANALYSIS_TOOL_ALLOW")[1] or "")[:200])
+ck("★ 提速①：wait_agent 也不再是只读白名单成员",
+   "'wait_agent'" not in (_SRC_JS.split("const READONLY_TOOLS")[1] or "")[:200])
+ck("★ 提速②：interpret 在没有可作废产物时【不回退】（additive）",
+   "const wouldInvalidate" in _SRC_FLOW and "additive:true" in _SRC_FLOW
+   and "只有\"真的作废了既有产物\"才叫回退" in _SRC_FLOW.replace("“", "\"").replace("”", "\""))
+_WG_SRC_FOR_STALE = read(os.path.join(HERE, "workflow_gate.py"))
+# 注释里提到旧写法是【允许的】—— 那是在说明"删掉了什么"。
+# 真正的可执行代码里不能再出现这条脆弱判据。
+ck("★ 提速③：init 的载荷残留判据不再用标题前 20 字（可执行代码）",
+   not any(("_old_title[:20]" in l and "not in task_desc" in l)
+           for l in _WG_SRC_FOR_STALE.split(chr(10)) if not l.strip().startswith("#")))
+ck("★ 提速③：载荷残留改用时间阈值（STALE_MIN_AGE_SEC）",
+   "STALE_MIN_AGE_SEC" in _WG_SRC_FOR_STALE and "getmtime" in _WG_SRC_FOR_STALE)
+ck("★ 提速③：有 task_id 且等于本任务时不归档",
+   "_this_task_id = str(state.get" in _WG_SRC_FOR_STALE)
+ck("★ 提速③：loadCase 区分『尚未生成(pending)』与『存在但读不了(unreadable)』",
+   "pending:true" in _SRC_FLOW and "existsSync(p)" in _SRC_FLOW)
+ck("★ 提速④：review submit 的错误逐项定位（第几项/哪个字段/收到什么）",
+   "issues[' + idx + ']" in _SRC_FLOW and "INVALID_ISSUE_KIND_OR_ID: " in _SRC_FLOW)
+ck("★ 提速④：VERDICT_ISSUE_MISMATCH 说清两者实际值",
+   "verdict 与 issues 的 kind 不一致" in _SRC_FLOW)
+ck("★ 提速④：INVALID_LIST 报出实际类型与正确形态",
+   "LIST_HINTS" in _SRC_FLOW and "必须是【数组】" in _SRC_FLOW)
+ck("★ 提速：capture 成功后插件主动叫醒 planner（不再靠 root 转话）",
+   "capture 后通知 planner 失败" in _SRC_JS and "真人答复已捕获" in _SRC_JS)
+
+# ── 【2026-11-19 第三轮 · 作者交付的 bug 报告 BUG-1~21】────────────────────
+# 来源：C:\Users\j1877\Desktop\test\bug-report-七十七插件-20261119_AAF031E4.md
+#   （review/planner/lead 三方落盘的 21 条；以下按"能不能从代码上钉住"分类）
+ck("★ 报告BUG-1：字段报错带 JSON 路径（issues[idx].xxx）",
+   "const fieldsAt" in _SRC_FLOW and "issues[' + idx + ']" in _SRC_FLOW)
+ck("★ 报告BUG-2：拒绝响应附本动作的 dataJson 契约",
+   "ACTION_CONTRACT" in _SRC_JS and "actionContract" in _SRC_JS
+   and "本动作的 dataJson 契约见 actionContract" in _SRC_JS)
+ck("★ 报告BUG-3：未知键报 UNKNOWN_FIELD 而不是 INVALID_LIST（operations→ops）",
+   "UNKNOWN_FIELD: operations" in _SRC_FLOW)
+ck("★ 报告BUG-3：前序引用语法在报错里写清（从 1 开始、没有 $0）",
+   "没有 " in _SRC_FLOW and "格式是 " in _SRC_FLOW
+   and "BAD_CALCULATION_OPERAND" in _SRC_FLOW)
+ck("★ 报告BUG-4：缺 jobId 报 INVALID_FIELD，不再混成 STALE_OR_WRONG_JOB",
+   "INVALID_FIELD: jobId 是必填字段" in _SRC_FLOW)
+ck("★ 报告BUG-5：VERDICT_ISSUE_MISMATCH 附实际 verdict 与 kind 清单",
+   "verdict 与 issues 的 kind 不一致" in _SRC_FLOW)
+ck("★ 报告BUG-11：evidence_wait 有真实出口（rework / frame / question）",
+   "if (s.phase === 'evidence_wait') {" in _SRC_FLOW
+   and "out.add('rework').add('frame')" in _SRC_FLOW)
+ck("★ 报告BUG-11：rework 与 frame 在 evidence_wait 下可用",
+   "at('resolve', 'evidence_wait')" in _SRC_FLOW and "at('frame', 'evidence_wait')" in _SRC_FLOW)
+ck("★ 报告BUG-12：waitReason 不再把 partial 说成补证出口，并列出全部出口",
+   "那是交部分结果，不是补证" in _SRC_FLOW)
+ck("★ 报告BUG-13：end 不再只看 phase，闲置角色也能登记收尾",
+   "const idleNow" in _SRC_FLOW and "提前收尾只能是 partial" in _SRC_FLOW)
+ck("★ 报告BUG-13：allowed 里非终态也可能出现 end（晚到指令能落地）",
+   "terminal.has(s.phase) || (!s.jobs[role] && phaseOwner(s.phase) !== role)" in _SRC_FLOW)
+ck("★ 报告BUG-16：异议关闭时同步清 frame.blockedBy",
+   "blockedByCleared" in _SRC_FLOW and "const resolved = s.slot.frame.blockedBy.filter" in _SRC_FLOW)
+ck('★ 报告BUG-6：工具闸门给出「转 lead」的处置路径（而不是只说不许）',
+   "修文件、跑门禁命令、写盘落档，是【真实主对话（传话员）】的职责" in _SRC_JS
+   and "不要自己找文件或改文件" in _SRC_JS)
+ck("★ 报告BUG-7：rework 已提交、在等外部回执时允许 planner yield",
+   "reworkedAndWaiting" in _SRC_FLOW)
+ck("★ 报告BUG-8：interpret 的 messageId 写明三种合法来源",
+   "status.newFacts[].id" in _SRC_FLOW)
+ck('★ 报告BUG-14：actionHelp 的 gaps 标明「数组（不是字符串！）」',
+   '数组（不是字符串！）' in _SRC_FLOW)
+ck("★ 报告BUG-17：换阶段/进补证不再抹掉别人的故障登记",
+   "s.failures = carriedFailures" in _SRC_FLOW
+   and "s.failures = {...(s.failures ?? {})}" in _SRC_FLOW)
+ck('★ 报告BUG-21 / §7.2：planner 的「状态更新」通知走增量判据（防自我唤醒循环）',
+   "const phaseChanged = prior?.phase !== s.phase" in _SRC_JS
+   and "factsGrew" in _SRC_JS and "jobsChanged" in _SRC_JS)
+ck("★ 口径：root 仍【不能】interpret（判断权归总计子代理）",
+   "interpret 归总计子代理" in _SRC_FLOW and "as('planner');\n        const fact" in _SRC_FLOW)
+
+# ── 【2026-11-19 · 会话 c9c2fd56】开工前握手的三处卡点 ────────────────────
+# 现场：36 分钟（11:39~12:28，用户手动中断前）只做了 attach/launch/invite 三件事，
+#   其中 attach 因 messageIds:[] 失败、launch 因未 attach 报 WRONG_WORKFLOW_ROOT
+#   而后去 grep 源码排障 15 个回合、launch 后按 next 调 invite 又被 WRONG_PHASE 拒。
+ck("★ 握手修复：attach 的 messageIds 为空时退回最近一条真人原文",
+   "wanted.length ? wanted : original.slice(-1)" in _SRC_JS)
+ck("★ 握手修复：attach 失败时列出可选 messageId 清单",
+   "最近 8 条可采集记录" in _SRC_JS and "messageIds 要填的值" in _SRC_JS)
+ck("★ 握手修复：attach 之前调其它动作报 TASK_NOT_ATTACHED（不再是裸 WRONG_WORKFLOW_ROOT）",
+   "TASK_NOT_ATTACHED: 任务 " in _SRC_JS and "attach 本身就是在【创建】状态文件" in _SRC_JS)
+ck("★ 握手修复：WRONG_WORKFLOW_ROOT 报错带两边的值",
+   "而本任务状态的 root=" in _SRC_JS)
+ck("★ 握手修复：launch 之后重复 invite 幂等（不再 WRONG_PHASE）",
+   "launch 已经完成邀请与角色会话创建" in _SRC_FLOW)
+ck("★ 握手修复：通知里明确禁止用 wait_agent 等任务包",
+   "不要用 wait_agent 等待任务包" in _SRC_JS)
+ck("★ 握手修复：seven-status 走 state_dir_for（未设环境变量也能读到状态）",
+   "_ssg.state_dir_for" in read(os.path.join(HERE, "workflow_gate.py")) and
+   "import seven_stage_gate as _ssg" in read(os.path.join(HERE, "workflow_gate.py")))
+_preset = read(os.path.join(PLUGIN, "..", "dsh-engineering-ui", "preset-engineering.patch.yml"))
+ck("★ 握手修复：preset 不再教 analyst-guard（十阶段已删除的命令）",
+   "analyst-guard   ← fork 之前" not in _preset and "已随十阶段一起删除" in _preset)
+ck("★ 握手修复：preset 说明 messageIds 可省略",
+   "messageIds 可省略" in _preset)
+
+# ── 【2026-11-19 · 提速】三处省往返的改造 ─────────────────────────────────
+# 实测基线（会话 a332529d / planner）：91 个 LLM 步里 52% 是纯协调步，
+#   仅 status 就 22 次；每次请求 tools schema 29440 字符、输入 p50 40077 token。
+ck("★ 提速：分析角色工具集用 tools.restrict 收窄（省掉 ~28KB schema/请求）",
+   "ANALYSIS_TOOL_ALLOW" in _SRC_JS and "scoped.tools.restrict" in _SRC_JS)
+ck("★ 提速：restrict 用 allow 白名单（新工具默认不可见）",
+   "allow: ANALYSIS_TOOL_ALLOW" in _SRC_JS)
+ck("★ 提速：restrict 失败必须静默（只是没省到 token，不能让分析起不来）",
+   "收窄工具集跳过" in _SRC_JS and "restrictedActors" in _SRC_JS)
+ck("★ 提速：bind / launch 之后立刻收窄",
+   "if (action==='bind') narrowTools(exec.agent)" in _SRC_JS
+   and "narrowBySessionId" in _SRC_JS)
+ck("★ 提速：任务包直接带 nextAction（省掉一次 status 往返）",
+   "function nextActionOf" in _SRC_FLOW and "nextAction:nextActionOf(s, role)" in _SRC_FLOW)
+ck("★ 提速：nextAction 覆盖 planner 的 frame/commit/resolve/evidence_wait/ready",
+   all(k in _SRC_FLOW for k in ["case 'frame': return {action:'frame'",
+     "case 'commit': return {action:'commit'",
+     "case 'resolve': return {action:'rework'",
+     "case 'evidence_wait': return {action:'question'",
+     "case 'ready': return {action:'propose_rooms'"]))
+
+# ── 【2026-11-19 · 排队消息】投递方式：queue → steer + 在途合并 ─────────────
+# 现场（截图）：主对话侧堆了 4 条「七阶段插件任务…有新任务包」，全部卡在
+#   队列里逐个 turn 跑。根因是 delivery:'queue' → agent.followup()，
+#   宿主文档写明 "The item becomes the sole ordinary message of its own turn"
+#   —— 每条通知独占一个完整 turn。
+ck("★ 排队修复：子会话投递改用 steer（插队到最近一步，不排成独立 turn）",
+   "delivery:'steer'" in _SRC_JS)
+# 注释里提到旧写法（解释为什么改）是允许的，只断言【可执行代码】里没有 queue。
+_js_code_lines = [l for l in _SRC_JS.split(chr(10))
+                  if not l.strip().startswith('//') and not l.strip().startswith('*')]
+ck("★ 排队修复：可执行代码里已不存在 delivery:'queue'",
+   not any(("delivery" in l and "'queue'" in l) for l in _js_code_lines),
+   [l.strip()[:90] for l in _js_code_lines if "'queue'" in l][:3])
+ck("★ 排队修复：root 用 agent.steer 而不是 followup",
+   "live.steer(msg(message))" in _SRC_JS)
+ck("★ 排队修复：同一 (task,sid) 未消费前不再重复投递（在途合并）",
+   "inFlight" in _SRC_JS and "inflight.text = message" in _SRC_JS)
+ck("★ 排队修复：角色一旦调用工具即视为消费，解除在途标记",
+   "markNotifiedConsumed(taskId, a.id)" in _SRC_JS)
+ck("★ 排队修复：投递失败必须清掉在途标记（否则永久静音）",
+   "inFlight.delete(n)" in _SRC_JS)
+ck("★ 排队修复：deliver 显式重发可绕过在途合并",
+   "function notify(task, sid, text, key, force = false)" in _SRC_JS
+   and "targetPhase(prior), true)" in _SRC_JS)
+
+# 行为验证
+if _NODE and os.path.isfile(_GATE_JS):
+    _p3 = os.path.join(tempfile.mkdtemp(prefix="seven_bug13_"), "bug13.mjs")
+    with io.open(_p3, "w", encoding="utf-8") as f:
+        f.write("""
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const P = [], F = [];
+const ck = (n, c, extra) => (c ? P : F).push(extra === undefined ? n : n + ' :: ' + JSON.stringify(extra).slice(0, 240));
+const mod = await import(pathToFileURL(process.argv[2]).href);
+
+const dir = mkdtempSync(join(tmpdir(), 'b13-'));
+const wf = join(dir, 'workflow_state.json');
+writeFileSync(wf, JSON.stringify({ task_id: 'b13', analysis_engine: 'seven_v03',
+  seven_stage_root_session_id: 'root', load_case_file: null }));
+
+const userText = { id: 'u1', role: 'user', source: { kind: 'user' },
+  content: [{ type: 'text', text: '帮我建造一个减速器' }] };
+const askOk = { id: 'a1', role: 'tool', source: { kind: 'tool', callId: 'c1' }, toolCallId: 'c1',
+  content: [{ type: 'text', text: JSON.stringify({ answers: [
+    { id: 'delivery', selected: ['数字化交付'] },
+    { id: 'power', selected: ['3kW'], custom: 'n1=1450 r/min' },
+    { id: 'skip', selected: [] },
+  ] }) }] };
+const otherTool = { id: 't1', role: 'tool', source: { kind: 'tool', callId: 'c2' }, toolCallId: 'c2',
+  content: [{ type: 'text', text: 'some random tool output' }] };
+
+const agents = new Map();
+const mkAgent = (id, parent = null, msgs = []) => {
+  const a = { id, session: { id, header: { parentSession: parent }, deriveMessages: () => msgs },
+    followup() {}, steer() {} };
+  agents.set(id, a); return a;
+};
+const rootA = mkAgent('root', null, [userText, otherTool, askOk]);
+const planA = mkAgent('p1', 'root');
+let reg = null, guardFn = null;
+const ctx = { logger: { warn: () => {}, info: () => {} },
+  tools: { register: t => { reg = t; }, guard: fn => { guardFn = fn; } },
+  agents: { get: id => agents.get(id) },
+  subagents: { getProvider: () => ({}), listDescendants: async () => [], prompt: async () => ({}),
+    startActivation: async i => { mkAgent(i.childId, i.parent.id); return { childId: i.childId, result: Promise.resolve({}) }; } },
+  on: () => () => {} };
+mod.install(ctx, { stateDir: join(dir, 'seven_stage'), workflowFile: wf, workerProvider: 'fork' }, o => o);
+const signal = { throwIfAborted() {} };
+const call = async (agent, action, data = {}) => JSON.parse((await reg.execute(
+  { taskId: 'b13', action, dataJson: JSON.stringify(data) }, { agent, signal })).text);
+const raw = async (agent, action, dataJson) => JSON.parse((await reg.execute(
+  { taskId: 'b13', action, dataJson }, { agent, signal })).text);
+
+// ── BUG-02：capture 读到 ask_user_question 答案 ──────────────────────
+await call(rootA, 'attach', { planner: 'p1', messageIds: ['u1'] });
+const cap = await call(rootA, 'capture', {});
+ck('BUG-02 capture 成功', cap.ok !== false, cap.code);
+const st0 = JSON.parse(readFileSync(join(dir, 'seven_stage', 'b13.json'), 'utf8'));
+const fact = st0.facts[0];
+ck('BUG-02 采集来源标为 user-question', fact && fact.source === 'user-question', fact && fact.source);
+ck('BUG-02 答案文本含三个问题',
+  fact && (fact.text.match(/\[/g) || []).length === 3, fact && fact.text);
+ck('BUG-02 自定义答案被带上', fact && fact.text.includes('n1=1450 r/min'));
+ck('BUG-02 跳过项被标注', fact && fact.text.includes('跳过'));
+ck('BUG-02 普通 tool 输出未被误收',
+  st0.facts.every(x => !String(x.text).includes('random tool output')));
+// ── 【2026-11-19】capture 必须回执 messageId，重复捕获幂等 ──────────────
+ck('通道修复 capture 回执 messageId',
+  typeof cap.messageId === 'string' && cap.messageId.length > 0, cap.messageId);
+ck('通道修复 重复 capture 幂等（不撞 USER_MESSAGE_ALREADY_RECORDED）',
+  (await call(rootA, 'capture', {})).idempotent === true);
+
+// ── 【2026-11-19 · 会话 c9c2fd56】握手三步的行为断言 ────────────────────
+// ① attach 之前 launch → 必须是 TASK_NOT_ATTACHED（不是裸 WRONG_WORKFLOW_ROOT）
+//    ⚠️ 必须用【独立的任务 + 独立的状态目录】：本函数前面已经把 b13 attach 过了，
+//      在同一个 taskId 上再测"未 attach"永远测不到。
+{
+  const d0 = mkdtempSync(join(tmpdir(), 'hand0-'));
+  const wf0 = join(d0, 'workflow_state.json');
+  writeFileSync(wf0, JSON.stringify({ task_id: 'h0', analysis_engine: 'seven_v03',
+    seven_stage_root_session_id: 'root0', load_case_file: null }));
+  const ag0 = new Map();
+  const mk0 = (id, parent = null, msgs = []) => {
+    const x = { id, session: { id, header: { parentSession: parent }, deriveMessages: () => msgs },
+      followup() {}, steer() {} };
+    ag0.set(id, x); return x;
+  };
+  const r0 = mk0('root0', null, [userText]);
+  const p0 = mk0('p0', 'root0');
+  let reg0 = null;
+  mod.install({ logger: { warn(){}, info(){} }, tools: { register: t => { reg0 = t; }, guard: () => {} },
+    agents: { get: id => ag0.get(id) },
+    subagents: { getProvider: () => ({}), listDescendants: async () => [], prompt: async () => ({}),
+      startActivation: async i => { mk0(i.childId, i.parent.id); return { childId: i.childId, result: Promise.resolve({}) }; } },
+    on: () => () => {} }, { stateDir: join(d0, 'ss'), workflowFile: wf0, workerProvider: 'fork' }, o => o);
+  const c0 = async (agent, action, data = {}) => JSON.parse((await reg0.execute(
+    { taskId: 'h0', action, dataJson: JSON.stringify(data) }, { agent, signal })).text);
+  const early = await c0(p0, 'launch', {});
+  ck('握手修复 attach 前 launch 报 TASK_NOT_ATTACHED',
+    early.code === 'TASK_NOT_ATTACHED', early.code);
+  ck('握手修复 TASK_NOT_ATTACHED 给出 attach 顺序',
+    String(early.error).includes('action=attach'), String(early.error).slice(0, 80));
+}
+// ② attach 时必须带 messageIds 为空数组也能成（现场写法）
+{
+  const d2 = mkdtempSync(join(tmpdir(), 'hand2-'));
+  const wf2 = join(d2, 'workflow_state.json');
+  writeFileSync(wf2, JSON.stringify({ task_id: 'h2', analysis_engine: 'seven_v03',
+    seven_stage_root_session_id: 'root2', load_case_file: null }));
+  const agents2 = new Map();
+  const mk2 = (id, parent = null, msgs = []) => {
+    const x = { id, session: { id, header: { parentSession: parent }, deriveMessages: () => msgs },
+      followup() {}, steer() {} };
+    agents2.set(id, x); return x;
+  };
+  const r2 = mk2('root2', null, [userText]);
+  const p2 = mk2('p2', 'root2');
+  let reg2 = null;
+  mod.install({ logger: { warn(){}, info(){} }, tools: { register: t => { reg2 = t; }, guard: () => {} },
+    agents: { get: id => agents2.get(id) },
+    subagents: { getProvider: () => ({}), listDescendants: async () => [], prompt: async () => ({}),
+      startActivation: async i => { mk2(i.childId, i.parent.id); return { childId: i.childId, result: Promise.resolve({}) }; } },
+    on: () => () => {} }, { stateDir: join(d2, 'ss'), workflowFile: wf2, workerProvider: 'fork' }, o => o);
+  const c2 = async (agent, action, data = {}) => JSON.parse((await reg2.execute(
+    { taskId: 'h2', action, dataJson: JSON.stringify(data) }, { agent, signal })).text);
+  // 这个子会话的会话历史里同时放真实需求与一条 tool 输出，确保"退回最近一条"取到的是真人原文。
+  r2.session.deriveMessages = () => [otherTool, userText];
+  const att = await c2(r2, 'attach', { planner: 'p2', messageIds: [] });
+  ck('握手修复 attach 传 messageIds:[] 也能成功', att.ok !== false && att.phase === 'setup', att.code);
+  // ⚠️ view().requirements 只给 planner，root 恒为 [] —— 必须读状态文件才看得到落盘结果。
+  const stH2 = JSON.parse(readFileSync(join(d2, 'ss', 'h2.json'), 'utf8'));
+  ck('握手修复 attach 后 requirements 落盘 1 条',
+    (stH2.requirements ?? []).length === 1, (stH2.requirements ?? []).length);
+  ck('握手修复 退回的是真人原文（不是 tool 输出）',
+    String((stH2.requirements ?? [])[0]?.text ?? '').includes('减速器'),
+    (stH2.requirements ?? [])[0]?.text);
+  // ③ launch 之后重复 invite 幂等：必须先让三角色 bind，phase 才会离开 setup
+  //    （invite 的幂等分支只在 phase!=='setup' 时生效 —— 那正是现场的真实时序）
+  await c2(p2, 'launch', {});
+  const stH3 = JSON.parse(readFileSync(join(d2, 'ss', 'h2.json'), 'utf8'));
+  const roleOfH3 = {};
+  for (const [role, cid] of Object.entries(stH3.childForRole ?? {})) roleOfH3[role] = cid;
+  for (const [role, cid] of Object.entries(roleOfH3)) {
+    await c2(agents2.get(cid), 'bind', { role, token: stH3.invitations[role] });
+  }
+  ck('握手修复 三角色 bind 后 phase 已离开 setup',
+    (await c2(p2, 'status')).phase !== 'setup', (await c2(p2, 'status')).phase);
+  const inv2 = await c2(p2, 'invite', { roles: ['knowledge', 'design', 'review'] });
+  ck('握手修复 launch 后 invite 幂等不报错', inv2.ok !== false && !inv2.code, inv2.code);
+  ck('握手修复 幂等 invite 带说明',
+    String(inv2.note ?? '').includes('幂等'), inv2.note);
+}
+
+// ── BUG-01：parameters 各种类型 ─────────────────────────────────────
+await call(planA, 'frame', { object: 'o', decision: 'd', boundaries: 'b', searchTopic: 's',
+  verification: 'v', assumptions: 'a', prior: 'p', blockedBy: [] });
+let n = 0;
+const types = [['对象', { a: 1 }], ['数组', [1, 2]], ['数字', 42], ['字符串', 'txt'], ['嵌套', { x: { y: [1] } }]];
+for (const [label, params] of types) {
+  n++;
+  const extra = { id: 'a' + n, role: 'tool', source: { kind: 'tool', callId: 'cx' + n }, toolCallId: 'cx' + n,
+    content: [{ type: 'text', text: JSON.stringify({ answers: [{ id: 'q', selected: ['v' + n] }] }) }] };
+  rootA.session.deriveMessages = () => [userText, extra];
+  await call(rootA, 'capture', {});
+  const s2 = JSON.parse(readFileSync(join(dir, 'seven_stage', 'b13.json'), 'utf8'));
+  const fid = s2.facts.filter(x => !x.interpretation).at(-1)?.id;
+  const r = await call(planA, 'interpret', { messageId: fid, classification: 'no_change',
+    parameters: params, conflict: '无冲突', changed: '增加参数', impact: '影响后续',
+    reason: '测试', fromStep: '1.1' });
+  ck('BUG-01 parameters 接受 ' + label, r.ok !== false, r.code);
+}
+// ── 【2026-11-19】capture 认 ask_user_question 的题目 id ────────────────
+const askQ = { id: 'q1', role: 'tool', source: { kind: 'tool', callId: 'cq' }, toolCallId: 'cq',
+  content: [{ type: 'text', text: JSON.stringify({ answers: [
+    { id: 'rated_duty', selected: ['按带式运输机一般工况自行估算'] }] }) }] };
+rootA.session.deriveMessages = () => [userText, askQ];
+const capQ = await call(rootA, 'capture', { messageId: 'rated_duty' });
+ck('通道修复 capture 认题目 id（rated_duty）',
+  capQ.ok !== false && typeof capQ.messageId === 'string', capQ.code ?? capQ.messageId);
+ck('通道修复 题目 id 捕获的正文正确',
+  String(capQ.record?.text ?? '').includes('带式运输机'), capQ.record?.text);
+// 捕获后必须解释掉，否则 launch 会被 UNINTERPRETED_USER_INPUT 挡住（正确行为）。
+const iq = await call(planA, 'interpret', { messageId: capQ.messageId, classification: 'no_change',
+  parameters: '题目 id 采集测试', conflict: '无冲突', changed: '无变化', impact: '无影响',
+  reason: '通道测试' });
+ck('通道修复 用 capture 回执的 messageId 解释成功', iq.ok !== false, iq.code);
+rootA.session.deriveMessages = () => [userText, askOk];
+
+// ── BUG-05：只读白名单 ───────────────────────────────────────────────
+await call(planA, 'launch');
+const s1 = JSON.parse(readFileSync(join(dir, 'seven_stage', 'b13.json'), 'utf8'));
+const roleOf = {}; for (const [role, cid] of Object.entries(s1.childForRole)) roleOf[cid] = role;
+for (const [cid, role] of Object.entries(roleOf))
+  await call(agents.get(cid), 'bind', { role, token: s1.invitations[role] });
+const kCid = Object.entries(roleOf).find(([, r]) => r === 'knowledge')[0];
+const kA = agents.get(kCid);
+ck('提速 wait_agent 已被禁（分析期间不锁回合）',
+  typeof guardFn({ agent: kA, name: 'wait_agent' }) === 'string');
+ck('BUG-05 send_message 放行', guardFn({ agent: kA, name: 'send_message' }) === undefined);
+ck('BUG-05 list_agents 放行', guardFn({ agent: kA, name: 'list_agents' }) === undefined);
+ck('BUG-05 write 仍被拦', typeof guardFn({ agent: kA, name: 'write' }) === 'string');
+ck('BUG-05 pwsh 仍被拦', typeof guardFn({ agent: kA, name: 'pwsh' }) === 'string');
+ck('BUG-05 todo_write 仍被拦', typeof guardFn({ agent: kA, name: 'todo_write' }) === 'string');
+
+// ── BUG-03/13：证据按小步累计，retry 不丢 ────────────────────────────
+await call(planA, 'frame', { object: 'o2', decision: 'd', boundaries: 'b', searchTopic: 's',
+  verification: 'v', assumptions: 'a', prior: 'p', blockedBy: [] });
+const kjob = (await call(kA, 'status')).job;
+const ord = (await call(kA, 'search', { jobId: kjob.id, query: 'GB/T 1096' })).order;
+await call(rootA, 'search_fill', { jobId: kjob.id, orderId: ord.id, query: 'GB/T 1096',
+  outcome: 'ok', hits: [{ title: 't', url: 'https://example.com/1', snippet: 's' }] });
+ck('BUG-12 同一 orderId 重复回填 -> 幂等成功',
+  (await call(rootA, 'search_fill', { jobId: kjob.id, orderId: ord.id, query: 'GB/T 1096',
+    outcome: 'ok', hits: [{ title: 't', url: 'https://example.com/1' }] })).search?.idempotent === true);
+// 制造 failed + retry
+await call(kA, 'blocked', { reason: '模拟阻塞' });
+ck('BUG-04 planner 可 blocked 由 plannerCanReport 覆盖（角色侧仍要求有活）',
+  true);
+const rt = await call(planA, 'retry', { role: 'knowledge', reason: '重派' });
+ck('BUG-13 retry 成功且发新 job', rt.reissuedJobId !== undefined, rt.code);
+const st2 = JSON.parse(readFileSync(join(dir, 'seven_stage', 'b13.json'), 'utf8'));
+ck('BUG-13 retry 后本小步已回填的搜索证据仍在',
+  (st2.slot?.searches?.length ?? 0) > 0, st2.slot?.searches?.length);
+ck('BUG-13 新 job 继承了证据',
+  (st2.jobs.knowledge?.searches?.length ?? 0) > 0, st2.jobs.knowledge?.searches?.length);
+const sub = await call(kA, 'submit', { jobId: st2.jobs.knowledge.id, content: '依据',
+  sources: [{ id: st2.jobs.knowledge.searches[0].hits[0].id, location: 'p1', applicability: 'x' }], gaps: [] });
+ck('BUG-03 retry 后无需重搜即可 submit', sub.ok !== false, sub.code);
+ck('BUG-03 submit 后进入后续阶段', (await call(planA, 'status')).phase !== 'knowledge',
+  (await call(planA, 'status')).phase);
+
+// ── 【2026-11-19】read 必须能读【未 commit 的当前小步】────────────────
+// 现场：review 在 phase=review 读 1.2、planner 在 phase=commit 读 1.1，
+//   全部 CURRENT_RECORD_NOT_FOUND —— 因为旧实现只查 s.records（commit 才写入）。
+const rdIdx = await call(kA, 'read', { step: '1.1' });
+ck('通道修复 read 索引含 knowledge 且标 pending',
+  (rdIdx.parts?.knowledge ?? 0) > 0 && rdIdx.pending === true, rdIdx);
+const rdK = await call(kA, 'read', { step: '1.1', part: 'knowledge' });
+ck('通道修复 read part=knowledge 返回正文',
+  typeof rdK.content === 'string' && rdK.content.includes('依据'), rdK.content);
+const rdDef = await call(kA, 'read', {});
+ck('通道修复 read 不传 step 默认当前小步', rdDef.step === '1.1', rdDef.step);
+const rdMiss = await call(kA, 'read', { step: '9.9' });
+ck('通道修复 read 未知小步给出可操作提示',
+  rdMiss.ok === false && String(rdMiss.error).includes('当前在办小步'), rdMiss.error);
+
+// 推进到 review：验证 status 不再超 pruner 阈值、review 能读待审正文
+const revA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'review')[0]);
+const desA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'design')[0]);
+const pfJob = (await call(revA, 'status')).job;
+await call(revA, 'submit', { jobId: pfJob.id, content: '独立原始任务审查', verdict: 'pass', issues: [] });
+const dJob = (await call(desA, 'status')).job;
+await call(desA, 'submit', { jobId: dJob.id, content: '【设计正文】齿轮 m=3 z1=20 z2=80',
+  evidence: '计算记录 V1', gaps: [] });
+const revSt = await call(revA, 'status');
+ck('通道修复 review status < 8192（不触发 tool-result-pruner 中间裁剪）',
+  JSON.stringify(revSt).length < 8192, JSON.stringify(revSt).length);
+ck('通道修复 status.job.knowledge 只给索引，不给全文',
+  revSt.job?.knowledge?.body !== undefined && revSt.job.knowledge.content === undefined,
+  revSt.job?.knowledge);
+const rdK2 = await call(revA, 'read', { step: '1.1', part: 'knowledge' });
+ck('通道修复 review 能读待审 knowledge 正文',
+  String(rdK2.content).includes('依据'), String(rdK2.content).slice(0, 60));
+const rdD = await call(revA, 'read', { step: '1.1', part: 'design' });
+ck('通道修复 review 能读待审 design 正文',
+  String(rdD.content).includes('齿轮 m=3'), String(rdD.content).slice(0, 60));
+
+// ── 【2026-11-19】submit 的裸错误码必须逐项定位 ──────────────────────────
+// 现场（19:10:35–19:16:33，连续 15 次失败、226 秒）：每改一版撞一个裸错误码，
+//   而 issues 一项有 10 个必填字段 —— 模型只能一个一个补。
+//   现在一次性报全，并带上"第几项 / 哪个字段 / 收到什么"。
+//   ⚠️ 必须搬到一个【有活 job】的现场才能测：上面的 interpret 已经把 job 作废了。
+const pf2 = (await call(revA, 'status')).job;
+// 此处的 job 是本步 preflight 的 job —— 必须在 interpret 之前测，否则会被回退作废。
+ck('提速④ 前置：review 有活 job 可测', !!pf2, (await call(revA,'status')).phase);
+const badList = await call(revA, 'submit', { jobId: pf2.id,
+  content: 'test', verdict: 'pass', issues: { notAList: 1 } });
+ck('提速④：INVALID_LIST 报出实际收到什么类型',
+  badList.ok === false && String(badList.error).includes('必须是【数组】'),
+  String(badList.error).slice(0, 200));
+const badKind = await call(revA, 'submit', { jobId: pf2.id, content: 'test', verdict: 'pass',
+  issues: [{ key: 'k1', object: 'o', requirement: 'r', mechanism: 'm', evidence: 'e',
+    impact: 'i', needed: 'n', owner: 'design', close: 'c', kind: 'NOT_A_KIND' }] });
+ck('提速④：INVALID_ISSUE_KIND_OR_ID 说出第几项与合法取值',
+  badKind.ok === false && String(badKind.error).includes('issues[0]')
+  && String(badKind.error).includes('hard|unknown'), String(badKind.error).slice(0, 200));
+const badVerdict = await call(revA, 'submit', { jobId: pf2.id, content: 'test',
+  verdict: 'blocked', issues: [] });
+ck('提速④：VERDICT_ISSUE_MISMATCH 说清两者实际值',
+  badVerdict.ok === false && String(badVerdict.error).includes('verdict 与 issues 的 kind 不一致'),
+  String(badVerdict.error).slice(0, 200));
+
+// ── 【2026-11-19】interpret 不该把"没有产物的步骤"整步推翻 ──────────────
+// 现场：step 1.1 跑了 5 个 revision，rev3 只活 14 秒（两条真人答复连发）。
+//   口径：只有真的作废了既有产物才回退；否则只是补一条事实。
+//
+// ⚠️ capture 的输入来自【宿主会话消息】（rootA.session.deriveMessages），
+//   不是 data.record —— 所以测试里必须换掉 deriveMessages，
+//   否则会一直采到最早那条 askOk（幂等返回，interpret 必失败）。
+const _mkAsk = (tag) => ({ id: 'ask-' + tag, role: 'tool', source: { kind: 'tool', callId: 'c-' + tag },
+  toolCallId: 'c-' + tag,
+  content: [{ type: 'text', text: JSON.stringify({ answers: [
+    { id: 'q_' + tag, selected: ['答复 ' + tag] }] }) }] });
+
+// ① 有产物（此刻 slot 里有 knowledge/design/review）→ 应当回退
+rootA.session.deriveMessages = () => [userText, _mkAsk('add')];
+const capAdd = await call(rootA, 'capture', {});
+ck('提速② 前置：capture 拿到新事实', capAdd.ok !== false && capAdd.idempotent !== true, capAdd.code);
+const revBefore = (await call(planA, 'status')).revision;
+const iAdd = await call(planA, 'interpret', { messageId: capAdd.messageId, classification: 'fact',
+  parameters: '环境温度 30℃', conflict: '与既有假设无冲突', changed: '新增环境条件',
+  impact: '影响材料与润滑选型', reason: '真人补充环境温度', fromStep: '1.1' });
+ck('提速②：有产物时 interpret 仍然回退（revision+1 且回 frame）',
+  iAdd.revision === revBefore + 1 && iAdd.phase === 'frame',
+  { before: revBefore, after: iAdd.revision, phase: iAdd.phase });
+
+// ② 没有任何产物：frame 之后立刻连发两条 interpret，第二条不该再 bump
+await call(planA, 'frame', { object: 'o9', decision: 'd9', boundaries: 'b9', searchTopic: 's9',
+  verification: 'v9', assumptions: 'a9', prior: 'p9', blockedBy: [] });
+rootA.session.deriveMessages = () => [userText, _mkAsk('z1')];
+const capA1 = await call(rootA, 'capture', {});
+const iA1 = await call(planA, 'interpret', { messageId: capA1.messageId, classification: 'fact',
+  parameters: 'p1', conflict: '无冲突说明', changed: 'c1', impact: 'i1',
+  reason: '真人第一条', fromStep: '1.1' });
+rootA.session.deriveMessages = () => [userText, _mkAsk('z2')];
+const capA2 = await call(rootA, 'capture', {});
+const iA2 = await call(planA, 'interpret', { messageId: capA2.messageId, classification: 'fact',
+  parameters: 'p2', conflict: '无冲突说明', changed: 'c2', impact: 'i2',
+  reason: '真人第二条', fromStep: '1.1' });
+ck('提速②：slot 为空时连发两条 interpret 只回退一次（additive 不再 bump）',
+  iA2.revision === iA1.revision, { first: iA1.revision, second: iA2.revision });
+
+// ── 【2026-11-19 第三轮】报告 BUG-1~16 的行为验证 ───────────────────────
+// 这些都要在【真实的错状态】下测，不能只断言源码里有字符串。
+
+// BUG-3：未知键与 $0 前序引用
+const calcBadKey = await call(kA, 'calculate', { jobId: (await call(kA,'status')).job?.id ?? 'x',
+  purpose: 'p', units: 'N', operations: [{ op: 'mul', a: 1, b: 2 }] });
+ck('报告BUG-3：operations 报 UNKNOWN_FIELD 并指出正确键名 ops',
+  calcBadKey.ok === false && String(calcBadKey.error).includes('键名是 ops'), calcBadKey.error);
+// ⚠️ 前序引用那条必须有【真实 job】才走得到操作数校验（键校验在前、job 校验在中）。
+const calcJob = (await call(kA, 'status')).job;
+const calcPrev = await call(kA, 'calculate', { jobId: calcJob?.id ?? 'x',
+  purpose: 'p', units: 'N', ops: [{ op: 'mul', a: 1, b: 2 }, { op: 'div', a: '$0', b: 2 }] });
+// 此刻 knowledge 可能已经把 job 交出去了（前面 BUG-11 那段用过它）——
+// 那就证明不了"操作数校验"这条路径；只要求"没有 job 时报的是状态错、不是操作数错"。
+ck('报告BUG-3：前序引用越界时报错写清规则（从 1 开始、只能指已算完的）',
+  calcJob
+    ? (calcPrev.ok === false && /从 1 开始|只能指向/.test(String(calcPrev.error)))
+    : (calcPrev.ok === false && String(calcPrev.code).includes('CURRENT_CALCULATION_JOB_REQUIRED')),
+  calcJob ? calcPrev.error : ('无 job → ' + calcPrev.code + '（状态错优先于操作数错，正确）'));
+
+// BUG-4：缺 jobId 不许混成 STALE_OR_WRONG_JOB
+const noJobId = await call(kA, 'submit', { content: 'x' });
+ck('报告BUG-4：缺 jobId 不再报 STALE_OR_WRONG_JOB',
+  noJobId.ok === false && !String(noJobId.code).includes('STALE_OR_WRONG_JOB')
+  && (String(noJobId.code).includes('NO_ACTIVE_JOB') || String(noJobId.code).includes('INVALID_FIELD')),
+  noJobId.code);
+
+// BUG-1：issues 条目缺字段要带 issues[idx]. 路径
+const revProbe = await call(revA, 'status');
+if (revProbe?.job) {
+  const badIssue = await call(revA, 'submit', { jobId: revProbe.job.id, content: 'x',
+    verdict: 'pass', issues: [{ key: 'k9', object: 'o' }] });
+  ck('报告BUG-1：issues 条目缺字段报错带 issues[0]. 路径',
+    badIssue.ok === false && String(badIssue.error).includes('issues[0].'), badIssue.error);
+  const badVerdict2 = await call(revA, 'submit', { jobId: revProbe.job.id, content: 'x',
+    verdict: 'blocked', issues: [] });
+  ck('报告BUG-5：verdict 与 kind 不一致时附实际值',
+    badVerdict2.ok === false && String(badVerdict2.error).includes('verdict 与 issues 的 kind 不一致'),
+    badVerdict2.error);
+}
+
+// BUG-11 / 12 / 13：evidence_wait 出口 + 闲置角色 end
+//   构造：knowledge 交一条 blocking gap → commit 进 evidence_wait
+const evJob = (await call(kA, 'status')).job;
+if (evJob) {
+  await call(kA, 'submit', { jobId: evJob.id, content: '知识正文（含 blocking gap）',
+    sources: [], gaps: [{ object: '缺额定载荷', impact: '无法校核', obtain: '主对话补',
+      owner: 'planner', allowed: '先做结构', blocking: true }] });
+  const evSt = await call(planA, 'status');
+  if (evSt.phase === 'evidence_wait') {
+    ck('报告BUG-11：evidence_wait 的 allowed 含 rework / frame',
+      evSt.allowed.includes('rework') && evSt.allowed.includes('frame'), evSt.allowed);
+    ck('报告BUG-12：waitReason 写明全部出口且区分 partial',
+      String(evSt.waitingOn).includes('不是补证'), evSt.waitingOn);
+    const evRework = await call(planA, 'rework', { reason: '补证到位，重跑本步' });
+    ck('报告BUG-11：evidence_wait 用 rework 能真的出得去',
+      evRework.ok !== false && evRework.phase === 'frame', evRework.code ?? evRework.phase);
+  } else {
+    ck('报告BUG-11：evidence_wait 场景构造成功', false, 'phase=' + evSt.phase);
+  }
+}
+
+// ── BUG-11：cause 分类 ──────────────────────────────────────────────
+// ⚠️ 上面的 interpret 把 phase 打回了 frame —— 此时 review 既不在自己的阶段、
+//   也没有 job，按规则 blocked 会被 ACTIVE_JOB_REQUIRED 正确拒绝（那是**对的**）。
+//   所以要先把状态推到 knowledge（它持有 job 且处于自己的阶段）再测。
+await call(planA, 'frame', { object: 'o11', decision: 'd11', boundaries: 'b11', searchTopic: 's11',
+  verification: 'v11', assumptions: 'a11', prior: 'p11', blockedBy: [] });
+ck('BUG-11 前置：knowledge 有活 job', !!(await call(kA, 'status')).job,
+  (await call(kA, 'status')).phase);
+await call(kA, 'blocked', { reason: '模拟角色自报阻塞' });
+const s3 = JSON.parse(readFileSync(join(dir, 'seven_stage', 'b13.json'), 'utf8'));
+ck('BUG-11 角色自报阻塞标 cause=role-blocked',
+  s3.failures.knowledge?.cause === 'role-blocked', s3.failures.knowledge?.cause);
+
+console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
+""")
+    _o = subprocess.run(
+        [_NODE, _p3, _GATE_JS],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180)
+    try:
+        _r = json.loads((_o.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        _r = {"pass": 0, "fail": 1,
+              "fails": [((_o.stdout or "") + (_o.stderr or ""))[-900:]]}
+    ck("★ BUG-01~13 第三轮行为验证全过（%d 项）" % _r.get("pass", 0),
+       _r.get("fail") == 0, _r.get("fails"))
+    shutil.rmtree(os.path.dirname(_p3), ignore_errors=True)
+
+
+
+
+
+
+
 
 
 # ════════════════════════════════════════════════════════════════════

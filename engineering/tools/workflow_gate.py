@@ -179,7 +179,7 @@ def _engine_gate():
     if eng != ANALYSIS_ENGINE:
         return {"ok": False, "gate": "ANALYSIS_ENGINE_MISMATCH",
                 "error": ("当前任务的 analysis_engine=%r，本版只支持 %r；"
-                          "十阶段引擎已删除，旧任务请用旧版本工具链收尾。"
+                          "十阶段引擎已删除（现为七阶段 seven_v03），旧任务请用旧版本工具链收尾。"
                           % (eng, ANALYSIS_ENGINE)),
                 "expected": ANALYSIS_ENGINE}
     if not str(st.get(SEVEN_STAGE_ROOT_KEY) or "").strip():
@@ -210,8 +210,24 @@ def _seven_stage_state():
     try:
         _wf = load_state()
         _tid = _wf.get("task_id")
-        _sd = os.environ.get("DSH_SEVEN_STAGE_STATE_DIR") or ""
-        if not _tid or not _sd or not os.path.isabs(_sd):
+        if not _tid:
+            return {}
+        # ══ 【2026-11-19 · 会话 c9c2fd56 现场】这里以前只认环境变量 ══════════
+        # 现场：环境里没设 DSH_SEVEN_STAGE_STATE_DIR（插件走的是"同级 seven_stage/"
+        #   回落），于是 seven-status 恒返回 seven_progress:{}，
+        #   而状态文件其实好好躺在 tools/seven_stage/<taskId>.json。
+        #   后果：主对话 11:44:29 查进度 → 看到"什么都没有"，误判分析没启动。
+        # 现在：统一走 seven_stage_gate.state_dir_for()（env → 同级 seven_stage），
+        #   与 Node 侧 resolvePaths()、与 read_design() 三处逐字一致。
+        _sd = None
+        try:
+            import seven_stage_gate as _ssg
+            _sd, _src = _ssg.state_dir_for(_tid)
+        except Exception:
+            _sd = None
+        if not _sd:
+            _sd = os.environ.get("DSH_SEVEN_STAGE_STATE_DIR") or ""
+        if not _sd or not os.path.isabs(_sd):
             return {}
         _p = os.path.join(_sd, "%s.json" % _tid)
         if not os.path.exists(_p):
@@ -720,6 +736,75 @@ def _extract_life_years(text):
         return 5.0
     if "1年以内" in s:
         return 1.0
+    return None
+
+
+# ══ 【REV08 修复】连续回转件的动作频次必须由转速推导 ═══════════════════════════
+# 详见 estimate_mechanics 里 cycles_per_year 那段的长注释。这里只放两个提取器。
+
+def _extract_work_hours_per_year(text):
+    """从用户输入里提取【年工作小时数】。找不到就按班制给合理值，绝不返回错量级。
+
+    单班 8h × 250 天 = 2000h；双班 = 4000h；连续生产 = 6000h（留检修）。
+    """
+    import re as _re
+    s = str(text or "")
+    # ① 用户直接写了工作小时
+    m = _re.search(r"(\d{2,5})\s*(?:小时|h|hours?)\s*/\s*(?:年|year)", s, flags=_re.IGNORECASE)
+    if m:
+        try:
+            v = float(m.group(1))
+            if 100 <= v <= 8760:
+                return v
+        except Exception:
+            pass
+    # ② 按班制推断
+    if any(k in s for k in ["三班", "连续生产", "24/7", "不间断"]):
+        return 6000.0
+    if any(k in s for k in ["双班", "两班"]):
+        return 4000.0
+    if any(k in s for k in ["单班", "一班", "8小时"]):
+        return 2000.0
+    # ③ 什么都没说 → 按最常见的单班制给一个【明确标注为估计】的值
+    return 2000.0
+
+
+def _extract_rpm_for_cycles(text, context=""):
+    """从任务/回答里提取【转速 r/min】。提不到返回 None（下游据此留空，不猜）。
+
+    识别顺序：
+      ① 明确带单位：1450 r/min、1450rpm、1450 转/分
+      ② n1=1450 / 输入转速 1450 / 输出转速 362.5
+      ③ 由「电机极数 × 50Hz」推同步转速（1440/1450 这一档最常见）
+    注意：这里【不】去算传动比 —— 减速器输出转速不等于输入转速，
+      猜错方向会让循环次数也错。拿不准就返回 None。
+    """
+    import re as _re
+    s = str(text or "") + " " + str(context or "")
+    # 注意匹配顺序：先匹配【带单位】的写法，再匹配裸数字。
+    #   否则 "n2=362.5" 里 n 后的 2 会被 d+ 吃掉，抓出 2 r/min 这种荒谬值。
+    pats = [
+        r"(\d+(?:\.\d+)?)\s*(?:r\s*/\s*min|rpm|转\s*/\s*分|转每分)",
+        r"n[0-9]?\s*[=:：]\s*(\d+(?:\.\d+)?)",
+        r"(?:输入|输出|额定|工作)\s*转速\s*[=:：]?\s*(\d+(?:\.\d+)?)",
+    ]
+    for p in pats:
+        m = _re.search(p, s, flags=_re.IGNORECASE)
+        if m:
+            try:
+                v = float(m.group(1))
+                if 1.0 <= v <= 100_000.0:
+                    return v
+            except Exception:
+                pass
+    # ④ 有电机功率但没给转速：四极电机同步转速常见档
+    if _re.search(r"(?:电机|马达|motor)", s, flags=_re.IGNORECASE):
+        if any(k in s for k in ["四级", "4极", "四极"]):
+            return 1450.0
+        if any(k in s for k in ["二级", "2极", "两极"]):
+            return 2900.0
+        if any(k in s for k in ["六级", "6极", "六极"]):
+            return 960.0
     return None
 
 
@@ -1236,7 +1321,7 @@ def _mode_confirm_message(task_desc, state=None):
         "【模式确认】",
         "  本次按【模式二 · 大型复杂器械/多零件装配体】流程执行：",
         "  主对话（大屋）编排多个子代理（小屋），每个小屋独立建模；",
-        "  由【总计子代理】先按十阶段流水线分析，并决定本轮开几个子代理。",
+        "  由【总计子代理】先按七阶段流水线分析，并决定本轮开几个子代理。",
         "  （零件数量不再固定为 3 个 —— 由总计子代理的分析结论决定。）",
         "",
         "请依次用系统问题询问用户以下【两项固定问题】（题面由代码固定，不可改写）：",
@@ -1306,7 +1391,7 @@ def _ask_depth_question(task_desc):
         "    · 不强（精简范围）：先出大致结构即可，细节由你按经验定",
         "",
         "⚠️ 【2026-11-18 七阶段】本题只决定【设计范围】的详略，**不再决定题数**：",
-        "   十阶段的「强 10~50 / 弱 5~10」题数硬约束已随引擎删除。",
+        "   旧引擎的「强 10~50 / 弱 5~10」题数硬约束已随十阶段引擎一起删除。",
         "   现在的真人澄清由七阶段插件按【明确决策缺口】触发（question→capture→interpret）。",
     ])
 
@@ -1497,8 +1582,44 @@ def estimate_mechanics(task, context=None):
         life_source = "默认 30 年（用户未给出寿命，请复核）"
     else:
         life_source = "用户输入"
-    # 动作频次：按工作制度粗估（保守取中值），供 Miner 累积损伤使用
-    if any(k in t for k in ["连续运行", "24/7"]):
+    # ══ 【REV08 修复】动作频次必须按【机构类型】区分，不能一律 200000 次/年 ══
+    # 现场（减速器任务，review 在 preflight 抓到的 hard 异议）：
+    #   cycles_per_year = 200000，n2 = 362.5 r/min
+    #   → 200000/(362.5×60) = 9.2 小时/年 → 30 年合计 275.9 小时
+    #   而 frame 里写的是「10 年单班 ≈ 20000 h」，**差了两个数量级**。
+    #   后果最恶劣：疲劳校核会因为"循环次数太少"而**平凡通过（虚假通过）**，
+    #   结论写着"寿命充裕"，实际远超。这比报错危险得多 —— 报错会停，假通过不会。
+    #
+    # 根因：默认值 200000 次/年 是按【间歇动作机构】（气缸/夹爪/机械臂每次动作算一次）
+    #   的口径给的，套到**连续回转**的传动件上直接错两个数量级。
+    #
+    # 修法：
+    #   ① transmission（齿轮/轴/轴承等连续回转件）→ 必须由【转速】推：
+    #        cycles/year = n_rpm × 60 × 年工作小时
+    #      转速从任务描述/上下文里提取；提不到就【留空并显式标记未知】，
+    #      绝不填一个错两个数量级的默认值。留空会让疲劳校核跳过并报"未执行"，
+    #      而不是给出一个假的"通过"。
+    #   ② 其它机构类型维持原口径（间歇动作，200000 次/年确实是合理量级）。
+    _work_hours = _extract_work_hours_per_year(t)   # 单班 2000h / 双班 4000h / 连续 6000h
+    _rpm = _extract_rpm_for_cycles(t, context)
+    cycles_unknown_reason = None
+    if task_type == "transmission":
+        if _rpm and _rpm > 0 and _work_hours:
+            cycles_per_year = float(round(_rpm * 60.0 * _work_hours))
+            duty_note = ("连续回转：转速 %.1f r/min × 60 × 年工作 %.0f h = %.0f 次/年"
+                         "（REV08：不再套用间歇机构的 200000 默认值）"
+                         % (_rpm, _work_hours, cycles_per_year))
+        else:
+            # 关键：宁可不给，也不给错。下游 physics 看到 None 会跳过疲劳并报"未执行"。
+            cycles_per_year = None
+            cycles_unknown_reason = (
+                "传动类任务（连续回转）无法从任务/回答中取得%s，"
+                "不采用「200000 次/年」这一间歇机构默认值 —— "
+                "套用会让疲劳校核平凡通过（虚假通过）。"
+                "请补充转速与年工作小时，或由 review 在 3.x 阶段登记缺口。"
+                % ("转速" if not _rpm else "年工作小时数"))
+            duty_note = cycles_unknown_reason
+    elif any(k in t for k in ["连续运行", "24/7"]):
         cycles_per_year = 2_000_000.0
         duty_note = "连续运行(24/7) 估算"
     elif any(k in t for k in ["间歇", "每天数小时"]):
@@ -1514,10 +1635,12 @@ def estimate_mechanics(task, context=None):
         cycles_per_year = 200_000.0
         duty_note = "默认按间歇运行估算（请复核）"
 
+    # 【REV08】cycles_per_year 可能是 None（传动件拿不到转速），不能再用 %.0f 硬格式化。
+    _cycles_txt = ("%.0f 次/年" % cycles_per_year) if cycles_per_year is not None else "未知（拒绝套用默认值）"
     notes = ("额定载荷来源: %s；动载系数 ×%.1f（%s）；设计寿命 %.0f 年（%s）；"
-             "动作频次 %.0f 次/年（%s）"
+             "动作频次 %s（%s）"
              % (load_source, impact_factor, load_type, life_years, life_source,
-                cycles_per_year, duty_note))
+                _cycles_txt, duty_note))
 
     return {
         # ── 兼容旧字段（字符串形式，供旧文案直接引用）──
@@ -1546,6 +1669,10 @@ def estimate_mechanics(task, context=None):
         # ── BUG-02 新增：疲劳/寿命校核输入 ──
         "design_life_years": life_years,
         "cycles_per_year": cycles_per_year,
+        # 【REV08】为 None 表示"传动件拿不到转速、拒绝套用间歇默认值"。
+        #   physics 的疲劳模块看到它 None 会跳过并报"未执行"，
+        #   而不是用一个错两个数量级的值给出"寿命充裕"的假结论。
+        "cycles_per_year_unknown": cycles_unknown_reason,
         # ── 【BUG-07】口径警告：粗估时必须让调用方与用户都看得见 ──
         # == [A-37 修复] 用真实推导状态（见上方 _load_is_estimate 的说明）==
         "load_is_estimate": bool(_load_is_estimate),
@@ -1845,10 +1972,24 @@ def write_load_case_file(state, mechanics, work_dir=None):
                 "mesh_quality_min": 0.1,
                 # ── 【BUG-02】疲劳/寿命校核输入（physics 疲劳模块读这两项）──
                 "design_life_years": float(mechanics.get("design_life_years") or 10.0),
-                "operating_cycles_per_year": float(mechanics.get("cycles_per_year") or 200000.0),
+                # ══ 【REV08 修复】这里绝不能写 or 200000.0 ═══════════════════════
+                # 原写法：拿不到 cycles_per_year 就静默填 200000 —— 对连续回转的
+                #   传动件而言这个数错两个数量级，会把疲劳校核变成"平凡通过"，
+                #   给出"寿命充裕"的假结论（详见 estimate_mechanics 的长注释）。
+                # 现在：拿不到就是 None。physics 侧看到 None 会跳过疲劳并报"未执行"，
+                #   这是【诚实的失败】，比"虚假的通过"安全得多。
+                "operating_cycles_per_year": (
+                    float(mechanics["cycles_per_year"])
+                    if mechanics.get("cycles_per_year") is not None else None),
+                "operating_cycles_unknown_reason": mechanics.get("cycles_per_year_unknown"),
                 "load_type": mechanics.get("load_type") or "static",
                 "impact_factor": _impact,
+                # 疲劳是否必需：声明 cyclic/impact 就要查；但如果循环次数未知，
+                #   标记成"要求但无法执行"，让上游显式看到这个窟窿。
                 "fatigue_check_required": (mechanics.get("load_type") in ("cyclic", "impact")),
+                "fatigue_check_blocked": (
+                    mechanics.get("cycles_per_year") is None
+                    and mechanics.get("load_type") in ("cyclic", "impact")),
                 "required_load_cases": ["rated", "lateral", "longitudinal"],
                 # ── 【Bug-D 修复】零件载荷分担系数 ──────────────────────────
                 # 工况里的 magnitude_n 是【整机】载荷；单件校核若原样施加，
@@ -2414,6 +2555,56 @@ def _material_for(mat_name, task_text="", material_spec=None):
         "source": "workflow_gate.default(无可用材料)",
     }
 
+
+def _extract_design_domain_override(text):
+    """【BUG-09】从回答里读取显式的三向设计域覆盖。找不到返回 None。
+
+    为什么需要它：自动推算的 design_domain 来自"零件包络"提取，
+      它分不清【平面尺寸】与【轴向/高度尺寸】—— 实测把减速器算成
+      [420,300,160]，160 是中心距/齿宽那一档的平面值，而箱体总高实际 340。
+      域给小的直接后果是物理校核判"零件出域"，而零件其实是对的。
+
+    支持的写法（都要求三个数，拒绝只给一个方向 —— 部分覆盖更容易出错）：
+      · 设计域 420x300x340 mm / 设计域 420×300×340
+      · 包络 L=420 W=300 H=340 / 包络 420 300 340
+      · design domain 420x300x340
+    返回 {"mm": [L,W,H], "raw": <命中的原文>, "source": ...}
+    """
+    import re as _re
+    s = str(text or "")
+    if not s.strip():
+        return None
+    # 三组数字之间的分隔符：x / × / X / * / 逗号 / 顿号 / 空格
+    _SEP = r"(?:\s*(?:[x×X*]|,|、|\s)\s*)"
+    _NUM = r"(\d+(?:\.\d+)?)"
+    _pat = (
+        r"(?:设计域|设计空间|包络|外廓|最大轮廓|design\s*domain|envelope)"
+        r"\s*[:：=]?\s*"
+        + _NUM + _SEP + _NUM + _SEP + _NUM
+        + r"(?:\s*mm)?"
+    )
+    m = _re.search(_pat, s, flags=_re.IGNORECASE)
+    if not m:
+        # 兜底：L= / W= / H= 三个都写了才算
+        _l = _re.search(r"\bL\s*[=:：]\s*(\d+(?:\.\d+)?)", s, flags=_re.IGNORECASE)
+        _w = _re.search(r"\bW\s*[=:：]\s*(\d+(?:\.\d+)?)", s, flags=_re.IGNORECASE)
+        _h = _re.search(r"\bH\s*[=:：]\s*(\d+(?:\.\d+)?)", s, flags=_re.IGNORECASE)
+        if _l and _w and _h:
+            try:
+                dims = [float(_l.group(1)), float(_w.group(1)), float(_h.group(1))]
+            except Exception:
+                return None
+            if all(0.1 <= d <= 1_000_000 for d in dims):
+                return {"mm": dims, "source": "L/W/H 显式指定",
+                        "raw": (_l.group(0) + " " + _w.group(0) + " " + _h.group(0))[:120]}
+        return None
+    try:
+        dims = [float(m.group(1)), float(m.group(2)), float(m.group(3))]
+    except Exception:
+        return None
+    if not all(0.1 <= d <= 1_000_000 for d in dims):
+        return None
+    return {"mm": dims, "source": "三向包络显式指定", "raw": m.group(0)[:120]}
 
 def _extract_part_envelope(spec_text, task_type="generic"):
     """【Bug-12 修复】从任务/背景回答里提取【零件】包络（排除赛道/整机尺寸）。
@@ -3026,7 +3217,7 @@ def cmd_init(task_desc):
 
     随后：
         第 2 步 → 强需求 / 弱需求（题数区间 10~50 / 5~10）
-        第 3 步 → 启动【总计子代理】按十阶段流水线分析，AI 按需提问
+        第 3 步 → 启动【总计子代理】按七阶段流水线分析，AI 按需提问
         第二步（原第一步）→ 多子代理并行建零件（数量由总计子代理决定）
 
     ⚠️ 实测教训：只把题数校验接进 provide_context、却没改 init，
@@ -3415,6 +3606,100 @@ def cmd_init(task_desc):
     except Exception as _e:
         state["legacy_state_archived"] = {"ok": False, "error": repr(_e)}
 
+    # ══ 【BUG-08 修复】载荷工况必须按任务隔离，绝不能让上一局的静默沿用 ══════
+    # 现场：本任务 init 之后，tools/load_cases/gate_load_case.json 里躺着的仍是
+    #   上一轮"七阶段接线回归：小型压装机"的内容 —— Q235 / 50000N / [100,100,100] /
+    #   汽车语义的三向工况。若不手动重跑 provide_context，减速器就会被按
+    #   50kN 压装力、100mm 立方域、Q235 去校核，**强度与寿命结论全错，而且门禁不报错**。
+    #   "静默的错误基准"比报错危险得多 —— 报错会停，错基准会一路跑到底。
+    #
+    # 修法：init 时检查该文件 meta 里有没有"属于别的任务"的证据，有就归档到
+    #   .stale/ 并记录到 state。为什么归档而不是删除：它是上一局的校核基准，
+    #   出问题时要能追溯；但本任务绝不能再用。
+    try:
+        _lc_dir = os.path.join(STATE_DIR, "load_cases")
+        _lc_file = os.path.join(_lc_dir, "gate_load_case.json")
+        _lc_stale = None
+        if os.path.exists(_lc_file):
+            _old_lc = None
+            try:
+                with open(_lc_file, "r", encoding="utf-8-sig") as _lf:
+                    _old_lc = json.load(_lf) or {}
+            except Exception as _e:
+                _old_lc = {"_unreadable": repr(_e)}
+            _old_meta = (_old_lc or {}).get("meta") or {}
+            _old_tid = _old_meta.get("task_id")
+            _old_title = str(_old_meta.get("title") or "")[:120]
+            _old_gen = str(_old_meta.get("generated_at") or "")
+            # ══ 判据（任一命中即视为上一局残留）═══════════════════════════
+            #   ① meta 明确带 task_id 且不等于本任务；
+            #   ② 有 task_id 且【等于】本任务 → 就是本任务的载荷，绝不归档；
+            #   ③ 没有 task_id（老格式）→ **用生成时间判**，不用标题。
+            #
+            # ══ 【2026-11-19 · 现场 20261119_173044】标题判据把本任务自己杀掉 ══
+            # 现场：本任务描述 "设计一台单级圆柱齿轮减速器（含箱体、齿轮轴…）"，
+            #   而载荷文件 title = "建造一个单级圆柱齿轮减速器（含箱体、箱盖…）"
+            #   —— 同一个东西，一个说"建造"一个说"设计"。
+            #   旧判据 _old_title[:20] not in task_desc 直接判成"其它任务"，归档进 .stale/。
+            #   后果：17:32-19:23 全程 gate_load_case.json **不存在**，
+            #   review 每一轮都登记同一条 blocking 异议 rv11-loadcase-unreadable，
+            #   而 commit 的硬规则是"有 blocking gap 就不许 commit" —— 永远走不过去，
+            #   step 1.1 白跑 5 轮、126 分钟、0/63。
+            #
+            # 为什么标题判据天生不可靠：
+            #   载荷文件的 title 来自**上一次任务**的描述文本，两次任务只要措辞不同
+            #   （"设计一台…" vs "建造一个…"），前 20 字就必然不匹配。
+            #   而"是不是本任务的残留"这件事，时间戳能给出**确定性**答案，标题只能猜。
+            #
+            # 现在的口径：
+            #   · 有 task_id → 只认 task_id 相等，相等即本任务（不归档）；
+            #   · 无 task_id → 看 generated_at / 文件 mtime：只有比现在早超过
+            #     STALE_MIN_AGE_SEC 才可能是上一局的残留；刚生成的一律不归档；
+            #   · 时间也拿不到 → **不归档**（宁可让旧基准过关一次，
+            #     也不能把本任务自己的载荷杀掉 —— 后者是必死，前者只是可能偏）。
+            _is_stale = False
+            _why = ""
+            _this_task_id = str(state.get("task_id") or "")
+            if _old_tid:
+                if str(_old_tid) != _this_task_id:
+                    _is_stale, _why = True, "meta.task_id=%s 属于其它任务" % _old_tid
+            else:
+                _STALE_MIN_AGE_SEC = 3600
+                _age = None
+                if _old_gen:
+                    for _fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                        try:
+                            _age = time.time() - time.mktime(
+                                time.strptime(str(_old_gen).strip(), _fmt))
+                            break
+                        except Exception:
+                            continue
+                if _age is None:
+                    try:
+                        _age = time.time() - os.path.getmtime(_lc_file)
+                    except Exception:
+                        _age = None
+                if _age is None:
+                    _why = "无 task_id 且无法判定生成时间 —— 保守起见不归档"
+                elif _age > _STALE_MIN_AGE_SEC:
+                    _is_stale, _why = True, (
+                        "无 task_id，且生成于 %.0f 分钟前（超过 %d 秒残留阈值）"
+                        % (_age / 60.0, _STALE_MIN_AGE_SEC))
+            if _is_stale:
+                _stale_dir = os.path.join(_lc_dir, ".stale")
+                os.makedirs(_stale_dir, exist_ok=True)
+                _stamp = time.strftime("%Y%m%d-%H%M%S")
+                _dest = os.path.join(_stale_dir, _stamp + "-gate_load_case.json")
+                try:
+                    os.replace(_lc_file, _dest)
+                    _lc_stale = {"from": _lc_file, "to": _dest, "why": _why,
+                                 "old_title": _old_title, "old_generated_at": _old_gen}
+                except Exception as _e:
+                    _lc_stale = {"ok": False, "error": repr(_e), "why": _why}
+        state["load_case_stale_archived"] = _lc_stale
+    except Exception as _e:
+        state["load_case_stale_archived"] = {"ok": False, "error": repr(_e)}
+
     state["step"] = "mode_confirm_asked"
     state["task"] = task_desc
     state["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -3501,7 +3786,7 @@ def cmd_init(task_desc):
             "flow_order": [
                 "1. 确认模式（模式二）+ 并行策略 D/E + 是否 AI 自主 A/B/C  ← 本次",
                 "2. 强需求/弱需求（题数区间：强 10~50、弱 5~10）",
-                "3. 总计子代理按十阶段分析（AI 按需提问）",
+                "3. 总计子代理按七阶段分析（AI 按需提问）",
                 "4. 多子代理并行建零件（数量由总计子代理决定）",
                 "5. 总装与验证 → 出图",
             ],
@@ -3719,9 +4004,62 @@ def cmd_provide_context(context_text):
                          "以插件登记的明确决策缺口为准。"),
             }
 
+        # ══ 【BUG-8 修复】环境体检前置到"开工之前" ═════════════════════════════
+        # 现场：用户/模型一路顺畅走到 attach → launch → bind → frame，
+        #   才在 search 那一步撞墙，前面全部白做。
+        # 七阶段真正的硬性环境依赖现在只剩两条（联网 key 依赖已随 BUG-1 移除，
+        #   搜索改由插件发工单、真实主对话用宿主 web_search 执行）：
+        #     ① 七阶段状态目录（DSH_SEVEN_STAGE_STATE_DIR 或 <workflow 目录>/seven_stage）
+        #     ② 插件已加载（内嵌在 engineering preset 里，无需单独配置）
+        # 这里的体检是【只读探测 + 显式披露】，不阻断流程（避免误报把新用户卡死），
+        # 但只要有问题，就在 message 最前面打 ⚠️ 大标题并给出修法。
+        _env_checks = []
+        _sd_env = os.environ.get("DSH_SEVEN_STAGE_STATE_DIR") or ""
+        if _sd_env and not os.path.isabs(_sd_env):
+            _env_checks.append({
+                "id": "seven_stage_state_dir_not_absolute",
+                "level": "error",
+                "detail": "DSH_SEVEN_STAGE_STATE_DIR 不是绝对路径：%r" % _sd_env,
+                "fix": "改成绝对路径，例如 C:\\Users\\<你>\\.dsh\\.agent-presets\\engineering\\tools\\seven_stage",
+            })
+        else:
+            try:
+                # 直接复用 Python 闸门的解析函数 —— 保证体检读的和 attach 写的是同一口径，
+                # 不能另起一套推导（那正是"Node 写 A 目录、Python 读 B 目录"的老坑）。
+                # 延迟导入：workflow_gate 顶层不依赖 seven_stage_gate，避免循环引用。
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import seven_stage_gate as _ssg
+                _sd_probe, _sd_src = _ssg.state_dir_for(None)
+            except Exception as _e:
+                _sd_probe, _sd_src = None, "probe_failed:%r" % (_e,)
+            if _sd_probe and not os.path.isdir(os.path.dirname(_sd_probe)):
+                _env_checks.append({
+                    "id": "seven_stage_state_dir_missing",
+                    "level": "warn",
+                    "detail": "七阶段状态目录的父目录不存在（首次运行会自动创建）：%s"
+                              % os.path.dirname(_sd_probe),
+                    "fix": "正常可忽略；若 attach 报 STATE_DIR 相关错误，检查 DSH_SEVEN_STAGE_STATE_DIR。",
+                })
+        # 载荷工况文件：分析角色要靠它拿额定载荷/材料/安全系数（插件会注入任务包）
+        _lc_probe = state.get("load_case_file")
+        if _lc_probe and not os.path.exists(_lc_probe):
+            _env_checks.append({
+                "id": "load_case_missing",
+                "level": "warn",
+                "detail": "载荷工况文件不存在：%s" % _lc_probe,
+                "fix": "力学估算那一步（provide_context 第 3 次）会重新落盘；若仍缺失，"
+                       "分析角色会拿到 loadCase=null，届时需人工补载荷。",
+            })
         return {
             "ok": True,
             "step": "context_asked",
+            "env_check": {
+                "ok": not any(x["level"] == "error" for x in _env_checks),
+                "checked": ["seven_stage_state_dir", "plugin_loaded", "load_case_file"],
+                "issues": _env_checks,
+                "note": ("联网不再需要任何 key：七阶段插件自己【不联网】，"
+                         "由真实主对话用宿主内置 web_search 执行检索工单。"),
+            },
             "param_depth": depth,
             "param_depth_label": "强需求(全量)" if depth == "full" else "不强(精简)",
             "question_count": total,
@@ -3827,6 +4165,24 @@ def cmd_provide_context(context_text):
     merged = ((state.get("depth_answer") or "") + " " + (context_text or "")).strip()
     state["context"] = merged
     state["mechanics_result"] = estimate_mechanics(state["task"], merged)
+    # ══ 【BUG-09 修复】设计域支持显式人工覆盖 ═══════════════════════════════
+    # 现场：力学估算给出 design_domain_mm=[420,300,160]，160 来自平面尺寸
+    #   （齿轮宽 b=64 / 中心距 a=160），但减速器箱体总高（底座+箱盖+凸台）
+    #   按 δ=0.025a+1、H≈0.5da+(30~50) 算明显超过 160。
+    #   后果：must_remain_in_design_domain=true 时物理校核会因为【零件出域】失败，
+    #   而根因是域本身给错了 —— 不是零件建错了，排查方向会被彻底带偏。
+    #
+    # 修法：调用方可以在回答文本里显式写三向包络，格式
+    #   「设计域 420x300x340 mm」或「包络 L=420 W=300 H=340」
+    # 命中就覆盖自动推算值，并在 state 里留痕（谁覆盖的、原值是什么）。
+    _override = _extract_design_domain_override(context_text)
+    if _override:
+        state["design_domain_override"] = _override
+        state["mechanics_result"]["design_domain_mm"] = _override["mm"]
+        state["mechanics_result"]["design_domain_from_override"] = True
+        state["mechanics_result"]["design_domain_auto"] = (
+            state["mechanics_result"].get("design_domain_mm_auto")
+            or state["mechanics_result"].get("design_domain_mm"))
     state["step"] = "mechanics_done"
     # 【FL-02】记录"力学估算已完成"的时刻（select 时序校验的关键凭据）
     state["mechanics_done_ts"] = time.time()
@@ -6661,7 +7017,7 @@ def _main_body():
                                                 "register-design / recheck-design / seven-status / "
                                                 "subagent-plan / rooms-template / room-types / "
                                                 "parts-board / export-docx / pre-delivery"
-                                                "（十阶段子命令已删除）；"
+                                                "（旧十阶段子命令已删除，现为七阶段）；"
                                                 "python %s mode2 --help 查看全部" % _me,
                               "register-design": "【七阶段】真实根会话登记房间编制（唯一入口）："
                                                  "python %s register-design" % _me,

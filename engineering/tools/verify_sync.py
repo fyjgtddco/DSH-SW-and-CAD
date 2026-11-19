@@ -179,6 +179,15 @@ PAIRS = [
     (os.path.join(REPO, "engineering", "plugins", "dsh-engineering-compaction"),
      os.path.join(DSH, "profiles", "desktop", "node_modules", "dsh-engineering-compaction"),
      "compaction@desktop"),
+    # ── 【2026-11-19】七阶段分析插件。它现在是 Mode 2 的唯一分析引擎，
+    #    而 verify_sync 以前【根本不比对它】—— 改完 flow.js/index.js 后
+    #    脚本照样报"完全同步"，实际 DSH 加载的还是旧代码。这个盲区必须补上。
+    (os.path.join(REPO, "engineering", "plugins", "dsh-engineering-seven-stage"),
+     os.path.join(DSH, "profiles", "web", "node_modules", "dsh-engineering-seven-stage"),
+     "seven-stage@web"),
+    (os.path.join(REPO, "engineering", "plugins", "dsh-engineering-seven-stage"),
+     os.path.join(DSH, "profiles", "desktop", "node_modules", "dsh-engineering-seven-stage"),
+     "seven-stage@desktop"),
 ]
 
 print("=" * 78)

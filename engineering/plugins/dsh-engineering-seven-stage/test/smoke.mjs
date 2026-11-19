@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openFlow, steps } from '../lib/flow.js';
@@ -29,10 +29,23 @@ try {
     const job = call(agents[role], 'status').job;
     return call(agents[role], 'submit', {jobId:job.id, ...more});
   };
+  // ══ 【BUG-1】联网搜索外包：知识发工单 → 传话员(root)回填 → 知识 submit ══
   const knowledge = () => {
     const job = call(agents.knowledge,'status').job;
     assert.throws(() => deliver('knowledge',{content:'没有联网'}), /SEARCH_REQUIRED/);
-    run.recordSearch(agents.knowledge, taskId, job.id, 'fixture', [{title:'fixture',url:'https://example.com/a',snippet:'mock only'}]);
+    // ① 知识只能发布工单，不能碰网络
+    const {order} = call(agents.knowledge,'search',{jobId:job.id, query:'fixture query'});
+    assert.equal(order.status,'pending');
+    // ② 知识不能自己回填（否则等于检索者自证）
+    assert.throws(() => call(agents.knowledge,'search_fill',{jobId:job.id, orderId:order.id,
+      query:'fixture query', hits:[{title:'x',url:'https://example.com/x'}]}), /SEARCH_FILL_RELAY_ONLY/);
+    // ③ 传话员（root）用宿主内置 web_search 的结果回填
+    const rec = call(root,'search_fill',{jobId:job.id, orderId:order.id, query:'fixture query',
+      hits:[{title:'fixture',url:'https://example.com/a',snippet:'mock only'}],
+      provider:'宿主内置 web_search'});
+    assert.equal(rec.search.hits.length,1);
+    assert.equal(rec.search.provider,'宿主内置 web_search');
+    // ④ 回填后知识才拿得到来源
     const [ref] = call(agents.knowledge,'status').job.searches[0].hits;
     deliver('knowledge', {content:'依据', sources:[{id:ref.id, location:'p.1', applicability:'仅模拟'}], gaps:[]});
   };
@@ -82,10 +95,25 @@ try {
   assert.equal(out.result.records.length,63);
   assert.equal(out.result.ready,true);
   assert.equal(out.result.completions.length,5);
-  // 合并进仓库后，读闸脚本落在 engineering/tools/seven_stage_gate.py。
-  // 用 DSH_SEVEN_STAGE_GATE_DIR 可覆盖（旧分离交付目录仍可跑）。
-  const adapterDir = process.env.DSH_SEVEN_STAGE_GATE_DIR
-    || fileURLToPath(new URL('../../../tools/',import.meta.url));
+  // 读闸脚本 seven_stage_gate.py 的位置随部署方式变化，按候选顺序探测：
+  //   ① DSH_SEVEN_STAGE_GATE_DIR（显式覆盖）
+  //   ② <包目录>/../../../tools/          —— 仓库源码布局
+  //        engineering/plugins/<pkg>/test/  →  engineering/tools/
+  //   ③ <DSH_HOME>/.agent-presets/engineering/tools/  —— 安装副本布局
+  //        （node_modules/dsh-engineering-seven-stage/test/ 里往上找不到 tools/）
+  //   ④ 当前工作目录下的 tools/
+  const gateCandidates = [
+    process.env.DSH_SEVEN_STAGE_GATE_DIR,
+    fileURLToPath(new URL('../../../tools/', import.meta.url)),
+    (() => {
+      const home = process.env.DSH_HOME
+        || (process.env.USERPROFILE ? join(process.env.USERPROFILE, '.dsh') : null);
+      return home ? join(home, '.agent-presets', 'engineering', 'tools') : null;
+    })(),
+    join(process.cwd(), 'tools'),
+  ].filter(Boolean);
+  const adapterDir = gateCandidates.find(d => existsSync(join(d, 'seven_stage_gate.py')))
+    || gateCandidates[1];
   const python = spawnSync(process.env.DSH_SEVEN_STAGE_PYTHON || 'python', ['-B','-c',
     'import sys; sys.path.insert(0,sys.argv[1]); from seven_stage_gate import read_design as read; '
     + 'ok=read("job-1","root",include_records=True); assert ok["ok"],ok; '
@@ -117,10 +145,25 @@ try {
   const signal=new AbortController().signal;
   const invoke=async (agent,action,args={})=>JSON.parse((await registered.execute({
     taskId:'host-job',action,dataJson:JSON.stringify(args)}, {agent,signal})).text);
+  // 【BUG-seven-stage-tool-gate · 附带】execute() 现在把内部异常统一转成
+  //   {ok:false, code, error}，不再把异常冒给宿主。凡是断言"必须被拒绝"的地方，
+  //   用这个变体：它把 error/ok:false 还原成一次 throw，保持原断言写法可用。
+  const invokeErr=async (agent,action,args={})=>{
+    const out=JSON.parse((await registered.execute({
+      taskId:'host-job',action,dataJson:JSON.stringify(args)}, {agent,signal})).text);
+    if (!out.ok) throw Object.assign(new Error(out.error || out.code || 'rejected'), {code:out.code});
+    return out;
+  };
   await invoke(hr,'attach',{planner:hp.id,messageIds:['user-1']});
   assert.match(toolGuard({agent:hp,name:'shell'}),/SEVEN_STAGE_TOOL_GATE/);
   assert.equal((await hooks.get('tools/pre-execute')({agent:hp,name:'subagent_fork'},()=>({kind:'allow'}))).kind,'deny');
   assert.equal(toolGuard({agent:hostAgent('unrelated'),name:'shell'}),undefined);
+  // 【P0】真实主对话（root）attach 之后必须仍然能用全部普通工具。
+  //   这是 2026-11-18 实机事故：root 被当成"分析期间会话"一起锁死，
+  //   门禁跑不了、连"把 bug 写进文件"和"请人介入"都做不到。
+  for (const tool of ['shell','read','write','grep','list_agents','todo_write','ask_user_question'])
+    assert.equal(toolGuard({agent:hr,name:tool}),undefined, 'root 不该被锁：'+tool);
+  assert.equal(toolGuard({agent:hr,name:'engineering_seven_stage'}),undefined);
   await invoke(hp,'launch');
   assert.equal(started.length,3);
   // Invitations and child IDs come from the simulated native activation, not model arguments.
@@ -132,34 +175,58 @@ try {
   await invoke(hp,'frame',frame);
   const hw=hostActors.get(started[0].childId);
   const job=(await invoke(hw,'status')).job;
+  // ══ 【BUG-1】插件【绝不自己联网】：无 key、无端点也能跑完整链路 ══════════
+  // 旧实现在这里断言 SEARCH_KEY_MISSING —— 那正是现场死因。现在验证的是：
+  //   插件进程内一个 fetch 都不发，联网完全外包给真实主对话（传话员）。
   const oldFetch=globalThis.fetch;
   const oldKey=process.env.DSH_SEVEN_STAGE_BRAVE_KEY;
+  const oldUrl=process.env.DSH_SEVEN_STAGE_SEARCH_URL;
   delete process.env.DSH_SEVEN_STAGE_BRAVE_KEY;
+  delete process.env.DSH_SEVEN_STAGE_SEARCH_URL;
+  let fetchCalls=0;
+  globalThis.fetch=async (...a)=>{ fetchCalls++; throw new Error('插件不该联网：'+a[0]); };
   try {
-    await assert.rejects(invoke(hw,'search',{jobId:job.id,query:'plain fixture'}),/SEARCH_KEY_MISSING/);
-    process.env.DSH_SEVEN_STAGE_BRAVE_KEY='fixture-only';
-    globalThis.fetch=async (url,options)=>{
-      assert.equal(new URL(url).host,'api.search.brave.com');
-      assert.equal(new URL(url).searchParams.get('q'),'plain fixture');
-      assert.equal(options.headers['X-Subscription-Token'],'fixture-only');
-      return new Response(JSON.stringify({web:{results:[{url:'https://example.com/fixture',
-        title:'Fixture',description:'placeholder source for controlled replay'}]}}));
-    };
-    const rec=await invoke(hw,'search',{jobId:job.id,query:'plain fixture'});
+    // ① 知识发布检索工单：不联网、不需要任何 key
+    const ord=await invoke(hw,'search',{jobId:job.id,query:'plain fixture'});
+    assert.equal(ord.order.status,'pending');
+    assert.equal(fetchCalls,0,'发布工单期间不得发起任何网络请求');
+    // ② 知识重复发布同一工单 → 拒绝（防止绕开预算）
+    await assert.rejects(invokeErr(hw,'search',{jobId:job.id,query:'plain fixture'}),/SEARCH_ORDER_ALREADY_PENDING/);
+    // ③ 知识自己回填 → 拒绝（检索者不能自证）
+    await assert.rejects(invokeErr(hw,'search_fill',{jobId:job.id,orderId:ord.order.id,
+      query:'plain fixture',hits:[{title:'伪造',url:'https://example.com/fake'}]}),/SEARCH_FILL_RELAY_ONLY/);
+    // ④ 传话员（真实主对话）回填宿主内置 web_search 的结果
+    const rec=await invoke(hr,'search_fill',{jobId:job.id,orderId:ord.order.id,
+      query:'plain fixture',provider:'宿主内置 web_search',
+      hits:[{title:'Fixture',url:'https://example.com/fixture',snippet:'controlled replay'}]});
     assert.equal(rec.search.hits.length,1);
+    assert.equal(rec.search.provider,'宿主内置 web_search');
+    assert.equal(fetchCalls,0,'回填期间插件也不得联网');
+    // ⑤ 回填后知识能拿到来源
+    const st=await invoke(hw,'status');
+    assert.equal(st.job.searches.length,1);
+    assert.equal(st.search.order.status,'filled');
+    assert.equal(st.job.searches[0].hits.length,1);
     const math=await invoke(hw,'calculate',{jobId:job.id,purpose:'数字接口',units:'N',ops:[
       {op:'mul',a:2,b:9.8},{op:'div',a:'$1',b:2}]});
     assert.deepEqual(math.calculation.values,[19.6,9.8]);
     hooks.get('agent/turn-stopping')({agent:hw,signal});
-    assert.equal(steers.length,1);
-    await assert.rejects(invoke(hw,'yield',{reason:'掩盖当前待办'}),/PENDING_JOB/);
+    // 【2026-11-19】投递语义已从 followup(queue) 改为 steer，并加了"在途合并"：
+    //   同一条状态变化不再每条通知都投一次，只保留最后一条未消费的通知。
+    //   这里只断言"确实有提醒到达"，不再绑定具体条数 —— 条数是实现细节，
+    //   而"不许一条都没有"才是这个用例真正要守的东西。
+    assert.ok(steers.length >= 1, '结束请求未登记时必须提醒至少一次');
+    assert.ok(String(steers.at(-1).message?.content?.[0]?.text ?? '').length > 0,
+      '提醒正文不能为空');
+    await assert.rejects(invokeErr(hw,'yield',{reason:'掩盖当前待办'}),/PENDING_JOB/);
   } finally {
     globalThis.fetch=oldFetch;
-    if(oldKey===undefined) delete process.env.DSH_SEVEN_STAGE_BRAVE_KEY;
-    else process.env.DSH_SEVEN_STAGE_BRAVE_KEY=oldKey;
+    const restore=(k,v)=>{ if(v===undefined) delete process.env[k]; else process.env[k]=v; };
+    restore('DSH_SEVEN_STAGE_BRAVE_KEY',oldKey);
+    restore('DSH_SEVEN_STAGE_SEARCH_URL',oldUrl);
     hooks.get('dispose')();
   }
-  console.log('OK: 模拟 DSH 宿主启动三会话、两处工具守卫、联网错误和搜索接口回放、数值计算、结束钩子、Python 交接凭证');
+  console.log('OK: 模拟 DSH 宿主启动三会话、两处工具守卫、检索工单外包（插件零联网）、数值计算、结束钩子、Python 交接凭证');
   console.log('OK: 真实身份模拟、独立预审、在线凭据门、两轮上限、事实换版、63 步完整链、结束理由、重读');
 } finally {
   rmSync(dir, {recursive:true, force:true});

@@ -10,22 +10,48 @@ provider: filesystem
 
 # Task Mode Selector with Code-Enforced Workflow Gate
 
-## ⛔ 先自查：你是不是被主对话派出来的子代理？
+## ⛔ 先自查：你是【主对话】还是【被派出来的子代理】？
 
-运行 `echo $env:DSH_SESSION_ID`，或看自己的 system prompt：
-**如果本次对话是父会话用 `subagent_fork` 派出来的子代理（delegationDepth>0），
-不要执行本技能的门禁流程**，按主对话给你的房间任务直接干活：
+> 🔧 **【BUG-seven-stage-tool-gate · P2 修复】这一节以前自相矛盾。**
+> 旧版开头写「如果你是被 `subagent_fork` 派出来的子代理（delegationDepth>0），
+> 不要执行本技能的门禁流程」，但同一份文档又把 `attach` / `capture` 规定为
+> 「只能由真实主对话调」—— 子代理照字面理解，既以为自己该跳过门禁，
+> 又发现自己没资格做门禁里唯一需要人做的事，于是卡在原地。
+>
+> 现在把身份拆成**四类**，每类只回答一个问题：**"我这一回合该不该跑门禁？"**
 
-| 你的身份 | 允许做什么 | 禁止做什么 |
+判断依据（按顺序，只看代码事实，不看自己的感觉）：
+
+| # | 判据 | 结论 |
 |---|---|---|
-| **建模小屋** | 本房间建模、验证、`room-report`、`room-artifact` | `init` / `provide_context` / `select` / `confirm-assembly` 等门禁命令 —— 门禁已在主对话完成 |
-| **总计子代理** | 只调 `engineering_seven_stage`（launch / frame / platform commit / question / interpret / propose_rooms / end） | `init` / `provide_context` / `select`（那是主对话的活） |
-| **知识 / 设计 / 反驳（二级）** | 只调 `engineering_seven_stage`（bind / status / search / calculate / submit / yield / blocked / end） | 任何 shell / 文件写入 / 旧门禁 / 再委派 —— 插件会 `SEVEN_STAGE_TOOL_GATE` 拒绝 |
+| 1 | 宿主注入的 `DSH_SESSION_ID` 在 `workflow_state.seven_stage_root_session_id` 里 | **你是主对话** → 跑门禁 |
+| 2 | 你的父会话是主对话，且你被 `subagent_fork` 创建 | **总计子代理** → 不跑门禁，只跑七阶段 |
+| 3 | 你的父会话是总计子代理，且你在插件里 `bind` 过 | **知识/设计/反驳** → 不跑门禁，只跑七阶段 |
+| 4 | 你在 `mode_gate` 的房间表里 | **建模小屋** → 不跑门禁，只建本房间 |
+
+| 身份 | 允许做什么 | 禁止做什么 |
+|---|---|---|
+| **主对话（真实根会话）** | 全部工具：门禁命令、`pwsh`、`write`、`ask_user_question`、`todo_write`、**`web_search`**；以及 `engineering_seven_stage` 的 attach / capture / status / read / export / end / **search_fill** | —— 没有工具限制（插件不会锁你） |
+| **建模小屋** | 本房间建模、验证、`room-report`、`room-artifact` | `init` / `provide_context` / `select` / `confirm-assembly` 等门禁命令 |
+| **总计子代理** | 只调 `engineering_seven_stage`（launch / frame / commit / question / interpret / propose_rooms / end） | `init` / `provide_context` / `select`；任何 shell / 写盘 |
+| **知识 / 设计 / 反驳（二级）** | 只调 `engineering_seven_stage`（bind / status / search / calculate / submit / yield / blocked / end） | 任何 shell / 文件写入 / 旧门禁 / 再委派 |
+
+> 🔴 **主对话多了一项法定职责：联网检索的【传话员】。**
+> 插件自己不联网（2026-11-18 起）。知识角色想联网只能用 `action=search` 发布检索工单，
+> 由**你**（真实主对话）用宿主内置 `web_search` 去搜，再用 `action=search_fill` 把结果回填。
+> 你只搬运、不改题、不替知识下结论 —— 这是「大脑(总计子代理) / 传话员(你)」分工的一部分，
+> 不是新权力。细节见 §3.6 的「④-b 联网搜索怎么走」。
+
+> ⚠️ **"子代理不跑门禁" ≠ "子代理不参与门禁"。**
+> 总计子代理和它的三个二级角色是门禁流水线里**必须存在**的一环，
+> 只是它们**不调 `workflow_gate`**（那是主对话的活），而是用
+> `engineering_seven_stage` 把自己的分析结果交给主对话去登记。
 
 > 实测教训（会话 `session-31c56a28`）：三个建模小屋各自加载本技能后又跑了一遍
 > `init → provide_context → …`，把主对话的分析状态覆盖成四份。
-> 现在代码侧已加两道闸：`ROOT_SESSION_REQUIRED`（子代理调编排命令直接拒绝）
-> 与七阶段插件的 `SEVEN_STAGE_TOOL_GATE`（分析会话只能用插件那一个工具）。
+> 现在代码侧有三道闸：`ROOT_SESSION_REQUIRED`（子代理调编排命令直接拒绝）、
+> `SEVEN_STAGE_TOOL_GATE`（分析角色只能用插件那一个工具），
+> 以及**对主对话的显式豁免**（`bound.role === 'root'` 直接放行 —— 见下方 P0）。
 
 ## Rules (Code-Enforced, Not Just Prompts)
 
@@ -208,6 +234,23 @@ subagent_fork(description="总计子代理（七阶段分析）",
 
 **初始 prompt 只让它「等 attach」**，其余工作等接入后再做 —— 否则它会先把活干完再发现没接上。
 
+> 🔴 **【BUG-seven-stage-tool-gate · P1】`subagent_fork` 与 `attach` 必须写在【同一条回复】里。**
+>
+> 实测事故：首个总计子代理（`767a61f8…`）在 attach 落地**之前**就自己结束了回合。
+> 此时宿主 `agents.get(planner)` 已查不到它，`attach` 必然返回
+> `REAL_DIRECT_CHILD_REQUIRED`（旧版**不可恢复**，只能重新 fork —— 实测换了
+> `planner2` 才成功）。
+>
+> 两条铁律：
+> 1. **同一条回复**：`subagent_fork(...)` 之后立刻在**同一轮**调
+>    `engineering_seven_stage(action="attach")`。不要隔一个回合、不要等它先回话。
+> 2. **初始 prompt 里明写**：
+>    「**收到 attach 通知前不得结束回合**；没收到就停下来等着，不要自行完成任何工作。」
+>
+> 现在插件已放宽：只要宿主还能证明它是我创建过的直系子会话（`listDescendants`
+> 里仍有 `kind=child` 记录），**即使它已经结束也能 attach**。
+> 但如果它从未被创建过、或压根不是我的子会话，照样拒绝 —— 不采信模型自报。
+
 #### ② 主对话：立刻 attach（唯一的真人入口登记）
 
 ```python
@@ -219,9 +262,14 @@ engineering_seven_stage(
 
 - `planner` 必须是**真实直系子会话**：插件会核对 `actorOf(ctx.agents.get(planner)).parent === 我`。
   填错 → `REAL_DIRECT_CHILD_REQUIRED`。
-- `messageIds` 省略时捕获最近一条真人原文。**多轮输入时必须指定原始需求那条**，
-  否则会把最后一句模式确认当成需求。
+- `messageIds` **省略即可**：省略或传空数组 `[]` 都会自动取**最近一条真人原文**。
+  只有在多轮对话中必须锁定"最初那条需求"时，才显式写原始需求的消息 id
+  （否则会把最后一句模式确认当成需求）。找不到时插件会列出可选 id 清单，照着填即可。
 - 只有**根会话**能 attach（`ROOT_REQUIRED`）。
+
+> 🔴 **attach 与 launch 的先后是硬的**：`attach` 之前调 `launch` 会得到
+> `TASK_NOT_ATTACHED` / `WRONG_WORKFLOW_ROOT`（含义是"还没接上"，**不是**身份错），
+> 别去翻源码排障 —— 先确认主对话的 attach 落没落地（`status` 能返回 `phase=setup` 就是落了）。
 
 #### ③ 总计子代理：`action=launch` 启动三个二级会话
 
@@ -230,6 +278,14 @@ engineering_seven_stage(taskId="<task_id>", action="launch")
 ```
 
 - 插件用宿主原生 `startActivation` 建三个会话（`maxDepth=2`），每个预留独立 sessionId；
+- 🚫 **launch 之后不要再调 `invite`**：launch 内部已完成邀请与三个角色会话的创建。
+  此时状态机可能已推进到 `frame`，再 invite 会拿到 `WRONG_PHASE`（现改为幂等返回，不报错也不重复发码）。
+- 🚫 **分析角色已经没有 `wait_agent` 了**（2026-11-19 从可见工具里摘掉）。
+  现场实测：knowledge 用它睡了 **70.9 分钟，其中 52.1 分钟纯白等** ——
+  三次整段无任何输入睡满 600s，三次"插件通知已在队列"却照样睡满 600s。
+  根因是宿主的两个投递通道不是同一个事件：`send_message` 落 `next-step`（能唤醒它），
+  插件 `notify` 落 `next-turn`（唤醒不了）。**能力上不给，比嘴上说更可靠。**
+  正确且唯一的等待姿势：`status` 看 `next` → 没活就 `action=yield` 结束回合 → 靠插件投递开新回合。
 - 只有**三个真实会话全部 bind 成功**，流程才进入 1.1；
 - 三个角色各自收到一次性邀请码，**第一次调用必须是 `action=bind`**：
   `dataJson='{"role":"knowledge","token":"<邀请码>"}'`。
@@ -243,13 +299,36 @@ engineering_seven_stage(taskId="<task_id>", action="launch")
 | 角色 | 动作 | 关键约束 |
 |---|---|---|
 | 总计 | `frame` | 对象 / 当前决策 / 边界 / **searchTopic** / 复核方案 / 假设 / 依赖 |
-| 知识 | `search` → `submit` | 必须先真实联网；来源必须来自本 job 的搜索结果 |
+| 知识 | `search` → `submit` | 先发检索工单（插件不联网）；来源必须来自本 job 被回填的搜索结果 |
 | 反驳 | `submit`（1.1 先盲审） | 只提交可复现、可行动的异议；空反对会被拒 |
 | 设计 | `submit` | 方案 + 参数 + 计算依据 + 缺口 |
 | 反驳 | `submit`（复审） | `verdict=pass/conditional/blocked`；已解决异议须逐条写关闭依据 |
 | 总计 | `commit` | 有 blocking 缺口 → 自动转 `evidence_wait` |
 
 - 一轮返工上限 **2 次**，超限转 `evidence_wait`（不是死锁，是要求补证）。
+
+#### ④-b 联网搜索怎么走（**2026-11-18 改为外包，插件不自带 key**）
+
+插件**不联网、不需要任何搜索密鑰**。链路是三段，顺序和权限都不可越界：
+
+```
+知识      action=search        → 发布「检索工单」（只登记 query，不联网）
+真实主对话 action=status 读到工单 → 用【宿主内置 web_search】真正去搜
+真实主对话 action=search_fill    → 把 sources 回填进插件
+知识      action=submit       → 按回填出来的来源 ID 写依据 / 出处 / 边界 / 缺口
+```
+
+- 工单长这样：`status.search.order = {id, query, status:'pending', jobId, step}`；
+  回填后变 `status:'filled'`（带 `hitCount`）。
+- **只有真实主对话（root / 传话员）能 `search_fill`**；知识调会得到
+  `SEARCH_FILL_RELAY_ONLY`。这是刻意锁死的：让检索者自己出证据，
+  「知识 → 设计 → 独立复审」三件套就失效了。
+- 传话员**只能搬运**：回填的 `query` 必须与工单原文一致（不一致 →
+  `SEARCH_QUERY_MISMATCH`），不能改题、不能替知识下结论。
+- 知识的 `web_search` / `web_fetch` 仍被 `SEVEN_STAGE_TOOL_GATE` 关死 ——
+  这是设计，不是 bug。要联网就走工单。
+- 真实主对话的建议节奏：每次 `status` 看到 `next` 里提到检索工单，
+  就立刻 `web_search` → `search_fill`，然后回到等待。
 - 想回更早节点用 `rewind`（同一证据不能重复回退）；回退后下游消息凭据作废。
 - 数值计算用 `action=calculate`（插件内置 add/sub/mul/div/pow/sqrt/abs/sin/cos/tan，
   三角用弧度）—— **不要心算**，算完的 `calculation` 会自动挂进本步记录。
@@ -263,7 +342,16 @@ engineering_seven_stage(taskId="<task_id>", action="launch")
 | **真实主对话** | `capture` | 从**宿主消息**取用户原话（`messageId` 可选） |
 | 总计 | `interpret` | 分类 `fact/preference/authorization/estimate/unknown/no_change`，并给出受影响最早步骤 `fromStep` |
 
-- **模型自己写的文本不能充当真人原话** —— `capture` 只认 `source.kind='user'` 的消息。
+- **模型自己写的文本不能充当真人原话**。`capture` 只认两类真实宿主来源：
+  1. `role=user` 且 `source.kind=user` 的用户打字的纯文本（`source='user'`）；
+  2. **`ask_user_question` 返回的结构化答案**（`source='user-question'`）——
+     它是 tool result 形态的 `{answers:[{id,selected,custom}]}`，
+     插件会严格校验形状后拼成 `[问题id] 选项 / 自定义` 的文本。
+  ⚠️ 这不是"放宽"：形状不符的普通 tool 输出**仍然被拒**，
+  否则模型自己写的工具结果就能冒充真人答复。
+- `interpret` 的 `parameters` **可以传任意 JSON**（对象/数组/数字/字符串都行），
+  插件内部会序列化成字符串保存。其余字段（`conflict`/`changed`/`impact`/`reason`）
+  必须是**具体说明**——写「无」「已完成」这类敷衍词会被 `DETAIL_REQUIRED` 拒。
 - 分类不是 `no_change` 时，插件会把 `fromStep` 及其下游全部作废、`revision+1`。
   这也意味着**已登记的建模编制立即失效**，必须重新 `register-design`。
 
@@ -294,7 +382,14 @@ python "<根>\tools\mode2_flow.py" register-design
   用户主动终止 → 用户在对话里说「停止分析」，真实主对话 `partial` 才会被认。
 - `partial` 产物可用于给用户看已完成对象、补证责任与下一步，
   **但不能解锁建模**（read_design 会拒绝）。
-- 角色没有可靠恢复路径时：**保留部分结果，另建新任务复跑**，别覆盖原审查历史。
+- **`partial` 不是单向门**：环境修好后，**真实主对话或总计子代理**可以调
+  `action=reopen`（`dataJson='{"reason":"<为什么能续跑>"}'`）把任务恢复回来。
+  - 恢复到哪个小步、由哪个角色接手，**完全由插件按已有产物推导**，你不要指定；
+  - 恢复后 `failed`/`ended` 会清空、失败预算重置，之前的故障记录归档进 `history`；
+  - 三个分析角色（knowledge/design/review）**不能**自己 reopen。
+  - 只有确实修好了阻塞原因（缺的资料来源拿到了、会话重建了…）才用；
+    没修就 reopen 只会再卡一次，白耗失败预算。
+- 角色确实没有恢复路径时：**保留部分结果，另建新任务复跑**，别覆盖原审查历史。
 
 #### ⑧ 权限边界（插件强制，违反直接被拒）
 
@@ -307,6 +402,29 @@ SEVEN_STAGE_TOOL_GATE: 分析期间由 engineering_seven_stage 分派任务、�
 
 即：**不能**跑 shell / 写文件 / 调旧门禁 / 改工作流状态 / 再委派 / 任意发信。
 普通根会话与建模小屋不受影响，照旧用原有工具。
+
+> 📌 **联网检查清单**（被拒时先看这里，别急着报 bug）：
+> · `knowledge` 调 `web_search` 被 `SEVEN_STAGE_TOOL_GATE` 拒 —— **这是设计**，走工单；
+> · `knowledge` 发不出工单 → 看 `status.allowed`，确认自己还在 `phase=knowledge`；
+> · 工单一直 `pending` → **真实主对话还没来执行**，不是死锁，status 的
+>   `waitingOn` 会写着「知识发布了一条检索工单…」；
+> · `SEARCH_FILL_RELAY_ONLY` → 你不是 root，回填这件事只能真实主对话做；
+> · `SEARCH_REQUIRED` 且工单已发 → 传话员还没回填，等 `status.search.order.status` 变 filled；
+> · `FAILED_SEARCH_CANNOT_CARRY_HITS` → outcome 说失败了却带了结果，二者矛盾；
+>   搜不了就传 `outcome:'unavailable'` + `error:'<原因>'` + `hits:[]`。
+
+> 📌 **终态（ready/partial）下工具会解锁**（2026-11-19 修复）：此时流水线已停，
+> 锁着只会让你连"把已有产物落盘"都做不到。解锁后仍**不能**推进任何一步
+> （推进动作本身就被拒），所以放心用 `glob`/`read`/`write` 整理遗留物。
+
+> 📌 **分析期间放行两个只读工具**（2026-11-19 调整）：
+> `send_message` / `list_agents` —— 它们不改任何流程状态，
+> 让子代理能主动催办上游、确认上游是否还活着。
+> 🚫 `wait_agent` **已从分析角色移除**：它把模型锁在回合内，等于拒绝把控制权交回插件；
+> 而插件 `notify` 投递的是 `next-turn` 队列，唤不醒它 —— 实测白等 52 分钟。
+> 分析角色唯一的等待姿势是 `yield` 结束回合。
+> 但 `write` / `edit` / `pwsh` / `run_code` / `todo_write` **仍然全拦**：
+> 能写出去的工具一旦放开，"分析角色只能读、结论归插件"这条隔离就破了。
 
 ### 第 4 步：力学估算（`provide_context` #3）
 
@@ -327,6 +445,19 @@ python "<工程模式根目录>\tools\workflow_gate.py" provide_context "<全部
 >   →（传全部提问答案）→ `mechanics_done`（力学估算 + A/B/C、D/E 选项）。
 > 不要跳步；`step` 不对时命令会直接报错拒绝。
 
+> 📌 **【BUG-09/REV08 修复】设计域与疲劳参数**
+>
+> · **设计域**：自动推算来自"零件包络"提取，可能把【平面尺寸】当成了高度。
+>   若你判断不对，可在回答里**显式指定三向包络**（四种写法都认）：
+>   `设计域 420x300x340 mm` / `设计域 420×300×340` /
+>   `包络 L=420 W=300 H=340` / `设计域 420 300 340`。
+>   必须先实测确认，不要凭感觉填 —— 域给错的后果是"零件明明对，却被判出域"。
+>
+> · **疲劳循环次数**：传动类（减速器/齿轮箱）**不再套用 200000 次/年的默认值**。
+>   插件会从你的回答里找转速（`n2=362.5 r/min`、`1450rpm` 等）和年工作小时
+>   （`单班`/`双班`/`三班`）来推算；**找不到就留空并报"未执行"，绝不编一个**。
+>   所以做传动件时，**务必在回答里写清转速与班制**，否则疲劳校核会被跳过。
+>
 > 📌 **【BUG-01/07 修复】载荷数值口径**
 > 力学估算会**优先读取用户明确写出的载荷数值**（如「100N」「10kg」「0.1kN」），
 > 关键词（冲击/动态）只用于确定**动载系数**，不再放大用户给的额定值。

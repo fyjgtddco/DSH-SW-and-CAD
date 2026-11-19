@@ -1100,27 +1100,76 @@ window.__ModuleLoader__.load({
       //   和旁边白色的对话流完全脱节。
       // 现在：不再给 .eng-cp 任何自己的底色（透明 → 父容器白底透上来），
       //   深色模式下也只调文字层级色，【永不】出现黑色块。
-      // ── 【会话视图】官方 conversation.view 页签的容器（整页自适应）──────────
-      // 它拿到的是【对话区】的完整尺寸（不像右列只有 1/4），因此这里按
-      //   阅读优先排版：限宽居中、留白充足、字号用 clamp 跟视口走。
-      '.eng-sv{box-sizing:border-box;display:flex;flex:1 1 auto;flex-direction:column;' +
-        'height:100%;min-height:0;overflow:hidden;' +
-        'background:var(--dsw-alias-bg-layer-1,#fff);' +
-        'color:var(--dsw-alias-label-primary,#0f172a);padding:16px 18px 0}' +
-      // 深色模式下也只把底色交给宿主变量，绝不钉死成 #16181d
-      '@media(prefers-color-scheme:dark){' +
-        '.eng-sv{background:var(--dsw-alias-bg-layer-1,#16181d);color:#e5e7eb}' +
-      '}' +
-      '.eng-sv-head{align-items:baseline;display:flex;flex:none;flex-wrap:wrap;' +
-        'gap:4px 12px;padding:0 2px 10px}' +
-      '.eng-sv-title{font-size:clamp(14px, 1.5vw, 17px);font-weight:700}' +
-      '.eng-sv-sub{color:var(--dsw-alias-label-tertiary,#94a3b8);' +
-        'font-size:clamp(11px, 1.05vw, 12.5px)}' +
-      '.eng-sv-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;' +
-        'max-width:1100px;overflow:hidden;width:100%}' +
-      '.eng-sv-body>.eng-cp{background:transparent;padding-bottom:14px}' +
-      '.eng-sv-empty{color:var(--dsw-alias-label-tertiary,#94a3b8);' +
-        'font-size:clamp(11.5px, 1.1vw, 13px);line-height:1.75;padding:22px 2px}' +
+      // 工程模式会话视图的首页与工作台。
+      `
+      .eng-sv {
+        --sv-bg: #f6f5f3; --sv-paper: #fff; --sv-ink: #25211f;
+        --sv-muted: #625a54; --sv-border: #e2dbd5; --sv-accent: #983e2a; --sv-tint: #f7ebe5;
+        --sv-canvas: #faf9f7; --sv-grid: #f0ebe6; --sv-guide-line: #e8e1db;
+        box-sizing: border-box; container-type: inline-size; color-scheme: light;
+        flex: 1 1 auto; width: 100%; height: 100%; min-height: 0; overflow: auto;
+        background: var(--sv-bg);
+        color: var(--sv-ink); font-size: 14px; line-height: 1.65;
+      }
+      .eng-sv-home {
+        box-sizing: border-box; display: grid; gap: 16px; width: min(100%, 1160px);
+        margin-inline: auto; padding: clamp(16px, 3cqw, 36px);
+      }
+      .eng-sv .eng-sv-home-head h1 { font-size: clamp(23px, 4cqw, 31px); font-weight: 720; line-height: 1.25; }
+      .eng-sv .eng-sv-home-head p { margin-top: 5px; color: var(--sv-muted); }
+      .eng-sv-box { min-width: 0; background: var(--sv-paper); border: 1px solid var(--sv-border); border-radius: 12px; }
+      .eng-sv .eng-sv-box > h2 { padding: 12px 16px; border-bottom: 1px solid var(--sv-border); font-size: 15px; font-weight: 680; }
+      .eng-sv-cards, .eng-sv-home-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      .eng-sv-cards { padding: 16px; }
+      .eng-sv-cast {
+        display: grid; place-items: center; min-height: 190px; max-height: 460px; aspect-ratio: 16 / 9;
+        margin: 16px; border: 1px solid var(--sv-border); border-radius: 8px;
+      }
+      .eng-sv-home .eng-sv-slot { min-height: 64px; border-color: var(--sv-border); background: var(--sv-canvas); }
+      .eng-sv-box > .eng-sv-slot { display: grid; margin: 16px; }
+      .eng-sv-card {
+        display: grid; align-content: start; gap: 6px; padding: clamp(12px, 2cqw, 18px);
+        border: 1px solid #ead1c6; border-radius: 10px; background: var(--sv-tint);
+        color: var(--sv-ink); font: inherit; text-align: start; cursor: pointer;
+      }
+      .eng-sv-card:hover { border-color: var(--sv-accent); }
+      .eng-sv-card-arrow { color: var(--sv-accent); margin-inline-start: 6px; }
+      .eng-sv-card strong { font-size: 16px; }
+      .eng-sv-card-desc { color: var(--sv-muted); font-size: 13px; }
+      .eng-sv h1, .eng-sv h2, .eng-sv p { margin: 0; }
+      .eng-sv-subpage { display: flex; flex-direction: column; height: 100%; min-height: 240px; }
+      .eng-sv-toolbar {
+        display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+      }
+      .eng-sv-toolbar h1 { margin-inline-end: auto; font-size: 18px; font-weight: 670; }
+      .eng-sv-back {
+        border: 1px solid var(--sv-border); border-radius: 7px; padding: 4px 9px; background: var(--sv-paper);
+        color: var(--sv-accent); font: inherit; font-size: 13px; cursor: pointer;
+      }
+      .eng-sv-back:hover { border-color: var(--sv-accent); }
+      .eng-sv-slot {
+        display: inline-grid; place-items: center; box-sizing: border-box;
+        padding: 2px 9px; border: 1px dashed var(--sv-border); border-radius: 5px;
+        color: var(--sv-muted); font-size: 12px; white-space: nowrap;
+      }
+      .eng-sv button:focus-visible { outline: 2px solid var(--sv-accent); outline-offset: 1px; }
+      .eng-sv-cast {
+        background-color: var(--sv-canvas);
+        background-image: linear-gradient(var(--sv-guide-line) 1px, transparent 1px),
+          linear-gradient(90deg, var(--sv-guide-line) 1px, transparent 1px),
+          linear-gradient(var(--sv-grid) 1px, transparent 1px), linear-gradient(90deg, var(--sv-grid) 1px, transparent 1px);
+        background-size: 100px 100px, 100px 100px, 20px 20px, 20px 20px;
+        background-position: center;
+      }
+      .eng-sv-history { display: flex; flex-direction: column; min-height: 0; padding: 16px; }
+      .eng-sv-history .eng-cp { padding: 0; }
+      .eng-sv-history :is(.eng-cp-cap-t, .eng-cp-name, .eng-cp-sum-i b) { color: var(--sv-ink); font-size: 14px; }
+      .eng-sv-history :is(.eng-cp-cap-n, .eng-cp-empty, .eng-cp-time, .eng-cp-save, .eng-cp-body, .eng-cp-sum-i) { color: var(--sv-muted); font-size: 13px; }
+      .eng-sv-history .eng-cp-row:hover { background: var(--sv-tint); }
+      @container (max-width: 600px) {
+        .eng-sv-cards, .eng-sv-home-pair { grid-template-columns: 1fr; }
+      }
+      ` +
 
 
       // ── 极窄屏(<900px)：面板内部纵向堆叠（目录在上、日志在下）──────
@@ -3901,14 +3950,10 @@ window.__ModuleLoader__.load({
       var useEffect = React.useEffect;
       var useRef = React.useRef;
 
-      // ── 开关：沿用设置页同一个字段（不新增开关，避免两处语义分叉）──
       var settings = useEngSettings();
-      var enabled = !!(settings && settings.useOwnSubagentPane);
-      // ── 强制视图（右侧面板用它锁成"主对话"）────────────────────────────
-      // 「会话视图」（官方 conversation.view 页签）里只该看主对话的压缩链，
-      //   而右列 .eng-dtabs 里默认跟随左列选中的子代理。
-      //   因此这里允许父组件传 forceTab='main'，且此时隐藏页签切换（不给用户
-      //   一个"点了会跳去看子代理"的按钮 —— 那是另一个页面的职责）。
+      var sessionView = !!(props && props.sessionView);
+      var enabled = sessionView || !!(settings && settings.useOwnSubagentPane);
+      // 调用方可以锁定压缩链并隐藏切换按钮。
       var forceTab = props && props.forceTab ? String(props.forceTab) : '';
 
       // ── 视图：选中的子代理 vs 主对话 ──────────────────────────────
@@ -3996,6 +4041,9 @@ window.__ModuleLoader__.load({
       }, [enabled, rootId]);
 
       if (!enabled) return null;
+      if (sessionView && D.exists === undefined && !D.err) {
+        return h('p', { className: 'eng-cp-empty', role: 'status' }, '正在读取压缩历史…');
+      }
 
       var all = D.entries || [];
       // 主对话链 = target === rootId；子代理链 = 其它（含孙代）
@@ -4156,10 +4204,6 @@ window.__ModuleLoader__.load({
     /* ══════════════════════════════════════════════════════════════════
      * 【会话视图】EngSessionViewPage — 官方 conversation.view 页签的正文
      * ══════════════════════════════════════════════════════════════════
-     * 用户要求（2026-11-07，图二黑框）：
-     *   「在黑框那里，加一个文字，官方叫"会话视图"，在会话视图中，加上主对话的
-     *     压缩历史，先这样子加吧」
-     *
      * 为什么用官方 conversation.view，而不是自己在对话区上方塞一排假页签：
      *   官方把「聊天 / 轨迹」那排页签声明为 conversation.view（list, session
      *   作用域；Chat 是 order=0 的 chat，Trajectory 是 order=10 的 trajectory）。
@@ -4169,42 +4213,73 @@ window.__ModuleLoader__.load({
      *     · 每个会话的选中状态与偏好持久化；
      *     · 渲染容器（填满对话区）。
      *   自己造页签则要复刻以上全部行为，且换 DSH 版本就会错位。
-     *
-     * 数据来源：与右列压缩历史同一个只读账本 /compaction-history
-     *   （dsh-engineering-compaction 写的 compaction_history.jsonl）。
-     *   rootSessionId 由页签注入的 sessionId 提供 —— 那就是"当前这条主对话"。
      */
     function EngSessionViewPage(props) {
-      var useState = React.useState;
-      var useEffect = React.useEffect;
-      // 开关：关掉工程模式自带显示页 → 交回官方（返回 null，页签照常存在但空白，
-      //   因此这里用 canOpen 之外的第二道闸：直接渲染官方风格的提示，不装死）。
-      var settings = useEngSettings();
-      var enabled = !!(settings && settings.useOwnSubagentPane);
       // 会话 id：conversation.view 的 inject(sessionId) 会把它作为 prop 注入；
       //   取不到时退回 DOM/列表兜底（engCurrentSessionId）。
       var sid = (props && props.sessionId) ? String(props.sessionId) : '';
       if (!sid) {
         try { sid = engCurrentSessionId(null) || ''; } catch (e) { sid = ''; }
       }
-      if (!enabled) {
-        return h('div', { className: 'eng-sv' },
-          h('div', { className: 'eng-sv-empty' },
-            '「工程模式自带显示页」已在设置里关闭 —— '
-            + '会话视图的主对话压缩记录一并关闭。'));
+      var navigation = useState(null);
+      var active = navigation[0] && navigation[0].sid === sid ? navigation[0] : null;
+      var page = active ? active.page : 'home';
+      var titleRef = useRef(null);
+      var pendingFocus = useRef(false);
+
+      function go(nextPage) {
+        if (page === nextPage) return;
+        pendingFocus.current = true;
+        navigation[1]({ sid: sid, page: nextPage });
       }
-      // 页签已经叫「工程模式」，页内标题不再重复一次"会话视图"（用户要求改名）。
+
+      useEffect(function () {
+        if (!pendingFocus.current || !titleRef.current) return;
+        pendingFocus.current = false;
+        titleRef.current.focus();
+      }, [page]);
+
+      function placeholder() {
+        return h('span', { className: 'eng-sv-slot' }, '占符位');
+      }
+
+      function entry(id, title, description) {
+        return h('button', { className: 'eng-sv-card', type: 'button', onClick: function () { go(id); } },
+          h('strong', null, title, h('span', { className: 'eng-sv-card-arrow', 'aria-hidden': 'true' }, '→')),
+          h('span', { className: 'eng-sv-card-desc' }, description));
+      }
+
+      if (page === 'home') {
+        return h('div', { className: 'eng-sv' },
+          h('div', { className: 'eng-sv-home' },
+            h('header', { className: 'eng-sv-home-head' },
+              h('h1', { tabIndex: -1, ref: titleRef }, '工程模式'),
+              h('p', null, '当前会话的设计工作台')),
+            h('section', { className: 'eng-sv-box', 'aria-label': '栏目入口' },
+              h('h2', null, '栏目入口'),
+              h('div', { className: 'eng-sv-cards' },
+                entry('daily', '日常使用', '查看主对话的压缩历史'),
+                entry('developer', '开发者使用', '开发者功能预留'))),
+            h('section', { className: 'eng-sv-box', 'aria-label': '画布' },
+              h('h2', null, '画布'),
+              h('div', { className: 'eng-sv-cast' },
+                h('span', { className: 'eng-sv-slot' }, 'AI 投屏占符位'))),
+            h('div', { className: 'eng-sv-home-pair' },
+              h('section', { className: 'eng-sv-box', 'aria-label': '工程流程' }, h('h2', null, '工程流程'), placeholder()),
+              h('section', { className: 'eng-sv-box', 'aria-label': '交付资料' }, h('h2', null, '交付资料'), placeholder()))));
+      }
+
+      var daily = page === 'daily';
       return h('div', { className: 'eng-sv' },
-        h('div', { className: 'eng-sv-head' },
-          h('span', { className: 'eng-sv-title' }, '工程模式'),
-          h('span', { className: 'eng-sv-sub' }, '主对话的压缩历史（L0 机械数值逐次保住）')),
-        h('div', { className: 'eng-sv-body' },
-          h(EngCompactPage, {
-            rootSessionId: sid,
-            selectedId: '',
-            forceTab: 'main',
-            label: '主对话',
-          })));
+        h('div', { className: 'eng-sv-home eng-sv-subpage' },
+          h('header', { className: 'eng-sv-toolbar' },
+            h('button', { className: 'eng-sv-back', type: 'button', onClick: function () { go('home'); } }, '← 栏目首页'),
+            h('h1', { tabIndex: -1, ref: titleRef }, daily ? '日常使用' : '开发者使用'),
+            h('button', { className: 'eng-sv-back', type: 'button', onClick: function () { go(daily ? 'developer' : 'daily'); } },
+              daily ? '切换到开发者使用' : '切换到日常使用')),
+          daily ? h('section', { className: 'eng-sv-box eng-sv-history', 'aria-label': '压缩历史' },
+            sid ? h(EngCompactPage, { key: sid, rootSessionId: sid, forceTab: 'main', sessionView: true })
+              : h('p', { className: 'eng-cp-empty', role: 'status' }, '正在识别当前会话…')) : null));
     }
 
 
@@ -5871,7 +5946,7 @@ window.__ModuleLoader__.load({
               h('div', { className: 'eng-row-txt' },
                 h('div', { className: 'eng-row-label' }, '是否启用工程模式的会话视图'),
                 h('div', { className: 'eng-row-hint' }, showEngView
-                  ? '对话页头多一个「工程模式」页签，里面是主对话的压缩历史。'
+                  ? '在对话页头显示「工程模式」页签，可打开日常使用和开发者使用栏目。'
                   : '已关闭：「工程模式」页签不出现（仅影响工程模式会话）。')),
               h(EngSwitch, {
                 bare: true,
@@ -6012,7 +6087,7 @@ window.__ModuleLoader__.load({
     var _engSettings = {
       useOwnSubagentPane: true,
       // ── 【新增·设置页「美化工程模式」→「是否启用工程模式的会话视图」】─────
-      // 控制官方 conversation.view 页签「工程模式」（里面是主对话的压缩历史）。
+      // 控制官方 conversation.view 页签「工程模式」。
       // 默认 true：装上就能看见；关掉只是不出现这个页签，不影响其它任何功能。
       // ⚠️ 它【只】对工程模式会话有效 —— 别的预设里该页签永远不存在。
       showEngConversationView: true,
