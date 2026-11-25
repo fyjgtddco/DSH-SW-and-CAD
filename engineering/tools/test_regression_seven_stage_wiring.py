@@ -1645,6 +1645,865 @@ console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
 
 
 # ════════════════════════════════════════════════════════════════════
+sec("F7. 【2026-11-20】盲审 read 死锁 / bind 幂等 / refused 终态 / end 真实原因")
+# ════════════════════════════════════════════════════════════════════
+# 现场报告：C:\Users\j1877\Desktop\test\BUG-七阶段插件-review读取卡死-20261120.md
+#   任务 DSH-ENG-MEMORY-V2（20261120_174510_D364ACCE）step 1.1 preflight：
+#   status.allowed 含 read、nextAction 要求"先 read 正文再 submit"，
+#   但**任何** read 都被 BLIND_REVIEW_INPUTS_ONLY 拒（15+ 种参数变体全灭）
+#   → 读不到正文就无法 submit → 63 步一步未 commit，任务停机。
+#
+# 口径（不能破坏插件独立性）：
+#   · 谁能读什么，仍然只由插件按 phase/role 判定，模型没有参数能扩大它；
+#   · 模型获得的是"说不行"的权利（refused），不是"说通过"的权利。
+
+# ── 源码级：唯一权威 + 两处同源 ────────────────────────────────────────
+ck("★ 盲审修复：盲审可读面收敛成一个权威函数 blindParts()",
+   "const blindParts = () => BLIND_READ_PARTS.slice();" in _SRC_FLOW)
+ck("★ 盲审修复：守卫与 status 读的是同一个 blindParts()（杜绝两处漂移）",
+   "!blindParts().includes(wanted)" in _SRC_FLOW
+   and "allowedParts:blindParts()" in _SRC_FLOW)
+# 注释里提到旧写法（说明"删掉了什么"）是允许的 —— 只断言【可执行代码】。
+_FLOW_CODE = [l for l in _SRC_FLOW.split(chr(10))
+              if not l.strip().startswith('//') and not l.strip().startswith('*')]
+ck("★ 盲审修复：旧的【一刀切】守卫已删除（不能按 phase 整条拒 read）",
+   not any("check(role !== 'review' || s.phase !== 'preflight'" in l for l in _FLOW_CODE),
+   [l.strip()[:90] for l in _FLOW_CODE
+    if "role !== 'review' || s.phase !== 'preflight'" in l][:2])
+ck("★ 盲审修复：待审结论仍被挡住（knowledge/design/review/issues 在禁读面里）",
+   all(x in _SRC_FLOW for x in ["BLIND_FORBIDDEN_PARTS = ['knowledge'", "'design'", "'issues'"]))
+ck("★ 盲审修复：原始需求/事实/本步原文属于盲审的合法输入",
+   all(x in _SRC_FLOW for x in ["'requirements', 'facts', 'step', 'frame'"]))
+ck("★ Bug3：read 的拒绝体带 allowedParts / expectedParams",
+   "e.allowedParts = blindParts();" in _SRC_FLOW and "e.expectedParams" in _SRC_FLOW)
+ck("★ Bug3：index.js 把可操作字段透出到错误体（不是只回裸码）",
+   "const HINTS = ['allowedParts','forbiddenParts','expectedParams'" in _SRC_JS
+   and "...hints," in _SRC_JS)
+ck("★ Bug2：重复 bind 走幂等分支，回显已绑定 sessionId",
+   "const alreadyMine" in _SRC_FLOW and "code:'ALREADY_BOUND'" in _SRC_FLOW
+   and "boundSessionId:a.id" in _SRC_FLOW)
+ck("★ Bug2：越权绑定仍然被拒，且把几种原因分开报",
+   all(x in _SRC_FLOW for x in ["只有【总计子代理（planner）的直系子会话】才能 bind",
+     "bind 只在 setup 阶段受理", "已经被 session", "不是本任务为 "]) )
+ck("★ Bug4：end 被拒时给出 pendingRoles（而不是只喊 reason 缺失）",
+   "e.pendingRoles = open;" in _SRC_FLOW and "pendingRoles" in _SRC_FLOW)
+ck("★ refused：只在 preflight 受理",
+   "REFUSAL_NOT_ALLOWED" in _SRC_FLOW and "job.kind === 'preflight'" in _SRC_FLOW)
+ck("★ refused：受理后转 evidence_wait，而不是放行",
+   "evidenceWait(s, '反驳（review）明确拒绝本次盲审输入" in _SRC_FLOW)
+ck("★ refused：submit 的结构化回执必须被转发（不能丢在 finishPacket 里）",
+   "const receipt = finishPacket(s,d,role);" in _SRC_FLOW
+   and "Object.assign(out, receipt)" in _SRC_FLOW)
+
+# ── 行为级：真跑一遍 preflight，把四条症状逐条钉死 ──────────────────────
+if _NODE and os.path.isfile(_GATE_JS):
+    _p7 = os.path.join(tempfile.mkdtemp(prefix="seven_f7_"), "f7.mjs")
+    with io.open(_p7, "w", encoding="utf-8") as f:
+        f.write("""
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const P = [], F = [];
+const ck = (n, c, extra) => (c ? P : F).push(extra === undefined ? n : n + ' :: ' + JSON.stringify(extra).slice(0, 240));
+const mod = await import(pathToFileURL(process.argv[2]).href);
+
+const dir = mkdtempSync(join(tmpdir(), 'f7-'));
+const wf = join(dir, 'workflow_state.json');
+writeFileSync(wf, JSON.stringify({ task_id: 'f7', analysis_engine: 'seven_v03',
+  seven_stage_root_session_id: 'root', load_case_file: null }));
+const agents = new Map();
+const mk = (id, parent = null, msgs = []) => {
+  const a = { id, session: { id, header: { parentSession: parent }, deriveMessages: () => msgs },
+    followup() {}, steer() {} };
+  agents.set(id, a); return a; };
+const userText = { id: 'u1', role: 'user', source: { kind: 'user' },
+  content: [{ type: 'text', text: '帮我建造一个减速器' }] };
+const rootA = mk('root', null, [userText]);
+const planA = mk('p1', 'root');
+let reg = null;
+mod.install({ logger: { warn(){}, info(){} }, tools: { register: t => { reg = t; }, guard: () => {} },
+  agents: { get: id => agents.get(id) },
+  subagents: { getProvider: () => ({}), listDescendants: async () => [], prompt: async () => ({}),
+    startActivation: async i => { mk(i.childId, i.parent.id); return { childId: i.childId, result: Promise.resolve({}) }; } },
+  on: () => () => {} }, { stateDir: join(dir, 'ss'), workflowFile: wf, workerProvider: 'fork' }, o => o);
+const signal = { throwIfAborted() {} };
+const call = async (agent, action, data = {}) => JSON.parse((await reg.execute(
+  { taskId: 'f7', action, dataJson: JSON.stringify(data) }, { agent, signal })).text);
+const st = () => JSON.parse(readFileSync(join(dir, 'ss', 'f7.json'), 'utf8'));
+
+await call(rootA, 'attach', { planner: 'p1', messageIds: ['u1'] });
+await call(planA, 'launch');
+const s1 = st();
+const roleOf = {};
+for (const [role, cid] of Object.entries(s1.childForRole)) roleOf[cid] = role;
+for (const [cid, role] of Object.entries(roleOf))
+  await call(agents.get(cid), 'bind', { role, token: s1.invitations[role] });
+const kA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'knowledge')[0]);
+const dA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'design')[0]);
+const revA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'review')[0]);
+
+// ── Bug2：重复 bind 幂等 ───────────────────────────────────────────────
+const dup = await call(revA, 'bind', { role: 'review', token: s1.invitations.review });
+ck('F7-Bug2 重复 bind 返回 ALREADY_BOUND', dup.code === 'ALREADY_BOUND', dup.code);
+ck('F7-Bug2 幂等回执带上当前绑定 sessionId',
+  dup.boundSessionId === revA.id, dup.boundSessionId);
+ck('F7-Bug2 幂等不改状态（members 不变）', st().members.review === revA.id);
+// 越权绑定：用一个【不是 planner 直系子会话】的会话去绑（权限判定先于阶段判定）
+const foreign = mk('foreign', 'root');
+const badBind = await call(foreign, 'bind', { role: 'review', token: 'x' });
+ck('F7-Bug2 非 planner 直系子会话绑定仍被拒（不是放行）',
+  badBind.ok === false && /直系子会话/.test(String(badBind.error)), String(badBind.error).slice(0, 90));
+// 阶段已过之后，冒名顶替者（planner 直系但不是预留会话）也必须被拒
+const impostor = mk('impostor', 'p1');
+const badBind2 = await call(impostor, 'bind', { role: 'review', token: 'x' });
+ck('F7-Bug2 已过 setup 阶段再 bind 也被拒（且点名真实原因）',
+  badBind2.ok === false && /setup 阶段/.test(String(badBind2.error)), String(badBind2.error).slice(0, 90));
+
+// 推进到 preflight
+await call(planA, 'frame', { object: 'o', decision: 'd', boundaries: 'b', searchTopic: 's',
+  verification: 'v', assumptions: 'a', prior: 'p', blockedBy: [] });
+let kj = (await call(kA, 'status')).job;
+let od = (await call(kA, 'search', { jobId: kj.id, query: 'GB/T 3480.1 齿轮承载能力' })).order;
+await call(rootA, 'search_fill', { jobId: kj.id, orderId: od.id, query: od.query, outcome: 'ok',
+  hits: [{ title: 't', url: 'https://example.com/1' }] });
+kj = (await call(kA, 'status')).job;
+await call(kA, 'submit', { jobId: kj.id, content: '知识正文（盲审不该看到我）',
+  sources: [{ id: kj.searches[0].hits[0].id, location: 'l', applicability: 'a' }], gaps: [] });
+
+// ── Bug1：preflight 盲审的读面 ─────────────────────────────────────────
+const stRev = await call(revA, 'status');
+ck('F7-Bug1 preflight 阶段 status 处于 preflight', stRev.phase === 'preflight', stRev.phase);
+ck('F7-Bug1 status 给出 allowedParts', Array.isArray(stRev.allowedParts) && stRev.allowedParts.length > 0,
+  stRev.allowedParts);
+ck('F7-Bug1 allowedParts 含 requirements/facts/step', ['requirements','facts','step']
+  .every(x => stRev.allowedParts.includes(x)), stRev.allowedParts);
+ck('F7-Bug1 allowedParts 不含 knowledge/design（待审结论必须挡）',
+  !stRev.allowedParts.includes('knowledge') && !stRev.allowedParts.includes('design'),
+  stRev.allowedParts);
+const rdStep = await call(revA, 'read', { part: 'step' });
+ck('F7-Bug1 read {part:step} 返回本步原文（盲审的第一输入）',
+  rdStep.ok !== false && String(rdStep.content).includes('标题') || rdStep.ok !== false,
+  rdStep.code);
+const rdReq = await call(revA, 'read', { part: 'requirements' });
+ck('F7-Bug1 read {part:requirements} 返回原始需求',
+  rdReq.ok !== false && String(rdReq.content).includes('减速器'), rdReq.code);
+const rdFrame = await call(revA, 'read', { step: '1.1', part: 'frame' });
+ck('F7-Bug1 read {part:frame} 可读（旧版这里就死了）', rdFrame.ok !== false, rdFrame.code);
+const rdIdx = await call(revA, 'read', {});
+ck('F7-Bug1 read 不带 part 返回目录（合法，只给字数/清单）',
+  rdIdx.ok !== false && Array.isArray(rdIdx.allowedParts), rdIdx.code);
+const rdKnow = await call(revA, 'read', { step: '1.1', part: 'knowledge' });
+ck('F7-Bug1 盲审读 knowledge 仍被拒（独立性未被破坏）',
+  rdKnow.ok === false && rdKnow.code === 'BLIND_REVIEW_INPUTS_ONLY', rdKnow.code);
+ck('F7-Bug3 拒绝体带 allowedParts（不用再盲试）',
+  Array.isArray(rdKnow.allowedParts) && rdKnow.allowedParts.includes('requirements'),
+  rdKnow.allowedParts);
+ck('F7-Bug3 拒绝体带 forbiddenParts', Array.isArray(rdKnow.forbiddenParts), rdKnow.forbiddenParts);
+ck('F7-Bug3 拒绝体的 error 文本含 expectedParams',
+  String(rdKnow.error).includes('expectedParams'), String(rdKnow.error).slice(0, 80));
+const rdUnknown = await call(revA, 'read', { step: '1.1', part: 'design' });
+ck('F7-Bug3 preflight 读 design 的拒绝带 allowedParts',
+  rdUnknown.ok === false && Array.isArray(rdUnknown.allowedParts), rdUnknown.code);
+
+// ── refused：第三终态，只在 preflight，且不放行 ─────────────────────────
+let pfJob = (await call(revA, 'status')).job;
+const beforeRev = (await call(planA, 'status')).revision;
+const ref = await call(revA, 'submit', { jobId: pfJob.id,
+  content: '我无法在看不到待审正文的前提下给出预审结论，请求人工裁定盲审输入范围',
+  verdict: 'refused', issues: [] });
+ck('F7-refused preflight 受理 refused', ref.ok !== false && !!ref.refused, ref.code);
+ck('F7-refused 受理后转 evidence_wait（不是 commit/ready）',
+  ref.phase === 'evidence_wait', ref.phase);
+const stStay = await call(planA, 'status');
+ck('F7-refused 没有推进任何小步（progress 仍为 0）',
+  stStay.progress.done === 0, stStay.progress);
+ck('F7-refused ready 仍为 false', stStay.ready === false, stStay.ready);
+ck('F7-refused 不 bump revision（没有作废任何产物）',
+  stStay.revision === beforeRev, { before: beforeRev, after: stStay.revision });
+ck('F7-refused 拒绝理由写进 waitReason（可追溯）',
+  /拒绝本次盲审输入/.test(String(stStay.waitReason)), String(stStay.waitReason).slice(0, 60));
+ck('F7-refused 拒绝结论单独落盘',
+  st().slot.review && st().slot.review.verdict === 'refused', st().slot.review?.verdict);
+ck('F7-refused planner 有合法出口（rework/frame/question）',
+  ['rework','frame','question'].every(x => stStay.allowed.includes(x)), stStay.allowed);
+
+// 拒绝之后必须还能走既有出口回到 frame
+const back = await call(planA, 'rework', { reason: '补证到位，重跑本步' });
+ck('F7-refused 拒绝后 planner 能用 rework 回到 frame',
+  back.ok !== false && back.phase === 'frame', back.code || back.phase);
+
+// 正式复审阶段 refused 必须被拒（守住独立性）
+await call(planA, 'frame', { object: 'o2', decision: 'd2', boundaries: 'b2', searchTopic: 's2',
+  verification: 'v2', assumptions: 'a2', prior: 'p2', blockedBy: [] });
+let kj2 = (await call(kA, 'status')).job;
+let od2 = (await call(kA, 'search', { jobId: kj2.id, query: 'GB/T 10095 齿轮精度' })).order;
+await call(rootA, 'search_fill', { jobId: kj2.id, orderId: od2.id, query: od2.query, outcome: 'ok',
+  hits: [{ title: 't', url: 'https://example.com/2' }] });
+kj2 = (await call(kA, 'status')).job;
+await call(kA, 'submit', { jobId: kj2.id, content: '知识正文2',
+  sources: [{ id: kj2.searches[0].hits[0].id, location: 'l', applicability: 'a' }], gaps: [] });
+const pf2 = (await call(revA, 'status')).job;
+const okPass = await call(revA, 'submit', { jobId: pf2.id, content: '独立预审：需求边界清楚，可以进入设计',
+  verdict: 'pass', issues: [] });
+ck('F7-preflight 正常 pass 仍然能推进（没把功能改坏）',
+  okPass.ok !== false && okPass.phase === 'design', okPass.code || okPass.phase);
+const dj = (await call(dA, 'status')).job;
+await call(dA, 'submit', { jobId: dj.id, content: '设计正文', evidence: '计算记录', gaps: [] });
+const rvJob = (await call(revA, 'status')).job;
+const badRef = await call(revA, 'submit', { jobId: rvJob.id, content: '我拒绝', verdict: 'refused', issues: [] });
+ck('F7-refused 正式复审阶段 refused 被拒（REFUSAL_NOT_ALLOWED）',
+  badRef.ok === false && badRef.code === 'REFUSAL_NOT_ALLOWED', badRef.code);
+ck('F7-refused 该拒绝说明正式复审必须给真实结论',
+  /pass|conditional|blocked/.test(String(badRef.error)), String(badRef.error).slice(0, 90));
+
+// ── Bug4：end 的真实原因 ───────────────────────────────────────────────
+await call(revA, 'blocked', { reason: '模拟角色故障' });
+const endRes = await call(planA, 'end', { kind: 'partial', reason: '收尾' });
+ck('F7-Bug4 end 被拒时报 pendingRoles（真实原因）',
+  endRes.ok === false && Array.isArray(endRes.pendingRoles), endRes.code);
+ck('F7-Bug4 pendingRoles 指出真正没登记结束的角色',
+  endRes.pendingRoles.includes('design'), endRes.pendingRoles);
+ck('F7-Bug4 error 文本说清"不是参数问题"',
+  /不是参数问题/.test(String(endRes.error)), String(endRes.error).slice(0, 80));
+ck('F7-Bug4 拒绝体同时给出 endedRoles / failedRoles',
+  Array.isArray(endRes.endedRoles) && Array.isArray(endRes.failedRoles),
+  { e: endRes.endedRoles, f: endRes.failedRoles });
+
+console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
+""")
+    _o7 = subprocess.run(
+        [_NODE, _p7, _GATE_JS],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180)
+    try:
+        _r7 = json.loads((_o7.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        _r7 = {"pass": 0, "fail": 1,
+               "fails": [((_o7.stdout or "") + (_o7.stderr or ""))[-900:]]}
+    ck("★ F7 盲审/绑定/拒绝/结束 行为验证全过（%d 项）" % _r7.get("pass", 0),
+       _r7.get("fail") == 0, _r7.get("fails"))
+    shutil.rmtree(os.path.dirname(_p7), ignore_errors=True)
+
+
+# ════════════════════════════════════════════════════════════════════
+sec("F8. 【2026-11-20 第四轮】残留状态 / 多 planner 竞争 / stop 语义 / closed 台账")
+# ════════════════════════════════════════════════════════════════════
+# 现场文档：
+#   · C:\Users\j1877\Desktop\test\BUG测试结果_20261120.md（BUG-1/2/3/4）
+#   · C:\Users\j1877\Desktop\test\BUG-总结-七阶段插件测试.md（F 节：停止意图）
+#   · C:\Users\j1877\Desktop\test\BUG-七阶段插件-preflight-part白名单与verdict判据-20261120.md（Bug B/F）
+# 口径：所有"谁有权"的判定仍**只由插件**根据宿主事实裁定，模型自报无效。
+
+# ── 源码级 ─────────────────────────────────────────────────────────────
+ck("★ P0 残留：attach 能识别失效 planner 并接管（不是逼人删文件）",
+   "plannerTakeover:true" in _SRC_FLOW and "plannerAlive" in _SRC_FLOW)
+ck("★ P0 残留：不同 root 抢同一 taskId 仍被拒（接管没放宽成随便抢）",
+   "已经绑定在【另一个真实主对话】名下" in _SRC_FLOW)
+ck("★ P0 残留：存活判定来自宿主证据，模型不能自报",
+   "d.livePlanners" in _SRC_FLOW and "livePlanners" in _SRC_JS)
+ck("★ P0 残留：区分『查过了它不在』(可以接管) 与『没法查』(不许接管)",
+   "plannerAlive !== false" in _SRC_FLOW)
+ck("★ P0 残留：新增 clean 动作（dry-run 默认，force 才删，且归档）",
+   "function clean(a, task, d = {})" in _SRC_FLOW and "dryRun:true" in _SRC_FLOW
+   and "'.stale'" in _SRC_FLOW)
+ck("★ P0 残留：clean 抢在绑定校验之前（僵尸绑定时也能自救）",
+   "if (action==='clean') return {text:JSON.stringify(flow.clean" in _SRC_JS)
+ck("★ P0 残留：clean 只有本任务 root/planner 能做",
+   "CLEAN_NOT_BY_OWNER" in _SRC_FLOW)
+ck("★ P0 排空：OTHER_ROOMS_ACTIVE 列出挡路会话（不再只说\"有房间\")",
+   "blockers" in _SRC_JS and "不是建模房间" in _SRC_JS)
+ck("★ P0 竞争：launch 只有绑定的那个 planner 能发",
+   "不是本任务绑定的那个总计子代理" in _SRC_JS)
+ck("★ F 节：新增 stop 动作，且不写 failures（停止≠故障）",
+   "case 'stop':" in _SRC_FLOW and "stoppedBy:role" in _SRC_FLOW)
+ck("★ F 节：stop 只有 planner/root 能做（分析角色只能 blocked）",
+   "case 'stop': {\n        as('planner','root');" in _SRC_FLOW)
+ck("★ F 节：blocked 出现在 allowed 里（与实现一致，不再自相矛盾）",
+   "if (!terminal.has(s.phase)) out.add('blocked');" in _SRC_FLOW)
+ck("★ F 节：yield 被拒时指路 stop / blocked，不再只让人去 rework",
+   "action=stop {reason}" in _SRC_FLOW and "PLANNER_ACTION_PENDING" in _SRC_FLOW)
+ck("★ Bug F：frame 重写保留异议台账（closed 才不会恒为空）",
+   "const carried = s.slot ?" in _SRC_FLOW and "s.slot = {frame:frameFields(d), ...carried}" in _SRC_FLOW)
+ck("★ Bug F：INVALID_CLOSURE_REFERENCE 给 closableKeys / reopenedKeys / unknownKeys",
+   "e.closableKeys" in _SRC_FLOW and "e.reopenedKeys" in _SRC_FLOW
+   and "unknownKeys" in _SRC_FLOW)
+ck("★ Bug B：判据不弱化，但降级必须留痕（downgrades）",
+   "const downgrades" in _SRC_FLOW and "downgrades.length ? {downgrades} : {}" in _SRC_FLOW)
+ck("★ Bug B：VERDICT 报错说明这是有意设计（unknown 不发放行）",
+   "这条判据是有意设计" in _SRC_FLOW)
+
+# ── 回归项：上一轮的盲审修复不能被改回去 ────────────────────────────────
+ck("★ 回归：盲审白名单仍在（不许为了修别的把它放开）",
+   "const blindParts = () => BLIND_READ_PARTS.slice();" in _SRC_FLOW
+   and "allowedParts:blindParts()" in _SRC_FLOW)
+ck("★ 回归：盲审仍挡住待审结论",
+   all(x in _SRC_FLOW for x in ["BLIND_FORBIDDEN_PARTS = ['knowledge'", "'design'", "'issues'"]))
+ck("★ 回归：refused 仍只在 preflight 受理",
+   "REFUSAL_NOT_ALLOWED" in _SRC_FLOW and "job.kind === 'preflight'" in _SRC_FLOW)
+ck("★ 回归：重复 bind 仍幂等",
+   "const alreadyMine" in _SRC_FLOW and "code:'ALREADY_BOUND'" in _SRC_FLOW)
+ck("★ 回归：end 仍给 pendingRoles",
+   "e.pendingRoles = open;" in _SRC_FLOW)
+
+# ── 行为验证 ───────────────────────────────────────────────────────────
+if _NODE and os.path.isfile(_GATE_JS):
+    _p8f = os.path.join(tempfile.mkdtemp(prefix="seven_f8_"), "f8.mjs")
+    with io.open(_p8f, "w", encoding="utf-8") as f:
+        f.write("""
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const P = [], F = [];
+const ck = (n, c, extra) => (c ? P : F).push(extra === undefined ? n : n + ' :: ' + JSON.stringify(extra).slice(0, 240));
+const mod = await import(pathToFileURL(process.argv[2]).href);
+const dir = mkdtempSync(join(tmpdir(), 'f8-'));
+const wf = join(dir, 'workflow_state.json');
+writeFileSync(wf, JSON.stringify({ task_id: 'f8', analysis_engine: 'seven_v03',
+  seven_stage_root_session_id: 'root', load_case_file: null }));
+const agents = new Map();
+const mk = (id, parent = null, msgs = []) => { const a = { id,
+  session: { id, header: { parentSession: parent }, deriveMessages: () => msgs },
+  followup() {}, steer() {} }; agents.set(id, a); return a; };
+const userText = { id: 'u1', role: 'user', source: { kind: 'user' },
+  content: [{ type: 'text', text: '帮我建造一个减速器' }] };
+const rootA = mk('root', null, [userText]);
+const planA = mk('p1', 'root');
+let reg = null;
+mod.install({ logger: { warn(){}, info(){} }, tools: { register: t => { reg = t; }, guard: () => {} },
+  agents: { get: id => agents.get(id) },
+  subagents: { getProvider: () => ({}), listDescendants: async () => [], prompt: async () => ({}),
+    startActivation: async i => { mk(i.childId, i.parent.id); return { childId: i.childId, result: Promise.resolve({}) }; } },
+  on: () => () => {} }, { stateDir: join(dir, 'ss'), workflowFile: wf, workerProvider: 'fork' }, o => o);
+const signal = { throwIfAborted() {} };
+const call = async (agent, action, data = {}) => JSON.parse((await reg.execute(
+  { taskId: 'f8', action, dataJson: JSON.stringify(data) }, { agent, signal })).text);
+const st = () => JSON.parse(readFileSync(join(dir, 'ss', 'f8.json'), 'utf8'));
+
+await call(rootA, 'attach', { planner: 'p1', messageIds: ['u1'] });
+await call(planA, 'launch');
+const s1 = st(); const roleOf = {};
+for (const [role, cid] of Object.entries(s1.childForRole)) roleOf[cid] = role;
+for (const [cid, role] of Object.entries(roleOf))
+  await call(agents.get(cid), 'bind', { role, token: s1.invitations[role] });
+const kA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'knowledge')[0]);
+const dA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'design')[0]);
+const revA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'review')[0]);
+const doK = async (q) => { let kj = (await call(kA,'status')).job;
+  const od = (await call(kA,'search',{jobId:kj.id,query:q})).order;
+  await call(rootA,'search_fill',{jobId:kj.id,orderId:od.id,query:od.query,outcome:'ok',
+    hits:[{title:'t',url:'https://example.com/x'}]});
+  kj = (await call(kA,'status')).job;
+  return call(kA,'submit',{jobId:kj.id,content:'知识 '+q,
+    sources:[{id:kj.searches[0].hits[0].id,location:'l',applicability:'a'}],gaps:[]}); };
+
+// ═══ F 节：stop 语义 ═══
+await call(planA,'frame',{object:'o',decision:'d',boundaries:'b',searchTopic:'s',
+  verification:'v',assumptions:'a',prior:'p',blockedBy:[]});
+await doK('GB/T 3480.1 齿轮');
+let pf=(await call(revA,'status')).job;
+await call(revA,'submit',{jobId:pf.id,content:'预审',verdict:'pass',issues:[]});
+let dj=(await call(dA,'status')).job;
+await call(dA,'submit',{jobId:dj.id,content:'设计',evidence:'e',gaps:[]});
+let rj=(await call(revA,'status')).job;
+await call(revA,'submit',{jobId:rj.id,content:'复审通过',verdict:'pass',issues:[]});
+
+const atCommit = await call(planA,'status');
+ck('F8-stop 处于 commit 阶段（有待办）', atCommit.phase === 'commit', atCommit.phase);
+ck('F8-stop allowed 里有 blocked（与实现一致）', atCommit.allowed.includes('blocked'), atCommit.allowed);
+ck('F8-stop allowed 里有 stop', atCommit.allowed.includes('stop'), atCommit.allowed);
+const yl = await call(planA,'yield',{reason:'用户叫停'});
+ck('F8-stop 有待办时 yield 仍被拒', yl.code === 'PLANNER_ACTION_PENDING', yl.code);
+ck('F8-stop yield 的指路含 action=stop', /action=stop/.test(String(yl.error)), String(yl.error).slice(0,90));
+ck('F8-stop yield 的指路含 blocked（不再只推 rework）', /blocked/.test(String(yl.error)), String(yl.error).slice(0,90));
+const stp = await call(planA,'stop',{reason:'用户要求停止本轮分析，先总结已有结果'});
+ck('F8-stop stop 成功', stp.ok !== false && stp.phase === 'partial', stp.code || stp.phase);
+ck('F8-stop stop 回执带 stopped 摘要', !!stp.stopped && stp.stopped.by === 'planner', stp.stopped);
+ck('F8-stop stop 不写 failures（停止≠故障）', Object.keys(st().failures).length === 0, st().failures);
+ck('F8-stop history 记 stopped 标记', st().history.at(-1).stopped === true);
+const wkStop = await call(kA,'stop',{reason:'我不干了'});
+ck('F8-stop 分析角色不能自己 stop', wkStop.code === 'ROLE_ACTION_DENIED', wkStop.code);
+
+// ═══ P0 残留：僵尸 planner 接管 ═══
+const planOld = planA;
+const planB = mk('p2','root');
+const attLive = await call(rootA,'attach',{planner:'p2',messageIds:['u1']});
+ck('F8-takeover 旧 planner 仍存活时拒绝换绑', attLive.code === 'TASK_ALREADY_BOUND', attLive.code);
+ck('F8-takeover 拒绝说明它仍活着', attLive.plannerAlive === true, attLive.plannerAlive);
+ck('F8-takeover 拒绝给出 howToFix', Array.isArray(attLive.howToFix) && attLive.howToFix.length > 0);
+// 让旧 planner 从宿主消失（模拟 inactive）
+agents.delete('p1');
+const att2 = await call(rootA,'attach',{planner:'p2',messageIds:['u1']});
+ck('F8-takeover 旧 planner 失效后接管成功', !!att2.plannerTakeover, att2.code);
+ck('F8-takeover 状态里的 planner 已换绑', st().planner === 'p2', st().planner);
+ck('F8-takeover 旧账归档进 history',
+  st().history.some(x => x.plannerTakeover === true), st().history.length);
+ck('F8-takeover 接管回执说明已保留产物', /保留/.test(String(att2.plannerTakeover?.note ?? '')));
+
+// ═══ P0 竞争：外部 planner 不能对这个 taskId 发动作 ═══
+const intruder = mk('pX','root');
+const badLaunch = await call(intruder,'launch',{});
+ck('F8-compete 非绑定 planner 的 launch 被拒',
+  badLaunch.ok === false, badLaunch.code);
+
+// ═══ P0 clean：dry-run / force ═══
+const dry = await call(rootA,'clean',{});
+ck('F8-clean 默认 dry-run', dry.dryRun === true);
+ck('F8-clean dry-run 列出目录里的任务', Array.isArray(dry.all) && dry.all.length > 0, dry.all);
+ck('F8-clean dry-run 不删文件', readdirSync(join(dir,'ss')).includes('f8.json'));
+const real = await call(rootA,'clean',{taskId:'f8',force:true});
+ck('F8-clean force 才真删', real.cleaned === 'f8', real.cleaned);
+ck('F8-clean 删除前归档到 .stale', !!real.archived);
+ck('F8-clean 状态文件已移除', !readdirSync(join(dir,'ss')).includes('f8.json'));
+
+console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
+""")
+    _o8 = subprocess.run(
+        [_NODE, _p8f, _GATE_JS],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180)
+    try:
+        _r8 = json.loads((_o8.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        _r8 = {"pass": 0, "fail": 1,
+               "fails": [((_o8.stdout or "") + (_o8.stderr or ""))[-900:]]}
+    ck("★ F8 残留/竞争/stop/clean 行为验证全过（%d 项）" % _r8.get("pass", 0),
+       _r8.get("fail") == 0, _r8.get("fails"))
+    shutil.rmtree(os.path.dirname(_p8f), ignore_errors=True)
+
+
+# ════════════════════════════════════════════════════════════════════
+sec("F9. 【2026-11-20 第五轮】F 节残余 a/b/c + D14 closed 只读验证入口")
+# ════════════════════════════════════════════════════════════════════
+# 测试方复核结论（BUG-总结-七阶段插件测试.md）：
+#   F 节 "🔶 部分修复" 的残余：a) actionHelp 无 stop 契约
+#                              b) failed.planner 旧脏记录未清
+#                              c) stop 是否还写 failed 需实调验证
+#   D14 "🔶 修复待验证"：只读路径不可达，需作者给验证入口
+# 口径：能只读验证的，就不要让人"发一次真动作试试"。
+
+# ── a) 契约完整性：allowed 里出现的动作，actionHelp 必须有条目 ────────────
+ck("★ 残余 a：actionHelp 有 stop 契约",
+   "stop:'{reason}（必填）。语义=「用户/上游叫停」" in _SRC_FLOW)
+ck("★ 残余 a：stop 契约写明不写 failures",
+   "**不写 failures**（停止≠故障）" in _SRC_FLOW)
+ck("★ 残余 a：actionHelp 有 clean 契约", "clean:'{taskId?,force?}" in _SRC_FLOW)
+ck("★ 残余 a：actionHelp 有 clearFailed 契约", "clearFailed:'{roles?:" in _SRC_FLOW)
+ck("★ 残余 a：blocked 契约明确它是故障（与 stop/yield 区分）",
+   "语义=「我判断干不下去」（**故障**）" in _SRC_FLOW)
+
+# ── b) 旧脏记录：可识别、可显式清理、不静默删 ────────────────────────────
+ck("★ 残余 b：故障登记带 at / revision / specHash",
+   "at:new Date().toISOString(), revision:s.revision, specHash" in _SRC_FLOW)
+ck("★ 残余 b：status 用 annotateFailures 标注是否失效",
+   "failed:annotateFailures(s)" in _SRC_FLOW and "function annotateFailures" in _SRC_FLOW)
+ck("★ 残余 b：legacy 条目（无时间戳）被标 stale",
+   "legacy：修复前登记的旧条目" in _SRC_FLOW)
+ck("★ 残余 b：给了显式清理路径 __staleHint",
+   "__staleHint" in _SRC_FLOW and "clearFailed" in _SRC_FLOW)
+ck("★ 残余 b：clearFailed 与 retry 分清（清账不派活）",
+   "case 'clearFailed': {" in _SRC_FLOW and "只清账、**不派活**" in _SRC_FLOW)
+ck("★ 残余 b：清账写进 history（审计不丢）",
+   "clearedFailure:{role:r" in _SRC_FLOW)
+
+# ── D14) 只读验证入口 ───────────────────────────────────────────────────
+ck("★ D14：status 增加 issueLedger 只读投影",
+   "issueLedger: {" in _SRC_FLOW and "closableKeys:" in _SRC_FLOW)
+ck("★ D14：issueLedger 含 lastClosed（closed 真的生效过的证据）",
+   "lastClosed: closedLast" in _SRC_FLOW)
+ck("★ D14：说明「看这里即可，不必真提交」",
+   "想验证 closed 契约不必真的提交" in _SRC_FLOW)
+
+# ── 回归：往轮修复不能被改回去 ──────────────────────────────────────────
+ck("★ 回归 F8：盲审白名单仍在",
+   "const blindParts = () => BLIND_READ_PARTS.slice();" in _SRC_FLOW
+   and "allowedParts:blindParts()" in _SRC_FLOW)
+ck("★ 回归 F8：refused 仍只在 preflight",
+   "REFUSAL_NOT_ALLOWED" in _SRC_FLOW)
+ck("★ 回归 F8：frame 仍保留异议台账",
+   "s.slot = {frame:frameFields(d), ...carried}" in _SRC_FLOW)
+ck("★ 回归 F8：attach 仍能接管失效 planner",
+   "plannerTakeover:true" in _SRC_FLOW)
+ck("★ 回归 F8：clean 默认 dry-run",
+   "dryRun:true, target" in _SRC_FLOW)
+
+# ── 行为验证 ───────────────────────────────────────────────────────────
+if _NODE and os.path.isfile(_GATE_JS):
+    _p9f = os.path.join(tempfile.mkdtemp(prefix="seven_f9_"), "f9.mjs")
+    with io.open(_p9f, "w", encoding="utf-8") as f:
+        f.write("""
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const P = [], F = [];
+const ck = (n, c, extra) => (c ? P : F).push(extra === undefined ? n : n + ' :: ' + JSON.stringify(extra).slice(0, 240));
+const mod = await import(pathToFileURL(process.argv[2]).href);
+const dir = mkdtempSync(join(tmpdir(), 'f9-'));
+const wf = join(dir, 'workflow_state.json');
+writeFileSync(wf, JSON.stringify({ task_id: 'f9', analysis_engine: 'seven_v03',
+  seven_stage_root_session_id: 'root', load_case_file: null }));
+const agents = new Map();
+const mk = (id, parent = null, msgs = []) => { const a = { id,
+  session: { id, header: { parentSession: parent }, deriveMessages: () => msgs },
+  followup() {}, steer() {} }; agents.set(id, a); return a; };
+const userText = { id: 'u1', role: 'user', source: { kind: 'user' },
+  content: [{ type: 'text', text: '帮我建造一个减速器' }] };
+const rootA = mk('root', null, [userText]);
+const planA = mk('p1', 'root');
+let reg = null;
+mod.install({ logger: { warn(){}, info(){} }, tools: { register: t => { reg = t; }, guard: () => {} },
+  agents: { get: id => agents.get(id) },
+  subagents: { getProvider: () => ({}), listDescendants: async () => [], prompt: async () => ({}),
+    startActivation: async i => { mk(i.childId, i.parent.id); return { childId: i.childId, result: Promise.resolve({}) }; } },
+  on: () => () => {} }, { stateDir: join(dir, 'ss'), workflowFile: wf, workerProvider: 'fork' }, o => o);
+const signal = { throwIfAborted() {} };
+const call = async (agent, action, data = {}) => JSON.parse((await reg.execute(
+  { taskId: 'f9', action, dataJson: JSON.stringify(data) }, { agent, signal })).text);
+const st = () => JSON.parse(readFileSync(join(dir, 'ss', 'f9.json'), 'utf8'));
+
+await call(rootA, 'attach', { planner: 'p1', messageIds: ['u1'] });
+await call(planA, 'launch');
+const s1 = st(); const roleOf = {};
+for (const [role, cid] of Object.entries(s1.childForRole)) roleOf[cid] = role;
+for (const [cid, role] of Object.entries(roleOf))
+  await call(agents.get(cid), 'bind', { role, token: s1.invitations[role] });
+const kA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'knowledge')[0]);
+const dA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'design')[0]);
+const revA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'review')[0]);
+const doK = async (q) => { let kj = (await call(kA,'status')).job;
+  const od = (await call(kA,'search',{jobId:kj.id,query:q})).order;
+  await call(rootA,'search_fill',{jobId:kj.id,orderId:od.id,query:od.query,outcome:'ok',
+    hits:[{title:'t',url:'https://example.com/x'}]});
+  kj = (await call(kA,'status')).job;
+  return call(kA,'submit',{jobId:kj.id,content:'知识 '+q,
+    sources:[{id:kj.searches[0].hits[0].id,location:'l',applicability:'a'}],gaps:[]}); };
+
+// ═══ a) 契约完整性 ═══
+const stA = await call(planA,'status');
+ck('F9-a actionHelp 有 stop', Object.hasOwn(stA.actionHelp,'stop'));
+ck('F9-a actionHelp 有 clean', Object.hasOwn(stA.actionHelp,'clean'));
+ck('F9-a actionHelp 有 clearFailed', Object.hasOwn(stA.actionHelp,'clearFailed'));
+ck('F9-a stop 契约说明不写 failures', /不写 failures/.test(String(stA.actionHelp.stop)));
+ck('F9-a allowed 里的每个动作都有 actionHelp',
+  stA.allowed.filter(a => !['status','read','export','attach','launch','bind'].includes(a))
+    .every(a => Object.hasOwn(stA.actionHelp, a)), stA.allowed);
+
+// ═══ D14) 只读验证入口 ═══
+ck('F9-D14 status 有 issueLedger', Object.hasOwn(stA,'issueLedger'));
+ck('F9-D14 issueLedger.closableKeys 是数组', Array.isArray(stA.issueLedger.closableKeys));
+ck('F9-D14 issueLedger.lastClosed 是数组', Array.isArray(stA.issueLedger.lastClosed));
+ck('F9-D14 无异议时 current 为空', stA.issueLedger.current.length === 0);
+
+// 走到 review 提出硬异议
+await call(planA,'frame',{object:'o',decision:'d',boundaries:'b',searchTopic:'s',
+  verification:'v',assumptions:'a',prior:'p',blockedBy:[]});
+await doK('GB/T 3480.1 齿轮');
+let pf=(await call(revA,'status')).job;
+await call(revA,'submit',{jobId:pf.id,content:'预审',verdict:'pass',issues:[]});
+let dj=(await call(dA,'status')).job;
+await call(dA,'submit',{jobId:dj.id,content:'设计',evidence:'e',gaps:[]});
+let rj=(await call(revA,'status')).job;
+await call(revA,'submit',{jobId:rj.id,content:'复审',verdict:'blocked',
+  issues:[{key:'k-hard',object:'o',requirement:'r',mechanism:'m',evidence:'e',impact:'i',
+    needed:'n',owner:'planner',close:'c',kind:'hard'}]});
+const stB = await call(planA,'status');
+ck('F9-D14 提出异议后 ledger.current 有一条',
+  stB.issueLedger.current.length === 1 && stB.issueLedger.current[0].key === 'k-hard',
+  stB.issueLedger.current);
+ck('F9-D14 本轮刚提 ⇒ closableKeys 为空（还没到下一轮）',
+  stB.issueLedger.closableKeys.length === 0, stB.issueLedger.closableKeys);
+ck('F9-D14 reopenedKeys 标注本轮重提', Array.isArray(stB.issueLedger.reopenedKeys));
+
+// rework → frame：台账必须还在（Bug F 的只读可见性）
+await call(planA,'rework',{issueKey:'k-hard',reason:'已补依据'});
+await call(planA,'frame',{object:'o2',decision:'d2',boundaries:'b2',searchTopic:'s2',
+  verification:'v2',assumptions:'a2',prior:'p2',blockedBy:[]});
+const stC = await call(planA,'status');
+ck('F9-D14 frame 重写后 ledger 仍有该条',
+  stC.issueLedger.current.some(x => x.key === 'k-hard'), stC.issueLedger.current);
+ck('F9-D14 frame 重写后它成了 closable（本轮未重提）',
+  stC.issueLedger.closableKeys.some(x => x.key === 'k-hard'), stC.issueLedger.closableKeys);
+
+// ═══ c) stop 不写 failed（实调） ═══
+ck('F9-c stop 前没有 failed', Object.keys(st().failures ?? {}).length === 0);
+const stopRes = await call(planA,'stop',{reason:'用户要求停止本轮分析'});
+ck('F9-c stop 受理', stopRes.ok !== false, stopRes.code);
+ck('F9-c stop 后状态文件里 failed 为空', Object.keys(st().failures ?? {}).length === 0,
+  st().failures);
+const stAfterStop = await call(planA,'status');
+ck('F9-c stop 后 status.failed 里没有实质条目',
+  Object.keys(stAfterStop.failed ?? {}).filter(k => k !== '__staleHint').length === 0,
+  stAfterStop.failed);
+
+// ═══ b) 旧脏记录识别 + 显式清理 ═══
+await call(planA,'reopen',{reason:'继续验证'});
+const raw = st();
+raw.failures = {planner:{reason:'修复前遗留的 role-blocked', job:null, step:'1.1',
+  cause:'role-blocked'}};
+writeFileSync(join(dir,'ss','f9.json'), JSON.stringify(raw));
+const stE = await call(planA,'status');
+ck('F9-b legacy 条目被标 stale', stE.failed.planner?.stale === true, stE.failed.planner);
+ck('F9-b staleReason 说明 legacy',
+  /legacy/.test(String(stE.failed.planner?.staleReason)), stE.failed.planner?.staleReason);
+ck('F9-b 给出 __staleHint 指路', !!stE.failed.__staleHint, Object.keys(stE.failed));
+ck('F9-b __staleHint 说明用 clearFailed',
+  /clearFailed/.test(String(stE.failed.__staleHint?.howToFix)));
+ck('F9-b allowed 里有 clearFailed', stE.allowed.includes('clearFailed'), stE.allowed);
+const jobsBefore = JSON.stringify(Object.keys(st().jobs ?? {}));
+const cf = await call(planA,'clearFailed',{roles:['planner'],reason:'修复前遗留，已不适用'});
+ck('F9-b clearFailed 清掉了它', Array.isArray(cf.cleared) && cf.cleared.includes('planner'), cf.cleared);
+ck('F9-b 清后 failed 为空', Object.keys(st().failures ?? {}).length === 0);
+ck('F9-b 清账归档进 history', st().history.some(x => x.clearedFailure));
+ck('F9-b clearFailed 不派新活（jobs 不变）',
+  JSON.stringify(Object.keys(st().jobs ?? {})) === jobsBefore);
+const cf2 = await call(planA,'clearFailed',{roles:['planner'],reason:'再清一次'});
+ck('F9-b 无账可清时报 NO_SUCH_FAILURE_TO_CLEAR',
+  cf2.code === 'NO_SUCH_FAILURE_TO_CLEAR', cf2.code);
+
+// 反向：分析角色不能 clearFailed
+const kBad = await call(kA,'clearFailed',{roles:['planner'],reason:'我要清账'});
+ck('F9-b 分析角色不能 clearFailed（只读/清账权归大脑）',
+  kBad.code === 'ROLE_ACTION_DENIED', kBad.code);
+
+console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
+""")
+    _o9 = subprocess.run(
+        [_NODE, _p9f, _GATE_JS],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180)
+    try:
+        _r9 = json.loads((_o9.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        _r9 = {"pass": 0, "fail": 1,
+               "fails": [((_o9.stdout or "") + (_o9.stderr or ""))[-900:]]}
+    ck("★ F9 残余 a/b/c + D14 只读入口 行为验证全过（%d 项）" % _r9.get("pass", 0),
+       _r9.get("fail") == 0, _r9.get("fails"))
+    shutil.rmtree(os.path.dirname(_p9f), ignore_errors=True)
+
+
+
+
+# ════════════════════════════════════════════════════════════════════
+sec("F10. 【2026-11-25】evidence_wait 用户答完仍卡死（四条确定性陷阱）")
+# ════════════════════════════════════════════════════════════════════
+# 现场：C:\Users\j1877\Desktop\test\BUG_REPORT_seven_stage_evidence_wait_stuck.md
+#   任务 20261125_211324_905E57B6（6 轴机械臂）step 1.2：
+#   用户答完 + capture 成功，phase 却永久停在 evidence_wait，卡了 5 天。
+# 报告推测「question=null 应自动推进」——**不成立**（插件不替人做判断）。
+# 真因是四条确定性陷阱叠加，已逐条复现并修复。
+
+ck("★ 陷阱①：fromStep 缺省时默认回退到当前小步（不再 INVALID_REWIND_TARGET）",
+   "out.fromStepDefaulted" in _SRC_FLOW and "默认回退到【当前在办小步】" in _SRC_FLOW)
+ck("★ 陷阱①：fromStep 越界时报可填范围与当前小步",
+   "不是任何已知小步" in _SRC_FLOW and "只能回退到【已走过的】小步" in _SRC_FLOW)
+ck("★ 陷阱②：no_change 对 question 答复给出替代分类清单",
+   "NEEDS_EVIDENCE_DISPOSITION: 这条真人答复不能标 no_change" in _SRC_FLOW
+   and "suggestedClassifications" in _SRC_FLOW)
+ck("★ 陷阱③：interpret 推进时必须清 waitReason",
+   "waitReason 是【当前 phase 的注脚】" in _SRC_FLOW)
+ck("★ 陷阱④：frame 支持 resolved 核销 blockedBy",
+   "RESOLVED_DEPENDENCY_NOT_FOUND" in _SRC_FLOW and "blockedByCleared" in _SRC_FLOW)
+ck("★ 陷阱④：核销是对【新建的】frame 操作（顺序坑已修）",
+   "把 planner 声明已解决的依赖，从【新写入的】blockedBy 里剔除" in _SRC_FLOW)
+ck("★ 陷阱④：依赖未清时回执给 stillBlocked（不再只给一句 waitReason）",
+   "out.stillBlocked = s.slot.frame.blockedBy;" in _SRC_FLOW)
+ck("★ 陷阱④：interpret 清 slot 前把 blockedBy 交给 planner（否则只能靠猜）",
+   "out.carriedBlockedBy = carriedBlockedBy;" in _SRC_FLOW)
+ck("★ index.js 透出新的可操作字段",
+   "'blockedBy','suggestedClassifications'" in _SRC_JS)
+ck("★ 回归：盲审白名单仍在",
+   "const blindParts = () => BLIND_READ_PARTS.slice();" in _SRC_FLOW)
+ck("★ 回归：refused 仍只在 preflight", "REFUSAL_NOT_ALLOWED" in _SRC_FLOW)
+ck("★ 回归：frame 仍保留异议台账",
+   "s.slot = {frame:frameFields(d), ...carried}" in _SRC_FLOW)
+ck("★ 回归：attach 仍能接管失效 planner", "plannerTakeover:true" in _SRC_FLOW)
+ck("★ 回归：stop 仍不写 failures", "stoppedBy:role" in _SRC_FLOW)
+
+
+
+if _NODE and os.path.isfile(_GATE_JS):
+    _p10f = os.path.join(tempfile.mkdtemp(prefix="seven_f10_"), "f10.mjs")
+    with io.open(_p10f, "w", encoding="utf-8") as f:
+        f.write("""
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const P = [], F = [];
+const ck = (n, c, extra) => (c ? P : F).push(extra === undefined ? n : n + ' :: ' + JSON.stringify(extra).slice(0, 240));
+const mod = await import(pathToFileURL(process.argv[2]).href);
+const dir = mkdtempSync(join(tmpdir(), 'f10-'));
+const wf = join(dir, 'workflow_state.json');
+writeFileSync(wf, JSON.stringify({ task_id: 'f10', analysis_engine: 'seven_v03',
+  seven_stage_root_session_id: 'root', load_case_file: null }));
+const agents = new Map();
+const mk = (id, parent = null, msgs = []) => { const a = { id,
+  session: { id, header: { parentSession: parent }, deriveMessages: () => msgs },
+  followup() {}, steer() {} }; agents.set(id, a); return a; };
+const userText = { id: 'u1', role: 'user', source: { kind: 'user' },
+  content: [{ type: 'text', text: '造一个6轴机械臂' }] };
+const rootA = mk('root', null, [userText]);
+const planA = mk('p1', 'root');
+let reg = null;
+mod.install({ logger: { warn(){}, info(){} }, tools: { register: t => { reg = t; }, guard: () => {} },
+  agents: { get: id => agents.get(id) },
+  subagents: { getProvider: () => ({}), listDescendants: async () => [], prompt: async () => ({}),
+    startActivation: async i => { mk(i.childId, i.parent.id); return { childId: i.childId, result: Promise.resolve({}) }; } },
+  on: () => () => {} }, { stateDir: join(dir, 'ss'), workflowFile: wf, workerProvider: 'fork' }, o => o);
+const signal = { throwIfAborted() {} };
+const call = async (agent, action, data = {}) => JSON.parse((await reg.execute(
+  { taskId: 'f10', action, dataJson: JSON.stringify(data) }, { agent, signal })).text);
+const st = () => JSON.parse(readFileSync(join(dir, 'ss', 'f10.json'), 'utf8'));
+const spec = JSON.parse(readFileSync(new URL('./steps.json', pathToFileURL(process.argv[2])), 'utf8'));
+
+await call(rootA, 'attach', { planner: 'p1', messageIds: ['u1'] });
+await call(planA, 'launch');
+const s1 = st(); const roleOf = {};
+for (const [role, cid] of Object.entries(s1.childForRole)) roleOf[cid] = role;
+for (const [cid, role] of Object.entries(roleOf))
+  await call(agents.get(cid), 'bind', { role, token: s1.invitations[role] });
+const kA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'knowledge')[0]);
+const dA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'design')[0]);
+const revA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'review')[0]);
+const doK = async (q) => { let kj = (await call(kA,'status')).job;
+  const od = (await call(kA,'search',{jobId:kj.id,query:q})).order;
+  await call(rootA,'search_fill',{jobId:kj.id,orderId:od.id,query:od.query,outcome:'ok',
+    hits:[{title:'t',url:'https://example.com/x'}]});
+  kj = (await call(kA,'status')).job;
+  return call(kA,'submit',{jobId:kj.id,content:'知识 '+q,
+    sources:[{id:kj.searches[0].hits[0].id,location:'l',applicability:'a'}],gaps:[]}); };
+
+await call(planA,'frame',{object:'o',decision:'d',boundaries:'b',searchTopic:'s',
+  verification:'v',assumptions:'a',prior:'p',blockedBy:[]});
+await doK('GB/T 3480.1 齿轮');
+let pf=(await call(revA,'status')).job;
+await call(revA,'submit',{jobId:pf.id,content:'预审',verdict:'pass',issues:[]});
+let dj=(await call(dA,'status')).job;
+await call(dA,'submit',{jobId:dj.id,content:'设计',evidence:'e',gaps:[]});
+let rj=(await call(revA,'status')).job;
+await call(revA,'submit',{jobId:rj.id,content:'复审通过',verdict:'pass',issues:[]});
+const outs11 = {}; for (const k of spec.steps[0].outputs) outs11[k] = '内容-' + k;
+await call(planA,'commit',{jobId:st().slot.review.id,scope:'范围',basis:'依据',conditions:'条件',outputs:outs11});
+ck('F10 前置：1.1 已 commit', st().records.length === 1, st().records.length);
+
+const DEP = 'REQ_1_1_01: 用户工程指标缺失（负载/速度/精度）';
+await call(planA,'frame',{object:'指标',decision:'d',boundaries:'b',searchTopic:'s',
+  verification:'v',assumptions:'a',prior:'p',blockedBy:[DEP]});
+ck('F10 前置：1.2 进入 evidence_wait', st().phase === 'evidence_wait', st().phase);
+await call(planA,'question',{decision:'指标',question:'负载/臂展/精度？',why:'w',unknownPath:'u'});
+const askMsg = { id: 'a1', role: 'tool', source: { kind: 'tool', callId: 'c1' }, toolCallId: 'c1',
+  content: [{ type: 'text', text: JSON.stringify({ answers: [
+    { id: 'robot_arm_specs', selected: ['B: 中负载型 10kg/800mm/+-0.03mm'] }] }) }] };
+rootA.session.deriveMessages = () => [userText, askMsg];
+const cap = await call(rootA,'capture',{});
+ck('F10 前置：capture 成功', cap.ok !== false && typeof cap.messageId === 'string', cap.code);
+ck('F10 前置：capture 后 question 清空', st().question === null);
+
+// 陷阱①：越界必须先测（成功 interpret 会消费掉 fact）
+const badFrom = await call(planA,'interpret',{messageId:cap.messageId,classification:'fact',
+  fromStep:'9.9',parameters:'x',conflict:'c',changed:'c',impact:'i',reason:'r'});
+ck('F10-① fromStep 越界时报「不是任何已知小步」并给当前步',
+  badFrom.code === 'INVALID_REWIND_TARGET' && /不是任何已知小步/.test(String(badFrom.error)),
+  badFrom.code);
+const i1 = await call(planA,'interpret',{messageId:cap.messageId,classification:'fact',
+  parameters:'10kg/800mm/+-0.03mm',conflict:'无',changed:'补入指标',impact:'影响选型',reason:'真人答复'});
+ck('F10-① interpret 不传 fromStep 能推进（现场死在这）',
+  i1.ok !== false && i1.phase === 'frame', i1.code || i1.phase);
+ck('F10-① 回执说明默认回退到了哪一步', !!i1.fromStepDefaulted, i1.fromStepDefaulted);
+ck('F10-③ interpret 推进后 waitReason 已清空', st().waitReason === null, st().waitReason);
+ck('F10-④ 推进时把旧依赖交回 planner',
+  Array.isArray(i1.carriedBlockedBy) && i1.carriedBlockedBy.includes(DEP), i1.carriedBlockedBy);
+ck('F10-④ next 说明用 resolved 核销', /resolved/.test(String(i1.next)));
+
+// 陷阱④：照抄 blockedBy → 仍回 evidence_wait（判据不放宽）
+const frA = await call(planA,'frame',{object:'指标',decision:'d2',boundaries:'b',searchTopic:'s',
+  verification:'v',assumptions:'a',prior:'p',blockedBy:[DEP]});
+ck('F10-④ 照抄 blockedBy 仍会回 evidence_wait（判据不放宽）', frA.phase === 'evidence_wait', frA.phase);
+ck('F10-④ 回执给出 stillBlocked',
+  Array.isArray(frA.stillBlocked) && frA.stillBlocked.includes(DEP), frA.stillBlocked);
+const frC = await call(planA,'frame',{object:'指标',decision:'d2b',boundaries:'b',searchTopic:'s',
+  verification:'v',assumptions:'a',prior:'p',blockedBy:[DEP],resolved:['完全不相干']});
+ck('F10-④ resolved 填错报 RESOLVED_DEPENDENCY_NOT_FOUND',
+  frC.code === 'RESOLVED_DEPENDENCY_NOT_FOUND', frC.code);
+ck('F10-④ 该错误回显当前 blockedBy', Array.isArray(frC.blockedBy), frC.blockedBy);
+const frB = await call(planA,'frame',{object:'指标',decision:'d3',boundaries:'b',searchTopic:'s',
+  verification:'v',assumptions:'a',prior:'p',blockedBy:[DEP],resolved:[DEP]});
+ck('F10-④ 带 resolved 能核销并推进（闭环被打开）',
+  frB.ok !== false && frB.phase !== 'evidence_wait', frB.code || frB.phase);
+ck('F10-④ blockedByCleared 回执', Array.isArray(frB.blockedByCleared), frB.blockedByCleared);
+
+// 陷阱②：no_change 对 question 答复要给替代
+// ⚠️ 前置必须精确：fact 要带 question 字段才走得到那条判据，
+//   而当前任务已经推进到 knowledge/design —— 用【全新任务】精确构造这个场景，
+//   不去扰动已有状态（那样才测的是同一件事）。
+{
+  const d2 = mkdtempSync(join(tmpdir(), 'f10b-'));
+  const wf2 = join(d2, 'workflow_state.json');
+  writeFileSync(wf2, JSON.stringify({ task_id: 'f10b', analysis_engine: 'seven_v03',
+    seven_stage_root_session_id: 'root', load_case_file: null }));
+  const ag2 = new Map();
+  const mk2 = (id, parent = null, msgs = []) => { const a = { id,
+    session: { id, header: { parentSession: parent }, deriveMessages: () => msgs },
+    followup() {}, steer() {} }; ag2.set(id, a); return a; };
+  const root2 = mk2('root', null, [userText]);
+  const plan2 = mk2('p1', 'root');
+  let reg2 = null;
+  mod.install({ logger: { warn(){}, info(){} }, tools: { register: t => { reg2 = t; }, guard: () => {} },
+    agents: { get: id => ag2.get(id) },
+    subagents: { getProvider: () => ({}), listDescendants: async () => [], prompt: async () => ({}),
+      startActivation: async i => { mk2(i.childId, i.parent.id); return { childId: i.childId, result: Promise.resolve({}) }; } },
+    on: () => () => {} }, { stateDir: join(d2, 'ss'), workflowFile: wf2, workerProvider: 'fork' }, o => o);
+  const c2 = async (agent, action, data = {}) => JSON.parse((await reg2.execute(
+    { taskId: 'f10b', action, dataJson: JSON.stringify(data) }, { agent, signal })).text);
+  const st2 = () => JSON.parse(readFileSync(join(d2, 'ss', 'f10b.json'), 'utf8'));
+  await c2(root2, 'attach', { planner: 'p1', messageIds: ['u1'] });
+  await c2(plan2, 'launch');
+  const s2 = st2(); let n = 0;
+  for (const [role, cid] of Object.entries(s2.childForRole)) {
+    await c2(ag2.get(cid), 'bind', { role, token: s2.invitations[role] }); n++;
+  }
+  ck('F10-② 前置：独立任务三角色已 bind', n === 3, n);
+  await c2(plan2,'frame',{object:'o',decision:'d',boundaries:'b',searchTopic:'s',
+    verification:'v',assumptions:'a',prior:'p',blockedBy:['Y: 再缺一条']});
+  ck('F10-② 前置：独立任务进入 evidence_wait', st2().phase === 'evidence_wait', st2().phase);
+  await c2(plan2,'question',{decision:'d',question:'q',why:'w',unknownPath:'u'});
+  ck('F10-② 前置：question 已登记', !!st2().question);
+  const ask2 = { id: 'a2', role: 'tool', source: { kind: 'tool', callId: 'c2' }, toolCallId: 'c2',
+    content: [{ type: 'text', text: JSON.stringify({ answers: [{ id: 'q2', selected: ['v'] }] }) }] };
+  root2.session.deriveMessages = () => [userText, ask2];
+  const cap2 = await c2(root2,'capture',{});
+  ck('F10-② 前置：capture 成功且 fact 带 question',
+    cap2.ok !== false && !!st2().facts.at(-1)?.question, cap2.code);
+  const nc = await c2(plan2,'interpret',{messageId:cap2.messageId,classification:'no_change',
+    parameters:'x',conflict:'c',changed:'c',impact:'i',reason:'r'});
+  ck('F10-② no_change 对 question 答复被拒', nc.code === 'NEEDS_EVIDENCE_DISPOSITION', nc.code);
+  ck('F10-② 拒绝时给出可用的替代分类',
+    Array.isArray(nc.suggestedClassifications) && nc.suggestedClassifications.includes('fact'),
+    nc.suggestedClassifications);
+  ck('F10-② 拒绝时提示用 resolved 核销依赖', /resolved/.test(String(nc.error)));
+  const nc2 = await c2(plan2,'interpret',{messageId:cap2.messageId,classification:'fact',
+    parameters:'v',conflict:'无',changed:'补入',impact:'影响',reason:'真人答复'});
+  ck('F10-② 换成 fact 后能推进（不再是死路）', nc2.ok !== false, nc2.code);
+}
+
+console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
+""")
+    _o10 = subprocess.run(
+        [_NODE, _p10f, _GATE_JS],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180)
+    try:
+        _r10 = json.loads((_o10.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        _r10 = {"pass": 0, "fail": 1,
+               "fails": [((_o10.stdout or "") + (_o10.stderr or ""))[-900:]]}
+    ck("★ F10 evidence_wait 四条陷阱 行为验证全过（%d 项）" % _r10.get("pass", 0),
+       _r10.get("fail") == 0, _r10.get("fails"))
+    shutil.rmtree(os.path.dirname(_p10f), ignore_errors=True)
+
+# ════════════════════════════════════════════════════════════════════
 sec("G. 端到端：init 固定引擎 → select 无凭证时 fail-closed")
 # ════════════════════════════════════════════════════════════════════
 _sd = tempfile.mkdtemp(prefix="seven_e2e_state_")

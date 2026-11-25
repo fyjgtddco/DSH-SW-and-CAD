@@ -44,6 +44,35 @@ const terminal = new Set(['ready', 'partial']);
 const phaseOwner = phase => ({frame:'planner', knowledge:'knowledge', preflight:'review',
   design:'design', review:'review', commit:'planner', resolve:'planner'}[phase] ?? null);
 const memberRoles = ['knowledge', 'design', 'review', 'planner', 'root'];
+
+/**
+ * ── 【2026-11-20 · 盲审读死锁】盲审可读面：**唯一权威** ─────────────────────
+ *
+ * 现场：任务 DSH-ENG-MEMORY-V2（20261120_174510_D364ACCE）step 1.1 preflight，
+ *   review 的 status.allowed 含 read、nextAction 要求"先 read 正文再 submit"，
+ *   但任何 read 都被 BLIND_REVIEW_INPUTS_ONLY 拒 —— 15+ 种参数变体全灭，
+ *   读不到正文就不能 submit ⇒ 63 步一步未 commit，任务停机。
+ *
+ * 旧实现是一刀切：`check(role !== 'review' || s.phase !== 'preflight', ...)`，
+ *   把"读原始需求"也一起封了 —— 而盲审的本意恰恰**必须读原始需求**。
+ *
+ * 口径：盲审要挡住的是【别人的结论】（knowledge/design 的待审正文），
+ *   不是【事实与需求】。所以：
+ *     · 白名单 BLIND_READ_PARTS —— 原始需求、事实、本步原文、框架就是盲审的输入；
+ *     · 黑名单 BLIND_FORBIDDEN_PARTS —— 待审结论，提交预审结论前一律不可读；
+ *     · 这里导出的 blindParts() 同时喂给【守卫】与【status.allowedParts】，
+ *       两处同源，从根上消灭"status 说可以、守卫说不行"的漂移。
+ *
+ * 与"不破坏分析插件独立性"的关系：
+ *   · 谁能在什么时候读什么，仍然**只由插件按 phase/role 判定**，模型没有任何参数能扩大它；
+ *   · 模型也无权"跳过/关闭"盲审 —— 它只能 read 白名单内的面，或者用
+ *     submit{verdict:'refused'} 把"我拒绝"这个结论**交给插件裁定**。
+ */
+const BLIND_PHASES = new Set(['preflight']);
+const BLIND_READ_PARTS = ['requirements', 'facts', 'step', 'frame', 'rules', 'outputs', 'searches', 'calculations'];
+const BLIND_FORBIDDEN_PARTS = ['knowledge', 'design', 'review', 'issues', 'scope', 'preflight'];
+/** 盲审阶段 status.allowedParts 的唯一来源（守卫 read 也读它）。 */
+const blindParts = () => BLIND_READ_PARTS.slice();
 /** 已了结（登记结束或判定故障）的角色。 */
 const settled = (s, r) => !!(s.ended[r] || s.failures[r]);
 /** 还没了结的角色（未 bind 的工作角色不算）。 */
@@ -573,7 +602,15 @@ export function allowedActions(s, role) {
     // 【报告 BUG-13】planner 同理：终态或"此刻没有我的活"都能登记收尾。
     if (terminal.has(s.phase) || (!s.jobs.planner && phaseOwner(s.phase) !== 'planner')) out.add('end');
     if (!terminal.has(s.phase)) out.add('yield');
-    if (s.jobs.planner || s.phase === 'setup') out.add('blocked');
+    // ══ 【2026-11-20 · 报告 F 节】blocked 的 allowed 必须与实现对齐 ══════════
+    // 现场：allowed 里从来没有 blocked，但 blocked 实际能调成功（plannerCanReport
+    //   允许 planner 在任何非终态登记故障）—— "能不能做"与"清单说能不能做"打架，
+    //   模型只能靠试。现在按真实实现列出：planner 在任何非终态都可以 blocked。
+    if (!terminal.has(s.phase)) out.add('blocked');
+    // 【F 节】正式停止：planner 代表上游叫停。它与 blocked（故障）、yield（等待）分开。
+    if (!terminal.has(s.phase)) out.add('stop');
+    // 【残余 (b)】有故障登记时才给 clearFailed —— 没账可清时它只会制造困惑。
+    if (Object.keys(s.failures ?? {}).length) out.add('clearFailed');
   } else if (roles.includes(role)) {
     out.add('status').add('read');
     if (s.jobs[role]) out.add('search').add('calculate').add('submit');
@@ -585,6 +622,9 @@ export function allowedActions(s, role) {
     if (terminal.has(s.phase) || (!s.jobs[role] && phaseOwner(s.phase) !== role)) out.add('end');
   }
   if (role === 'root' && !terminal.has(s.phase)) out.add('wait_user');
+  // 【F 节】root 代表用户本人 —— 用户说"停"时它必须能直接登记，而不必借道 blocked。
+  if (role === 'root' && !terminal.has(s.phase)) out.add('stop');
+  if (role === 'root' && Object.keys(s.failures ?? {}).length) out.add('clearFailed');
   // 【报告 BUG-13】root 也必须能在非终态登记收尾，
   //   否则"宿主已宣告终态、插件 phase 还没落盘"时它无路可走。
   if (role === 'root' && (terminal.has(s.phase)
@@ -594,17 +634,108 @@ export function allowedActions(s, role) {
   return [...out];
 }
 
+/**
+ * ── 【2026-11-20 · 测试方残余 (b)】把故障清单标上"是否还适用于当前版本" ──────
+ *
+ * 为什么只标注不删除：
+ *   故障登记是**审计事实**（"某一刻某个角色说我干不下去了"），
+ *   它不该因为代码升级自动消失 —— 那等于篡改历史。
+ *   但调用方确实需要知道"这条还作不作数"，否则会把历史脏数据当成现况。
+ *
+ * 判定：
+ *   · 没有 at/revision/specHash（修复前写入的旧条目）→ stale，并注明 legacy；
+ *   · specHash 不同 → stale（模板换了，旧判定依据已不成立）；
+ *   · 有 revision 且与当前不同 → stale（回退过，旧故障属于上一版产物）；
+ *   · 其它 → 现行有效。
+ */
+function annotateFailures(s) {
+  const out = {};
+  for (const [role, f] of Object.entries(s.failures ?? {})) {
+    const legacy = !f || f.at === undefined;
+    const hashMismatch = !!(f && f.specHash && f.specHash !== specHash);
+    const revMismatch = !!(f && typeof f.revision === 'number' && f.revision !== s.revision);
+    const stale = legacy || hashMismatch || revMismatch;
+    out[role] = {...f,
+      ...(stale ? {stale:true,
+        staleReason: legacy ? 'legacy：修复前登记的旧条目（没有时间戳/版本号），无法确认是否还适用'
+          : hashMismatch ? 'specHash：模板已更换，旧判定依据已不成立'
+          : 'revision：期间回退过，这条属于上一版产物'} : {stale:false}),
+    };
+  }
+  // 单独给一句"怎么清"——否则调用方看到 stale 也不知道该不该动它。
+  const staleRoles = Object.entries(out).filter(([,v]) => v.stale).map(([k]) => k);
+  if (staleRoles.length) {
+    out.__staleHint = {
+      roles:staleRoles,
+      howToFix:'这些是历史/失效故障，当前仍会出现在 failed 里（审计保留，不静默删）。'
+        + '要清掉：planner 或 root 调 action=clearFailed {roles:' + JSON.stringify(staleRoles)
+        + ', reason:"<为什么可以清>"}（会写进 history，可回溯）。'
+        + '若它们其实仍然成立，请改用 retry {role,reason} 重派，而不是 clearFailed。',
+    };
+  }
+  return out;
+}
+
 function view(s, role) {
   const step = steps[s.cursor];
   const next = nextText(s, role);
   return {role, taskId:s.taskId, revision:s.revision, phase:s.phase, next,
     waitingOn:waitingOn(s),
     allowed:allowedActions(s, role),
+    // ══ 【2026-11-20 · 盲审读死锁】allowed 只写"动作名"，read 的**可读面**必须另给 ══
+    // 现场：allowed 里有 read，模型据此认为"什么都能读"，然后 15+ 个 part
+    //   全部被 BLIND_REVIEW_INPUTS_ONLY 拒。动作放行 ≠ 参数放行 —— 两者要分开说。
+    // 这份清单与守卫读的是同一个 blindParts()，不存在两处漂移。
+    ...(BLIND_PHASES.has(s.phase) && role === 'review'
+      ? {allowedParts:blindParts(), forbiddenParts:BLIND_FORBIDDEN_PARTS.slice(),
+        blind:true,
+        blindNote:'preflight（盲审）：只能读 allowedParts 里的面。待审的知识稿/设计稿'
+          + '在提交预审结论前不可读；不带 part 的 read 只返回目录。'
+          + '若认为限制本身使复审无法进行，用 submit {verdict:"refused",...} 登记，'
+          + '插件会转补证等待交给人。'}
+      : {}),
     search:role === 'knowledge' || role === 'planner' || role === 'root'
       ? {order:s.jobs.knowledge?.searchOrder ?? null,
          filled:(s.jobs.knowledge?.searches ?? []).length}
       : undefined,
     members: s.members, ready:validReady(s), progress:{done:s.records.length,total:steps.length},
+    // ══ 【2026-11-20 · D14】只读验证入口：异议台账 + 当前可关闭集合 ═══════════
+    // 现场反馈（BUG-总结 D14）："closed 契约修复待验证 —— 只读路径不可达，
+    //   status 返回体没有 closed/closable 字段，触发动作又不在 allowed 白名单里"。
+    //   也就是说：想确认"closed 现在能不能用"，只能真的发一次 submit 去撞，
+    //   而 submit 会改状态 —— 验证一个只读契约却要写状态，这本身就不合理。
+    //
+    // 口径：把「这一轮 review 会看到什么」变成**纯只读投影**放进 status：
+    //   · issueLedger.current      —— 本轮台账里还挂着哪些异议（key/kind/owner）；
+    //   · issueLedger.closableKeys —— **现在就能关**的 key（上一轮提出、本轮未重提）；
+    //   · issueLedger.reopenedKeys —— 本轮已重提、不能"关闭"的 key；
+    //   · issueLedger.lastClosed    —— 上一次 review 实际关闭了哪些（含依据），
+    //                                 这是"closed 真的生效过"的直接证据。
+    //   全部由插件按状态算，模型看不到也改不了；不改变任何判定。
+    ...(() => {
+      const ledger = Object.values(s.slot?.issues ?? {});
+      const lastReview = s.slot?.review ?? null;
+      const closedLast = lastReview?.closed ?? [];
+      // 「现在能关」= 台账里有、且本轮 review 还没把它重提。
+      // 注意：这与 submit 时的 closable 同一口径（都用 issues 台账 + 当前 review.issues），
+      // 所以这里看到的就是"提交时会被接受"的集合，不含第二种判断。
+      const reopenedNow = new Set((lastReview?.issues ?? []).map(x => x.key));
+      const closable = ledger.filter(x => !reopenedNow.has(x.key));
+      return {
+        issueLedger: {
+          current: ledger.map(x => ({key:x.key, kind:x.kind, owner:x.owner})),
+          closableKeys: closable.map(x => ({key:x.key, kind:x.kind, owner:x.owner})),
+          reopenedKeys: ledger.filter(x => reopenedNow.has(x.key)).map(x => x.key),
+          lastClosed: closedLast,
+          lastVerdict: lastReview?.verdict ?? null,
+          ...(lastReview?.downgrades ? {downgrades:lastReview.downgrades} : {}),
+          note: ledger.length
+            ? '这份台账是【只读投影】：closableKeys 就是下一轮 submit 时 closed[] 会被接受的集合。'
+              + '想验证 closed 契约不必真的提交 —— 看这里即可。'
+            : '本步还没有任何异议台账（review 尚未提出过硬异议），closed[] 暂时无可关闭对象。',
+        },
+      };
+    })(),
     // 【2026-11-19】planner 的 current 同样只给索引：旧实现塞了 knowledge(11.6KB)
     //   + design(3.7KB) + review(5.4KB) + issues(3.75KB)，status 直接 28.9KB，
     //   被 pruner 裁到 5.1KB —— 既丢正文又白烧 token。
@@ -626,7 +757,18 @@ function view(s, role) {
     newFacts:role === 'planner' ? s.facts.filter(x=>!x.interpretation) : [],
     requirements:role === 'planner' ? s.requirements : [],
     dispatch:role === 'planner' ? dispatchMatrix(s) : undefined,
-        failed:s.failures, ended:s.ended, waitReason:s.waitReason,
+        // ══ 【2026-11-20 · 测试方残余 (b)】旧账必须可识别、可显式清理 ═══════════
+        // 现场：failed.planner 里挂着修复前那条 role-blocked，一直跟着 status 返回，
+        //   而条目里没有时间/版本信息 —— 分不清"现在的故障"还是"上一版的脏数据"。
+        //   测试方因此没法判断修复是否生效（残余 c 也卡在这里）。
+        //
+        // 口径（三条都要，缺一不可）：
+        //   ① 每条故障带 at / revision / specHash（登记时写入）；
+        //   ② status 把"与当前 revision/specHash 不匹配"的标成 stale:true ——
+        //      **只做标记，绝不静默删除**（故障是审计记录）；
+        //   ③ 给显式清理路径 clearFailed：让人/大脑自己决定要不要清，并留下审计。
+        failed:annotateFailures(s),
+        ended:s.ended, waitReason:s.waitReason,
     roomProposal:role==='planner'||role==='root' ? s.roomProposal ?? null : undefined,
     actionHelp:{
       frame:'{object,decision,boundaries,searchTopic,verification,assumptions,prior,blockedBy:[]}',
@@ -667,10 +809,36 @@ function view(s, role) {
         + '② status.newFacts[].id（真人答复已入池但还未解释时）；'
         + '③ status.facts[].id（历史事实）>,classification:fact|preference|authorization|estimate|unknown|no_change,'
         + 'parameters:<任意 JSON，可传对象/数组/字符串，内部按字符串存>,'
-        + 'conflict:<字符串>,changed:<字符串>,impact:<字符串>,reason:<字符串>,fromStep}'
-        + ' · conflict/changed/impact/reason 都必须是具体说明（写「无」「已完成」会被 DETAIL_REQUIRED 拒）',
+        + 'conflict:<字符串>,changed:<字符串>,impact:<字符串>,reason:<字符串>,'
+        + 'fromStep?:<小步 id；**不传时默认回退到当前在办小步**>,'
+        + 'resolved?:[<被这条答复解决的 blockedBy 原文>]}'
+        + ' · conflict/changed/impact/reason 都必须是具体说明（写「无」「已完成」会被 DETAIL_REQUIRED 拒）'
+        + ' · **question 的答复不能用 classification=no_change**（那等于把缺口留在原地），'
+        + '按实际性质填 fact/preference/authorization/estimate/unknown'
+        + ' · 若答复消除了 frame.blockedBy 里的依赖，务必带 resolved:[...]，否则会退回 evidence_wait',
       propose_rooms:'{rooms:[{name,type,parts:[零件ID],why,depends_on:[房名]}],rationale,scope}',
-      yield:'{reason}', blocked:'{reason}', retry:'{role,reason}', partial:'{reason}',
+      yield:'{reason}。语义=「我在等外部回执」：回合结束，靠插件投递开新回合。',
+      // ══ 【2026-11-20 · 测试方残余 (a)】新动作必须有 help 文本 ═══════════════
+      // 现场：allowed 里已经有 stop，但 actionHelp 里没有它的契约 ——
+      //   子代理只知道"有个叫 stop 的动作"，不知道该不该传 reason、和 blocked 差在哪，
+      //   于是要么不敢用，要么拿它当 blocked 用（那正是 F 节要消灭的语义污染）。
+      // 口径：**凡出现在 allowed 里的动作，actionHelp 必须有对应条目**。
+      stop:'{reason}（必填）。语义=「用户/上游叫停」：**不写 failures**（停止≠故障），'
+        + '已提交小步全部保留，phase 转 partial。仅 planner / root 可调；'
+        + '三个分析角色只能 blocked 上报，停不停由大脑决定。'
+        + '要继续用 reopen {reason}。',
+      blocked:'{reason}。语义=「我判断干不下去」（**故障**）—— 会写进 failures，需要人 retry。'
+        + '与 stop（叫停）、yield（等待）是三种不同的事，不要混用。',
+      retry:'{role,reason}', partial:'{reason}。语义=「交部分结果」，可用于用户明确要求终止时的旧路径。',
+      // clean 是清理入口，同样要在 help 里 —— 否则模型查到 allowed 也不敢用。
+      // 【残余 (b)】旧账清理同样要有 help，否则模型看到 allowed 里有也不敢用。
+      clearFailed:'{roles?:[角色名], role?:单个角色名, reason}。'
+        + '清掉**已经不适用**的故障登记（旧版本遗留 / 回退过 / 角色已换人），'
+        + '**不派新活**，原文归档进 history。若故障仍成立要它继续干活，请用 retry。'
+        + 'status.failed 里带 stale:true 的条目就是可清理的候选（见 __staleHint）。',
+      clean:'{taskId?,force?}。**默认 dry-run 只看不删**（列出目录里所有任务）；'
+        + 'force:true 才真删，且先归档到 .stale/。一次只删一个 taskId，'
+        + '只有本任务自己的 root/planner 能做。用于清理残留状态（僵尸 planner 绑死新任务时）。',
       end:'{kind:complete|partial,reason}'},
     source:{version:spec.version,sha256:specHash},
     protocol:role === 'planner' && s.phase === 'setup' ? spec.opening : undefined};
@@ -891,12 +1059,34 @@ export function openFlow(stateDir) {
         + JSON.stringify(issues.map(x=>x.key).filter((k,i,a)=>a.indexOf(k)!==i)));
       const closed = list(data.closed ?? [], 'closed',32).map(x=>fields(x,['key','evidence']));
       const prior = Object.values(s.slot.issues);
+      // ══ 【2026-11-20 · 报告 Bug F】可关闭集合必须【真的算出来】并回显 ═══════
+      // 现场：INVALID_CLOSURE_REFERENCE 的"可关闭 key"恒为 []，因为 frame 重写时
+      //   把 issues 台账抹掉了（见 case 'frame' 的修复）。调用方拿到空列表后
+      //   无从自纠 —— 既不知道哪些能关，也不知道为什么都不能关。
+      // 现在：三种 key 分开报，每一种都带"为什么"：
+      //   · closable    —— 上一轮提出、本轮未重提 ⇒ 现在就能关；
+      //   · reopened    —— 上一轮提出且本轮又提 ⇒ 不能"关闭"，它仍然成立；
+      //   · unknownKey  —— 上一轮根本没提过 ⇒ 不是有效的关闭依据。
+      const closable   = prior.filter(p => !issues.some(y=>y.key===p.key));
+      const reopened   = prior.filter(p =>  issues.some(y=>y.key===p.key));
       const badClosures = closed.filter(x => !prior.some(p=>p.key===x.key) || issues.some(y=>y.key===x.key));
-      check(!badClosures.length,
-        'INVALID_CLOSURE_REFERENCE: closed 里的这些 key 不能关闭 —— '
-        + JSON.stringify(badClosures.map(x=>x.key))
-        + '。可关闭的 key（上一轮 review 提出、且本次没有重新提出）：'
-        + JSON.stringify(prior.filter(p=>!issues.some(y=>y.key===p.key)).map(p=>p.key)));
+      if (badClosures.length) {
+        const e = new Error('INVALID_CLOSURE_REFERENCE: closed 里的这些 key 不能关闭 —— '
+          + JSON.stringify(badClosures.map(x=>x.key))
+          + '。\nclosableKeys（上一轮提出、本轮未重提 ⇒ 现在可关）：'
+          + JSON.stringify(closable.map(p=>({key:p.key, kind:p.kind, owner:p.owner})))
+          + '\nreopenedKeys（本轮又提 ⇒ 仍成立，不能用 closed 抹掉）：'
+          + JSON.stringify(reopened.map(p=>p.key))
+          + '\nunknownKeys（上一轮没提过 ⇒ 不是有效关闭依据）：'
+          + JSON.stringify(closed.filter(x=>!prior.some(p=>p.key===x.key)).map(x=>x.key))
+          + (closable.length ? '' : '\n注意：本次没有任何可关闭的 key —— 若你确实已解决上一轮的异议，'
+            + '必须在 issues 里【重新提出并写明仍成立的理由】，或等下一轮再核销；'
+            + '把"已解决"只写进正文不会被记入 closed 台账。'));
+        e.code = 'INVALID_CLOSURE_REFERENCE';
+        e.closableKeys = closable.map(p=>({key:p.key, kind:p.kind, owner:p.owner}));
+        e.reopenedKeys = reopened.map(p=>p.key);
+        throw e;
+      }
       const unclosed = prior.filter(serious).filter(x =>
         !issues.some(y=>y.key===x.key && serious(y)) && !closed.some(y=>y.key===x.key));
       check(!unclosed.length,
@@ -906,23 +1096,96 @@ export function openFlow(stateDir) {
         + '。请为每一条补 closed:{key,evidence}（写清关闭依据），'
         + '或在 issues 里重新提出并说明仍然成立的理由。');
       const verdict = data.verdict;
+      // ══ 【2026-11-20 · judge_output 第三终态】allow review 合法"拒绝评审" ═══════
+      // 现场：旧实现只有 pass|conditional|blocked 三种结论，没有任何合法出口能
+      //   表达"我拒绝这个输入"。于是 review 在 preflight 读不到正文时，只能
+      //   要么违反盲审硬着头皮 submit（假通过），要么 action=blocked 停机 ——
+      //   63 步卡死在 1.1。
+      //
+      // 口径（**关键是它不能变成模型自己给自己放行**）：
+      //   · refused **只在 preflight（盲审）阶段**受理 —— 正式复审 phase=review
+      //     必须真的给出 pass/conditional/blocked，那里没有"我拒绝"这个选项；
+      //   · 受理后**不推进、不放行**：转 evidence_wait（补证等待）并记录 refuseReason，
+      //     由 planner/review 走 rework/frame/question 的既有出口把问题交给人；
+      //   · 审计里单独记一条 refused 结论，事后可追溯"这一步是被谁拒的、为什么"。
+      //   换句话说：模型获得了"说不行"的权利，但没有获得"说通过"的权利。
+      const refusedNow = verdict === 'refused';
+      // 注意：这里不能 break —— finishPacket 是普通函数，没有 switch。
+      // 拒绝分支只在函数体内直接 return（与其它角色的正常路径一致）。
+      if (refusedNow) {
+        check(job.kind === 'preflight',
+          'REFUSAL_NOT_ALLOWED: verdict="refused" 只在 preflight（盲审）阶段受理。'
+          + '当前 job.kind=' + JSON.stringify(job.kind) + ' —— 正式复审必须给出真实结论：'
+          + 'pass（全过）/ conditional（通过但有条件，需至少一条 kind=condition 的 issue）/ '
+          + 'blocked（存在 hard|unknown 异议，需至少一条对应 issue）。');
+        const refuseReason = named(data.content, 'content');
+        const entry = { id:job.id, revision:s.revision, kind:job.kind, verdict:'refused',
+          content:refuseReason, issues:[], closed:[], refused:true,
+          calculations:job.calculations, knowledgeId:s.slot.knowledge?.id, designId:s.slot.design?.id };
+        s.slot.review = entry;
+        s.slot.reviews.push(entry);
+        // 不放行、不推进：转补证等待，把"怎么办"交回给已有的三个出口
+        // （rework 补证后重做 / frame 重写本步边界 / question 问真人）。
+        evidenceWait(s, '反驳（review）明确拒绝本次盲审输入，理由：'
+          + String(refuseReason).slice(0, 300)
+          + '；插件不会因此放行，也不改判 verdict。');
+        // 返回值直接给出"发生了什么 + 谁该处置"，而不是让调用方去猜 phase 变化。
+        return {
+          refused:{step:steps[s.cursor]?.id, reason:String(refuseReason).slice(0, 300),
+            by:role, jobId:job.id},
+          phase:'evidence_wait',
+          next:'已登记 review 的拒绝结论（refused），本步转入补证等待（evidence_wait），'
+            + '**没有**被判定通过、也没有被放行。出口：planner 用 rework{reason} 补证后重做 / '
+            + 'frame{…} 重写本步边界 / question{…} 把人拉进来；真做不下去才 partial 收尾。',
+        };
+      }
       check(['pass','conditional','blocked'].includes(verdict),
         'INVALID_VERDICT: verdict 必须是 pass|conditional|blocked，收到 '
-        + JSON.stringify(verdict) + '。');
+        + JSON.stringify(verdict) + '。'
+        + (job.kind === 'preflight'
+          ? '（preflight 盲审还接受 verdict="refused"：如果你认为当前限制使复审无法进行，'
+            + '用它明确登记，插件会转补证等待并交给人，不会自行放行。）' : ''));
       const hasSerious = issues.some(serious);
+      // ══ 【2026-11-20 · 报告 Bug B】unknown 的"降级"必须留痕，但判据不弱化 ══
+      // 现场观察：preflight 下 issues 含 kind=unknown 必被强制 verdict=blocked；
+      //   review 为了让流程往前走，会把真 unknown **降级成 condition** 再提交。
+      //   报告问这是否有意设计。
+      //
+      // 结论：**判据本身是有意设计，保持不动** —— hard/unknown 意味着"这件事现在没有
+      //   依据"，而七阶段的口径是"没有依据就不许登记通过"。若允许 unknown 走
+      //   conditional，等于给"我不知道"发通行证，后面 62 步都会建立在它上面。
+      //   （这也是 read_design 最终要求每步都有真实来源的同一条原则。）
+      //
+      // 但报告点出的副作用是真的："降级成了唯一推进手段"会**掩盖**真 unknown。
+      //   所以这里加一道【留痕】而不是放宽：
+      //     · 本轮把上一轮 kind=hard|unknown 的异议以 condition/preference 重新提出 →
+      //       记 downgrades，并如实写进 review 条目与 status；
+      //     · 降级不改变 verdict 判据（本条仍在，仍是 blocked），只是让"我把它降级了"
+      //       这件事可追溯，事后能查是谁、在哪一步把 unknown 降成了 condition。
+      //   ——允许降级发生在【下一轮正常提交】里，但绝不静默。
+      const downgrades = issues.filter(x => objections.has(x.kind) && !serious(x))
+        .filter(x => prior.some(p => p.key === x.key && serious(p)))
+        .map(x => ({key:x.key, from:prior.find(p=>p.key===x.key)?.kind ?? null, to:x.kind}));
       check(hasSerious === (verdict === 'blocked'),
         'VERDICT_ISSUE_MISMATCH: verdict 与 issues 的 kind 不一致 —— '
         + 'verdict=' + JSON.stringify(verdict) + '，但含 hard/unknown 的 issues '
         + (hasSerious ? '有' : '没有') + '（' + JSON.stringify(issues.filter(serious).map(x=>x.key)) + '）。'
         + '硬异议（hard/unknown）存在时 verdict 必须是 blocked；'
-        + '反之 verdict=blocked 必须至少有一条 hard/unknown 异议。');
+        + '反之 verdict=blocked 必须至少有一条 hard/unknown 异议。'
+        + '（这条判据是有意设计：unknown = 现在没有依据，不允许登记通过。'
+        + '如果你认为某条 unknown 其实已有依据，请在 issues 里给出 evidence，而不是改成 condition。）'
+        + (downgrades.length ? ' 本轮检测到降级：' + JSON.stringify(downgrades)
+            + ' —— 已记入 review 条目的 downgrades，用于事后追溯。' : ''));
       check(verdict !== 'conditional' || issues.some(x=>x.kind==='condition'),
         'CONDITIONS_REQUIRED: verdict=conditional 时必须至少有一条 kind="condition" 的 issues。'
         + '当前 issues 的 kind：' + JSON.stringify(issues.map(x=>x.kind)) + '。'
         + '如果只是"通过但有条件要补"，用 conditional + condition 项；'
         + '如果全部通过，用 pass 并把 issues 留空。');
       const entry = { id:job.id, revision:s.revision, kind:job.kind, verdict, content, issues, closed, calculations:job.calculations,
-        knowledgeId:s.slot.knowledge?.id, designId:s.slot.design?.id };
+        knowledgeId:s.slot.knowledge?.id, designId:s.slot.design?.id,
+        // 【Bug B 留痕】把"哪条异议被从 hard/unknown 降级成了 condition"记在案上。
+        // 不改变任何判定，只让降级事后可查（谁、哪一步、从什么降成什么）。
+        ...(downgrades.length ? {downgrades} : {})};
       s.slot.review = entry;
       s.slot.reviews.push(entry);
       s.slot.issues = Object.fromEntries(issues.map(x=>[x.key,x]));
@@ -978,8 +1241,78 @@ export function openFlow(stateDir) {
     if (action === 'attach') {
       check(a.parent === null && id(d.planner) && d.planner !== a.id, 'ROOT_AND_REAL_PLANNER_REQUIRED');
       if (s) {
-        check(s.root === a.id && s.planner === d.planner, 'TASK_ALREADY_BOUND');
-        return view(s,'root');
+        const sameRoot = s.root === a.id;
+        const samePlanner = s.planner === d.planner;
+        if (sameRoot && samePlanner) return view(s,'root');
+        // ══ 【2026-11-20 · P0】僵尸绑定必须能被识别并接管，不能逼人删文件 ══════
+        // 现场（BUG测试结果_20261120 BUG-2）：上一轮 attach 后只 yield 就被
+        //   OTHER_ROOMS_ACTIVE 挡下，状态文件却已经落盘（planner 指向一个已经
+        //   inactive 的 session）。新 planner 接不上 → TASK_ALREADY_BOUND，
+        //   而状态文件里没有任何“可以覆盖”的标记；现场唯一的出路是
+        //   Remove-Item seven_stage\*.json —— 手工删状态不该是常规路径。
+        //
+        // 口径（**插件自己判定绑定是否已失效，模型不能自报**）：
+        //   · 同一 root、但 planner 不是同一个 → 只有在“旧 planner 确实不在了”时允许接管；
+        //   · 不同 root → 一律拒绝（那是另一个真实会话名下的任务，不能抢）。
+        //   判定依据来自宿主：d.livePlanners 是插件能确认“仍在运行”的 sessionId 集合
+        //   （由 index.js 从 ctx.agents 查出来传进来）。插件不猜、不采信模型自报。
+        const live = Array.isArray(d.livePlanners) ? d.livePlanners.map(String) : null;
+        const plannerAlive = live ? live.includes(String(s.planner)) : null;
+        if (!sameRoot) {
+          const e = new Error('TASK_ALREADY_BOUND: 任务 ' + JSON.stringify(task)
+            + ' 已经绑定在【另一个真实主对话】名下（root=' + JSON.stringify(s.root)
+            + '，当前调用者是 ' + JSON.stringify(a.id) + '）。'
+            + '不同会话不能抢同一个 taskId。如果那个会话已经不用了，'
+            + '请让【它自己】执行 action=clean {taskId, force:true}；'
+            + '或者直接用新的 taskId 重新 init。');
+          e.code = 'TASK_ALREADY_BOUND';
+          e.boundRoot = s.root;
+          e.boundPlanner = s.planner;
+          e.howToFix = ['action=clean {taskId, force:true}（在该 root 会话里执行）',
+            'workflow_gate.py reset 后重新 init（taskId 会变）'];
+          throw e;
+        }
+        // 同一 root、换了 planner：旧 planner 必须确实不在了才允许接管。
+        if (plannerAlive === true) {
+          const e = new Error('TASK_ALREADY_BOUND: 任务已经绑定在 planner='
+            + JSON.stringify(s.planner) + ' 上，而它【此刻仍然存活】。'
+            + '同一个 taskId 不允许有两个总计子代理并行 —— 那会让两个大脑同时推进同一份状态。'
+            + '正确做法：① 继续用那个 planner（不要重新 fork）；'
+            + '② 若确实要换，先让它结束（或用 interrupt_agent 确认它停下来），再 attach；'
+            + '③ 需要强行换绑时：action=clean {taskId, force:true} 清掉后重新 attach。');
+          e.code = 'TASK_ALREADY_BOUND';
+          e.boundPlanner = s.planner;
+          e.plannerAlive = true;
+          e.howToFix = ['继续用现有 planner', '等它结束后重新 attach',
+            'action=clean {taskId, force:true} 后重新 attach'];
+          throw e;
+        }
+        // live 不可用（拿不到宿主状态）→ 保守：不自动接管，但把出路写清楚。
+        if (plannerAlive !== false) {
+          const e = new Error('TASK_ALREADY_BOUND: 任务已绑定在 planner='
+            + JSON.stringify(s.planner) + ' 上，而插件无法确认它是否还活着（宿主未提供存活信息）。'
+            + '保守起见不自动接管。确认它已经结束后：'
+            + 'action=clean {taskId, force:true}，再重新 attach。');
+          e.code = 'TASK_ALREADY_BOUND';
+          e.boundPlanner = s.planner;
+          e.plannerAlive = null;
+          e.howToFix = ['action=clean {taskId, force:true}', '然后重新 attach'];
+          throw e;
+        }
+        // 同一个 root + 旧 planner 已确认失效 ⇒ 接管（换绑），旧账归档进 history。
+        const fromPlanner = s.planner;
+        s.history.push({revision:s.revision, plannerTakeover:true,
+          fromPlanner, toPlanner:d.planner, at:new Date().toISOString(),
+          fromPhase:s.phase, carriedFailures:s.failures});
+        s.planner = d.planner;
+        s.failures = {};   // 旧 planner 名下的故障随换绑作废（它已经不在了）
+        s.turns = {};
+        audit(s,a.id,'attach_takeover',{fromPlanner, toPlanner:d.planner});
+        save(s);
+        const v = view(s,'root');
+        return {...v, plannerTakeover:{fromPlanner, toPlanner:d.planner,
+          note:'原 planner 已失效，本次 attach 按【接管】处理：换绑到新 planner，'
+            + '旧账已归档进 history。已提交的 ' + s.records.length + ' 步全部保留。'}};
       }
       check(!trackedActor(a) && !tracked().some(x=>x.planner===d.planner), 'ACTIVE_BINDING_EXISTS');
       const requirements = list(d.requirements,'requirements',32).map(userRecord);
@@ -998,18 +1331,116 @@ export function openFlow(stateDir) {
     }
     check(s, 'TASK_NOT_ATTACHED');
     if (action === 'bind') {
-      check(a.parent === s.planner && s.phase === 'setup' && roles.includes(d.role), 'ROLE_BIND_DENIED');
-      check(!actorRole(s,a) && !s.members[d.role] && s.childForRole[d.role] === a.id && d.token && s.invitations[d.role] === d.token, 'INVALID_OR_USED_INVITATION');
-      s.members[d.role] = a.id;
-      delete s.invitations[d.role];
+      // ══ 【2026-11-20 · Bug2】重复 bind 必须幂等，不能与"越权"共用一个错误码 ══
+      // 现场：同一个 role 再调一次 action=bind（会话重连、模型重试、宿主重放）
+      //   得到 ROLE_BIND_DENIED，而它**其实已经绑定成功**。调用方无从区分
+      //   "我已经绑好了" 与 "我不许绑"，只能盲试 —— 实测重复试了很多轮。
+      //
+      // 口径：把两件事彻底分开
+      //   · 同一个会话、同一个角色、确实已是它的绑定 → ALREADY_BOUND（幂等成功，
+      //     回显当前绑定的 sessionId，方便对账）；
+      //   · 其它一切（不是 planner 的直系子会话 / 阶段已过 / 角色名非法 /
+      //     被别的会话占了 / 邀请码已用或不对）→ 仍然拒绝，且写清是哪一条。
+      //   注意：幂等只对"确实是它自己的绑定"成立，绝不因为"角色已被占"就放行别的会话。
+      const role2 = compact(d.role);
+      const alreadyMine = roles.includes(role2) && s.members[role2] === a.id
+        && a.parent === s.planner;
+      if (alreadyMine) {
+        return {...view(s, role2),
+          alreadyBound:true,
+          code:'ALREADY_BOUND',
+          boundSessionId:a.id,
+          note:'该角色已经绑定在【当前这个会话】上，本次按幂等处理（没有重复绑定、没有改状态）。'
+            + '直接按 status 的 job / nextAction 继续即可。'};
+      }
+      if (!(a.parent === s.planner)) {
+        throw Error('ROLE_BIND_DENIED: 只有【总计子代理（planner）的直系子会话】才能 bind。'
+          + '当前调用者 parent=' + JSON.stringify(a.parent ?? null)
+          + '，本任务的 planner=' + JSON.stringify(s.planner) + '。'
+          + '正确做法：planner 用 subagent_fork 建二级会话，由那个子会话自己调用 bind。');
+      }
+      if (s.phase !== 'setup') {
+        throw Error('ROLE_BIND_DENIED: bind 只在 setup 阶段受理，当前 phase=' + s.phase
+          + '（三角色已绑定完毕并进入流程）。若你确实已绑定，直接用 action=status 继续；'
+          + '绑定关系见 status.members（'
+          + JSON.stringify(Object.entries(s.members).map(([r,cid])=>({role:r, sessionId:cid})))
+          + '）。');
+      }
+      if (!roles.includes(role2)) {
+        throw Error('ROLE_BIND_DENIED: role=' + JSON.stringify(d.role)
+          + ' 不是合法角色；只能是 ' + roles.join(' | ') + '。');
+      }
+      if (s.members[role2]) {
+        throw Error('ROLE_BIND_DENIED: 角色 ' + role2 + ' 已经被 session '
+          + JSON.stringify(s.members[role2]) + ' 绑定，不可能是你。'
+          + '如果你就是它，请确认 identity（你的 sessionId 必须等于上面那个）；'
+          + '如果你是新会话，说明这次 fork 的邀请已被使用 —— 请让 planner 重新 invite/launch。');
+      }
+      if (s.childForRole[role2] !== a.id) {
+        throw Error('ROLE_BIND_DENIED: 你（session ' + JSON.stringify(a.id) + '）不是本任务为 '
+          + role2 + ' 预留的那个子会话（预留的是 '
+          + JSON.stringify(s.childForRole[role2] ?? null) + '）。'
+          + 'bind 必须由 planner 用 launch/invite 为这个角色创建的那个会话亲自执行。');
+      }
+      if (!d.token || s.invitations[role2] !== d.token) {
+        throw Error('INVALID_OR_USED_INVITATION: '
+          + (s.invitations[role2]
+              ? 'token 与本角色的邀请码不一致（邀请码是一次性的，形如 UUID）。'
+                + '请使用 planner 在 invite/launch 输出里给你的那个 token。'
+              : '本角色当前没有待用邀请码（可能已被使用）。'
+                + '请让 planner 检查 status.members 与 childForRole。'));
+      }
+      s.members[role2] = a.id;
+      delete s.invitations[role2];
       if (roles.every(r=>s.members[r])) s.phase = 'frame';
-      audit(s,a.id,action,{role:d.role}); save(s);
-      return view(s,d.role);
+      audit(s,a.id,action,{role:role2}); save(s);
+      return view(s,role2);
     }
     const role = who(s,a);
     if (action === 'status') return view(s,role);
     if (action === 'read') {
-      check(role !== 'review' || s.phase !== 'preflight', 'BLIND_REVIEW_INPUTS_ONLY');
+      // ══ 【2026-11-20 · 盲审读死锁】守卫与 status 必须【同源】 ═══════════════
+      // 现场（任务 DSH-ENG-MEMORY-V2 / 20261120_174510_D364ACCE）：
+      //   preflight 步 1.1，review 的 status.allowed 明确含 read、nextAction 也写
+      //   "先 read 正文再 submit"，但**任何** read 都被 BLIND_REVIEW_INPUTS_ONLY 拒 ——
+      //   试了 15+ 种参数变体（step / part=frame|knowledge|design|issues|… / jobId /
+      //   空参）全灭，读不到正文就无法 submit → 63 步卡死在 1.1。
+      //
+      // 根因：旧的盲审守卫是一刀切 —— 只要 phase=preflight 就整条 read 拒掉，
+      //   连"读原始需求和事实（盲审本来就必须读的东西）"一起封了。
+      //   而盲审的**唯一目的是不让 review 在提交预审结论前看到 knowledge/design
+      //   的正文**（否则它审的就是知识稿而不是原始需求，独立复审就失效了）。
+      //   这个限制只该落在那几个 part 上，不该落在整个动作上。
+      //
+      // 口径（**由插件裁定，模型不能自行宣布解除**）：
+      //   · blindParts() 是【唯一权威】—— status 的 allowedParts 与这里的守卫
+      //     读的是同一个函数，杜绝"status 说可以、守卫说不行"的两处漂移；
+      //   · 拒绝时把 allowedParts / forbiddenParts 一并写进错误体，
+      //     调用方一次就能改对，不必靠猜（旧实现只回一个裸码）。
+      if (BLIND_PHASES.has(s.phase)) {
+        const wanted = compact(d.part ?? d.what);
+        // 不带 part（要"目录"）时放行：目录只列各部分的**字数**，不泄露任何正文，
+        // 而"这一步有哪些可读面"正是盲审需要的导航信息。
+        if (wanted && role === 'review' && !blindParts().includes(wanted)) {
+          const e = new Error('BLIND_REVIEW_INPUTS_ONLY: preflight 阶段（盲审）不能读 '
+            + JSON.stringify(wanted) + '。'
+            + '盲审只允许读【原始需求与事实】—— 待审的知识稿/设计稿必须等你自己提交预审结论、'
+            + '进入正式复审（phase=review）后才开放，否则复审就变成了复读知识稿。'
+            + '\nallowedParts（本阶段可读）：' + JSON.stringify(blindParts())
+            + '\nforbiddenParts（提交 preflight 结论前不可读）：'
+            + JSON.stringify(BLIND_FORBIDDEN_PARTS)
+            + '\nexpectedParams：read {step:"' + (steps[s.cursor]?.id ?? '当前步') + '", part:"<allowedParts 之一>"}；'
+            + '不带 part 只返回各部分的字数目录（合法）。'
+            + '\n下一步：按 allowedParts 读完原始需求 → 用 action=submit 提交预审结论'
+            + '（verdict=pass|conditional|blocked）→ 之后自动进入 design 阶段。'
+            + '若你认为这些限制本身使复审无法进行，请用 submit {verdict:"refused",...} 明确登记'
+            + '（插件会转入补证等待并交给人，不会自己放行）。');
+          e.code = 'BLIND_REVIEW_INPUTS_ONLY';
+          e.allowedParts = blindParts();
+          e.forbiddenParts = BLIND_FORBIDDEN_PARTS.slice();
+          throw e;
+        }
+      }
       // ══ 【2026-11-19 · 卡在 1/63 的根因】read 必须能读【未 commit 的当前小步】 ══
       // 旧实现只查 s.records —— 而 records 只在 commit 时写入，于是：
       //   · review 在 phase=review 读本步 → CURRENT_RECORD_NOT_FOUND
@@ -1040,6 +1471,28 @@ export function openFlow(stateDir) {
       };
       // 规则只发一次（launch 的 prompt），但要保留一个可重读的入口。
       if (wantedPart === 'rules') return {part:'rules', ...slice(spec.crossCutting)};
+      // ══ 【2026-11-20 · 盲审读死锁】盲审专用的三个"事实面" ═══════════════════
+      // 它们是 BLIND_READ_PARTS 里的成员，但【不属于某一个小步的 slot】，
+      // 所以必须在小步解析之前返回 —— 否则会先撞 CURRENT_RECORD_NOT_FOUND
+      // （现场就是这么被误导的：review 以为"记录不存在"，其实是"这个 part 不分步"）。
+      //    · requirements —— 原始需求（盲审的第一输入）
+      //    · facts        —— 已捕获并解释过的真人事实（同样只读，不改任何状态）
+      //    · step         —— 本小步原文（七阶段文档原文，不是别人的结论）
+      if (wantedPart === 'requirements') {
+        return {part:'requirements', count:s.requirements.length, ...slice(
+          JSON.stringify(s.requirements.map(x=>({id:x.id, text:x.text, source:x.source})), null, 2))};
+      }
+      if (wantedPart === 'facts') {
+        return {part:'facts', count:s.facts.length, ...slice(
+          JSON.stringify(s.facts.map(x=>({id:x.id, text:x.text, source:x.source,
+            interpretation:x.interpretation ?? null})), null, 2))};
+      }
+      if (wantedPart === 'step') {
+        const st = steps[s.cursor];
+        return {part:'step', step:st?.id ?? null, ...slice(
+          JSON.stringify({id:st?.id, stage:st?.stage, title:st?.title, procedure:st?.procedure,
+            outputs:st?.outputs}, null, 2))};
+      }
       const stepId = compact(d.step) || steps[s.cursor]?.id;
       check(stepId, 'STEP_REQUIRED: 读哪一小步？传 step（例如 "1.2"）；不传则读当前小步。');
       const committed = s.records.find(x=>x.step===stepId);
@@ -1070,16 +1523,43 @@ export function openFlow(stateDir) {
       add('outputs', rec.outputs);
       if (committed) add('scope', {scope:rec.scope, basis:rec.basis, conditions:rec.conditions});
       add('searches', rec.searches);
+      // 盲审阶段：目录里【不能】列出待审正文的键名与字数（那是最低限度的泄露），
+      // 改为明确给出 allowedParts，让调用方一眼知道该读什么。
+      const blindNow = BLIND_PHASES.has(s.phase) && role === 'review';
       if (!wantedPart) {
+        if (blindNow) {
+          return {step:stepId, pending:!committed, revision:rec.revision ?? s.revision,
+            phase:committed ? 'committed' : s.phase, blind:true,
+            allowedParts:blindParts(), forbiddenParts:BLIND_FORBIDDEN_PARTS.slice(),
+            counts:{requirements:s.requirements.length, facts:s.facts.length},
+            next:'盲审（preflight）只能读 allowedParts。建议顺序：'
+              + 'read {part:"step"} → read {part:"requirements"} → read {part:"facts"}；'
+              + '读完用 action=submit 提交预审结论。'};
+        }
         return {step:stepId, pending:!committed, revision:rec.revision ?? s.revision,
           phase:committed ? 'committed' : s.phase,
+          ...(BLIND_PHASES.has(s.phase) ? {allowedParts:blindParts()} : {}),
           parts:Object.fromEntries(Object.entries(parts).map(([k,v]) => [k, JSON.stringify(v).length])),
           next:'用 read {step:"' + stepId + '", part:"<上面的键名>"} 取正文；'
             + '单次最多 6000 字，超长按返回的 nextOffset 续读。'};
       }
-      check(own(parts, wantedPart), 'UNKNOWN_RECORD_PART: step ' + stepId + ' 没有 '
-        + JSON.stringify(wantedPart) + ' 这一部分；可用 part：'
-        + (Object.keys(parts).join('、') || '（无）') + '。');
+      // ══ 【2026-11-20 · 可操作性】UNKNOWN_RECORD_PART 必须给 expectedParams ══════
+      // 现场：note 让模型"按 error 修正后重试"，而 error 体里没有任何可操作字段，
+      //   只能盲试 15+ 个变体。所有"参数被拒"的错都必须带上期望值。
+      if (!own(parts, wantedPart)) {
+        const e = new Error('UNKNOWN_RECORD_PART: step ' + stepId + ' 没有 '
+          + JSON.stringify(wantedPart) + ' 这一部分；可用 part：'
+          + (Object.keys(parts).join('、') || '（无）') + '。'
+          + (blindNow
+            ? '本步处于 preflight（盲审）：可读面是 ' + JSON.stringify(blindParts())
+              + '（含不分步的 requirements / facts / step / rules）。'
+            : '')
+          + 'expectedParams：read {step:"' + stepId + '", part:"<可用 part 之一>", offset?, limit?}。');
+        e.code = 'UNKNOWN_RECORD_PART';
+        e.allowedParts = blindNow ? blindParts() : Object.keys(parts);
+        e.expectedParams = ['step', 'part', 'offset', 'limit'];
+        throw e;
+      }
       const text = typeof parts[wantedPart] === 'string'
         ? parts[wantedPart] : JSON.stringify(parts[wantedPart]);
       return {step:stepId, pending:!committed, revision:rec.revision ?? s.revision,
@@ -1132,21 +1612,107 @@ export function openFlow(stateDir) {
             //   直接诱因。规则本身仍然完整保留（不是删掉，是搬到只发一次的地方）。
             + '\n\n=== 八条工作规则（全程有效）===\n' + spec.crossCutting}));
         break;
-      case 'frame':
+      case 'frame': {
         // 【2026-11-19 · 报告 BUG-11】evidence_wait 也允许 frame：
         //   缺口变了、或经评估要换一条技术路线时，必须能重写本步对象与边界。
         //   否则 blockedBy 一旦写进去就永远清不掉（配合 BUG-16 的同步清理）。
         as('planner'); at('frame', 'evidence_wait');
         check(!s.question, 'USER_INPUT_PENDING');
-        // 【BUG-03】searches/calculations 挂在【小步】上而不是 job 上：
-        //   job 是"一次委派"，会被 retry/reissue 换掉；而"这一步搜过什么"是
-        //   已经发生的事实，不该随委派作废。
-        s.slot = {frame:frameFields(d), issues:{}, reviews:[], rework:0,
-          searches:[], calculations:[]};
+        // ══ 【2026-11-20 · 报告 Bug F】重写 frame 必须【保留异议台账】 ══════════
+        // 现场（20261120_174510_D364ACCE，revision 2）：
+        //   rework(owner=planner) → phase=frame → planner 调 frame 重写本步对象/边界，
+        //   而旧写法是把 s.slot 整块替换成 {frame, issues:{}, ...}，
+        //   上一轮 review 提出的异议（2 个 unknown + 2 个 condition）随 slot 一起没了。
+        //   于是下一轮 review 提交 closed:[...] 时 prior 是空的 →
+        //   INVALID_CLOSURE_REFERENCE，且错误信息里的"可关闭 key"恒为 []。
+        //   调用方只能把"已解决"写进正文（closed 机制形同虚设）；
+        //   一旦有谁按 closed 计数判放行，就是死循环。
+        //
+        // 口径：frame 改的是"本步对象与边界"，不是"把上轮的账抹掉"。
+        //   异议是对【上一版产物】的判定，它必须活到下一次 review 逐条核销为止。
+        //   只保留【同一小步内】的账：cursor 前进后 commit 会置 slot=null，
+        //   新小步的 frame 天然拿不到 carried（s.slot 为 null）。
+        // ══ 【2026-11-25 · 现场 20261125_211324_905E57B6】blockedBy 必须能被事实核销 ══
+        // 现场闭环（已实测复现）：
+        //   1.2 frame 写 blockedBy=['REQ_1_1_01: 用户工程指标缺失', 'REQ_1_1_04: 基座法兰标准待确认']
+        //   → evidence_wait；用户答完 + capture 成功 → interpret 推进到 frame；
+        //   → planner 按 waitingOn 指路 frame{…} 重写本步边界，
+        //   → 但 planner 无从知道'这条依赖已被刚才那条答复解决了'，
+        //     于是照抄 blockedBy → 立刻退回 evidence_wait → **无限闭环**。
+        //   实测：只要 blockedBy 还留着旧依赖，每次 frame 都会掉回 evidence_wait。
+        //
+        // 口径（**插件判定，不靠模型自觉**）：
+        //   · planner 必须显式声明 resolved:[<依赖原文或前缀>] 才会摘除；
+        //   · 声明了但要摘的项在 blockedBy 里找不到 → 报错并列出当前 blockedBy，
+        //     避免'我以为我清掉了'的静默失败；
+        //   · 摘除结果写进 out.blockedByCleared，谁摘的、摘了什么都看得见。
+        //   剩余项仍然会进 evidence_wait —— 判据一个字没放宽。
+        const resolvedWant = Array.isArray(d.resolved)
+          ? list(d.resolved, 'resolved').map(x => String(x).trim()).filter(Boolean) : [];
+        const curBlocked = Array.isArray(s.slot?.frame?.blockedBy) ? s.slot.frame.blockedBy : [];
+        const matchDep = (want) => curBlocked.find(dep => dep === want
+          || dep.startsWith(want) || want.startsWith(dep) || dep.includes(want));
+        const unmatchedResolved = resolvedWant.filter(w => !matchDep(w));
+        if (unmatchedResolved.length) {
+          const e = new Error('RESOLVED_DEPENDENCY_NOT_FOUND: resolved 里这些项不在本步 blockedBy 中 —— '
+            + JSON.stringify(unmatchedResolved)
+            + '。当前 blockedBy=' + JSON.stringify(curBlocked) + '。'
+            + 'resolved 要填 blockedBy 里的原文（或它的前缀），不要另起一句话。');
+          e.code = 'RESOLVED_DEPENDENCY_NOT_FOUND';
+          e.blockedBy = curBlocked;
+          throw e;
+        }
+        // ⚠️ 顺序很关键：这里【不能】直接改 s.slot.frame ——
+        //   紧接着 s.slot 会被整个替换成新的 frameFields(d)（下面几行），
+        //   先改会被覆盖掉（实测踩到：blockedByCleared 报"已摘除"，
+        //   但写回去的 blockedBy 还是原样，phase 仍掉回 evidence_wait）。
+        //   正确做法：算出"要摘掉的项"，等新 frame 建好之后再从它里面剔除。
+        const dropDeps = resolvedWant.map(matchDep).filter(Boolean);
+        const carried = s.slot ? {
+          issues: s.slot.issues ?? {},
+          reviews: s.slot.reviews ?? [],
+          preflight: s.slot.preflight ?? null,
+          rework: s.slot.rework ?? 0,
+          reworkReason: s.slot.reworkReason,
+          // 【BUG-03】searches/calculations 挂在【小步】上而不是 job 上：
+          //   job 是"一次委派"，会被 retry/reissue 换掉；而"这一步搜过什么"是
+          //   已经发生的事实，不该随委派作废。
+          searches: s.slot.searches ?? [],
+          calculations: s.slot.calculations ?? [],
+          // 记录本轮 frame 是第几次重写，让 review 知道异议来自哪一版。
+          reframes: (s.slot.reframes ?? 0) + (s.slot.frame ? 1 : 0),
+        } : {issues:{}, reviews:[], preflight:null, rework:0,
+          searches:[], calculations:[], reframes:0};
+        s.slot = {frame:frameFields(d), ...carried};
+        // 【2026-11-25】把 planner 声明已解决的依赖，从【新写入的】blockedBy 里剔除。
+        //   注意是对 s.slot.frame（刚建好的）操作，不是对旧 frame。
+        if (dropDeps.length) {
+          const before = s.slot.frame.blockedBy;
+          s.slot.frame = {...s.slot.frame,
+            blockedBy: before.filter(dep => !dropDeps.includes(dep))};
+          out.blockedByCleared = dropDeps;
+        }
         s.retryCounts = {};
-        if (s.slot.frame.blockedBy.length) evidenceWait(s,'本轮决策依赖未处理的缺口。');
+        if (carried.issues && Object.keys(carried.issues).length) {
+          out.carriedIssues = Object.values(carried.issues).map(x=>({
+            key:x.key, owner:x.owner, kind:x.kind}));
+          out.next = '已重写本步对象与边界。上一轮还有 '
+            + Object.keys(carried.issues).length + ' 条异议未核销（见 carriedIssues）—— '
+            + '它们会在下一次 review 提交时被要求逐条 closed（或重新提出）。';
+        }
+        if (s.slot.frame.blockedBy.length) {
+          evidenceWait(s, '本轮决策依赖未处理的缺口。');
+          // 【2026-11-25】必须把'还差哪几条'直接给出来：现场 planner 只看到
+          //   一句waitReason，不知道 blockedBy 里还剩什么，于是照抄旧值 → 闭环。
+          out.stillBlocked = s.slot.frame.blockedBy;
+          out.next = '仍有 ' + s.slot.frame.blockedBy.length + ' 条依赖未消除（见 stillBlocked）：'
+            + JSON.stringify(s.slot.frame.blockedBy)
+            + '。如果它们已经被真人答复解决，重发 frame 时带上 resolved:[<上面的原文>] 即可核销；'
+            + '如果确实还没解决，请用 question{…} 问真人，或在 partial 里说明。';
+        }
         else advance(s,'knowledge','knowledge');
         break;
+      }
       case 'calculate': {
         as(...roles);
         // ══ 【2026-11-19 · 报告 BUG-3】键名校验必须排在校验链【最前面】═══════
@@ -1251,8 +1817,14 @@ export function openFlow(stateDir) {
         s = load(task);
         break;
       }
-      case 'submit':
-        as(...roles); finishPacket(s,d,role); break;
+      case 'submit': {
+        as(...roles);
+        // finishPacket 可能返回结构化回执（例如 verdict='refused' 的拒绝登记）。
+        // 旧写法直接丢弃返回值 → 模型只能看到 phase 变了，不知道"我的拒绝被受理了"。
+        const receipt = finishPacket(s,d,role);
+        if (receipt && typeof receipt === 'object') Object.assign(out, receipt);
+        break;
+      }
       case 'commit': {
         as('planner'); at('commit');
         const {review, design, knowledge, issues} = s.slot;
@@ -1409,10 +1981,68 @@ export function openFlow(stateDir) {
         const info = fields(d,['classification','parameters','conflict','changed','impact','reason']);
         check(['fact','preference','authorization','estimate','unknown','no_change'].includes(info.classification), 'BAD_FACT_CLASSIFICATION');
         if (info.classification === 'no_change') {
-          check(s.phase!=='evidence_wait' && !fact.question, 'NEEDS_EVIDENCE_DISPOSITION');
+          // ══ 【2026-11-25 · 现场 20261125_211324_905E57B6】no_change 的死路 ══════
+          // 现场：真人在 evidence_wait 里通过 ask_user_question 答了工程指标，
+          //   planner 想"这条不改设计" → 填 no_change → NEEDS_EVIDENCE_DISPOSITION；
+          //   换个分类 → INVALID_REWIND_TARGET（见上一条）。
+          //   两头顶死，planner 只能放弃（实际卡了 5 天）。
+          //
+          // 根因：no_change 的语义是"这条输入不需要处置"，可它对
+          //   **question 的答复**天然不成立 —— 那条答复正是用来消除缺口的，
+          //   说"不需要处置"等于把缺口留在原地。
+          // 判据本身没错，错的是：拒绝时**没给可用的替代**。
+          if (s.phase === 'evidence_wait' || fact.question) {
+            const e = new Error('NEEDS_EVIDENCE_DISPOSITION: 这条真人答复不能标 no_change —— '
+              + (s.phase === 'evidence_wait'
+                  ? '当前 phase=evidence_wait（在等补证），标 no_change 等于把缺口留在原地，流程会永远卡在这里。'
+                  : '它是你在 question 里问出来的答复，本来就是为了消除某个缺口。')
+              + '\n请按答复的实际性质重填 classification：'
+              + '\n  · fact          —— 用户在陈述事实/指标（最常见；params 写进 parameters）；'
+              + '\n  · preference    —— 用户在表达偏好/取舍；'
+              + '\n  · authorization —— 用户在授权某个决定；'
+              + '\n  · estimate      —— 用户给的是估计值；'
+              + '\n  · unknown       —— 用户明确说他也不知道（会保持 evidence_wait，但会记下"问过了"）。'
+              + '\n同时：如果这条答复消除了 frame.blockedBy 里的依赖，'
+              + '重发 frame 时带 resolved:[<被解决的依赖原文>]，否则会立刻退回 evidence_wait。'
+              + '\n（no_change 只适用于"本条输入不产生任何变化"的普通消息，'
+              + '不适用于 question 的答复。）');
+            e.code = 'NEEDS_EVIDENCE_DISPOSITION';
+            e.suggestedClassifications = ['fact','preference','authorization','estimate','unknown'];
+            e.factQuestionId = fact.question?.id ?? null;
+            throw e;
+          }
         } else {
-          const from = stepIndex(d.fromStep);
-          check(from>=0 && from<=s.cursor && s.phase!=='setup', 'INVALID_REWIND_TARGET');
+          // ══ 【2026-11-25 · 现场 20261125_211324_905E57B6】fromStep 的真实边界 ══
+          // 现场：actionHelp 把 fromStep 标成"可选"，而代码里它**事实上必填** ——
+          //   stepIndex(undefined) 返回 -1 → 裸 INVALID_REWIND_TARGET。
+          //   planner 在 evidence_wait 里连试 3 次都是这个码，而错误里
+          //   既不说"该填什么"，也不说"当前能回退到哪"，只能盲试。
+          //   实际耗时 5 天（21:51 卡住 → 用户放弃）。
+          //
+          // 口径（**不猜结论，只给坐标**）：
+          //   · 不传 fromStep 时，默认回退到【当前在办的小步】——
+          //     这是唯一无歧义的选择（planner 说的"这条答复影响本步"）。
+          //     它不改变任何判定：该清 slot / 该 bump revision 的判据一个字没动；
+          //   · 传了就必须合法：越界时把"可填范围 + 当前小步"一起报出来。
+          //   —— 这一步是"少一次盲试"，不是"放宽校验"。
+          let from;
+          if (d.fromStep === undefined || d.fromStep === null || String(d.fromStep).trim() === '') {
+            check(s.phase !== 'setup', 'INVALID_REWIND_TARGET: setup 阶段还没有小步，无法回退。');
+            from = s.cursor;
+            out.fromStepDefaulted = {step:steps[s.cursor]?.id ?? null,
+              note:'未传 fromStep，已默认回退到【当前在办小步】。'
+                + '若这条答复其实影响更早的小步，请显式传 fromStep:"<更早的小步 id>"。'};
+          } else {
+            from = stepIndex(d.fromStep);
+            check(from>=0, 'INVALID_REWIND_TARGET: fromStep=' + JSON.stringify(d.fromStep)
+              + ' 不是任何已知小步。合法的写法是七阶段小步 id（形如 "1.2"、"3.5"），'
+              + '当前在办小步是 ' + JSON.stringify(steps[s.cursor]?.id ?? null) + '。'
+              + '不传 fromStep 时会默认回退到当前小步。');
+            check(from<=s.cursor && s.phase!=='setup',
+              'INVALID_REWIND_TARGET: fromStep=' + JSON.stringify(d.fromStep)
+              + ' 在当前小步（' + JSON.stringify(steps[s.cursor]?.id ?? null) + '）之后，'
+              + '只能回退到【已走过的】小步。');
+          }
           check(!Object.keys(s.ended).length, 'CLOSED_ROLES_REQUIRE_NEW_TASK');
           // ══ 【2026-11-19 · 现场 20261119_173044】没有作废任何东西时【不许】回退 ═══
           // 现场：step 1.1 一共跑了 5 个 revision，其中 rev3 只活了 **14 秒** ——
@@ -1434,10 +2064,39 @@ export function openFlow(stateDir) {
             invalidated:s.records.splice(from), reason:info.reason, messageId:fact.id,
             ...(hasWork ? {} : {additive:true})});
           if (hasWork) {
+            // ══ 【2026-11-25 · 现场 20261125_211324_905E57B6】清 slot 前先把依赖记下来 ══
+            // 现场闭环的真正源头在这里：interpret 推进时 s.slot 被整个清空，
+            //   blockedBy 也跟着没了；planner 回到 frame 只能凭记忆重写依赖 ——
+            //   它不记得"哪条已被刚才这条答复解决"，于是把旧依赖照抄回去，
+            //   frame 又立刻判定 evidence_wait，形成**无限闭环**（实测已复现）。
+            //   注意：这不是"依赖不该清"（清 slot 是对的，本步产物已作废），
+            //   而是"清之前要把账交给 planner"，否则它只能猜。
+            const carriedBlockedBy = Array.isArray(s.slot?.frame?.blockedBy)
+              ? s.slot.frame.blockedBy.slice() : [];
             s.revision += 1;
             s.cursor = from; s.phase = info.classification==='unknown' && s.phase==='evidence_wait'
               ? 'evidence_wait' : 'frame';
             s.slot = null; s.jobs = {}; s.roomProposal = null;
+            // ══ 【2026-11-25 · 现场 20261125_211324_905E57B6】waitReason 必须跟着清 ══
+            // 现场：phase 已经推进到 frame，但 waitReason 还留着
+            //   "本轮决策依赖未处理的缺口。" —— status/state 里这条永不消失，
+            //   于是 planner 以为"缺口还在"，反复 frame/rework 空转。
+            // 口径：waitReason 是【当前 phase 的注脚】，phase 变了它就必须重算。
+            //   这里的重算是无条件清空：真正的依据在 slot.frame.blockedBy 里，
+            //   而不是这句文案（见 case 'frame' 的核销逻辑）。
+            s.waitReason = null;
+            // 把刚才被清掉的依赖原样交给 planner，并说明怎么声明核销。
+            // 这是**提示**，不是自动核销：真正的摘除仍要 planner 在 frame 里
+            //   用 resolved:[...] 显式声明（判据不放宽，见 case 'frame'）。
+            if (carriedBlockedBy.length) {
+              out.carriedBlockedBy = carriedBlockedBy;
+              out.next = '已按这条答复回退到 step ' + (steps[from]?.id ?? '?') + ' 的 frame。'
+                + '\n注意：本步原来的依赖（blockedBy）已随作废产物一起清空，它们是：'
+                + JSON.stringify(carriedBlockedBy)
+                + '\n如果其中某些已经被这条答复解决，重写 frame 时把它们写进 resolved:[...]，'
+                + '插件会把它们从 blockedBy 里核销（否则照抄回去会立刻退回 evidence_wait）。'
+                + '\n如果仍然没解决，就继续留在 blockedBy 里。';
+            }
           } else {
             // 纯增量：不动 revision / cursor / phase / slot / jobs。
             // 但 evidence_wait 必须能被打断 —— 缺证补上了，不回到 frame 就永远出不去。
@@ -1477,6 +2136,40 @@ export function openFlow(stateDir) {
           && new Set(parts).size===parts.length, 'DUPLICATE_OR_EMPTY_ROOM_OWNERSHIP');
         check(rooms.every(r=>r.depends_on.every(x=>names.has(x) && x!==r.name)),'ROOM_DEPENDENCY_INVALID');
         s.roomProposal={rooms,...fields(d,['rationale','scope']), actor:a.id, revision:s.revision};
+        break;
+      }
+      // ══ 【2026-11-20 · 报告 F 节】正式 stop / abort 语义 ══════════════════════
+      // 现场：用户说"不再进行，总结 bug"，planner 没有任何干净出口 ——
+      //   yield 被 PLANNER_ACTION_PENDING 挡（还有 commit 待办），提示"先 rework 再 yield"
+      //   而 rework 会把小步打回 design 继续烧 token；只能走 blocked，结果被登记成
+      //   failed.planner（"我想停"变成"我失败了"），且 allowed 里始终没有 blocked。
+      //
+      // 口径：**停止是意志，不是故障，也不是等待**。三者必须分开记：
+      //   · stop    —— 用户/上游叫停：保留现有产物，登记是谁叫停、为什么，不写进 failures；
+      //   · partial —— 交部分结果（承认这一步交不出完整东西）；
+      //   · blocked —— 角色自己判断干不下去（故障，需要 retry）。
+      // 谁可以 stop：planner（大脑，代上游叫停）与 root（传话员，代表用户本人）。
+      //   **三个分析角色不能自己 stop** —— 它们只能 blocked 上报，停不停由大脑决定。
+      // 停下来的后果与 partial 一致（phase=partial、jobs 清空），但语义与台账完全不同：
+      //   history 里记 stoppedBy / stopReason，failures 保持干净，重跑用 reopen。
+      case 'stop': {
+        as('planner','root');
+        check(!terminal.has(s.phase), 'ALREADY_TERMINAL: 任务已在终态（' + s.phase
+          + '）。要重新推进请用 action=reopen {reason}。');
+        const why = named(d.reason,'reason');
+        s.waitReason = why;
+        s.history.push({revision:s.revision, retained:s.slot, reason:why,
+          partial:true, stopped:true, stoppedBy:role, stoppedByActor:a.id,
+          at:new Date().toISOString()});
+        s.phase = 'partial';
+        s.jobs = {};
+        // 关键：**不写 failures**。停止不是故障，写进去会让上游把"用户叫停"
+        //   当成"角色坏了"，后续 retry / 自动重派的判据也会被污染。
+        out.stopped = {by:role, reason:why, step:steps[s.cursor]?.id ?? null,
+          progress:{done:s.records.length, total:steps.length}};
+        out.next = '已按【停止】登记（不是故障）：' + why
+          + '。已提交的 ' + s.records.length + '/' + steps.length + ' 步全部保留，failures 未被写入。'
+          + '要继续时用 action=reopen {reason} 从当前小步恢复；要交付现有产物用 action=export。';
         break;
       }
       case 'partial':
@@ -1521,11 +2214,26 @@ export function openFlow(stateDir) {
         //   若本步 **已经 rework 过**（slot.reworkReason 有值），说明该做的已经做了，
         //   剩下的是等外部回执 —— 这时 yield 是如实汇报，不是偷懒。
         const reworkedAndWaiting = role === 'planner' && s.slot?.reworkReason;
-        check(reworkedAndWaiting
-          || !(role==='planner' && ['frame','commit','resolve'].includes(s.phase) && !s.question
-            && !hasPending(s) && !Object.keys(s.failures).length),
+        // ══ 【2026-11-20 · 报告 F 节】用户叫停 ≠ 外部回执 ≠ 角色失败 ══════════
+        // 现场：用户说"不再进行，总结 bug"，planner 想合法停下来：
+        //   · yield   → PLANNER_ACTION_PENDING（commit 待办未做），提示"先 rework 再 yield"，
+        //               但 rework 会把小步打回 design **继续烧 token** —— 与叫停相反；
+        //   · blocked → 可以调成功，却被登记成 failed.planner={cause:'role-blocked'}，
+        //               于是"我想停"被记成"我失败了"，语义污染；
+        //   · allowed 里又始终没有 blocked（只有 status/read/…/commit/yield），
+        //               与实际能调成功这件事自相矛盾。
+        //
+        // 口径：停下来是【用户/上游的意志】，不是角色的失败，也不是"在等外部回执"。
+        //   所以新增 stop 动作（见 case 'stop'），并在这里把 yield 的指路改成 stop：
+        //   有待办时 yield 仍然拒绝（避免"偷偷跳过"），但提示不再让人去 rework。
+        const pendingWork = role==='planner' && ['frame','commit','resolve'].includes(s.phase)
+          && !s.question && !hasPending(s) && !Object.keys(s.failures).length;
+        check(reworkedAndWaiting || !pendingWork,
           'PLANNER_ACTION_PENDING: 本阶段还有该你做的动作（' + s.phase + '），不能 yield 跳过。'
-          + '先按 status.next 做完；确实要等外部回执时，先 rework 说明原因，再 yield。');
+          + '\n三种情况的正确姿势：'
+          + '\n  · 用户/上游要求【停止】→ action=stop {reason}（P指"叫停"，不会把你记成失败）；'
+          + '\n  · 在等【外部回执】→ 先 rework{reason} 说明原因，再 yield；'
+          + '\n  · 真做不下去 → blocked{reason}（这会登记为故障，需要人 retry）。');
         s.turns[role] = {reason:named(d.reason,'reason'), at:Date.now()};
         break;
       case 'blocked': {
@@ -1551,9 +2259,50 @@ export function openFlow(stateDir) {
         //   与 interrupt() 的 host-disposed（宿主回收会话）处置方式完全相反。
         //   role-blocked 一律【不自动重派】—— 那需要 planner/root 判断后手动 retry，
         //   否则等于把人的决策权抢走。
+        // ══ 【2026-11-20 · 测试方残余 (b)】故障必须带时间戳与 revision ═══════
+        // 现场：修复前登记的 role-blocked 一直挂在 status.failed.planner 里，
+        //   而条目里**没有任何时间/版本信息** —— 于是分不清它是"刚才登记的"
+        //   还是"上一版代码遗留的脏数据"，也没法判断它是否还适用于当前 revision。
+        // 口径：给每个故障打 at / revision / step。之后 status 会据此标 stale，
+        //   **但绝不静默删除** —— 故障是审计记录，删不删要由 retry/reopen 决定。
         s.failures[role] = {reason:named(d.reason,'reason'), job:s.jobs[role]?.id ?? null,
-          step:steps[s.cursor]?.id, cause:'role-blocked'};
+          step:steps[s.cursor]?.id, cause:'role-blocked',
+          at:new Date().toISOString(), revision:s.revision, specHash};
         s.turns[role] = {reason:d.reason, at:Date.now()};
+        break;
+      }
+      // ══ 【2026-11-20 · 测试方残余 (b)】显式清理历史/失效故障 ═══════════════
+      // 与 retry 的区别（**这个区别是本节的全部意义**）：
+      //   · retry        —— 故障仍然成立：清掉并【重派新 job】让它再干一次；
+      //   · clearFailed  —— 故障已经不适用（旧版本遗留 / 回退过 / 角色已换人）：
+      //                     只清账、**不派活**，并写进 history 留痕。
+      // 为什么不能自动清：故障是审计事实，自动消失等于篡改历史；
+      //   而且"到底还适不适用"只有大脑（planner）能判断 —— 这正是它的职责。
+      // 为什么必须能清：否则一条修复前的脏数据会永远污染 waitingOn / dispatch，
+      //   让上游一直以为"planner 坏了"（现场就卡在这条上）。
+      case 'clearFailed': {
+        as('planner','root');
+        const want = Array.isArray(d.roles) ? d.roles.map(x=>String(x))
+          : (typeof d.role === 'string' ? [d.role] : Object.keys(s.failures ?? {}));
+        const known = ['knowledge','design','review','planner','root'];
+        const bad = want.filter(r => !known.includes(r));
+        check(!bad.length, 'CLEAR_FAILED_UNKNOWN_ROLE: 这些不是合法角色：'
+          + JSON.stringify(bad) + '；只能是 ' + known.join('|') + '。');
+        const why = named(d.reason, 'reason');
+        const cleared = want.filter(r => own(s.failures, r));
+        check(cleared.length || want.length === 0, 'NO_SUCH_FAILURE_TO_CLEAR: '
+          + JSON.stringify(want) + ' 里没有任何一条故障登记；当前 failed='
+          + JSON.stringify(Object.keys(s.failures ?? {})) + '。');
+        for (const r of cleared) {
+          s.history.push({revision:s.revision, clearedFailure:{role:r, ...s.failures[r]},
+            reason:why, at:new Date().toISOString(), clearedBy:role});
+          delete s.failures[r];
+        }
+        out.cleared = cleared;
+        out.next = cleared.length
+          ? '已清除 ' + cleared.join('、') + ' 的故障登记（**没有派新活**）。原文已归档进 history。'
+            + '若它们其实还要继续干活，请改用 retry {role,reason} —— retry 才会重派 job。'
+          : '没有可清除的故障登记。';
         break;
       }
       case 'retry': {
@@ -1659,7 +2408,33 @@ export function openFlow(stateDir) {
           'COMPLETION_STATUS_MISMATCH: kind=complete 要求 63 步齐全且无未解释输入，'
           + '当前 progress=' + s.records.length + '/' + steps.length + '。');
         if (role==='planner' && kind==='complete') check(s.roomProposal?.revision===s.revision,'ROOM_PROPOSAL_REQUIRED');
-        if (role==='planner') check(roles.every(r=>!s.members[r] || s.ended[r] || (kind==='partial' && s.failures[r])),'WORKER_END_REASONS_REQUIRED');
+        // ══ 【2026-11-20 · Bug4】WORKER_END_REASONS_REQUIRED 必须说清缺谁、怎么补 ══
+        // 现场：planner 按 stepContract 的 required=[kind,reason] 原样传参，
+        //   连续 4 次拿到 WORKER_END_REASONS_REQUIRED —— 这个码字面意思是"理由缺失"，
+        //   而真实原因是【还有角色没登记结束】，参数一点问题都没有。
+        //   同一类问题（Bug3）：错误体不说明真实缺失字段，调用方只能盲试。
+        // 口径：报"还差谁"，并把两种合法补法写出来（等它 end，或它确实 failed）。
+        if (role==='planner') {
+          const open = roles.filter(r => s.members[r] && !s.ended[r]
+            && !(kind==='partial' && s.failures[r]));
+          if (open.length) {
+            const e = new Error('WORKER_END_REASONS_REQUIRED: 你的 kind/reason 参数是合法的，'
+              + '被拒的真实原因是【还有角色没有登记结束】：' + JSON.stringify(open)
+              + '。这不是参数问题。'
+              + '\n处置（二选一）：'
+              + '\n  ① 先用 send_message 让这些角色各自 end{kind,reason}，等它们登记完再 end；'
+              + '\n  ② 若它们确实干不下去，planner 可先 partial{reason} 收尾，'
+              + '或让对应角色 blocked{reason} 登记故障后再按 partial 结束。'
+              + '\n当前已登记结束的角色：'
+              + JSON.stringify(Object.entries(s.ended).map(([r,x])=>({role:r, kind:x.kind})))
+              + '；已登记故障：' + JSON.stringify(Object.keys(s.failures)) + '。');
+            e.code = 'WORKER_END_REASONS_REQUIRED';
+            e.pendingRoles = open;
+            e.endedRoles = Object.keys(s.ended);
+            e.failedRoles = Object.keys(s.failures);
+            throw e;
+          }
+        }
         if (role==='root') check(s.ended.planner || (kind==='partial' && s.failures.planner), 'PLANNER_END_REASON_REQUIRED');
         s.ended[role] = { role, actor:a.id, kind, reason:named(d.reason,'reason'), at:new Date().toISOString() };
         break;
@@ -1846,6 +2621,7 @@ export function openFlow(stateDir) {
     const orphaned = s.jobs[role]?.id;
     const cause = opts.cause ?? 'role-blocked';
     s.failures[role]={reason,job:orphaned,step:steps[s.cursor]?.id,cause,
+      at:new Date().toISOString(), revision:s.revision, specHash,
       ...(orphaned ? {orphanedJob:orphaned} : {})};
     // 只作废【这个角色】的 job；别人的在途任务不受影响。
     if (orphaned) delete s.jobs[role];
@@ -1917,7 +2693,65 @@ export function openFlow(stateDir) {
     return job.id;
   }
 
+  /**
+   * ── 【2026-11-20 · P0】清理残留的七阶段状态 ───────────────────────────────
+   *
+   * 现场（BUG测试结果_20261120 BUG-1/2）：上一轮任务异常结束后，状态文件里留着
+   *   一个指向 inactive session 的 planner，新任务 attach 报 TASK_ALREADY_BOUND、
+   *   launch 报 OTHER_ROOMS_ACTIVE —— 唯一出路是手工 Remove-Item。这不是正常路径。
+   *
+   * 口径：
+   *   · **只看不删是默认行为**（dryRun:true）—— 列出目录里有哪些任务、各自什么状态；
+   *   · 真删必须显式 force:true，且一次只删【一个 taskId】——
+   *     绝不提供"清空整个目录"的批量入口（那是事故放大器）；
+   *   · 删除前把状态归档到 .stale/（与 gate_load_case 的处置一致），保留证据可追溯；
+   *   · 只有该任务自己的 root 或 planner 能删（root 指定不了别人的任务）。
+   *
+   * 这是"清残留"的**插件内合法入口**，代替手工删文件。
+   */
+  function clean(a, task, d = {}) {
+    const dry = !(d.force === true);
+    const target = compact(d.taskId ?? task);
+    const path = pathOf(target);
+    const exists = existsSync(path);
+    const s = exists ? load(target, false) : null;
+    const info = s ? {taskId:s.taskId, phase:s.phase, revision:s.revision,
+      progress:{done:s.records.length, total:steps.length},
+      planner:s.planner, root:s.root,
+      members:Object.fromEntries(Object.entries(s.members ?? {}))} : null;
+    if (dry) {
+      // dry-run：列出目录里所有任务，标出哪些"看起来是残留"（planner 不可考也照列）。
+      const all = readdirSync(stateDir)
+        .filter(n => /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}\.json$/.test(n))
+        .map(n => { const t = n.slice(0,-5); const x = load(t, false);
+          return x ? {taskId:t, phase:x.phase, done:x.records.length,
+            planner:x.planner, root:x.root} : {taskId:t, unreadable:true}; });
+      return {dryRun:true, target, targetExists:exists, targetState:info, all,
+        next:'这是【只看不删】。要真的清掉 ' + target + '：action=clean {taskId:"'
+          + target + '", force:true}（会把状态归档到 .stale/ 再删）。'};
+    }
+    check(exists, 'CLEAN_TARGET_NOT_FOUND: ' + JSON.stringify(target) + ' 没有状态文件。');
+    check(s, 'CLEAN_TARGET_UNREADABLE: 状态文件存在但不是本版本/已损坏，拒绝自动删除。'
+      + '请人工确认后备份再删：' + path);
+    // 只有该任务自己的 root 或 planner 能删。
+    const mine = s.root === a.id || s.planner === a.id;
+    check(mine, 'CLEAN_NOT_BY_OWNER: 只有本任务自己的 root 或 planner 能清理它。'
+      + '当前调用者=' + JSON.stringify(a.id) + '，本任务的 root='
+      + JSON.stringify(s.root) + '、planner=' + JSON.stringify(s.planner) + '。');
+    // 归档而不是直接删 —— 保留证据，事后可追溯。
+    const staleDir = join(stateDir, '.stale');
+    mkdirSync(staleDir, {recursive:true, mode:0o700});
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const archived = join(staleDir, stamp + '-' + target + '.json');
+    try { writeFileSync(archived, JSON.stringify(s), 'utf8'); } catch {}
+    save({...s, ended:{...(s.ended ?? {}), root:{role:'root', kind:'partial',
+      reason:'clean: 由 ' + a.id + ' 显式清理', at:new Date().toISOString()}}});
+    try { unlinkSync(path); } catch {}
+    return {cleaned:target, archived, archivedAt:stamp,
+      next:'已清理 ' + target + '（原文归档在 .stale/）。现在可以重新 attach 同一 taskId。'};
+  }
+
   return {call, load, trackedActor, searchJob, orderSearch, fillSearch, recordSearch,
     reserveWorker, consumeTurn, interrupt, autoReissue, allowedActions, waitingOn:waitingOn,
-    result:task=>makeResult(load(task))};
+    clean, result:task=>makeResult(load(task))};
 }

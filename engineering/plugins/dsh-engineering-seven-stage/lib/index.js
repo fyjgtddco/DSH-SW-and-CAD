@@ -657,6 +657,20 @@ export function install(ctx, config, createUserMessage) {
         outputs:{'<step.outputs 的每个键>':'…'}}},
     retry:{required:['role','reason'],example:{role:'knowledge|design|review',reason:'…'}},
     blocked:{required:['reason'],example:{reason:'…'}},
+    // 【F 节】stop 与 blocked 的差别必须写进契约，否则模型还会拿 blocked 当停止用。
+    clearFailed:{required:['reason'],
+      optional:{roles:'数组，要清的角色名（knowledge|design|review|planner|root）；不传则清全部',
+        role:'单个角色名的简写' },
+      note:'只清【已经不适用】的故障登记（旧版本遗留 / 回退过 / 角色已换人），**不派新活**。'
+        + '若故障仍然成立、要让它继续干活，请用 retry（retry 才会重派 job）。',
+      example:{roles:['planner'], reason:'那条是修复前遗留的 role-blocked，当前已不适用'}},
+    stop:{required:['reason'],
+      note:'表示【用户/上游叫停】，不是故障、也不是等待：不写 failures，已提交产物全部保留。'
+        + '与 blocked（我卡了，要人 retry）、yield（我在等外部回执）是三种不同的事。',
+      example:{reason:'用户要求停止本轮分析，先总结已有结果'}},
+    // 【P0-1】clean：清掉残留的七阶段状态（僵尸 planner 绑死新任务时用）。
+    clean:{optional:{taskId:'要清理的 taskId；不传则只看不删（dry-run）',
+      force:'布尔；必须显式 true 才会真的删除状态文件'}},
     yield:{required:['reason'],example:{reason:'…'}},
     partial:{required:['reason'],example:{reason:'…'}},
     end:{required:['kind','reason'],example:{kind:'complete|partial',reason:'…'}},
@@ -764,7 +778,7 @@ export function install(ctx, config, createUserMessage) {
       // wait_user: 仅真实主对话可用 —— 表示"这一回合是在等用户回答，正常停止"。
       //   它不是结束（结束仍要 end + read_design 复核）。
       action:{type:'string',enum:['attach','launch','bind','status','frame','search','search_fill','calculate','explore','submit','commit','rework',
-        'question','capture','interpret','rewind','propose_rooms','partial','yield','wait_user','blocked','retry','reopen','end','read','export','deliver']},
+        'question','capture','interpret','rewind','propose_rooms','partial','yield','wait_user','blocked','stop','retry','reopen','end','read','export','deliver','clean','clearFailed']},
       dataJson:{type:'string',description:'动作参数的 JSON 对象。status 返回所需字段，可按错误修正。'}
     }},
     output:{schema:{type:'object',required:['text'],additionalProperties:false,properties:{text:{type:'string'}}},
@@ -813,13 +827,36 @@ export function install(ctx, config, createUserMessage) {
         // 实测同一个 submit 被拒 10+ 轮才成功。
         // 现在：把该动作的契约直接挂在错误体上，改错不需要再查任何地方。
         const contract = actionContract(String(args?.action ?? ''));
+        // ══ 【2026-11-20 · Bug3】"参数被拒"必须给出【可操作字段】 ══════════════
+        // 现场：note 写"按 error 修正后重试"，而 error 体里一个可操作字段都没有
+        //   —— 既没有 allowedParts，也没有 expectedParams，调用方只能盲试
+        //   15+ 个参数变体，每次都拿不到比上一次更多的信息。
+        // 口径：只要异常本身带了结构化线索（allowedParts / forbiddenParts /
+        //   expectedParams / pendingRoles / endedRoles / failedRoles），
+        //   就原样透出到错误体 —— 这些线索由 flow 层产生（插件裁定），
+        //   这里只做搬运，不新增任何判定。
+        const HINTS = ['allowedParts','forbiddenParts','expectedParams',
+          'pendingRoles','endedRoles','failedRoles',
+          // 【2026-11-20】残留/竞争/关闭类错误的结构化线索：
+          'blockers','boundPlanner','boundRoot','plannerAlive','howToFix',
+          'closableKeys','reopenedKeys',
+          // 【2026-11-25】evidence_wait 相关：依赖核销与分类建议
+          'blockedBy','suggestedClassifications','factQuestionId','stillBlocked'];
+        const hints = {};
+        for (const k of HINTS) {
+          if (err && err[k] !== undefined) hints[k] = err[k];
+        }
         return { text: JSON.stringify({
           ok: false, code,
           error: raw,
           ...context,
+          ...hints,
           ...(contract ? { actionContract: contract } : {}),
           note: '按上面的 error 修正后重试；一次拒绝不会改变任何已落盘状态。'
             + (context.allowed ? ' 当前允许的动作见 allowed。' : '')
+            + (hints.allowedParts ? ' 本次调用【参数】允许的取值见 allowedParts。' : '')
+            + (hints.expectedParams ? ' 期望的参数名见 expectedParams。' : '')
+            + (hints.pendingRoles ? ' 还差这些角色没登记结束见 pendingRoles。' : '')
             + (contract ? ' 本动作的 dataJson 契约见 actionContract。' : ''),
         }) };
       }
@@ -868,10 +905,16 @@ export function install(ctx, config, createUserMessage) {
       //   消化掉前一条"去 status"的通知。在这里解除在途标记，允许下一波再投一条。
       //   位置必须在最前面：即使这次调用会因为别的 check 被拒，也证明它醒了。
       markNotifiedConsumed(taskId, a.id);
+      // ══ 【2026-11-20 · P0】clean 必须抢在所有"绑定校验"之前 ═══════════════
+      // 理由：它要处理的正是"绑定已经烂掉"的现场 —— 僵尸 planner 让
+      //   trackedActor 指到一个与 taskId 不符的任务上，WRONG_BOUND_TASK 会先把
+      //   清理入口挡死，于是又回到"只能手工删文件"。
+      // 权限不在这里判：flow.clean 内部要求调用者是该任务的 root 或 planner。
+      if (action==='clean') return {text:JSON.stringify(flow.clean(a, taskId, data))};
       const prior = flow.load(taskId);
       const bound = flow.trackedActor(a);
       check(!bound || bound.s.taskId===taskId,'WRONG_BOUND_TASK');
-      if (!['status','read','export'].includes(action)) {
+      if (!['status','read','export','clean'].includes(action)) {
         // ══ 【2026-11-19 · 会话 c9c2fd56 现场】错误码必须能自解释 ═══════════════
         // 现场：planner 在 attach 落地前就 launch → 拿到裸 WRONG_WORKFLOW_ROOT。
         //   这个码的字面意思是"工作流根会话不对"，而真实原因是【任务还没 attach】。
@@ -1039,11 +1082,52 @@ export function install(ctx, config, createUserMessage) {
           const wf = currentWorkflow(taskId);
           loadCasePath = typeof wf.load_case_file === 'string' ? wf.load_case_file : null;
         } catch {}
+        // ══ 【2026-11-20 · P0】把"哪些会话还活着"作为插件判定的输入 ══════════
+        // attach 需要回答"旧 planner 是不是已经不在了"。这个判断**不能**由模型自报，
+        // 只能由宿主证明。做法：把工作流根会话下所有仍能被 ctx.agents 查到的
+        // 子会话 id 收集起来，交给 flow 去比对旧 planner。
+        // 注意：这只是"输入证据"，判定仍在 flow 里（插件是大脑这条口径不变）。
+        // ⚠️ 只有"确实查得到宿主会话表"时才给出证据 —— 查不到就传 undefined，
+        //   让 flow 走"无法确认 ⇒ 保守不接管"那条分支。
+        //   区分"查过了、它不在"（[]，可以接管）与"没法查"（undefined，不许接管），
+        //   这两个含义相反，绝不能混成一个空数组。
+        let livePlanners;
+        try {
+          const oldPl = prior ? prior.planner : null;
+          if (oldPl && ctx.agents && typeof ctx.agents.get === 'function') {
+            const live = actorOf(ctx.agents.get(oldPl));
+            livePlanners = (live && live.parent === a.id) ? [String(oldPl)] : [];
+          }
+        } catch { livePlanners = undefined; }
         result = flow.call(a,taskId,'attach',
-          {planner:plannerId, requirements, loadCasePath});
+          {planner:plannerId, requirements, loadCasePath, livePlanners});
         if (plannerNote) result.plannerNote = plannerNote;
         if (!prior) notify(taskId,plannerId,'已绑定为需求与规划。调用 launch 创建三个工作角色。','attach');
       } else if (action==='launch') {
+        // ══ 【2026-11-20 · P0】launch 必须认人：只有【当前绑定的那个 planner】能 launch ══
+        // 现场（BUG测试结果_20261120 BUG-3）：连开 3 个总计子代理，只有最后一个
+        //   attach 成功，前几个仍挂在平台 —— 它们照样能发动作指令。
+        // 旧判据只查 bound.role==='planner'，而 trackedActor 是按"谁的 parent 是 planner"
+        //   找角色，于是**任何一个** planner 的子会话都可能被认成 analyst，
+        //   多个大脑同时推进同一份状态。
+        // 口径：launch / frame / commit 等"大脑动作"必须核对【就是状态里记的那一个】。
+        //   actorRole 已经按 s.planner === a.id 判定，这里再显式兜一层，
+        //   并把"你不是被绑定的那个 planner"说清楚，避免模型以为是阶段问题。
+        if (bound?.role === 'planner' && prior && String(a.id) !== String(prior.planner)) {
+          const e = new Error('PLANNER_SETUP_REQUIRED: 你（session ' + JSON.stringify(a.id)
+            + '）不是本任务绑定的那个总计子代理（绑定的是 '
+            + JSON.stringify(prior.planner) + '）。'
+            + '同一个 taskId 只允许一个大脑。'
+            + '\n如果你是新 fork 的替代 planner：先让主对话 action=attach {planner:<你的 sessionId>} '
+            + '（旧 planner 已失效时插件会自动接管），再 launch。'
+            + '\n如果你是误开的第二个：直接结束本会话，不要对同一 taskId 发动作。');
+          e.code = 'PLANNER_SETUP_REQUIRED';
+          e.boundPlanner = prior.planner;
+          e.yourSessionId = String(a.id);
+          e.howToFix = ['主对话 action=attach {planner:<正确 sessionId>}',
+            '结束这个多余的子代理'];
+          throw e;
+        }
         check(bound?.role==='planner' && prior?.phase==='setup','PLANNER_SETUP_REQUIRED');
         check(!launches.has(taskId),'LAUNCH_IN_PROGRESS');
         const provider = config.workerProvider ?? 'fork';
@@ -1056,8 +1140,39 @@ export function install(ctx, config, createUserMessage) {
             exec.signal.throwIfAborted();
             const descendants=await ctx.subagents.listDescendants(prior.root,exec.signal);
             const known=new Set([a.id,...Object.values(flow.load(taskId).childForRole)]);
-            check(descendants.filter(x=>x.kind==='child' && x.activity!=='inactive')
-              .every(x=>known.has(String(x.id))), 'OTHER_ROOMS_ACTIVE_DRAIN_BEFORE_ANALYSIS');
+            // ══ 【2026-11-20 · P0】OTHER_ROOMS_ACTIVE 必须点名"谁在挡" ══════════
+            // 现场（BUG测试结果_20261120 BUG-1）：launch 报"其他房间未排空"，
+            //   而 room-board --json 显示 rooms 为空 —— 因为这里挡的是**活跃会话**，
+            //   不是建模房间。两套词汇混用，排查方向被带偏；错误里又没有任何
+            //   "哪个 session / 怎么处置"的信息，只能人工翻 list_agents。
+            //
+            // 口径：把挡路的会话逐个列出来（id + label + activity），并给两条出路：
+            //   · 让它们结束（分析角色应等 launch；若是陈旧会话，用 clean 清残留）；
+            //   · 若确认它们与本任务无关且已 inactive，本判据本来就会放行。
+            const blockers = descendants
+              .filter(x=>x.kind==='child' && x.activity!=='inactive')
+              .filter(x=>!known.has(String(x.id)));
+            if (blockers.length) {
+              const e = new Error('OTHER_ROOMS_ACTIVE_DRAIN_BEFORE_ANALYSIS: 分析开始前还有 '
+                + blockers.length + ' 个活跃子会话不是本任务的成员，先把它们排空。'
+                + '\n⚠️ 注意：这条判据看的是【活跃会话】，不是建模房间 —— '
+                + 'room-board 显示 rooms 为空并不代表这里会放行。'
+                + '\n挡路的会话（sessionId / label / activity）：'
+                + JSON.stringify(blockers.map(x=>({
+                    sessionId:String(x.id), label:x.label ?? null,
+                    activity:x.activity ?? null})))
+                + '\n处置（按顺序试）：'
+                + '\n  ① 如果它们是本任务上一轮遗留的总计子代理：确认已结束后重新 launch；'
+                + '\n  ② 如果它们是别的任务的会话：等它们结束，或先在那边收尾；'
+                + '\n  ③ 残留状态清了还挡：action=clean {dryRun 看目录} → '
+                + 'action=clean {taskId:"<本任务>", force:true}，再重新 attach + launch。');
+              e.code = 'OTHER_ROOMS_ACTIVE_DRAIN_BEFORE_ANALYSIS';
+              e.blockers = blockers.map(x=>({sessionId:String(x.id),
+                label:x.label ?? null, activity:x.activity ?? null}));
+              e.howToFix = ['等这些会话结束', 'action=clean {taskId, force:true} 后重新 attach',
+                '或在对应任务里收尾'];
+              throw e;
+            }
             const childId = randomUUID();
             flow.reserveWorker(a,taskId,role,childId);
             try {

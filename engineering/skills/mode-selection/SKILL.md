@@ -289,8 +289,19 @@ engineering_seven_stage(taskId="<task_id>", action="launch")
 - 只有**三个真实会话全部 bind 成功**，流程才进入 1.1；
 - 三个角色各自收到一次性邀请码，**第一次调用必须是 `action=bind`**：
   `dataJson='{"role":"knowledge","token":"<邀请码>"}'`。
-- ⚠️ 启动前插件要求「本任务没有其它活跃房间」：有别的建模小屋在跑 →
-  `OTHER_ROOMS_ACTIVE_DRAIN_BEFORE_ANALYSIS`。**先排空建模会话再开分析。**
+- ⚠️ 启动前插件要求「本任务名下没有无关的**活跃子会话**」：
+  `OTHER_ROOMS_ACTIVE_DRAIN_BEFORE_ANALYSIS`。**注意它看的是会话，不是建模房间** ——
+  `room-board --json` 显示 rooms 为空并不代表这里会放行。
+  错误体会给出 `blockers`（sessionId / label / activity）与 `howToFix`，照着处置即可。
+
+> 🔵 **残留状态 / 僵尸 planner 的自救**（2026-11-20 新增）：
+> - `attach` 时若状态文件已存在、但**旧 planner 已确认失效**，插件会**自动接管**（换绑 + 归档旧账），
+>   回执里带 `plannerTakeover`，不再返回 `TASK_ALREADY_BOUND`；
+> - 旧 planner **仍存活**时才拒绝（同一 taskId 不允许两个大脑），并给出 `howToFix`；
+> - 实在要清残留：`action=clean {}` 先看目录（dry-run），
+>   `action=clean {taskId:"<本任务>", force:true}` 才真删（先归档到 `.stale/`）。
+>   **不要再手工 `Remove-Item` 状态文件。**
+> - 同一个 taskId 只允许**一个**总计子代理：多余的 fork 直接结束，别对它发动作。
 
 #### ④ 按 `action=status` 的 `stepContract` 逐步推进
 
@@ -300,7 +311,7 @@ engineering_seven_stage(taskId="<task_id>", action="launch")
 |---|---|---|
 | 总计 | `frame` | 对象 / 当前决策 / 边界 / **searchTopic** / 复核方案 / 假设 / 依赖 |
 | 知识 | `search` → `submit` | 先发检索工单（插件不联网）；来源必须来自本 job 被回填的搜索结果 |
-| 反驳 | `submit`（1.1 先盲审） | 只提交可复现、可行动的异议；空反对会被拒 |
+| 反驳 | `submit`（1.1 先盲审） | 只提交可复现、可行动的异议；空反对会被拒。盲审只能读 `status.allowedParts` 里的面（原始需求/事实/本步原文），**待审的知识稿与设计稿此时不可读**；若认为限制本身使复审无法进行，用 `verdict:"refused"` 登记（插件转 `evidence_wait` 交给人，**不会**因此放行） |
 | 设计 | `submit` | 方案 + 参数 + 计算依据 + 缺口 |
 | 反驳 | `submit`（复审） | `verdict=pass/conditional/blocked`；已解决异议须逐条写关闭依据 |
 | 总计 | `commit` | 有 blocking 缺口 → 自动转 `evidence_wait` |
@@ -340,7 +351,29 @@ engineering_seven_stage(taskId="<task_id>", action="launch")
 | 总计 | `question` | 写清 当前决策 / 所需信息 / 为什么缺 / 不知道时怎么取得 |
 | **真实主对话** | 把问题展示给用户 | 用 `ask_user_question` 或 `yield` 暂停 |
 | **真实主对话** | `capture` | 从**宿主消息**取用户原话（`messageId` 可选） |
-| 总计 | `interpret` | 分类 `fact/preference/authorization/estimate/unknown/no_change`，并给出受影响最早步骤 `fromStep` |
+| 总计 | `interpret` | 分类 `fact/preference/authorization/estimate/unknown/no_change`；`fromStep` **可省略**（默认回退到当前在办小步） |
+
+> 🔴 **evidence_wait 里最容易踩死的四件事**（2026-11-25 现场，卡了 5 天）：
+>
+> | 坑 | 正确做法 |
+> |---|---|
+> | 不传 `fromStep` 以为会被拒 | **可以省略**；不传时插件默认回退到当前小步，回执里 `fromStepDefaulted` 会说明 |
+> | 把 question 的答复标成 `no_change` | **不行**，会被 `NEEDS_EVIDENCE_DISPOSITION` 拒（那条答复就是用来消除缺口的）。按实际性质填 `fact` / `preference` / `authorization` / `estimate` / `unknown` |
+> | 照抄旧 `blockedBy` 重发 `frame` | 会**立刻退回 `evidence_wait`**（死循环）。如果某条依赖已被答复解决，要写 `resolved:[<那条依赖原文>]` |
+> | 以为 `waitReason` 说明"还缺什么" | 它只是当前 phase 的注脚。真正还缺什么看 `status.current.frame.blockedBy`，或回执里的 `stillBlocked` / `carriedBlockedBy` |
+>
+> **完整恢复姿势**（`interpret` 成功后）：
+>
+> ```
+> # 1) 先 interpret（不必给 fromStep），回执会带 carriedBlockedBy
+> interpret {messageId:"…", classification:"fact", parameters:"…",
+>   conflict:"…", changed:"…", impact:"…", reason:"真人答复<什么>"}
+>
+> # 2) 重写 frame：把已被解决的依赖写进 resolved，其余的留在 blockedBy
+> frame {object:"…", …, blockedBy:["<依赖A>","<依赖B>"], resolved:["<依赖A>"]}
+> ```
+>
+> `resolved` 要是 `blockedBy` 里的原文/前缀；填错会 `RESOLVED_DEPENDENCY_NOT_FOUND` 并回显当前 `blockedBy`。
 
 - **模型自己写的文本不能充当真人原话**。`capture` 只认两类真实宿主来源：
   1. `role=user` 且 `source.kind=user` 的用户打字的纯文本（`source='user'`）；
@@ -378,8 +411,20 @@ python "<根>\tools\mode2_flow.py" register-design
 
 #### ⑦ 部分结果 / 中断
 
+> 🔴 **停止 ≠ 故障 ≠ 等待**，三件事用三个动作，不要混用：
+>
+> | 你的处境 | 用哪个 | 写进哪 |
+> |---|---|---|
+> | 用户/上游要**停** | `stop {reason}` | `history[].stopped`，**不写 failures** |
+> | 我在等**外部回执** | `yield {reason}` | `turns` |
+> | 我判断**干不下去**（故障） | `blocked {reason}` | `failures`（需要人 retry） |
+>
+> - `stop` 只有 **planner / root** 能做；三个分析角色只能 `blocked`，停不停由大脑决定。
+> - `stop` 之后 phase=`partial`，已提交小步全部保留；要继续用 `reopen {reason}`。
+> - ⚠️ **不要用 `blocked` 表达"用户叫停"** —— 那会把 planner 永久记成 failed，语义污染整个台账。
+
 - 暂时停止（还有任务）用 `yield`；有任务但遇故障用 `blocked`；
-  用户主动终止 → 用户在对话里说「停止分析」，真实主对话 `partial` 才会被认。
+  用户主动终止 → 真实主对话或总计子代理用 `action=stop {reason}`（旧的 `partial` 路径仍然可用）。
 - `partial` 产物可用于给用户看已完成对象、补证责任与下一步，
   **但不能解锁建模**（read_design 会拒绝）。
 - **`partial` 不是单向门**：环境修好后，**真实主对话或总计子代理**可以调
@@ -533,6 +578,11 @@ python "<工程模式根目录>\tools\workflow_gate.py" select <A|B|C>,<D|E>
 
 - 每一步都必须有「知识（含真实联网来源）→ 设计 → 独立复审」三件套；
 - 1.1 先**盲审**原始需求（此时还没有设计结论），再进入设计发布；
+  - 盲审的可读面由插件裁定：`status.allowedParts` = `requirements/facts/step/frame/rules/outputs/searches/calculations`，
+    禁读面 = `knowledge/design/review/issues/scope`（提交预审结论前看到待审正文，独立复审就失效了）；
+    不带 `part` 的 `read` 返回目录 + `allowedParts`，不泄露正文；
+  - 正式复审（`phase=review`）**必须**给出 `pass|conditional|blocked`，不接受 `refused` ——
+    "我拒绝"只在盲审受理，且只把问题抬给 planner，永远不产生"通过"；
 - 空反对、未填理由、省略未关闭的硬异议 → 一律拒绝；
 - 一轮返工上限 2 次，超限转 `evidence_wait`；
 - `7.12` 的复审必须 `pass`，否则 `read_design` 拒绝交接。
