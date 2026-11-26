@@ -1,4 +1,4 @@
-import { applyChange, digest, directChanges, MARKER, snapshot } from './guarded-memory.js';
+import { applyChange, candidatePages, digest, directChanges, MARKER, readableSummary, snapshot, SUMMARY_TITLE } from './guarded-memory.js';
 
 function checkedChange(graph, change) {
   if (change.kind === 'user' && (!change.evidence || !directChanges(change.evidenceText)
@@ -14,8 +14,10 @@ export function auditCommit(journal, pending, events, surface) {
   const before = journal.state();
   const expected = (pending.changes ?? []).reduce(checkedChange, before.graph);
   if (digest(expected) !== digest(pending.graph)) throw new Error('MEMORY_PROTECTED_DATA_CHANGED');
-  const { pages } = JSON.parse(candidate.body.slice(candidate.body.indexOf('\n') + 1));
-  if (candidate.body !== snapshot(pending.id, expected, pages) || digest(candidate.graph) !== digest(expected)) {
+  const pages = candidatePages(candidate);
+  const body = candidate.format === 'readable'
+    ? readableSummary(expected, pages) : snapshot(pending.id, expected, pages);
+  if (candidate.body !== body || digest(candidate.graph) !== digest(expected)) {
     throw new Error('MEMORY_PROTECTED_DATA_CHANGED');
   }
   const matches = event => event.data?.compactionId === pending.hostId;
@@ -46,7 +48,8 @@ export function auditRead(pins, messages) {
   for (const message of messages) {
     if (message.source?.kind !== 'compact-checkpoint') continue;
     const pin = allowed.get(message.id);
-    const ours = message.content?.some(block => block.type === 'text' && block.text.startsWith(MARKER));
+    const ours = message.content?.some(block => block.type === 'text' &&
+      (block.text.startsWith(MARKER) || block.text === SUMMARY_TITLE || block.text.startsWith(SUMMARY_TITLE + '\n')));
     if (!pin && !ours) continue;
     if (!pin || message.source.compactionId !== pin.hostId || digest(message.content) !== pin.hash) {
       throw new Error('MEMORY_READ_HASH_MISMATCH');

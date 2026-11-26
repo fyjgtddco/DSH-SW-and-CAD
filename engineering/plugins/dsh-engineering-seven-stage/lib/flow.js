@@ -468,8 +468,38 @@ function nextActionOf(s, role) {
     }
   }
   if (roles.includes(role) && s.jobs[role]) {
+    // ══ 【2026-11-26 · 现场 20261125_211324_905E57B6】knowledge 要知道「现在能不能 submit」 ══
+    // 现场：工单已回填（filled，6 条来源），但 nextAction 只说「先 read 再提交」，
+    //   没写「回填已完成，可以提交了」。knowledge 于是先 yield 等回填
+    //   → 被 PENDING_JOB 拒 → 再 status → 看到一句通用指引 → 停在原地 38 秒
+    //   → 直到 root 手动 stop 广播把它唤醒，才带着旧上下文去 submit
+    //   → NO_ACTIVE_JOB_FOR_ROLE（任务已 partial）。整条链路空转 42 秒后自毁。
+    //
+    // 口径：把 knowledge 的「检索进度」直接翻成一句可执行的判断：
+    //   · 有 pending 工单 → 明确说「在等传话员回填，先做别的，别 submit」；
+    //   · 已 filled 且有过来源 → 明确说「回填完成，现在 submit」；
+    //   · 一次都没发单 → 提示先发单。
+    //   这不是放宽判据（submit 仍由插件校验），只是不再让模型靠猜。
+    let gate = null;
+    if (role === 'knowledge') {
+      const order = s.jobs[role].searchOrder;
+      const filled = (s.jobs[role].searches ?? []).length;
+      if (order && order.status === 'pending') {
+        gate = {state:'awaiting-search-fill', orderId:order.id,
+          message:'检索工单还在等真实主对话回填（orderId=' + order.id + '）。'
+            + '不要 submit：现在没有来源可用。可以先做本步其它准备，或 yield 等回填。'};
+      } else if (filled) {
+        gate = {state:'ready-to-submit', hits:filled,
+          message:'检索已回填 ' + filled + ' 条（orderId=' + (order?.id ?? '') + '），现在就可以 submit。'
+            + 'sources[].id 直接用 status.job.searches[].hits[].id。'};
+      } else {
+        gate = {state:'no-search-yet',
+          message:'本步还没有检索记录：先用 action=search 发布工单，等回填后再 submit。'};
+      }
+    }
     return {
       action:'submit', jobId:s.jobs[role].id,
+      ...(gate ? {ready:gate} : {}),
       dataJson: role === 'knowledge'
         ? {jobId:'<本 job.id>', content:'…',
           sources:[{id:'<status.job.searches[].hits[].id>', location:'…', applicability:'…'}], gaps:[]}
@@ -482,7 +512,9 @@ function nextActionOf(s, role) {
       required: role === 'knowledge' ? ['jobId','content','sources','gaps']
         : role === 'review' ? ['jobId','content','verdict','issues']
         : ['jobId','content','evidence','gaps'],
-      note:'正文先用 action=read {step:"' + step + '", part:"…"} 取，再提交。',
+      // 【2026-11-26】note 必须带上 ready.message —— 它才是「现在该不该提交」的答案。
+      note:(gate ? gate.message + ' ' : '')
+        + "正文先用 action=read {step:\"" + step + "\", part:\"…\"} 取，再提交。",
     };
   }
   return null;
@@ -2204,7 +2236,29 @@ export function openFlow(stateDir) {
             : role==='root' && !s.ended.planner && !s.failures.planner;
           check(waiting, 'TERMINAL_ROLE_MUST_REGISTER_END_REASON');
         }
-        check(!s.jobs[role], 'PENDING_JOB_USE_SUBMIT_OR_REPORT_BLOCKER');
+        // ══ 【2026-11-26 · 现场 20261125_211324_905E57B6】「有 job」≠「现在就该干活」 ══
+        // 现场：knowledge 发了检索工单、正在等传话员回填，于是调 yield 说"我在等"
+        //   → 被 PENDING_JOB_USE_SUBMIT_OR_REPORT_BLOCKER 拒。
+        //   它只能结束这一回合；等回填唤醒后再 status，看到一句通用指引就停下了。
+        //   整条链路空转 42 秒，最后被 root 手动 stop 的广播才撞起来。
+        //
+        // 根因：这条判据把「持有 job」等同于「现在就能提交」。
+        //   但对 knowledge 来说，发完工单后**它确实在等外部回执** ——
+        //   这时逼它 submit 只会得到一个 SEARCH_REQUIRED。
+        // 口径：有 job 仍不许 yield（防止偷偷跳过），但**等外部回执的合法状态要放行**：
+        //   · 工单 pending（等传话员回填）→ 允许 yield，这正是"我在等"；
+        //   · 工单 filled（可以提交）→ 仍然拒绝 yield，并明确指出"现在该 submit"。
+        const orderPending = role === 'knowledge'
+          && s.jobs.knowledge?.searchOrder?.status === 'pending';
+        const noSearchYet = role === 'knowledge'
+          && !(s.jobs.knowledge?.searches ?? []).length
+          && !s.jobs.knowledge?.searchOrder;
+        check(!s.jobs[role] || orderPending || noSearchYet,
+          'PENDING_JOB_USE_SUBMIT_OR_REPORT_BLOCKER: 你手上有一个可以立刻提交的任务包'
+          + '（jobId=' + (s.jobs[role]?.id ?? '') + '），不能 yield 跳过。'
+          + '\n现在该做的：' + (role === 'knowledge'
+              ? '检索已回填，直接 action=submit（sources 用 status.job.searches[].hits[].id）。'
+              : '按 status.job.nextAction 提交，或 blocked 登记故障。'));
         // ══ 【2026-11-19 · 报告 BUG-7】rework 已提交、在等外部回执时应当允许 yield ══
         // 现场：resolve 阶段唯一处置动作是 rework（退回 frame），
         //   而真正在等的是"外部文件回执"—— 它还没到，这一轮本来就该结束。

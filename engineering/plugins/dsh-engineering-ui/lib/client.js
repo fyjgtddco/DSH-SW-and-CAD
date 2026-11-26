@@ -1169,6 +1169,46 @@ window.__ModuleLoader__.load({
       @container (max-width: 600px) {
         .eng-sv-cards, .eng-sv-home-pair { grid-template-columns: 1fr; }
       }
+      // ── 【七阶段运行日志】开发者使用页的容器 ─────────────────────────
+      // 面板本体（.dsh-runlog）的样式来自 lib/run-log/view.css，由组件按固定
+      //   同源地址 <link> 加载一次（见 EngRunLog）。这里只负责【容器】：
+      //   与「压缩历史」同款白纸卡片 + 内边距，让两个子页视觉一致；
+      //   overflow:auto 保证长事件列表在本页内滚动，而不是把整页顶长。
+      .eng-sv-runlog { display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+      .eng-runlog { min-width: 0; padding: 0; }
+      .eng-runlog .eng-cp-empty { padding: 16px; margin: 0; }
+      .eng-runlog-host { min-width: 0; }
+      .eng-sv-runlog > .eng-cp-empty { padding: 16px; margin: 0; color: var(--sv-muted); font-size: 13px; }
+      // ── 【外部监控插件诊断日志】开发者使用页的第二块卡片 ─────────────
+      // 与七阶段面板上下堆叠：先看分析流水线有没有走通，再看 SW/COM 侧有没有被拒。
+      // 两块的高度都是 min-height:0 + 内部滚动，整页不跟着事件条数变长。
+      .eng-sv-devstack { display: grid; gap: 12px; min-height: 0; }
+      .eng-sv-monlog { display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+      .eng-mlog { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; min-width: 0; }
+      .eng-mlog-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+      .eng-mlog-title { font-size: 14px; font-weight: 680; color: var(--sv-ink); }
+      .eng-mlog-meta { color: var(--sv-muted); font-size: 12px; }
+      .eng-mlog-spacer { flex: 1 1 auto; }
+      .eng-mlog-detail { color: var(--sv-muted); font-size: 13px; }
+      .eng-mlog-warn { display: grid; gap: 3px; padding: 7px 10px; border-radius: 7px;
+        background: #fdf6ec; border: 1px solid #f0d9b5; color: #7a4b12; font-size: 12px; }
+      .eng-mlog-list { display: grid; gap: 1px; max-height: 340px; overflow: auto;
+        border: 1px solid var(--sv-border); border-radius: 8px; }
+      .eng-mlog-row { display: grid; grid-template-columns: 128px minmax(140px, 1fr) 1.4fr;
+        gap: 8px; padding: 5px 9px; font-size: 12px; align-items: baseline;
+        background: var(--sv-paper); border-bottom: 1px solid var(--sv-grid); }
+      .eng-mlog-row:last-child { border-bottom: none; }
+      .eng-mlog-row.err { background: #fdf0ee; }
+      .eng-mlog-row.warn { background: #fdf8ec; }
+      .eng-mlog-time { color: var(--sv-muted); white-space: nowrap; }
+      .eng-mlog-code { font-family: ui-monospace, Consolas, monospace; color: var(--sv-ink); }
+      .eng-mlog-row.err .eng-mlog-code { color: #a3231a; font-weight: 640; }
+      .eng-mlog-bits { color: var(--sv-muted); }
+      .eng-mlog-empty { padding: 14px 16px; border-radius: 8px; background: var(--sv-canvas);
+        color: var(--sv-muted); font-size: 13px; display: grid; gap: 4px; }
+      .eng-mlog-empty.err { background: #fdf0ee; color: #a3231a; }
+      .eng-mlog-empty.off { background: #f4f2f0; color: #6b625c; }
+      .eng-mlog-empty.off strong { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
       ` +
 
 
@@ -4201,6 +4241,331 @@ window.__ModuleLoader__.load({
         h('div', { className: 'eng-cp-list', ref: boxRef }, rows));
     }
 
+    /* ══════════════════════════════════════════════════════════════════════
+     * 【七阶段运行日志】EngRunLog — 「开发者使用」页的正文
+     * ══════════════════════════════════════════════════════════════════════
+     * 它做什么：把这个根会话（含子代理）的宿主事件 + 七阶段插件的任务状态
+     *   整理成一份摘要，回答「做到第几步 / 谁在等谁 / 哪儿花时间 / 为什么停住」，
+     *   并能把完整结构化 JSON 下载下来交给 AI 排查。
+     *
+     * 为什么浏览器半单独成一个同源模块（lib/run-log/view.mjs）：
+     *   · 渲染逻辑与独立预览版（outputs/DSH-七阶段运行日志）是同一份代码，
+     *     宿主只负责给数据，展示口径只有一处，不会出现"预览能看到、装进 DSH 看不到"；
+     *   · 这份客户端 bundle 已有 440KB，面板的 DOM 逻辑没必要再挤进来。
+     *   宿主按固定同源地址 /dsh-engineering-ui/run-log/view.mjs 发布它，
+     *   CSS 由同一个目录的 view.css 按地址加载一次。
+     *
+     * 只读：不写会话、不调工具、不向被观测会话注入任何提示词 ——
+     *   观测本身不能变成被观测会话的额外排队与上下文开销。
+     * ══════════════════════════════════════════════════════════════════════ */
+    var RUN_LOG_MODULE = '/dsh-engineering-ui/run-log/view.mjs';
+    var RUN_LOG_STYLE = '/dsh-engineering-ui/run-log/view.css';
+    var RUN_LOG_STYLE_ID = 'dsh-engineering-runlog-style';
+
+    /** 载入面板样式表（全局只挂一次；多处挂载不会重复插入）。 */
+    function ensureRunLogStyle() {
+      try {
+        if (typeof document === 'undefined') return;
+        if (document.getElementById(RUN_LOG_STYLE_ID)) return;
+        var el = document.createElement('link');
+        el.id = RUN_LOG_STYLE_ID;
+        el.rel = 'stylesheet';
+        el.href = RUN_LOG_STYLE;
+        (document.head || document.documentElement).appendChild(el);
+      } catch (e) { /* 样式挂了不该影响数据 */ }
+    }
+
+    /**
+     * 拉一次摘要。
+     * 单独成函数是为了让 view.mjs 的 load 契约（signal / limit / download）
+     * 只在这一处落地，面板里不再拼 URL。
+     */
+    function loadRunLog(params) {
+      var opts = params || {};
+      var query = new URLSearchParams();
+      query.set('rootSessionId', String(opts.rootSessionId || ''));
+      if (opts.download === true) query.set('download', '1');
+      else query.set('limit', String(opts.limit || 300));
+      return fetch('/dsh-engineering-ui/run-log?' + query.toString(), {
+        method: 'GET',
+        signal: opts.signal,
+        credentials: 'same-origin',
+        cache: 'no-store',
+      }).then(function (response) {
+        if (!response.ok) {
+          throw new Error('运行日志读取失败（HTTP ' + response.status + '）');
+        }
+        return response.json();
+      });
+    }
+
+    function EngRunLog(props) {
+      var rootSessionId = (props && props.rootSessionId) ? String(props.rootSessionId) : '';
+      // ⚠️ 红线：hooks 必须写在所有早退分支【之前】。
+      //   下面「没有会话 ID」的分支直接 return 一段提示，若 hooks 写在它后面，
+      //   会话 ID 由空变有时会触发 hooks 数量变化 → React 直接报错。
+      var hostRef = useRef(null);
+      // 初值就是 'mounting'：有会话 ID 时首屏直接显示"正在载入"，
+      //   不会先白一帧再变文字（effect 要等到 commit 之后才跑）。
+      var stageState = useState('mounting');   // 'mounting' | 'ready' | 'failed'
+      var stage = stageState[0];
+      var setStage = stageState[1];
+      var errorState = useState('');
+      var error = errorState[0];
+      var setError = errorState[1];
+      // 依赖数组里放 rootSessionId：切会话必须重建面板（旧请求 abort、定时器清掉）。
+      // ⚠️ props 的变化只走这一条路径，不要在其他地方再读 props 做判断。
+      useEffect(function () {
+        var target = hostRef.current;
+        if (!rootSessionId || !target) return;
+        ensureRunLogStyle();
+        var disposed = false;
+        var unmount = null;
+        setStage('mounting');
+        setError('');
+        // 加时间戳防宿主/浏览器缓存旧模块（面板是开发期热改的）。
+        var url = RUN_LOG_MODULE + '?t=' + Date.now();
+        import(url).then(function (mod) {
+          // 卸载/切会话后模块才回来 → 直接丢弃，别在已经清空的节点上挂载。
+          if (disposed || !target) return;
+          if (!mod || typeof mod.mountLogPanel !== 'function') {
+            throw new Error('面板模块缺少 mountLogPanel');
+          }
+          unmount = mod.mountLogPanel(target, {
+            intervalMs: 2500,
+            load: function (params) {
+              return loadRunLog({
+                rootSessionId: rootSessionId,
+                signal: params && params.signal,
+                limit: params && params.limit,
+                download: params && params.download === true,
+              });
+            },
+          });
+          setStage('ready');
+        }).catch(function (err) {
+          if (disposed) return;
+          // 模块加载失败 ≠ 没有日志：必须如实说"面板加载失败"，
+          //   否则用户会以为这个任务什么都没发生（历史教训）。
+          setStage('failed');
+          setError('运行日志面板加载失败：' + ((err && err.message) || '模块不可用'));
+        });
+        return function () {
+          disposed = true;
+          // view.mjs 的卸载函数自己会 abort 轮询请求、清掉定时器、摘掉 visibilitychange；
+          //   这里再兜一层，确保组件卸载后没有任何请求或计时器存活。
+          try { if (typeof unmount === 'function') unmount(); } catch (e) {}
+          try { if (target) target.replaceChildren(); } catch (e) {}
+        };
+      }, [rootSessionId]);
+
+      if (!rootSessionId) {
+        return h('p', { className: 'eng-cp-empty', role: 'status' }, '正在识别当前会话…');
+      }
+      return h('div', { className: 'eng-runlog' },
+        error
+          ? h('p', { className: 'eng-cp-empty', role: 'alert' }, error)
+          : (stage === 'mounting'
+              ? h('p', { className: 'eng-cp-empty', role: 'status' }, '正在载入运行日志…')
+              : null),
+        h('div', { className: 'eng-runlog-host', ref: hostRef }));
+    }
+
+
+    /* ══════════════════════════════════════════════════════════════════
+     * 【外部监控插件运行日志】EngMonitorLog — 开发者使用页的第二块
+     * ══════════════════════════════════════════════════════════════════
+     * 数据源：GET /dsh-engineering-ui/monitor-log
+     *   → MonitorBridge.readDiagnostics() → 监控器 POST /v1/diagnostics
+     *   也就是 monitor_diagnostics 表里那些【监控器自己判定过的失败】：
+     *   接管被拒（UNMANAGED_SW_RUNNING / COM_WORKER_STILL_RUNNING …）、
+     *   COM 作业失败（含阶段/步号/HRESULT）、验收阻断、清理失败。
+     *
+     * 为什么不像七阶段那块那样挂外部模块：
+     *   这块面板要展示的是"状态 + 事件表"，逻辑比时间线简单得多，而且
+     *   必须能在 status.level === 'unavailable' 时把 code 与 detail
+     *   原样显示出来（历史上最容易犯的错：把"监控器没开"渲染成"没有日志"）。
+     *   所以直接在本文件里画，归一化仍走 run-log/monitor-model.mjs 的纯函数，
+     *   宿主与面板的判定口径只有一份。
+     * ══════════════════════════════════════════════════════════════════ */
+    var MONITOR_LOG_ROUTE = '/dsh-engineering-ui/monitor-log';
+
+    /** 拉一次监控器诊断。降级时后端同样返回 200 + ok:false，故此处不抛。 */
+    function loadMonitorLog(params) {
+      var opts = params || {};
+      var query = new URLSearchParams();
+      query.set('limit', String(opts.limit || 100));
+      if (opts.sinceSeq) query.set('since_seq', String(opts.sinceSeq));
+      if (opts.download === true) query.set('download', '1');
+      return fetch(MONITOR_LOG_ROUTE + '?' + query.toString(), {
+        method: 'GET',
+        signal: opts.signal,
+        credentials: 'same-origin',
+        cache: 'no-store',
+      }).then(function (response) {
+        if (!response.ok) throw new Error('监控器日志读取失败（HTTP ' + response.status + '）');
+        return response.json();
+      });
+    }
+
+    /** 严重度 → 徽标配色（与零件看板的 eng-pb-stat 同一套语义）。 */
+    function monitorLevelClass(level) {
+      if (level === 'error') return 'err';
+      if (level === 'warn') return 'warn';
+      if (level === 'unavailable') return 'off';
+      if (level === 'empty') return 'idle';
+      return 'ok';
+    }
+
+    function EngMonitorLog(props) {
+      // ⚠️ hooks 必须在所有早退分支之前（与 EngRunLog 同一条红线）。
+      var intervalMs = (props && props.intervalMs) || 5000;
+      var dataState = useState({ ok: true, status: null, events: [], warnings: [], err: null, ts: 0 });
+      var D = dataState[0];
+      var setD = dataState[1];
+      var busyState = useState(false);
+      var busy = busyState[0];
+      var setBusy = busyState[1];
+
+      useEffect(function () {
+        var alive = true;
+        var controller = null;
+        var timer = null;
+        var pull = function () {
+          if (!alive) return;
+          // 页面不可见时不拉：这块面板 5s 一次，后台常驻没必要。
+          try { if (typeof document !== 'undefined' && document.hidden) return; } catch (e) {}
+          try { if (controller) controller.abort(); } catch (e) {}
+          controller = new AbortController();
+          loadMonitorLog({ signal: controller.signal, limit: 100 })
+            .then(function (json) {
+              if (!alive) return;
+              setD({
+                ok: json && json.ok !== false,
+                status: (json && json.status) || null,
+                events: Array.isArray(json && json.events) ? json.events : [],
+                warnings: Array.isArray(json && json.warnings) ? json.warnings : [],
+                counts: (json && json.counts) || null,
+                err: null,
+                ts: Date.now(),
+              });
+            })
+            .catch(function (e) {
+              if (!alive || (e && e.name === 'AbortError')) return;
+              // 网络层失败 ≠ 没有日志 —— 必须整块变色并显示原因。
+              setD({
+                ok: false, status: null, events: [], warnings: [], counts: null,
+                err: String((e && e.message) || e), ts: Date.now(),
+              });
+            });
+        };
+        pull();
+        timer = setInterval(pull, intervalMs);
+        return function () {
+          alive = false;
+          if (timer) clearInterval(timer);
+          try { if (controller) controller.abort(); } catch (e) {}
+        };
+      }, [intervalMs]);
+
+      /** 下载 JSON：走后端 download=1（全量分页，后端限 10000 条并标 truncated）。 */
+      function download() {
+        if (busy) return;
+        setBusy(true);
+        loadMonitorLog({ download: true })
+          .then(function (json) {
+            var task = (json && json.task) || 'no-task';
+            var stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            var blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json;charset=utf-8' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = 'DSH-监控器诊断日志-' + task + '-' + stamp + '.json';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(function () {
+              try { a.remove(); } catch (e) {}
+              try { URL.revokeObjectURL(url); } catch (e) {}
+              setBusy(false);
+            }, 0);
+          })
+          .catch(function (e) {
+            setBusy(false);
+            setD(function (prev) {
+              var n = {}; for (var k in prev) if (Object.prototype.hasOwnProperty.call(prev, k)) n[k] = prev[k];
+              n.err = '下载失败：' + ((e && e.message) || e);
+              return n;
+            });
+          });
+      }
+
+      var st = D.status || null;
+      var level = st ? st.level : (D.err ? 'unavailable' : 'idle');
+      var label = st ? st.label : (D.err ? '读取失败' : '读取中…');
+      var detail = st ? st.detail : (D.err || '');
+      var events = D.events || [];
+
+      var head = h('div', { className: 'eng-mlog-head' },
+        h('span', { className: 'eng-mlog-title' }, '外部监控插件 · 诊断日志'),
+        h('span', { className: 'eng-pb-stat ' + monitorLevelClass(level) }, label),
+        st && st.task ? h('span', { className: 'eng-mlog-meta' }, '任务 ' + st.task) : null,
+        h('span', { className: 'eng-mlog-spacer' }),
+        h('button', {
+          type: 'button', className: 'eng-sv-back', disabled: busy,
+          title: '下载本次可读取的全部诊断事件（JSON，交给 AI 排查）',
+          onClick: download,
+        }, busy ? '正在打包…' : '下载日志 JSON'));
+
+      var summary = detail ? h('p', { className: 'eng-mlog-detail' }, detail) : null;
+
+      var warnBox = (D.warnings && D.warnings.length)
+        ? h('div', { className: 'eng-mlog-warn' },
+            D.warnings.map(function (w, i) { return h('p', { key: 'w' + i }, w); }))
+        : null;
+
+      // 事件表：失败置顶视觉，时间倒序（最新在上，与压缩历史一致）。
+      var rows = events.slice(0, 200).map(function (e, i) {
+        var sev = String(e.severity || 'info');
+        var when = e.at || e.iso || '';
+        if (!when && e.ts) {
+          try { when = new Date(Number(e.ts) * 1000).toLocaleString('zh-CN', { hour12: false }); } catch (err) {}
+        }
+        var bits = [];
+        if (e.op) bits.push(e.op);
+        if (e.room) bits.push('房间 ' + e.room);
+        if (e.part) bits.push('零件 ' + e.part);
+        if (e.stage) bits.push('阶段 ' + e.stage);
+        if (e.step != null) bits.push('步 ' + e.step);
+        if (e.hresult) bits.push(e.hresult);
+        return h('div', { className: 'eng-mlog-row ' + sev, key: 'e' + (e.seq != null ? e.seq : i) },
+          h('span', { className: 'eng-mlog-time' }, when || '—'),
+          h('span', { className: 'eng-mlog-code' }, e.code || '(无故障码)'),
+          h('span', { className: 'eng-mlog-bits' }, bits.join(' · ')));
+      });
+
+      var body;
+      if (D.err) {
+        // 网络层失败：红色整块，绝不显示空列表。
+        body = h('div', { className: 'eng-mlog-empty err' }, '读取失败：' + D.err);
+      } else if (!st) {
+        body = h('div', { className: 'eng-mlog-empty' }, '正在读取监控器诊断…');
+      } else if (level === 'unavailable') {
+        // ★ 历史教训：这里必须显示 code + detail，而不是"暂无记录"。
+        //   监控器没开 / 未 attach 各有明确 code，看 code 就知道该做什么。
+        body = h('div', { className: 'eng-mlog-empty off' },
+          h('strong', null, st.code || 'MONITOR_UNAVAILABLE'),
+          h('span', null, st.detail || '监控器诊断日志当前不可用'));
+      } else if (!rows.length) {
+        body = h('div', { className: 'eng-mlog-empty' },
+          '监控器已接入，但还没有诊断记录。诊断只记录【被判定过的失败】（接管被拒、COM 作业失败、验收阻断等），'
+          + '正常建模与保存不产生条目。');
+      } else {
+        body = h('div', { className: 'eng-mlog-list' }, rows);
+      }
+
+      return h('div', { className: 'eng-mlog' }, head, summary, warnBox, body);
+    }
+
     /* ══════════════════════════════════════════════════════════════════
      * 【会话视图】EngSessionViewPage — 官方 conversation.view 页签的正文
      * ══════════════════════════════════════════════════════════════════
@@ -4259,7 +4624,7 @@ window.__ModuleLoader__.load({
               h('h2', null, '栏目入口'),
               h('div', { className: 'eng-sv-cards' },
                 entry('daily', '日常使用', '查看主对话的压缩历史'),
-                entry('developer', '开发者使用', '开发者功能预留'))),
+                entry('developer', '开发者使用', '七阶段运行日志，可下载完整 JSON'))),
             h('section', { className: 'eng-sv-box', 'aria-label': '画布' },
               h('h2', null, '画布'),
               h('div', { className: 'eng-sv-cast' },
@@ -4279,7 +4644,16 @@ window.__ModuleLoader__.load({
               daily ? '切换到开发者使用' : '切换到日常使用')),
           daily ? h('section', { className: 'eng-sv-box eng-sv-history', 'aria-label': '压缩历史' },
             sid ? h(EngCompactPage, { key: sid, rootSessionId: sid, forceTab: 'main', sessionView: true })
-              : h('p', { className: 'eng-cp-empty', role: 'status' }, '正在识别当前会话…')) : null));
+              : h('p', { className: 'eng-cp-empty', role: 'status' }, '正在识别当前会话…'))
+            : h('div', { className: 'eng-sv-devstack' },
+              h('section', { className: 'eng-sv-box eng-sv-runlog', 'aria-label': '七阶段运行日志' },
+                sid ? h(EngRunLog, { key: 'seven:' + sid, rootSessionId: sid })
+                  : h('p', { className: 'eng-cp-empty', role: 'status' }, '正在识别当前会话…')),
+              // 【外部监控插件】与七阶段并列：一个看分析流水线，一个看 SW 使用权与 COM。
+              //   两者数据源完全不同（会话日志/七阶段状态 vs 监控器诊断表），
+              //   分开成两块卡片，谁坏了都能一眼定位，不会互相掩盖。
+              h('section', { className: 'eng-sv-box eng-sv-monlog', 'aria-label': '外部监控插件诊断日志' },
+                h(EngMonitorLog, { key: 'monitor' })))));
     }
 
 
@@ -7524,6 +7898,10 @@ window.__ModuleLoader__.load({
     exports.EngCompactPage = EngCompactPage;
     exports.EngCompactPanel = EngCompactPage;
     exports.EngSessionViewPage = EngSessionViewPage;
+    // 【七阶段运行日志】开发者使用页正文（导出便于单测直接渲染 / 外部复用）
+    exports.EngRunLog = EngRunLog;
+    // 【外部监控插件诊断日志】与七阶段面板并列的第二块（同样导出供单测）
+    exports.EngMonitorLog = EngMonitorLog;
     exports.EngPartsBoard = EngPartsBoard;
     exports.SubagentDock = SubagentConsole;
     exports.formatMessage = formatMessage;

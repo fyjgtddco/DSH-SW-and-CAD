@@ -25,7 +25,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute } from 'node:path';
-import { applyChange, digest, directChanges, exportGraph, isResumeOriginal, messageText, needsDimensionIntent, openJournal, snapshot } from './guarded-memory.js';
+import { applyChange, candidatePages, directChanges, exportGraph, isResumeOriginal, messageText, needsDimensionIntent, openJournal, readableSummary } from './guarded-memory.js';
 import { apply as installAudit } from './guarded-audit.js';
 import { appendLedgerEntry } from './ledger.js';
 
@@ -39,6 +39,7 @@ const TOOL = 'engineering_memory_request';
  *   抛错 —— 那会直接把整个 preset 挂掉，连兜底的机会都没有。
  */
 let BasicCompactionEngine;
+let balancedAfter;
 let ENGINE_MODE = 'real';
 try {
   const m = await import('@deepseek-ai/dsh-compaction-basic');
@@ -69,6 +70,10 @@ try {
     };
   }
 }
+if (ENGINE_MODE === 'real') {
+  try { ({ toolPairingBalancedAfter: balancedAfter } = await import('@deepseek-ai/dsh-compaction')); }
+  catch { /* The regular host range still works without the optional wider selection. */ }
+}
 
 export const engineMode = () => ENGINE_MODE;
 
@@ -98,22 +103,45 @@ function activePins(state) {
 }
 
 function recentPages(messages, previous, revised, redacted = new Set()) {
-  const pages = new Map(previous.filter(page => page.kind === 'user' || page.kind === 'user-evidence')
+  const pages = new Map(previous.filter(page => ['user', 'user-evidence', 'answer', 'workflow'].includes(page.kind))
     .map(page => [page.id, page]));
+  const calls = new Map();
   for (const message of messages) {
+    if (message.role === 'assistant') {
+      for (const block of message.content) {
+        if (block.type === 'tool-call') calls.set(block.id, block.name);
+      }
+    }
+    if (message.role === 'tool' && !message.isError && message.source?.kind === 'tool') {
+      const tool = calls.get(message.toolCallId ?? message.source.callId);
+      if (tool === 'ask_user_question' || tool === 'engineering_seven_stage') {
+        let result;
+        try { result = JSON.parse(messageText(message)); }
+        catch { continue; }
+        if (tool === 'ask_user_question' && Array.isArray(result?.answers)) {
+          for (const answer of result.answers) {
+            if (typeof answer?.id !== 'string') continue;
+            const selected = Array.isArray(answer.selected) ? answer.selected : [];
+            const text = [...selected, answer.custom].filter(value => typeof value === 'string' && value.trim()).join('\n');
+            if (!text) continue;
+            const id = message.id + '/' + answer.id;
+            if (!pages.has(id)) pages.set(id, { kind: 'answer', id, text });
+          }
+        }
+        if (tool === 'engineering_seven_stage' && result?.ok !== false &&
+            /^[\w.-]{1,80}$/.test(result?.taskId ?? '') && /^[a-z_]{1,40}$/.test(result?.phase ?? '')) {
+          const step = result.current?.step;
+          pages.set('workflow', { kind: 'workflow', id: 'workflow', task: result.taskId,
+            step: typeof step === 'string' && /^\d+(\.\d+)*$/.test(step) ? step : '', phase: result.phase });
+        }
+      }
+    }
     if (message.source?.kind !== 'user' || message.role !== 'user') continue;
     const text = messageText(message);
     if (text && !pages.has(message.id)) pages.set(message.id, { kind: 'user', id: message.id, text });
   }
-  const result = [...pages.values()].map(page => redacted.has(page.id) || (revised && /\p{N}/u.test(page.text ?? ''))
+  return [...pages.values()].map(page => redacted.has(page.id) || (revised && /\p{N}/u.test(page.text ?? ''))
     ? { kind: 'user-evidence', id: page.id } : page);
-  // 没有依赖边可循的旧数值只能降为来源指针；无关、无数字的用户指令仍然逐字保留。
-  if (revised) return result;
-  const activity = messages.filter(message => message.role === 'assistant' && messageText(message).trim()).at(-1);
-  if (activity) result.push({ kind: 'activity', id: activity.id, excerpt: [...messageText(activity)].slice(-420).join('') });
-  const refs = messages.filter(message => message.role === 'tool' && message.id).slice(-8).map(message => message.id);
-  if (refs.length) result.push({ kind: 'tool-evidence', messageIds: refs });
-  return result;
 }
 
 /**
@@ -373,7 +401,9 @@ export class GuardedCompaction extends BasicCompactionEngine {
   #excerptOf(entry, pin) {
     try {
       if (!pin?.candidate) return '';
-      const { body } = entry.journal.load(pin.candidate);
+      const candidate = entry.journal.load(pin.candidate);
+      if (candidate.format === 'readable') return candidate.body.slice(0, 1600);
+      const { body } = candidate;
       const json = body.slice(body.indexOf('\n') + 1);
       const parsed = JSON.parse(json);
       const lines = [];
@@ -444,7 +474,7 @@ export class GuardedCompaction extends BasicCompactionEngine {
       const nodes = agent.session.surface.nodes;
       const target = nodes.includes(range.start) && nodes.includes(range.end) ? range : selectedSpan(agent);
       if (!target) throw new Error('MEMORY_RECOVERY_NO_SAFE_RANGE');
-      await this.compactRegion(target.start, target.end, agent, signal);
+      await this.#compactSelected(target.start, target.end, agent, signal);
     }
     for (const id of journal.state().consumed) corrections.delete(id);
   }
@@ -452,6 +482,7 @@ export class GuardedCompaction extends BasicCompactionEngine {
   async #run(agent, signal, operation) {
     const entry = this.#entry(agent);
     const key = agent.session.id;
+    const wasPending = Boolean(entry.journal.state().pending);
     if (this.#running.has(key)) throw new Error('MEMORY_COMPACTION_PENDING');
     this.#running.add(key);
     try {
@@ -461,6 +492,14 @@ export class GuardedCompaction extends BasicCompactionEngine {
       return result;
     } catch (error) {
       const state = entry.journal.state();
+      const end = agent.session.snapshotEvents().findLast(event => event.type === 'compaction/end' &&
+        event.data.compactionId === state.pending?.hostId);
+      if (!wasPending && !signal?.aborted && state.pending && end &&
+          /^(summary is not smaller than the shadowed content \(|MEMORY_MINIMUM_OVER_BUDGET$)/.test(end.data.error ?? '')) {
+        // No replacement was made. Normal budget rejection must not force recovery compaction.
+        entry.journal.save({ ...state, pending: null });
+        return null;
+      }
       if (state.pending) entry.journal.save({ ...state, pending: { ...state.pending,
         failure: signal?.aborted ? 'MEMORY_INTERRUPTED' : String(error.cause?.message ?? error.message).slice(0, 300),
       } });
@@ -469,6 +508,32 @@ export class GuardedCompaction extends BasicCompactionEngine {
   }
 
   async compactRegion(start, end, agent, signal) {
+    const entry = this.#entry(agent);
+    if (entry.journal.state().pending) return null;
+    const session = agent.session;
+    const nodes = this.ctx.tokenMeter.measure(session).nodes;
+    const first = nodes.findIndex(node => node.seq === start);
+    const last = nodes.findIndex(node => node.seq === end);
+    if (first < 0 || last < first) return null;
+    const minTokens = 512;
+    const selected = nodes.slice(first, last + 1);
+    const selectedSize = selected.reduce((sum, node) => sum + node.tokens, 0);
+    if (selectedSize < minTokens) {
+      if (selected.every(node => session.eventAt(node.seq)?.data.source?.kind === 'compact-checkpoint')) return null;
+      if (!balancedAfter) return null;
+      // Let a token-poor header-only prefix join older history while leaving a recent tail.
+      const total = nodes.slice(first).reduce((sum, node) => sum + node.tokens, 0);
+      let tail = 0;
+      let cutoff = nodes.length - 1;
+      while (cutoff > last && tail < Math.max(128, total * 0.16)) tail += nodes[cutoff--].tokens;
+      while (cutoff > last && !balancedAfter(session, nodes[cutoff].seq)) cutoff--;
+      if (cutoff <= last || nodes.slice(first, cutoff + 1).reduce((sum, node) => sum + node.tokens, 0) < minTokens) return null;
+      end = nodes[cutoff].seq;
+    }
+    return this.#compactSelected(start, end, agent, signal);
+  }
+
+  async #compactSelected(start, end, agent, signal) {
     return this.#run(agent, signal, entry => {
       this.#begin(entry, [], [], { start, end });
       return super.compactRegion(start, end, agent, signal);
@@ -493,15 +558,29 @@ export class GuardedCompaction extends BasicCompactionEngine {
     await new Promise(resolve => setImmediate(resolve));
     signal?.throwIfAborted();
     let previous = [];
-    for (const pin of activePins(state)) {
+    const currentPins = activePins(state);
+    let backfillLegacy = false;
+    for (const pin of currentPins) {
       try {
-        const { body } = journal.load(pin.candidate);
-        previous.push(...JSON.parse(body.slice(body.indexOf('\n') + 1)).pages);
+        const candidate = journal.load(pin.candidate);
+        previous.push(...candidatePages(candidate));
+        backfillLegacy ||= candidate.format !== 'readable';
       } catch {
         // 只从备份的原始输入里恢复用户要求，绝不从损坏的摘要里恢复。
         try { previous.push(...recentPages(journal.load(pin.source).messages, [], false)); }
         catch { throw new Error('MEMORY_RECOVERY_BACKUP_INVALID'); }
       }
+    }
+    if (backfillLegacy) {
+      // Legacy checkpoints omitted question answers. Recover them once from audited input backups.
+      let recovered = [];
+      for (const pin of state.pins) {
+        recovered = recentPages(journal.load(pin.source).messages, recovered, false);
+      }
+      if (state.pins.some(pin => pin.redacted?.length)) {
+        recovered = recovered.filter(page => page.kind !== 'answer' || !/\p{N}/u.test(page.text));
+      }
+      previous = [...recovered, ...previous];
     }
     if (pending.source && pending.hostId !== hostId) {
       try { previous.push(...recentPages(journal.load(pending.source).messages, [], false)); }
@@ -509,7 +588,7 @@ export class GuardedCompaction extends BasicCompactionEngine {
     }
     const redacted = new Set(state.pins.flatMap(pin => pin.redacted ?? []));
     const pages = recentPages(input.messages, previous, pending.changes.length > 0, redacted);
-    const textFor = items => snapshot(pending.id, pending.graph, items);
+    const textFor = items => readableSummary(pending.graph, items);
     const meter = this.ctx.tokenMeter;
     const price = text => meter.estimateMessage({ role: 'user', content: [{ type: 'text', text }] });
     const inputCost = input.messages.filter(message => message.role !== 'system')
@@ -517,12 +596,12 @@ export class GuardedCompaction extends BasicCompactionEngine {
     const limit = Math.min(12000, Math.max(0, inputCost - 75));
     let body = textFor(pages);
     for (let index = pages.length - 1; price(body) > limit && index >= 0; index--) {
-      if (pages[index].kind === 'user' || pages[index].kind === 'user-evidence') continue;
+      if (pages[index].kind !== 'workflow') continue;
       pages.splice(index, 1);
       body = textFor(pages);
     }
     if (price(body) > limit) throw new Error('MEMORY_MINIMUM_OVER_BUDGET');
-    const candidate = journal.backup({ kind: 'candidate', body, graph: pending.graph }, {
+    const candidate = journal.backup({ kind: 'candidate', format: 'readable', body, pages, graph: pending.graph }, {
       label: identityOf(agent).label, root: identityOf(agent).root,
     });
     journal.save({ ...state, pending: { ...pending, hostId, source, candidate } });

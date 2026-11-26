@@ -95,6 +95,14 @@ test('actual host apply keeps connection and read-only routes available without 
  const installMemoryTrace=()=>()=>{};
  const installJobWaitGuard=()=>()=>{};
  const MonitorBridge=class{};
+ // 【2026-11-26】诊断日志路由：import 被整行剥掉后同样要补桩，
+ //   否则 apply() 跑到 createMonitorLogHandler(...) 就 ReferenceError。
+ //   该路由的正确性由 test/monitor-log.test.mjs 独立覆盖。
+ const createMonitorLogHandler=()=>async()=>{};
+ // 【2026-11-26】七阶段运行日志路由（另路接入）同样被剥掉 import，也要补桩：
+ //   /run-log 及其两块静态资源的路由逻辑由 run-log 面板自己的用例覆盖。
+ const createRunLogHandler=()=>async()=>{};
+ const createRunLogAssetHandler=()=>async()=>{};
  const CONFIG_NAME='sw_monitor.json';
  const classifyModelError=e=>({kind:'unknown',message:String(e&&e.message||e)});
  const backoffMsOf=()=>0;
@@ -115,7 +123,8 @@ test('actual host apply keeps connection and read-only routes available without 
   installMemoryTrace,installJobWaitGuard,MonitorBridge,CONFIG_NAME,classifyModelError,backoffMsOf,
   hasStandaloneMarker,collectWaitingEvidence,turnGuardIsAnalystAgent,readAnalystSessionId,latestContextWindow,
   memGuardEnabled,maxActiveSubagents,reclaimThresholdPct,reclaimIntervalMs,evaluateConcurrency,
-  countOccupiedChildren,memorySnapshot,createReclaimer,
+  countOccupiedChildren,memorySnapshot,createReclaimer,createMonitorLogHandler,
+  createRunLogHandler,createRunLogAssetHandler,
   DefenseSigner:class{writeRuntime(){}startGuard(){}stopGuard(){}},process:{env:{...env},platform:process.platform,cwd:()=>temp},console:{log(){},warn(){},error(){}},setTimeout:()=>0,clearTimeout(){},setInterval:()=>0,clearInterval(){},URL,URLSearchParams};
  vm.runInNewContext(source+'\nthis.boot=apply;',sandbox);const dispose=sandbox.boot(ctx2);
  assert.ok(routes.has('/dsh-engineering-ui/conn-state'));assert.ok(routes.has('/dsh-engineering-ui/webots-context'),'host did not install Webots routes');assert.equal(guards.length,1);

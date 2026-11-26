@@ -76,13 +76,30 @@ def same_instance(app, list_pids, pid):
          "SW_INSTANCE_CHANGED_OR_MULTIPLE")
 
 
+@contextlib.contextmanager
+def observed_com_call(stage, step=None):
+    try:
+        yield
+    except Fault:
+        raise
+    except Exception as error:
+        detail = f"COM_CALL_FAILED: {stage}"
+        if step is not None:
+            detail += f" STEP={step}"
+        hresult = getattr(error, "hresult", None)
+        if type(hresult) is int:
+            detail += f" HRESULT=0x{hresult & 0xFFFFFFFF:08X}"
+        raise Fault(detail) from error
+
+
 def build_part(app, new, list_pids, output, material, steps):
     validated_steps(steps)
     pid = int(member(app, "GetProcessID"))
     same_instance(app, list_pids, pid)
     need(member(app, "GetDocumentCount") == 0 and app.ActiveDoc is None, "SW_DOCUMENTS_ALREADY_OPEN")
     need(not os.path.lexists(output), "OUTPUT_ALREADY_EXISTS")
-    model = new(app, material=material)
+    with observed_com_call("new_document"):
+        model = new(app, material=material)
     doc = model.model
     title = member(doc, "GetTitle")
     need(isinstance(title, str) and bool(title.strip()), "SW_DOCUMENT_TITLE_MISSING")
@@ -95,17 +112,20 @@ def build_part(app, new, list_pids, output, material, steps):
              and member(active, "GetPathName") == expected_path
              and member(doc, "GetPathName") == expected_path, "SW_DOCUMENT_SCOPE_CHANGED")
 
-    for step in steps:
+    for index, step in enumerate(steps, 1):
         sole_document("")
-        method = getattr(model, OPERATIONS[step["op"]][0])
-        result = method(*step["args"])
+        op = step["op"]
+        with observed_com_call(op, index):
+            method = getattr(model, OPERATIONS[op][0])
+            result = method(*step["args"])
         need(result is not False and (not isinstance(result, dict) or result.get("ok") is True),
-             "COM_OPERATION_FAILED: " + step["op"])
+             f"COM_OPERATION_FAILED: {op} STEP={index}")
         del result
     sole_document("")
     need(model._has_solid_body(), "SW_NO_SOLID_BODY")
     need(not os.path.lexists(output), "OUTPUT_ALREADY_EXISTS")
-    result = model.save(str(output))
+    with observed_com_call("save"):
+        result = model.save(str(output))
     need(result.get("ok") is True and result.get("saved") is True and not output.is_symlink(),
          "SAVE_FAILED")
     sha = digest(output)
@@ -115,7 +135,8 @@ def build_part(app, new, list_pids, output, material, steps):
     sole_document(path)
     title = member(doc, "GetTitle")
     need(isinstance(title, str) and bool(title.strip()), "SW_DOCUMENT_TITLE_MISSING")
-    app.CloseDoc(title)
+    with observed_com_call("close"):
+        app.CloseDoc(title)
     # The broker sets UserControl before opening a document so the session stays observable.
     same_instance(app, list_pids, pid)
     need(member(app, "GetDocumentCount") == 0 and app.ActiveDoc is None, "CLOSE_NOT_CONFIRMED")

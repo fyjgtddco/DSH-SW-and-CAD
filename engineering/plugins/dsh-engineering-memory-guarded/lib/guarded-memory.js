@@ -6,6 +6,7 @@ const ID = /^[\p{L}_][\p{L}\p{N}_.-]{0,79}$/u;
 const VALUE = /^[+-]?(?:\d{1,20}(?:\.\d{1,12})?|\.\d{1,12})\s?(?:mm|cm|m|in|°|deg|N|kN|Pa|MPa|GPa|kg|g|rpm|%)?$/u;
 const SHA256 = /^[a-f0-9]{64}$/;
 export const MARKER = 'DSH-ENG-MEMORY-V2 ';
+export const SUMMARY_TITLE = '## 工程记忆摘要';
 
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const messageText = message => (message?.content ?? [])
@@ -193,6 +194,32 @@ export function snapshot(attempt, graph, pages) {
   const derived = Object.entries(graph).filter(([, node]) => node.source === 'derived');
   return MARKER + attempt + '\n' +
     JSON.stringify({ activeConstraints: Object.fromEntries(constraints), derived: Object.fromEntries(derived), pages });
+}
+
+export function candidatePages(candidate) {
+  if (candidate.format === 'readable') return candidate.pages;
+  return JSON.parse(candidate.body.slice(candidate.body.indexOf('\n') + 1)).pages;
+}
+
+export function readableSummary(graph, pages) {
+  const sections = [SUMMARY_TITLE];
+  const append = (title, lines) => {
+    if (lines.length) sections.push('### ' + title + '\n' + lines.map(line => '- ' + line).join('\n'));
+  };
+  const nodes = Object.entries(graph);
+  append('当前尺寸约束', nodes.filter(([, node]) => node.source === 'user')
+    .map(([id, node]) => id + ' = ' + node.value));
+  append('派生值（待工程校核）', nodes.filter(([, node]) => node.source === 'derived')
+    .map(([id, node]) => id + ' = ' + node.value + '（依赖 ' + node.parents.join('、') + '）'));
+  append('用户要求', pages.filter(page => page.kind === 'user').map(page => page.text));
+  append('问答确认', pages.filter(page => page.kind === 'answer')
+    .map(page => page.id.slice(page.id.indexOf('/') + 1) + ' · ' + page.text));
+  append('七阶段进度（压缩时的工具记录）', pages.filter(page => page.kind === 'workflow')
+    .map(page => [page.task, page.step && '步骤 ' + page.step, '阶段 ' + page.phase].filter(Boolean).join(' · ')));
+  if (pages.some(page => page.kind === 'user-evidence')) {
+    sections.push('包含旧数值的历史条目已归档。当前尺寸以经审核的活动约束为准。');
+  }
+  return sections.join('\n\n');
 }
 
 export function exportGraph(graph) {

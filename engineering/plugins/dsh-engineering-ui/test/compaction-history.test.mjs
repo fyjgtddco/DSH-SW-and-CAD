@@ -30,17 +30,22 @@ export const agentPresetProjectionDefinition = { init: () => null, apply: (s) =>
 const url = (s) => 'data:text/javascript;base64,' + Buffer.from(s).toString('base64');
 
 const LIB = new URL('../lib/', import.meta.url);
-function inline(src) {
+function inline(src, base = LIB) {
   let out = src;
-  const re = /from '\.\/([A-Za-z0-9_.-]+\.js)'/g;
+  // 【子目录 import】原来只认 './x.js'，遇到 './run-log/y.mjs' 会整份漏掉 →
+  //   data: URL 无法解析相对路径 → 整个测试文件 ERR_UNSUPPORTED_RESOLVE_REQUEST。
+  //   递归基准必须是【该模块自己的目录】，否则 lib/run-log/x.mjs 里的 './y.mjs'
+  //   会被当成 lib/y.mjs 而漏内联。
+  const re = /from '\.\/((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:js|mjs))'/g;
   const names = new Set();
   let m;
   while ((m = re.exec(src)) !== null) names.add(m[1]);
   for (const name of names) {
-    let body;
-    try { body = readFileSync(new URL(name, LIB), 'utf8'); }
+    let body, own;
+    try { own = new URL(name, base); body = readFileSync(own, 'utf8'); }
     catch { continue; }
-    out = out.split("from './" + name + "'").join("from '" + url(inline(body)) + "'");
+    out = out.split("from './" + name + "'")
+      .join("from '" + url(inline(body, new URL('.', own))) + "'");
   }
   return out;
 }

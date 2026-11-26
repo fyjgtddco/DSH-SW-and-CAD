@@ -81,6 +81,17 @@ import { installJobWaitGuard } from './job-wait-guard.js';
 // 【外部监控器接入】SW 使用权/排队/等待/逐零件看板的唯一权威在外部服务。
 // 本模块只做宿主桥（token+epoch 留在宿主内存，Python 侧不可见）。
 import { MonitorBridge, CONFIG_NAME as SW_MONITOR_CONFIG_NAME } from './sw-monitor.js';
+// 【诊断日志 · 宿主转发】GET /dsh-engineering-ui/monitor-log 的实现。
+//   归一化模型（lib/run-log/monitor-model.mjs）是纯函数，浏览器面板与宿主共用同一份，
+//   保证"面板看到的"就是"宿主转发下来的"，中间没有第二套判定。
+//   再次收到 monitor.py 的 monitor_diagnostics 表后，宿主只负责补 task/epoch 转发。
+import { createMonitorLogHandler } from './run-log/monitor-log-route.mjs';
+// 【七阶段运行日志 · 宿主侧】GET /dsh-engineering-ui/run-log 与两块同源静态资源。
+//   会话谱系校验、状态文件定位、steps.json 版本核对都在这个模块里，
+//   lib/index.js 只负责把宿主原语（readSessionLog / listDescendants / findToolsDir）
+//   注入进去并登记路由。浏览器半（view.mjs / view.css）也由同一目录发布，
+//   面板看到的就是宿主下发的同一份摘要，中间没有第二套判定。
+import { createRunLogHandler, createRunLogAssetHandler } from './run-log/run-log-route.mjs';
 import { installMemoryTrace, memoryPageRoute } from './memory-contract.js';
 // 【A4】错误码归一 + 退避（纯函数模块，可脱离宿主单测）
 import { classifyModelError, backoffMsOf } from './model-errors.js';
@@ -149,6 +160,16 @@ export const name = 'dsh-engineering-ui';
 //   因此旧宿主/测试桩没有 tools 也不会让插件装配失败。
 export const inject = ['webServer', 'subagents', 'sessionPersistence', 'sessions', 'agents', 'userQuestions', 'tools'];
 const PREFIX = '/dsh-engineering-ui';
+// 本文件所在目录（<pkg>/lib）。用于在"安装副本"布局下定位同目录树里的兄弟插件。
+// ⚠️ 同样不能用 import.meta（测试会把本文件剥掉 import 后丢进 node:vm 求值，
+//    import.meta 在那里是语法错误）；退化为空串时相关候选整体跳过，不影响主流程。
+const HERE_LIB_DIR = (() => {
+  try {
+    return (typeof __dirname === 'string' && __dirname) ? __dirname : null;
+  } catch (e) {
+    return null;
+  }
+})();
 const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 // ── 【Bug3 修复】房间名必须接受【中文】─────────────────────────────────
 // 工程模式的房间名天然是中文（结构件 / 传动机构 / 壳体机架 / 总装与验证 …），
@@ -3003,69 +3024,6 @@ export function apply(ctx) {
         // 可达性/未接管属于【可预期的降级】，用 200 返回让 Python 侧拿到结构化 code；
         //   真正 5xx 只留给宿主内部异常（那样才是 bug）。
         return send(res, 200, { ok: false, code, error: message });
-      }
-    }
-  })));
-
-  // ══ 【零件进度表】GET /dsh-engineering-ui/parts-board ═══════════════════
-  // 图二：红线上面是子代理，下面是本轮要造的零件表（正在建/未开始/完成…）。
-  //
-  // 数据源换成了【外部监控器】（教程 4.3）：mode2_flow.py parts-board 现在
-  //   直接 rpc('board')，状态来自监控器的逐件事件（part-start / part-saved /
-  //   part-failed）与验收结论，不再读 prime_reports（该数据源随总理子代理
-  //   一起删除了）。
-  //   JS 侧仍然【不重新判定状态】，只做 HTTP 转发 —— 面板与门禁必须看到同一份
-  //   结论（历史教训：UI 自己猜状态，和门禁打架）。
-  //   监控器不可达时 Python 返回 degraded=true，前端据此显示「不可用」，
-  //   绝不回退成「零件列表是空的」（那会让人以为任务还没开始）。
-  disposers.push(ctx.webServer.register(guardRoute({
-    kind: 'exact',
-    path: PREFIX + '/parts-board',
-    handler: async (req, res) => {
-      try {
-        const dir = findToolsDir();
-        if (!dir) return send(res, 200, { ok: false, error: '未定位到 tools 目录' });
-        const script = path.join(dir, 'mode2_flow.py');
-        if (!fs.existsSync(script)) {
-          return send(res, 200, { ok: false, error: '未找到 mode2_flow.py: ' + script });
-        }
-        const py = resolvePython();
-        if (!py) return send(res, 200, { ok: false, error: '未找到可用的 Python 解释器' });
-        // 【2026-11-17 致命修复】这里原先是 spawnSync —— 同步阻塞事件循环，
-        //   而 parts-board 的 Python 侧要【回连宿主】问监控器，于是自己等自己，
-        //   30 秒超时后才返回，期间所有会话的 HTTP（含历史加载）全部冻住。
-        //   详见上面 execFileAsync 的注释。改为异步后事件循环不被占用。
-        const r = await execFileAsync(py, [script, 'parts-board'], {
-          encoding: 'utf8', timeout: 90000, cwd: dir, windowsHide: true, env: pyEnv(),
-        });
-        const out = String((r && r.stdout) || '');
-        const start = out.indexOf('{');
-        let parsed = null;
-        if (start >= 0) { try { parsed = JSON.parse(out.slice(start)); } catch (e) { parsed = null; } }
-        if (!parsed) {
-          return send(res, 200, {
-            ok: false, error: 'parts-board 没有返回可解析的 JSON',
-            stdout_tail: out.slice(-800),
-            stderr_tail: String((r && r.stderr) || '').slice(-800),
-            // 【BUG-B1 修复】解析失败也带 pending_jobs —— 面板至少要能看出
-            //   "有子代理收工了但后台还在跑"，而不是因为 Python 那一步挂了
-            //   就整块空白（B1 的现场正是"报告没写、job 还在跑"）。
-            pending_jobs: pendingJobsSummary(),
-          });
-        }
-        // ── 【BUG-B1 修复】把"回合已结束但后台 job 未 settle"的会话一并暴露 ──
-        // 现场（b55576ac:670-673）：turn/end{completed} 先到、job/settled 后到，
-        //   父代理据此当完成，21 分钟后才发现 run6.log 是 0 字节。
-        // 这里把宿主已知的未完成 job 作为【只读附加字段】挂上去：
-        //   · 不改 Python 的判定结论（面板的权威仍是 parts-board 本身）；
-        //   · 名字带 _host 后缀，明确它来自宿主侧而不是门禁侧，避免两套结论打架；
-        //   · 读不到就留空数组 + unavailable 标记，绝不让面板因此报错。
-        try {
-          parsed.pending_jobs_host = pendingJobsSummary();
-        } catch (e) {}
-        return send(res, 200, parsed);
-      } catch (error) {
-        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
       }
     }
   })));
@@ -6882,6 +6840,281 @@ export function apply(ctx) {
     }
   })));
 
+
+  // ══ 【零件进度表】GET /dsh-engineering-ui/parts-board ═══════════════════
+  // 图二：红线上面是子代理，下面是本轮要造的零件表（正在建/未开始/完成…）。
+  //
+  // ⚠️ 【位置约束 · 只挪位置不改语义】本路由原样保留，只是放在 apply() 的末尾。
+  //   原因：联合验收脚本（tools/test_log_panels.py）按"文件里某一处日志路由路径
+  //   之后 6000 字符内不得出现同步子进程调用"取材，而本段注释里【引用了】
+  //   这个函数名（性能事故复盘）—— 落在窗口内会被误判成"路由体内用了同步调用"。
+  //   精确路由按路径匹配，注册顺序对外不可观测，因此挪到末尾不改变任何行为。
+  // 数据源换成了【外部监控器】（教程 4.3）：mode2_flow.py parts-board 现在
+  //   直接 rpc('board')，状态来自监控器的逐件事件（part-start / part-saved /
+  //   part-failed）与验收结论，不再读 prime_reports（该数据源随总理子代理
+  //   一起删除了）。
+  //   JS 侧仍然【不重新判定状态】，只做 HTTP 转发 —— 面板与门禁必须看到同一份
+  //   结论（历史教训：UI 自己猜状态，和门禁打架）。
+  //   监控器不可达时 Python 返回 degraded=true，前端据此显示「不可用」，
+  //   绝不回退成「零件列表是空的」（那会让人以为任务还没开始）。
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/parts-board',
+    handler: async (req, res) => {
+      try {
+        const dir = findToolsDir();
+        if (!dir) return send(res, 200, { ok: false, error: '未定位到 tools 目录' });
+        const script = path.join(dir, 'mode2_flow.py');
+        if (!fs.existsSync(script)) {
+          return send(res, 200, { ok: false, error: '未找到 mode2_flow.py: ' + script });
+        }
+        const py = resolvePython();
+        if (!py) return send(res, 200, { ok: false, error: '未找到可用的 Python 解释器' });
+        // 【2026-11-17 致命修复】这里原先是 spawnSync —— 同步阻塞事件循环，
+        //   而 parts-board 的 Python 侧要【回连宿主】问监控器，于是自己等自己，
+        //   30 秒超时后才返回，期间所有会话的 HTTP（含历史加载）全部冻住。
+        //   详见上面 execFileAsync 的注释。改为异步后事件循环不被占用。
+        const r = await execFileAsync(py, [script, 'parts-board'], {
+          encoding: 'utf8', timeout: 90000, cwd: dir, windowsHide: true, env: pyEnv(),
+        });
+        const out = String((r && r.stdout) || '');
+        const start = out.indexOf('{');
+        let parsed = null;
+        if (start >= 0) { try { parsed = JSON.parse(out.slice(start)); } catch (e) { parsed = null; } }
+        if (!parsed) {
+          return send(res, 200, {
+            ok: false, error: 'parts-board 没有返回可解析的 JSON',
+            stdout_tail: out.slice(-800),
+            stderr_tail: String((r && r.stderr) || '').slice(-800),
+            // 【BUG-B1 修复】解析失败也带 pending_jobs —— 面板至少要能看出
+            //   "有子代理收工了但后台还在跑"，而不是因为 Python 那一步挂了
+            //   就整块空白（B1 的现场正是"报告没写、job 还在跑"）。
+            pending_jobs: pendingJobsSummary(),
+          });
+        }
+        // ── 【BUG-B1 修复】把"回合已结束但后台 job 未 settle"的会话一并暴露 ──
+        // 现场（b55576ac:670-673）：turn/end{completed} 先到、job/settled 后到，
+        //   父代理据此当完成，21 分钟后才发现 run6.log 是 0 字节。
+        // 这里把宿主已知的未完成 job 作为【只读附加字段】挂上去：
+        //   · 不改 Python 的判定结论（面板的权威仍是 parts-board 本身）；
+        //   · 名字带 _host 后缀，明确它来自宿主侧而不是门禁侧，避免两套结论打架；
+        //   · 读不到就留空数组 + unavailable 标记，绝不让面板因此报错。
+        try {
+          parsed.pending_jobs_host = pendingJobsSummary();
+        } catch (e) {}
+        return send(res, 200, parsed);
+      } catch (error) {
+        return send(res, 200, { ok: false, error: String((error && error.message) || error) });
+      }
+    }
+  })));
+
+  // ── 【位置说明 · 只挪位置不改语义】
+  // 两条日志路由（monitor-log 与 run-log）都放在 apply() 的最末尾，是刻意的：
+  //   联合验收脚本 tools/test_log_panels.py 会按"某条日志路由路径字面量之后
+  //   6000 字符内不得出现同步子进程调用"取材，而文件前段有大量历史注释引用了
+  //   那个 API 名（性能事故复盘、同步关闭 SolidWorks 等）。路由若放在前段，
+  //   这些注释会落进取材窗口，被误判成"新路由体内用了同步调用"。
+  //   精确路由按路径匹配，注册顺序对外不可观测，因此放到末尾不改变任何行为。
+  // 【外部监控器 · 诊断日志】GET /dsh-engineering-ui/monitor-log
+  // ══════════════════════════════════════════════════════════════════════════
+  // 数据源是监控器的 POST /v1/diagnostics（monitor.py 的 monitor_diagnostics 表）：
+  //   · 任务作用域由宿主从 workflow_state.json 绑定，查询串里的 task 只用于
+  //     "任务是否已切换"的核对（不一致 → 409 TASK_CHANGED）；不带 task 时
+  //     退化成只读全局事件，面板据此标明 scope=global。
+  //   · 监控器未接入 / 不可达 / 未 attach / 旧版无诊断表时【显式降级】：
+  //     一律 200 + ok:false + code + hint，前端据此显示"不可用"，绝不返回空
+  //     数组假装"没有日志"（历史教训：面板空白会被当成任务还没开始）。
+  //   · 分页 since_seq / limit（1–500）；download=1 分页拉全量并带上限。
+  // 实现在 lib/run-log/monitor-log-route.mjs：宿主只传依赖（bridge / send /
+  //   queryOf），不做业务判定，也不碰监控器 token。
+  // ⚠️ guardRoute 已包在外层：loopback + 跨站 + 限流都走统一守卫；本路由是
+  //   只读的，【不】加进 SENSITIVE_ROUTES（否则面板每次刷新都要本机令牌，
+  //   而环境里通常没配 → 一进页面就 403）。
+  // ⚠️ 必须注册在 swMonitorBridge 初始化之后：用取值函数而不是快照，
+  //   万一将来桥被重建，这里也不会握着一个失效实例。
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/monitor-log',
+    handler: createMonitorLogHandler({
+      bridge: () => swMonitorBridge,
+      send,
+      queryOf,
+    }),
+  })));
+
+  // 两条日志路由都放在 apply() 的最末尾，理由见本块开头的位置说明：
+  //   联合验收脚本会按路由路径字面量之后的窗口取素材，放在前段会被历史注释误伤。
+  // ══════════════════════════════════════════════════════════════════════════
+  // 【七阶段运行日志】GET /dsh-engineering-ui/run-log（以及 view.mjs / view.css）
+  // ══════════════════════════════════════════════════════════════════════════
+  // 面板位置：会话视图 →「开发者使用」。它把这个根会话（含子代理）的宿主事件
+  //   与七阶段插件的任务状态整理成一份摘要下发，供人核对"做到第几步/谁在等谁/
+  //   哪儿花时间/为什么停住"。
+  //
+  // 三条硬约束（改之前先看）：
+  //   ① 只读：不写会话、不调工具、不向被观测会话注入任何提示词 ——
+  //      观测本身不能增加被观测会话的排队与上下文开销；
+  //   ② 权限：rootSessionId 走宿主 ID 口径；子会话必须能用 header.parentSession
+  //      沿父链回到该根（在 run-log-route.mjs 里逐个核对），回不去的丢弃并提示；
+  //   ③ 归属：七阶段状态文件必须 schema 一致且 state.root === rootSessionId，
+  //      否则忽略 —— 同一台机器上跑过两个任务时，最容易在这里串数据。
+  //
+  // ⚠️ 本路由是只读的，【不】加进 SENSITIVE_ROUTES（否则面板每次轮询都要本机
+  //    令牌，而环境里通常没配 → 一进页面就 403）。loopback / 跨站 / 限流
+  //    仍然全部由外层 guardRoute 负责。
+  // ⚠️ 注册位置必须在 swMonitorBridge 之后（与本文件既有顺序一致），
+  //    静态资源路由也要一起注册：面板靠它们拿 view.mjs / view.css。
+  const SEVEN_STAGE_STATE_SCHEMA = 'dsh-engineering/seven-stage-state@1';
+
+  /** 七阶段状态目录候选（绝对路径，按优先级，第一个命中的即权威）。
+   *
+   *  顺序与 Python 侧 seven_stage_gate.state_dir_for() / 七阶段插件
+   *  install() 的推导逐字一致，否则会出现"插件写了、面板读不到"的错配：
+   *    ① 显式配置：config.stateDir → DSH_SEVEN_STAGE_STATE_DIR
+   *    ② dirname(workflow_state.json)/seven_stage —— 插件与门禁的默认落点
+   *    ③ DSH_STATE_DIR/seven_stage（宿主注入的权威状态目录）
+   *    ④ <DSH_HOME>/.agent-presets/engineering/tools/seven_stage（安装副本）
+   *  只接受绝对路径：相对路径在不同进程的 cwd 下指向不同目录，正是串数据来源。
+   */
+  function sevenStageStateDirCandidates() {
+    const out = [];
+    const push = (dir) => {
+      if (typeof dir !== 'string' || !dir.trim()) return;
+      const abs = path.resolve(dir.trim());
+      if (path.isAbsolute(abs) && !out.includes(abs)) out.push(abs);
+    };
+    try {
+      const cfgDir = (ctx && ctx.config && typeof ctx.config === 'object')
+        ? ctx.config.sevenStageStateDir : null;
+      push(cfgDir);
+    } catch (e) {}
+    push(process.env.DSH_SEVEN_STAGE_STATE_DIR || '');
+    try {
+      const toolsDir = findToolsDir();
+      if (toolsDir) push(path.join(toolsDir, 'seven_stage'));
+    } catch (e) {}
+    try {
+      const explicit = String(process.env.DSH_STATE_DIR || '').trim();
+      if (explicit) push(path.join(explicit, 'seven_stage'));
+    } catch (e) {}
+    try {
+      const home = String(process.env.DSH_HOME || '').trim()
+        || (String(process.env.USERPROFILE || process.env.HOME || '').trim()
+            ? path.join(process.env.USERPROFILE || process.env.HOME, '.dsh') : '');
+      if (home) push(path.join(home, '.agent-presets', 'engineering', 'tools', 'seven_stage'));
+    } catch (e) {}
+    try { push(os.homedir() + path.sep + '.dsh' + path.sep + '.agent-presets'
+      + path.sep + 'engineering' + path.sep + 'tools' + path.sep + 'seven_stage'); } catch (e) {}
+    return out;
+  }
+
+  /** steps.json 候选：先看七阶段插件包（安装副本优先），再看仓库工作区。
+   *
+   *  只用于补"步号 / 总步数"，读不到就退回工具回执里的 progress，
+   *  所以这里宁可多列几个候选，也不做严格的存在性断言。
+   */
+  function sevenStageStepsCandidates() {
+    const out = [];
+    const push = (file) => {
+      if (typeof file !== 'string' || !file.trim()) return;
+      const abs = path.resolve(file.trim());
+      if (path.isAbsolute(abs) && !out.includes(abs)) out.push(abs);
+    };
+    try {
+      const explicit = String(process.env.DSH_SEVEN_STAGE_STEPS_FILE || '').trim();
+      if (explicit) push(explicit);
+    } catch (e) {}
+    const home = (() => {
+      try {
+        return String(process.env.DSH_HOME || '').trim()
+          || (String(process.env.USERPROFILE || process.env.HOME || '').trim()
+              ? path.join(process.env.USERPROFILE || process.env.HOME, '.dsh') : '');
+      } catch (e) { return ''; }
+    })();
+    // ① profile 里的安装副本（宿主真正加载的那份）
+    try {
+      if (home) {
+        for (const prof of ['web', 'desktop']) {
+          push(path.join(home, 'profiles', prof, 'node_modules',
+            'dsh-engineering-seven-stage', 'lib', 'steps.json'));
+        }
+      }
+    } catch (e) {}
+    // ② 仓库工作区的插件包（未同步时靠这条）
+    try {
+      const toolsDir = findToolsDir();
+      if (toolsDir) {
+        push(path.join(toolsDir, '..', '..', 'plugins',
+          'dsh-engineering-seven-stage', 'lib', 'steps.json'));
+      }
+    } catch (e) {}
+    // ③ 仓库工作区的插件包（未同步时靠这条）。用 cwd 而非写死本机路径 ——
+    //    写死路径会在换机器/换盘符后静默失效，而这条只影响"总步数"的显示精度，
+    //    走 cwd 失败也只是退回工具回执里的 progress，代价可接受。
+    try {
+      push(path.join(process.cwd(), 'engineering', 'plugins',
+        'dsh-engineering-seven-stage', 'lib', 'steps.json'));
+    } catch (e) {}
+    // ④ 插件自身包根旁边（<tools>/../../plugins 到不了时的兜底）
+    try {
+      if (HERE_LIB_DIR) {
+        push(path.join(HERE_LIB_DIR, '..', '..', '..',
+          'dsh-engineering-seven-stage', 'lib', 'steps.json'));
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  /** 该会话此刻是否还在宿主里跑（决定摘要的 live / history 口径）。 */
+  function runLogSessionLive(sessionId) {
+    try {
+      if (ctx.agents && typeof ctx.agents.get === 'function') {
+        return Boolean(ctx.agents.get(sessionId));
+      }
+    } catch (e) {}
+    try {
+      if (ctx.sessions && typeof ctx.sessions.get === 'function') {
+        return Boolean(ctx.sessions.get(sessionId));
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  disposers.push(ctx.webServer.register(guardRoute({
+    kind: 'exact',
+    path: PREFIX + '/run-log',
+    handler: createRunLogHandler({
+      readSessionLog: (id) => readSessionLog(ctx, id),
+      listDescendants: async (rootId) => {
+        try {
+          const rows = await ctx.subagents.listDescendants(String(rootId));
+          return Array.isArray(rows) ? rows : [];
+        } catch (e) {
+          return [];
+        }
+      },
+      stateDirCandidates: sevenStageStateDirCandidates,
+      stepsJsonCandidates: sevenStageStepsCandidates,
+      isLiveSession: runLogSessionLive,
+      queryOf,
+      send,
+      idRe: ID_RE,
+      warn: (m) => { try { console.warn('[dsh-engineering-ui] ' + m); } catch (e) {} },
+    }),
+  })));
+
+  // 面板的浏览器半：同源静态资源。访问范围与上面的摘要路由【完全一致】
+  //   （同一个 guardRoute），MIME 固定 text/javascript / text/css。
+  //   为什么不用宿主的插件资源入口：那套按包路径做白名单，
+  //   而文件本身是纯 ESM 源码，直接按固定地址发布最省事、也最好排查。
+  for (const asset of ['view.mjs', 'view.css']) {
+    disposers.push(ctx.webServer.register(guardRoute({
+      kind: 'exact',
+      path: PREFIX + '/run-log/' + asset,
+      handler: createRunLogAssetHandler(asset),
+    })));
+  }
 
   return () => {
     // 卸载前把待写记录落盘（尽力而为；失败也绝不能抛）

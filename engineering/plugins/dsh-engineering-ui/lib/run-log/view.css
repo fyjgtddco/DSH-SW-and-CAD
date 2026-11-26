@@ -1,0 +1,210 @@
+.dsh-runlog {
+  --rl-bg: #f2f6fb;
+  --rl-surface: #fff;
+  --rl-line: #dbe3ef;
+  --rl-text: #182338;
+  --rl-muted: #536782;
+  --rl-blue: #244fa1;
+  --rl-blue-bg: #e8f0ff;
+  --rl-green: #176451;
+  --rl-green-bg: #e3f5ee;
+  --rl-warn: #7e460d;
+  --rl-warn-bg: #fff0d8;
+  --rl-error: #9b2438;
+  --rl-error-bg: #fcebf0;
+  background: var(--rl-bg);
+  color: var(--rl-text);
+  padding: clamp(16px, 3vw, 44px);
+  font: 14px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  color-scheme: light;
+}
+.dsh-runlog *, .dsh-runlog *::before, .dsh-runlog *::after { box-sizing: border-box; }
+.dsh-runlog h1, .dsh-runlog h2, .dsh-runlog h3, .dsh-runlog p, .dsh-runlog dl, .dsh-runlog dd { margin: 0; }
+.dsh-runlog h1 { font-size: clamp(24px, 4vw, 34px); line-height: 1.25; letter-spacing: .01em; }
+.dsh-runlog h2 { font-size: 16px; font-weight: 650; }
+.dsh-runlog h3 { font-size: 15px; }
+.dsh-runlog small { font-size: 12px; color: var(--rl-muted); }
+.dsh-runlog .rl-header, .dsh-runlog .rl-section-head, .dsh-runlog .rl-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+}
+.dsh-runlog .rl-header {
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 0 0 20px;
+  border-bottom: 1px solid var(--rl-line);
+}
+.dsh-runlog .rl-status { margin-top: 8px; color: var(--rl-blue); font-weight: 650; }
+.dsh-runlog .rl-status[data-tone="error"] { color: var(--rl-error); }
+.dsh-runlog .rl-muted { color: var(--rl-muted); font-size: 12px; overflow-wrap: anywhere; }
+.dsh-runlog .rl-header .rl-muted { margin-top: 3px; }
+.dsh-runlog .rl-button, .dsh-runlog .rl-filters select, .dsh-runlog .rl-filters input[type="search"] {
+  background: var(--rl-surface);
+  color: var(--rl-text);
+  border: 1px solid var(--rl-line);
+  border-radius: 7px;
+  padding: 7px 10px;
+  min-height: 36px;
+  max-width: 100%;
+  font: inherit;
+}
+.dsh-runlog .rl-button { cursor: pointer; font-weight: 600; }
+.dsh-runlog .rl-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dsh-runlog .rl-button:disabled { opacity: .6; cursor: wait; }
+.dsh-runlog .rl-button:hover:not(:disabled), .dsh-runlog .rl-filters select:hover {
+  border-color: var(--rl-blue);
+}
+.dsh-runlog :focus-visible { outline: 2px solid var(--rl-blue); outline-offset: 2px; }
+.dsh-runlog .rl-notices:not(:empty) {
+  display: grid;
+  gap: 5px;
+  margin-top: 16px;
+  padding: 10px 14px;
+  color: var(--rl-warn);
+  background: var(--rl-warn-bg);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.dsh-runlog .rl-workflow, .dsh-runlog .rl-agents {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 225px), 1fr));
+  gap: 12px;
+}
+.dsh-runlog .rl-workflow { margin-top: 18px; }
+.dsh-runlog .rl-agents { grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); }
+.dsh-runlog .rl-card, .dsh-runlog .rl-events, .dsh-runlog .rl-empty {
+  border: 1px solid var(--rl-line);
+  border-radius: 10px;
+  background: var(--rl-surface);
+}
+.dsh-runlog .rl-card {
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 8px;
+  padding: 14px 16px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dsh-runlog .rl-agent { padding: 12px 14px; border-top: 3px solid var(--rl-line); }
+.dsh-runlog .rl-big { font-size: clamp(22px, 3.5vw, 36px); font-weight: 650; line-height: 1.05; color: var(--rl-blue); font-variant-numeric: tabular-nums; }
+.dsh-runlog progress { width: 100%; height: 9px; accent-color: var(--rl-blue); }
+.dsh-runlog .rl-chip {
+  display: inline-block;
+  max-width: 100%;
+  background: var(--rl-blue-bg);
+  color: var(--rl-blue);
+  border-radius: 6px;
+  padding: 3px 7px;
+  font-size: 12px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.dsh-runlog .rl-chip[data-tone="active"] { color: var(--rl-green); background: var(--rl-green-bg); }
+.dsh-runlog .rl-chip[data-tone="warn"] { color: var(--rl-warn); background: var(--rl-warn-bg); }
+.dsh-runlog .rl-chip[data-tone="error"] { color: var(--rl-error); background: var(--rl-error-bg); }
+.dsh-runlog .rl-fields { display: grid; width: 100%; gap: 3px; font-size: 13px; }
+.dsh-runlog .rl-field { display: grid; grid-template-columns: minmax(0, 5.4em) minmax(0, 1fr); gap: 6px; }
+.dsh-runlog .rl-field dt { color: var(--rl-muted); }
+.dsh-runlog .rl-field dd { white-space: pre-line; }
+.dsh-runlog .rl-agent .rl-field { grid-template-columns: minmax(0, 4.9em) minmax(0, 1fr); }
+.dsh-runlog .rl-activity { font-size: 13px; }
+.dsh-runlog .rl-section-head { justify-content: space-between; margin: 22px 0 10px; }
+.dsh-runlog .rl-filters { margin-bottom: 10px; }
+.dsh-runlog .rl-filters label { display: inline-flex; align-items: center; gap: 5px; color: var(--rl-muted); }
+.dsh-runlog .rl-filters input[type="checkbox"] { accent-color: var(--rl-blue); }
+.dsh-runlog .rl-empty { padding: 16px; color: var(--rl-muted); }
+.dsh-runlog .rl-events { padding: 0; margin: 0; list-style: none; overflow: hidden; }
+.dsh-runlog .rl-events:empty { display: none; }
+.dsh-runlog .rl-event {
+  display: grid;
+  grid-template-columns: 108px minmax(76px, 110px) minmax(0, 1fr) minmax(64px, 185px);
+  align-items: start;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  overflow-wrap: anywhere;
+}
+.dsh-runlog .rl-event + .rl-event { border-top: 1px solid var(--rl-line); }
+.dsh-runlog .rl-event[data-error="true"] { box-shadow: inset 3px 0 var(--rl-error); }
+.dsh-runlog .rl-event-time { color: var(--rl-muted); font-size: 12px; font-variant-numeric: tabular-nums; padding-top: 3px; }
+.dsh-runlog .rl-event-type, .dsh-runlog .rl-event-copy, .dsh-runlog .rl-event-result { display: grid; gap: 2px; }
+.dsh-runlog .rl-event-type strong { font-size: 13px; }
+.dsh-runlog .rl-event-result { justify-items: start; }
+.dsh-runlog .rl-elapsed { color: var(--rl-blue); font-variant-numeric: tabular-nums; }
+.dsh-runlog .rl-detail {
+  margin-top: 7px;
+  padding: 7px 9px;
+  background: var(--rl-bg);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  max-height: 240px;
+  overflow: auto;
+}
+.dsh-runlog .rl-details summary { cursor: pointer; }
+.dsh-runlog .rl-details summary .rl-event-copy { display: inline-grid; vertical-align: top; max-width: 94%; }
+@media (max-width: 640px) {
+  .dsh-runlog .rl-event { grid-template-columns: auto minmax(0, 1fr); }
+  .dsh-runlog .rl-event > :nth-child(n + 3) { grid-column: 1 / -1; }
+}
+@media (prefers-color-scheme: dark) {
+  .dsh-runlog {
+    --rl-bg: #161f2d;
+    --rl-surface: #202c3e;
+    --rl-line: #3b4a61;
+    --rl-text: #eef3fb;
+    --rl-muted: #b5c5dc;
+    --rl-blue: #a6c4ff;
+    --rl-blue-bg: #293f65;
+    --rl-green: #9ce2cb;
+    --rl-green-bg: #26483f;
+    --rl-warn: #f8cb90;
+    --rl-warn-bg: #523b24;
+    --rl-error: #ffb7c3;
+    --rl-error-bg: #542b37;
+    color-scheme: dark;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * DSH 工程模式接入层（追加，不改上面独立预览版的任何一条规则）
+ * ──────────────────────────────────────────────────────────────────────────
+ * 面板被挂进「会话视图 → 开发者使用」的 .eng-sv 容器里。这里只做一件事：
+ *   把 --rl-* 主题变量重新绑到页面既有的 --sv-* 上，让运行日志和旁边的
+ *   「压缩历史」「栏目首页」是同一套纸色/边框/墨色，而不是另一块蓝色界面。
+ * 选择器用 .eng-sv .dsh-runlog（0,2,0）压过下面的深色媒体查询（0,1,0），
+ * 所以工程模式里恒为浅色纸面，与 .eng-sv 的 color-scheme: light 一致。
+ * ══════════════════════════════════════════════════════════════════════════ */
+.eng-sv .dsh-runlog {
+  --rl-bg: var(--sv-canvas);
+  --rl-surface: var(--sv-paper);
+  --rl-line: var(--sv-border);
+  --rl-text: var(--sv-ink);
+  --rl-muted: var(--sv-muted);
+  --rl-blue: var(--sv-accent);
+  --rl-blue-bg: var(--sv-tint);
+  --rl-warn: #7e460d;
+  --rl-warn-bg: #fff0d8;
+  --rl-error: #9b2438;
+  --rl-error-bg: #fcebf0;
+  background: transparent;
+  color: var(--rl-text);
+  /* 内边距放在这里（而不是宿主 client.js 里）：两条规则同文件同选择器，
+     谁生效只取决于书写顺序，不会被 <link> 的加载时机左右。 */
+  padding: 16px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.65;
+  color-scheme: light;
+}
+/* 页面自己已有工具栏大标题「开发者使用」，面板标题必须降到同级，
+   否则一进页面出现两个 31px 的 H1。 */
+.eng-sv .dsh-runlog h1 { font-size: 18px; font-weight: 670; letter-spacing: 0; }
+.eng-sv .dsh-runlog h2 { font-size: 15px; font-weight: 680; }
+.eng-sv .dsh-runlog .rl-header { padding-bottom: 14px; }
+.eng-sv .dsh-runlog .rl-workflow, .eng-sv .dsh-runlog .rl-agents { gap: 10px; }
+.eng-sv .dsh-runlog :focus-visible { outline: 2px solid var(--sv-accent); outline-offset: 1px; }
+.eng-sv .dsh-runlog .rl-button,
+.eng-sv .dsh-runlog .rl-filters select,
+.eng-sv .dsh-runlog .rl-filters input[type="search"] { border-radius: 7px; }

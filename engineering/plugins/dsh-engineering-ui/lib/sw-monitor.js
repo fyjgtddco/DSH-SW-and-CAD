@@ -43,6 +43,12 @@ const OPS = new Set([
   'review-part', 'review-room', 'close-room', 'verify-task',
   'reopen-room', 'room-failed', 'plan',
   'status', 'attach', 'recover', 'page-status', 'audit',
+  // 【诊断日志】只读。monitor.py 的 call() 对 'diagnostics' 走独立分支
+  //   （_read_diagnostics），不经过 _call 的业务分支，也不改任何状态。
+  //   ⚠️ 故意【不】放进 NEEDS_TASK：宿主自己有 task 时才带 task，
+  //   未绑定任务时退化为"全局事件"（监控器约定 task 缺省 = 只返回全局记录），
+  //   这样"监控器起来了但任务还没 select"也能看出日志，而不是一片空白。
+  'diagnostics',
 ]);
 
 /** 需要 task 作用域的操作（监控器按 task 隔离房间与票据）。 */
@@ -344,6 +350,141 @@ export class MonitorBridge {
       out.code = (e && e.code) || null;
     }
     return out;
+  }
+
+  /**
+   * 读取监控器诊断日志（POST /v1/diagnostics）。
+   *
+   * 降级码一览（本方法只会返回其中之一，从不抛错）。每一个都对应"面板该显示
+   * 什么"，绝不与"没有日志"混为一谈：
+   *   MONITOR_NOT_ENABLED        没有 sw_monitor.json（没接入监控器）
+   *   MONITOR_UNAVAILABLE        配置在但连不上（监控器没启动 / 端口不通）
+   *   MONITOR_NOT_ATTACHED       连上了但本地还没 attach(drained)
+   *   DIAGNOSTICS_UNSUPPORTED    监控器是旧程序（没有 /v1/diagnostics）
+   *   DIAGNOSTICS_CURSOR_INVALID 游标越界（恢复旧备份后常见 → 移回 0）
+   *   DIAGNOSTICS_UNAVAILABLE    监控器读不到诊断表（数据库错误）
+   *   TASK_UNKNOWN               监控器不认识宿主绑定的 task
+   *   HOST_EPOCH                 epoch 变了（监控器重启）→ 需重新 attach
+   * 宿主路由另有两码：MONITOR_BRIDGE_DOWN（桥没装配）、TASK_CHANGED（任务已切换）。
+   *
+   * 与 call() 的区别：call() 遇到不可达 / 未接管会【抛错】，让门禁立刻失败；
+   * 这里反过来 —— 诊断日志本来就是用来看"为什么不通"的，所以把一切异常折叠成
+   * 结构化降级 { ok:false, code, error, hint }，绝不抛。调用方（宿主路由 / 面板）
+   * 据此显式显示"不可用 + 原因"，而不是"日志是空的"。
+   *
+   * @param {object} [opts]
+   * @param {number} [opts.since_seq=0] 上一页的 next_since_seq
+   * @param {number} [opts.limit=100]    1–500（监控器侧硬校验）
+   * @param {string|null} [opts.task]    宿主绑定的任务；null = 只取全局事件
+   */
+  async readDiagnostics({ since_seq = 0, limit = 100, task = null } = {}) {
+    const base = {
+      ok: false,
+      code: '',
+      error: '',
+      hint: '',
+      scope: task ? 'task' : 'global',
+      task: task || null,
+      attached: this.attached,
+      since_seq,
+      limit,
+      events: [],
+      latest_seq: null,
+      next_since_seq: since_seq,
+      has_more: false,
+      incomplete: false,
+      observed_at: new Date().toISOString(),
+    };
+    if (!this.enabled()) {
+      return Object.assign(base, {
+        code: 'MONITOR_NOT_ENABLED',
+        error: '未接入监控器（缺少 ' + CONFIG_NAME + '）',
+        hint: '启动 DSH-SW-Monitor 后执行 python mode_gate.py sw-monitor attach --drained',
+      });
+    }
+    try {
+      await this.connect();
+    } catch (e) {
+      return Object.assign(base, {
+        code: 'MONITOR_UNAVAILABLE',
+        error: String((e && e.message) || e),
+        hint: '监控器进程未启动或端口不通；诊断日志不可用，不代表没有日志',
+      });
+    }
+    if (!this.attached) {
+      // ⚠️ 【2026-11-26 实测修正】不能只凭 this.attached=false 就报"未接管"：
+      //   监控器【进程已经停掉】时 attached 同样是 false，那样会把"连不上"
+      //   谎报成"没接管"，处置方式完全不同（一个去查进程，一个去 attach）。
+      //   所以先探一次可达性：能读到全局诊断 → 真的是没 attach；
+      //   读不到（传输层失败）→ 监控器不可达。
+      try {
+        await this.host.rpc('diagnostics', { since_seq: 0, limit: 1 });
+      } catch (e) {
+        const raw = String((e && (e.code || e.message)) || e);
+        const rawCode = (e && e.code) || (/^[A-Z][A-Z0-9_]{2,}$/.test(raw) ? raw : '');
+        if (!rawCode || rawCode === 'MONITOR_UNREACHABLE') {
+          return Object.assign(base, {
+            code: 'MONITOR_UNAVAILABLE',
+            error: raw,
+            hint: '监控器进程未启动或端口不通；诊断日志不可用，不代表没有日志',
+          });
+        }
+      }
+      // 接管前监控器本身也不保留诊断（重启即换 epoch）；这里如实报告，
+      //   而不是回退到"空日志"。全局事件仍可以从监控器运维侧读取，宿主不代劳。
+      return Object.assign(base, {
+        code: 'MONITOR_NOT_ATTACHED',
+        error: '监控器尚未 attach(drained)，诊断数据源不可用',
+        hint: '先完成接管：python mode_gate.py sw-monitor attach --drained',
+      });
+    }
+    const payload = { since_seq, limit };
+    if (task) payload.task = task;
+    try {
+      const out = await this.host.rpc('diagnostics', payload);
+      return Object.assign(base, {
+        ok: true,
+        events: Array.isArray(out && out.events) ? out.events : [],
+        latest_seq: Number.isSafeInteger(out && out.latest_seq) ? out.latest_seq : null,
+        next_since_seq: Number.isSafeInteger(out && out.next_since_seq)
+          ? out.next_since_seq : since_seq,
+        has_more: !!(out && out.has_more === true),
+        incomplete: !!(out && out.incomplete === true),
+        scope: task ? 'task' : 'global',
+        observed_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      const raw = String((e && (e.code || e.message)) || e);
+      // 传输层失败（TransportError）没有 code，只有 message；业务拒绝则一定带 code
+      //   （host-adapter.mjs 会把 result.error 挂到 error.code 上）。两者必须区分：
+      //   "连不上"和"监控器说不行"是完全不同的处置方式。
+      const rawCode = (e && e.code) || (/^[A-Z][A-Z0-9_]{2,}$/.test(raw) ? raw : '');
+      let code = rawCode || 'MONITOR_UNAVAILABLE';
+      let hint = '';
+      if (!rawCode || code === 'MONITOR_UNREACHABLE') {
+        code = 'MONITOR_UNAVAILABLE';
+        hint = '监控器连接失败（进程已退出或端口不通）；这不是"没有日志"';
+      } else if (code === 'UNKNOWN_OPERATION' || code === 'INVALID_ROUTE') {
+        // 旧版监控器没有 /v1/diagnostics —— 迁移期间必然遇到。
+        code = 'DIAGNOSTICS_UNSUPPORTED';
+        hint = '监控器是旧版本（无 monitor_diagnostics 表）；升级后重启即开始记录';
+      } else if (code === 'HOST_EPOCH') {
+        this.attached = false;
+        hint = '监控器已重启或换了宿主 epoch，需重新 attach(drained)';
+      } else if (code === 'DIAGNOSTICS_CURSOR_INVALID') {
+        hint = '游标超出范围（恢复旧备份后常见）；把 since_seq 移回 0 重新读取';
+      } else if (code === 'DIAGNOSTICS_UNAVAILABLE') {
+        hint = '监控器读不到诊断表（数据库错误）';
+      } else if (!/^DIAGNOSTICS_/.test(code)) {
+        hint = '监控器拒绝了这次读取（见 error）';
+      }
+      return Object.assign(base, {
+        code,
+        error: String((e && e.message) || e),
+        hint,
+        attached: this.attached,
+      });
+    }
   }
 
   /**

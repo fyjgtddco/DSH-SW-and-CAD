@@ -28,6 +28,63 @@ def fault_code(value):
     return match.group() if match else None
 
 
+ATTACH_FAILURES = frozenset("""
+    DIRTY_PAGES_PENDING COM_WORKER_STILL_RUNNING SW_PROCESS_SCAN_FAILED
+    UNMANAGED_SW_RUNNING OWNED_SW_STILL_RUNNING SW_INSTANCE_CHANGED_OR_MULTIPLE
+    COM_REQUIRES_WINDOWS RECOVERY_PROOF_REQUIRED HOST_STILL_ACTIVE RECOVERY_REQUIRED
+""".split())
+COM_SUBMIT_FAILURES = frozenset("""
+    COM_REPLAY_CONFLICT COM_WORKER_BUSY COM_ROOM_UNSUPPORTED STALE_GENERATION_OR_PART
+    COM_STEPS_INVALID COM_OPERATION_DENIED COM_ARGUMENTS_INVALID COM_PLANE_DENIED
+    COM_NUMBER_INVALID SKETCH_ALREADY_OPEN SKETCH_NOT_OPEN GEAR_TEETH_INVALID
+    COM_DIMENSION_INVALID COM_GEAR_INVALID COM_GEAR_ANGLE_INVALID COM_FEATURE_INVALID
+    COM_SOLID_FEATURE_REQUIRED INVALID_FILE INVALID_PATH PATH_OUTSIDE_TASK
+    NEW_OUTPUT_REQUIRED FILE_ALREADY_ASSIGNED COM_JOB_UNKNOWN
+""".split())
+COM_WORK_FAILURES = frozenset("""
+    CLOSE_NOT_CONFIRMED COM_OUTPUT_CHANGED COM_OPERATION_FAILED COM_CALL_FAILED SW_PROCESS_SCAN_FAILED
+    SW_INSTANCE_CHANGED_OR_MULTIPLE SW_DOCUMENTS_ALREADY_OPEN OUTPUT_ALREADY_EXISTS
+    SW_DOCUMENT_TITLE_MISSING SW_DOCUMENT_SCOPE_CHANGED SW_NO_SOLID_BODY SAVE_FAILED
+    SAVE_NOT_CONFIRMED MODEL_CHANGED_DURING_CLOSE COM_TIMEOUT COM_WORKER_PROTOCOL
+    MULTIPLE_SW_PROCESSES COM_REQUIRES_WINDOWS UNMANAGED_SW_RUNNING PYWIN32_REQUIRED
+    OWNED_SW_STILL_RUNNING FILE_CHANGED EMPTY_OR_NOT_FILE
+""".split())
+SAFE_COM_STAGES = frozenset((
+    "new_document", "sketch", "circle", "rectangle", "line", "end_sketch",
+    "extrude", "cut", "gear", "helix_gear", "save", "close",
+))
+
+
+def com_details(error):
+    if not isinstance(error, str):
+        return {}
+    code = fault_code(error)
+    known = {"COM_TIMEOUT": "worker_timeout", "SAVE_FAILED": "save",
+             "SAVE_NOT_CONFIRMED": "save", "CLOSE_NOT_CONFIRMED": "close",
+             "MODEL_CHANGED_DURING_CLOSE": "close", "COM_OUTPUT_CHANGED": "postcheck"}
+    if code in known:
+        return {"stage": known[code]}
+    match = re.fullmatch(r"(?:COM_CALL_FAILED|COM_OPERATION_FAILED): ([a-z_]+)"
+                         r"(?: STEP=([1-9][0-9]{0,5}))?(?: HRESULT=(0x[0-9A-F]{8}))?", error)
+    if not match or match[1] not in SAFE_COM_STAGES:
+        return {}
+    details = {"stage": match[1]}
+    if match[2]:
+        details["step"] = int(match[2])
+    if match[3]:
+        details["hresult"] = match[3]
+    return details
+
+
+REVIEW_OPERATIONS = frozenset(("review-part", "review-room", "verify-task", "close-room"))
+REVIEW_FAILURES = frozenset("""
+    ROOM_NEEDS_REOPEN SW_COMMAND_IN_FLIGHT SW_TICKET_NOT_SETTLED ROOM_NOT_VERIFIED
+    ROOMS_NOT_VERIFIED ROOM_EVIDENCE_CHANGED REVIEW_INPUT_CHANGED
+    PART_NOT_SAVED EVIDENCE_PROVIDER_FAILED BAD_PROVIDER_RESULT EVIDENCE_CHANGED
+    EVIDENCE_PROVIDER_TIMEOUT
+""".split())
+
+
 def need(test, code):
     if not test:
         raise Fault(code)
@@ -139,6 +196,7 @@ class Coordinator:
         self.com_busy = False
         self.cv = Condition()
         self.heartbeat = 0.0
+        self.heartbeat_lost = False
         self.db = sqlite3.connect(database, isolation_level=None, check_same_thread=False)
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY, body TEXT)")
@@ -150,19 +208,132 @@ class Coordinator:
             "owner": None, "tickets": {}, "tasks": {}, "last_recovery": None,
         }
         need(self.state["schema"] == 1, "STATE_SCHEMA_UNSUPPORTED")
+        self.diagnostics_incomplete = False
+        try:
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS monitor_diagnostics (
+                    seq INTEGER PRIMARY KEY, op TEXT NOT NULL, code TEXT NOT NULL,
+                    task TEXT, room TEXT, part TEXT, ts REAL NOT NULL, details TEXT
+                )
+            """)
+            if "details" not in {column[1] for column in self.db.execute("PRAGMA table_info(monitor_diagnostics)")}:
+                self.db.execute("ALTER TABLE monitor_diagnostics ADD COLUMN details TEXT")
+            self.db.execute("CREATE INDEX IF NOT EXISTS monitor_diagnostics_task_seq "
+                            "ON monitor_diagnostics(task, seq)")
+        except sqlite3.Error:
+            self._diagnostics_write_failed()
+        with self.cv:
+            self._diagnose("monitor-start", "MONITOR_STARTED_COM" if self.com_runner is not None
+                           else "MONITOR_STARTED_COORDINATOR")
         if self.state["owner"] and self.state["tickets"][self.state["owner"]]["state"] == "claimed":
             restarted = self._snapshot()
             restarted["frozen"] = True
             t = restarted["tickets"][restarted["owner"]]
+            interrupted = []
             for job in t.get("com_jobs", {}).values():
                 if job["result"]["state"] == "running":
                     job["result"].update(state="quarantined", error="MONITOR_RESTARTED_DURING_COM")
+                    interrupted.append(job["result"]["part"])
             with self.cv:
                 self._commit(restarted, "restart", t)
+                for part in interrupted:
+                    self._diagnose("restart", "MONITOR_RESTARTED_DURING_COM",
+                                   t["task"], t["room"], part)
+                if not interrupted:
+                    self._diagnose("restart", "MONITOR_RESTARTED_WITH_CLAIMED_TICKET",
+                                   t["task"], t["room"])
         self.review_slots = BoundedSemaphore(2)
 
     def close(self):
         self.db.close()
+
+    def _diagnostics_write_failed(self):
+        if self.diagnostics_incomplete:
+            return
+        self.diagnostics_incomplete = True
+        try:
+            print("MONITOR_DIAGNOSTICS_WRITE_FAILED", file=sys.stderr)
+        except (OSError, ValueError):
+            pass
+
+    def _diagnose(self, op, code, task=None, room=None, part=None, details=None):
+        # The caller holds self.cv. Scope comes from a validated task or a stored ticket.
+        try:
+            self.db.execute(
+                "INSERT INTO monitor_diagnostics (op, code, task, room, part, ts, details) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (op, code, task, room, part, time.time(), json.dumps(details) if details else None))
+        except (sqlite3.Error, UnicodeError):
+            self._diagnostics_write_failed()
+
+    def _read_diagnostics(self, d):
+        with self.cv:
+            task = d.get("task")
+            if task is not None:
+                need(self.state["epoch"] is not None and d.get("epoch") == self.state["epoch"],
+                     "HOST_EPOCH")
+                self._read_task(self.state, d)
+            cursor, limit = d.get("since_seq", 0), d.get("limit", 100)
+            need(type(cursor) is int and cursor >= 0 and type(limit) is int and 1 <= limit <= 500,
+                 "DIAGNOSTICS_CURSOR_INVALID")
+            try:
+                latest = self.db.execute("SELECT coalesce(max(seq), 0) FROM monitor_diagnostics").fetchone()[0]
+                need(cursor <= latest, "DIAGNOSTICS_CURSOR_INVALID")
+                records = self.db.execute(
+                    "SELECT seq, op, code, task, room, part, ts, details FROM monitor_diagnostics "
+                    "WHERE (task IS NULL OR task = ?) AND seq > ? ORDER BY seq LIMIT ?",
+                    (task, cursor, limit + 1)).fetchall()
+            except sqlite3.Error:
+                raise Fault("DIAGNOSTICS_UNAVAILABLE") from None
+            events = []
+            for seq, op, code, task, room, part, ts, details in records[:limit]:
+                event = {"seq": seq, "op": op, "code": code, "task": task, "ts": ts}
+                if room is not None:
+                    event["room"] = room
+                if part is not None:
+                    event["part"] = part
+                if details:
+                    event["details"] = json.loads(details)
+                events.append(event)
+            return {"events": events, "has_more": len(records) > limit, "latest_seq": latest,
+                    "next_since_seq": events[-1]["seq"] if events else cursor,
+                    "incomplete": self.diagnostics_incomplete}
+
+    def _diagnose_rejection(self, op, d, error):
+        code = fault_code(str(error))
+        with self.cv:
+            s = self.state
+            if op in ("attach", "recover") and code in ATTACH_FAILURES:
+                self._diagnose(op, code)
+            elif op in ("com-build", "com-status") and code in COM_SUBMIT_FAILURES:
+                key = d.get("ticket")
+                t = s["tickets"].get(key) if isinstance(key, str) else None
+                lease = d.get("lease")
+                if not t or not t.get("lease") or not isinstance(lease, str) or not lease.isascii():
+                    return
+                if not all(t[k] == d.get(k) for k in ("epoch", "task", "room", "session")):
+                    return
+                if not secrets.compare_digest(t["lease"], lease):
+                    return
+                room = s["tasks"][t["task"]]["rooms"][t["room"]]
+                pn = d.get("part")
+                part = pn if isinstance(pn, str) and pn in room["parts"] else None
+                self._diagnose(op, code, t["task"], t["room"], part)
+            elif op in REVIEW_OPERATIONS and code in REVIEW_FAILURES:
+                task = d.get("task")
+                if not isinstance(task, str) or task not in s["tasks"] or s["epoch"] != d.get("epoch"):
+                    return
+                room = d.get("room") if op != "verify-task" else None
+                if op != "verify-task" and (
+                    not isinstance(room, str) or room not in s["tasks"][task]["rooms"]
+                ):
+                    return
+                part = d.get("part") if op == "review-part" else None
+                if op == "review-part" and (
+                    not isinstance(part, str) or part not in s["tasks"][task]["rooms"][room]["parts"]
+                ):
+                    return
+                self._diagnose(op, code, task, room, part)
 
     def _save(self, s, op, context):
         old = self.state
@@ -183,9 +354,15 @@ class Coordinator:
         if op == "recover":
             payload["dirty_pages"] = context.get("dirty_pages", [])
             payload["observed_rev"] = context.get("observed_rev")
+        if op in REVIEW_OPERATIONS and type(context.get("review_passed")) is bool:
+            payload["review_passed"] = context["review_passed"]
         if op.startswith("com-"):
             payload["state"] = context.get("state")
-            payload["fault"] = fault_code(context.get("error"))
+            if op == "com-complete" and context.get("state") in ("failed", "quarantined"):
+                code = fault_code(context.get("error"))
+                payload["fault"] = code if code in COM_WORK_FAILURES else "COM_BUILD_FAILED"
+            else:
+                payload["fault"] = None
             if op == "com-complete" and context.get("state") == "saved":
                 t = s["tickets"][context["ticket"]]
                 job = t["com_jobs"][context["command"]]
@@ -235,8 +412,11 @@ class Coordinator:
             self.cv.notify_all()
 
     def _tick(self, s):
-        if not self._online() and s["owner"]:
-            if s["tickets"][s["owner"]]["state"] == "claimed":
+        if not self._online():
+            if self.heartbeat > 0 and not self.heartbeat_lost:
+                self.heartbeat_lost = True
+                self._diagnose("tick", "HOST_HEARTBEAT_EXPIRED")
+            if s["owner"] and s["tickets"][s["owner"]]["state"] == "claimed":
                 s["frozen"] = True
         self._advance(s)
 
@@ -313,6 +493,7 @@ class Coordinator:
         if recover or s["owner"] is None:
             s["frozen"] = False
         self.heartbeat = time.monotonic()
+        self.heartbeat_lost = False
         self._advance(s)
         return {"state": "quarantined" if s["frozen"] else "ready"}
 
@@ -359,6 +540,9 @@ class Coordinator:
         if op == "heartbeat":
             # tick 在更新心跳前已记录脱线期间的持锁不确定性。
             self.heartbeat = time.monotonic()
+            if self.heartbeat_lost:
+                self.heartbeat_lost = False
+                self._diagnose("heartbeat", "HOST_HEARTBEAT_RESUMED")
             return {"state": "quarantined" if s["frozen"] else "ready"}
         need(self._online() and not s["frozen"], "HOST_OFFLINE_OR_QUARANTINED")
         if op == "plan":
@@ -616,7 +800,17 @@ class Coordinator:
                 subject["review"] = result
                 if not result["passed"]:
                     new_task["rooms"][rn]["closed"] = False
-            self._commit(now, op, d)
+            self._commit(now, op, d | {"review_passed": result["passed"]})
+            if not result["passed"]:
+                supplied_checks = result.get("checks")
+                checks = {}
+                if isinstance(supplied_checks, dict):
+                    checks = {key: value["status"] for key, value in supplied_checks.items()
+                              if isinstance(key, str) and key in ("登记", "材料", "物理", "领域", "仿真", "采购清单",
+                                                                     "DSH 收尾", "任务总核实", "相邻尺寸", "台账一致性")
+                              and isinstance(value, dict) and value.get("status") in ("BLOCK", "UNSUPPORTED")}
+                self._diagnose(op, "REVIEW_BLOCKED", d["task"], rn, pn,
+                               {"checks": checks} if checks else None)
         return {k: v for k, v in result.items() if k not in ("files", "registry_rows")}
 
     def _provider(self, op, d, task, targets):
@@ -636,12 +830,20 @@ class Coordinator:
                                     env=os.environ | {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
             need(result.returncode == 0, "EVIDENCE_PROVIDER_FAILED: " + result.stderr[-400:])
             out = json.loads(result.stdout)
-            need(isinstance(out.get("files"), dict) and type(out.get("passed")) is bool, "BAD_PROVIDER_RESULT")
+            need(isinstance(out, dict) and isinstance(out.get("files"), dict)
+                 and type(out.get("passed")) is bool, "BAD_PROVIDER_RESULT")
             need(not out["passed"] or (matches(out["files"]) and registry_matches(out.get("registry_rows", []))),
                  "EVIDENCE_CHANGED")
             return out
         except subprocess.TimeoutExpired:
             raise Fault("EVIDENCE_PROVIDER_TIMEOUT") from None
+        except (OSError, ValueError):
+            # Provider output and OS messages can include file paths and raw evidence.
+            with self.cv:
+                self._diagnose(op, "EVIDENCE_PROVIDER_FAILED", d["task"],
+                               d.get("room") if op != "verify-task" else None,
+                               d.get("part") if op == "review-part" else None)
+            raise
         finally:
             self.review_slots.release()
 
@@ -714,7 +916,8 @@ class Coordinator:
                 self.com_busy = False
                 s = self._snapshot()
                 s["frozen"] = True
-                self._commit(s)
+                self._diagnose(op, "COM_WORKER_START_FAILED", t["task"], t["room"], pn)
+                self._commit(s, "worker-start-failed", t)
                 raise
             return accepted
 
@@ -763,12 +966,22 @@ class Coordinator:
                     if not s["frozen"]:
                         self._advance(s)
                 self._commit(s, "com-complete", d | result)
-            except Exception as e:
+                if error:
+                    code = fault_code(error)
+                    self._diagnose("com-complete", code if code in COM_WORK_FAILURES else "COM_BUILD_FAILED",
+                                   t["task"], t["room"], result["part"],
+                                   {"command": cmd, **com_details(error)})
+                if cleanup:
+                    code = fault_code(cleanup)
+                    self._diagnose("com-cleanup", code if code in COM_WORK_FAILURES else "COM_CLEANUP_FAILED",
+                                   t["task"], t["room"], result["part"], {"command": cmd, "stage": "cleanup"})
+            except Exception:
                 # Keep the original ticket in-flight if durable commit fails.
-                print(f"COM completion commit failed: {e!r}", file=sys.stderr)
                 self.state["frozen"] = True
                 t = self.state["tickets"][d["ticket"]]
                 t["com_jobs"][cmd]["result"].update(state="quarantined", error="COM_COMMIT_FAILED")
+                self._diagnose("com-complete", "COM_COMMIT_FAILED", t["task"], t["room"], accepted["part"],
+                               {"command": cmd, "stage": "commit"})
             finally:
                 self.com_busy = False
                 self.cv.notify_all()
@@ -857,6 +1070,7 @@ class Coordinator:
                     row.pop("state", None)
                     row.pop("model_sha256", None)
                     row.pop("spec_sha256", None)
+                    row.pop("review_passed", None)
                 row["dirty_pages"] = [page for page in row.get("dirty_pages", [])
                                       if page == "mon.owner" and any(x["task"] == task for x in row["tickets"])
                                       or page.startswith("mon.part:") and json.loads(page[9:])[0] == task]
@@ -865,6 +1079,20 @@ class Coordinator:
                     "next_since_rev": events[-1]["rev"] if events else cursor}
 
     def call(self, op, d):
+        if op == "diagnostics":
+            return self._read_diagnostics(d)
+        try:
+            return self._call(op, d)
+        except Exception as error:
+            if op in ("attach", "recover", "com-build", "com-status") or op in REVIEW_OPERATIONS:
+                try:
+                    self._diagnose_rejection(op, d, error)
+                except Exception:
+                    with self.cv:
+                        self._diagnostics_write_failed()
+            raise
+
+    def _call(self, op, d):
         if op in ("audit", "page-status"):
             return self._inspect_pages(op, d)
         if op in ("com-build", "com-status"):
@@ -910,9 +1138,16 @@ class Coordinator:
             self._tick(s)
             self._commit(s)
             s = self._snapshot()
+            was_online = self._online()
             out = self._mutate(s, op, d)
             self._advance(s)
+            changed = s != self.state
             self._commit(s, op, d)
+            if op == "recover":
+                self._diagnose(op, "HOST_RECOVERED")
+            if op == "attach" and (changed or not was_online):
+                code = "HOST_ATTACHED" if out["state"] == "ready" else "HOST_ATTACH_QUARANTINED"
+                self._diagnose(op, code)
             return out
 
 
@@ -992,7 +1227,6 @@ class Handler(BaseHTTPRequestHandler):
             #   使用者只看到"内部错误"，真实原因（UNMANAGED_SW_RUNNING /
             #   COM_WORKER_STILL_RUNNING …）全丢 —— 排查时极难定位。
             code = fault_code(str(e)) or fault_code(getattr(e, "code", "") or "")
-            print(f"handler failure: {e!r}", file=sys.stderr)
             if code:
                 status, result = 409, {"ok": False, "error": code}
             else:

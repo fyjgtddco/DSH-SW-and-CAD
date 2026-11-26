@@ -2503,6 +2503,130 @@ console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
        _r10.get("fail") == 0, _r10.get("fails"))
     shutil.rmtree(os.path.dirname(_p10f), ignore_errors=True)
 
+
+
+# ════════════════════════════════════════════════════════════════════
+sec("F11. 【2026-11-26】search_fill 后 knowledge 不动（可执行性缺口）")
+# ════════════════════════════════════════════════════════════════════
+# 现场：C:\Users\j1877\Desktop\test\bug_report_seven_stage_stuck.md
+#   任务 20261125_211324_905E57B6 · step 1.2 · 报告称"knowledge 未响应 submit"。
+# 逐条核对会话日志后，结论与报告相反：
+#   · 插件在 01:53:31 确实唤醒了 knowledge，status 也返回了完整 job（6 条 hits 都在）；
+#   · knowledge 先 yield（在等回填）→ 被 PENDING_JOB_USE_SUBMIT_OR_REPORT_BLOCKER 拒；
+#   · 再 status → 只拿到一句通用指引，没有"回填已完成，现在该 submit"；
+#   · 它停在那里 38 秒没有产出，直到 root 手动 stop 的广播把它撞醒；
+#   · 那时任务已 partial → submit 得到 NO_ACTIVE_JOB_FOR_ROLE → 自毁。
+# 也就是说：**不是唤醒通道坏了，是"接下来该干什么"没说清楚。**
+
+ck("★ 可执行性：nextAction 给 knowledge 一个 ready 闸门",
+   "gate = {state:'awaiting-search-fill'" in _SRC_FLOW
+   and "gate = {state:'ready-to-submit'" in _SRC_FLOW)
+ck("★ 可执行性：回填完成后 note 明确说「现在就可以 submit」",
+   "现在就可以 submit" in _SRC_FLOW)
+ck("★ 可执行性：工单 pending 时明确说「不要 submit」",
+   "不要 submit：现在没有来源可用" in _SRC_FLOW)
+ck("★ 语义：yield 在「工单 pending（在等外部回执）」时放行",
+   "const orderPending" in _SRC_FLOW and "orderPending || noSearchYet" in _SRC_FLOW)
+ck("★ 语义：回填完成后 yield 仍被拒，且给 jobId 与下一步",
+   "你手上有一个可以立刻提交的任务包" in _SRC_FLOW
+   and "直接 action=submit" in _SRC_FLOW)
+ck("★ 回归：盲审白名单仍在",
+   "const blindParts = () => BLIND_READ_PARTS.slice();" in _SRC_FLOW)
+ck("★ 回归：stop 仍不写 failures", "stoppedBy:role" in _SRC_FLOW)
+ck("★ 回归：attach 仍能接管失效 planner", "plannerTakeover:true" in _SRC_FLOW)
+
+
+if _NODE and os.path.isfile(_GATE_JS):
+    _p11f = os.path.join(tempfile.mkdtemp(prefix="seven_f11_"), "f11.mjs")
+    with io.open(_p11f, "w", encoding="utf-8") as f:
+        f.write("""
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const P = [], F = [];
+const ck = (n, c, extra) => (c ? P : F).push(extra === undefined ? n : n + ' :: ' + JSON.stringify(extra).slice(0, 240));
+const mod = await import(pathToFileURL(process.argv[2]).href);
+const dir = mkdtempSync(join(tmpdir(), 'f11-'));
+const wf = join(dir, 'workflow_state.json');
+writeFileSync(wf, JSON.stringify({ task_id: 'f11', analysis_engine: 'seven_v03',
+  seven_stage_root_session_id: 'root', load_case_file: null }));
+const agents = new Map();
+const mk = (id, parent = null, msgs = []) => { const a = { id,
+  session: { id, header: { parentSession: parent }, deriveMessages: () => msgs }, followup() {}, steer() {} };
+  agents.set(id, a); return a; };
+const userText = { id: 'u1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'x' }] };
+const rootA = mk('root', null, [userText]); const planA = mk('p1', 'root');
+let reg = null;
+mod.install({ logger: { warn(){}, info(){} }, tools: { register: t => { reg = t; }, guard: () => {} },
+  agents: { get: id => agents.get(id) },
+  subagents: { getProvider: () => ({}), listDescendants: async () => [], prompt: async () => ({}),
+    startActivation: async i => { mk(i.childId, i.parent.id); return { childId: i.childId, result: Promise.resolve({}) }; } },
+  on: () => () => {} }, { stateDir: join(dir, 'ss'), workflowFile: wf, workerProvider: 'fork' }, o => o);
+const signal = { throwIfAborted() {} };
+const call = async (agent, action, data = {}) => JSON.parse((await reg.execute(
+  { taskId: 'f11', action, dataJson: JSON.stringify(data) }, { agent, signal })).text);
+const st = () => JSON.parse(readFileSync(join(dir, 'ss', 'f11.json'), 'utf8'));
+
+await call(rootA, 'attach', { planner: 'p1', messageIds: ['u1'] });
+await call(planA, 'launch');
+const s1 = st(); const roleOf = {};
+for (const [role, cid] of Object.entries(s1.childForRole)) roleOf[cid] = role;
+for (const [cid, role] of Object.entries(roleOf))
+  await call(agents.get(cid), 'bind', { role, token: s1.invitations[role] });
+const kA = agents.get(Object.entries(roleOf).find(([, r]) => r === 'knowledge')[0]);
+await call(planA,'frame',{object:'o',decision:'d',boundaries:'b',searchTopic:'s',
+  verification:'v',assumptions:'a',prior:'p',blockedBy:[]});
+
+// ① 还没发单：ready 应指出要先发单
+const g0 = (await call(kA,'status')).job?.nextAction?.ready;
+ck('F11-① 未发单时 ready.state=no-search-yet', g0?.state === 'no-search-yet', g0);
+
+// ② 发了单但没回填：ready 必须说「不要 submit」，且 yield 要被允许
+const kj = (await call(kA,'status')).job;
+const od = (await call(kA,'search',{jobId:kj.id,query:'GB/T 3480.1 齿轮'})).order;
+const g1 = (await call(kA,'status')).job?.nextAction?.ready;
+ck('F11-② 工单 pending 时 ready.state=awaiting-search-fill',
+  g1?.state === 'awaiting-search-fill', g1);
+ck('F11-② ready 明确写「不要 submit」', /不要 submit/.test(String(g1?.message)), g1?.message);
+const y1 = await call(kA,'yield',{reason:'等待真实主对话执行 web_search 并回填'});
+ck('F11-② 等回填时 yield 被允许（现场就是这里被拒的）',
+  y1.ok !== false, y1.code);
+
+// ③ 回填后：ready 必须说「现在可以 submit」，且 yield 必须被拒并给 jobId
+await call(rootA,'search_fill',{jobId:kj.id,orderId:od.id,query:od.query,outcome:'ok',
+  hits:[{title:'t',url:'https://example.com/x'}]});
+const g2 = (await call(kA,'status')).job?.nextAction?.ready;
+ck('F11-③ 回填后 ready.state=ready-to-submit', g2?.state === 'ready-to-submit', g2);
+ck('F11-③ ready 明确写「现在就可以 submit」', /现在就可以 submit/.test(String(g2?.message)), g2?.message);
+ck('F11-③ ready 带 hits 计数', g2?.hits === 1, g2?.hits);
+const y2 = await call(kA,'yield',{reason:'我再等等'});
+ck('F11-③ 回填完成后 yield 仍被拒（不能偷懒）',
+  y2.ok === false && y2.code === 'PENDING_JOB_USE_SUBMIT_OR_REPORT_BLOCKER', y2.code);
+ck('F11-③ 拒绝文案带 jobId', String(y2.error).includes(kj.id), String(y2.error).slice(0, 80));
+ck('F11-③ 拒绝文案指 submit', /submit/.test(String(y2.error)));
+
+// ④ 按指引 submit 必须成功
+const sub = await call(kA,'submit',{jobId:kj.id,content:'知识正文',
+  sources:[{id:st().jobs.knowledge.searches[0].hits[0].id,location:'l',applicability:'a'}],gaps:[]});
+ck('F11-④ 按 ready 指引 submit 成功', sub.ok !== false, sub.code);
+ck('F11-④ submit 后离开 knowledge 阶段', st().phase !== 'knowledge', st().phase);
+
+console.log(JSON.stringify({ pass: P.length, fail: F.length, fails: F }));
+""")
+    _o11 = subprocess.run(
+        [_NODE, _p11f, _GATE_JS],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180)
+    try:
+        _r11 = json.loads((_o11.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        _r11 = {"pass": 0, "fail": 1,
+               "fails": [((_o11.stdout or "") + (_o11.stderr or ""))[-900:]]}
+    ck("★ F11 search_fill 后可执行性 行为验证全过（%d 项）" % _r11.get("pass", 0),
+       _r11.get("fail") == 0, _r11.get("fails"))
+    shutil.rmtree(os.path.dirname(_p11f), ignore_errors=True)
+
 # ════════════════════════════════════════════════════════════════════
 sec("G. 端到端：init 固定引擎 → select 无凭证时 fail-closed")
 # ════════════════════════════════════════════════════════════════════

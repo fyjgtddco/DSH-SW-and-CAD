@@ -82,17 +82,23 @@ const TURNGUARD_URL = 'data:text/javascript;base64,' + Buffer.from(turnGuardSour
 function inlineLocalLibs(src, libDirUrl) {
   let out = src;
   const names = new Set();
-  const re = /from '\.\/([A-Za-z0-9_.-]+\.js)'/g;
+  // 【子目录 import】原来只认 './x.js'，遇到 './run-log/y.mjs' 会整份漏掉 →
+  //   data: URL 无法解析相对路径 → 整个测试文件 ERR_UNSUPPORTED_RESOLVE_REQUEST。
+  //   现在允许子目录与 .mjs：目录层用 [A-Za-z0-9_.-] 逐个段匹配（. 已包含在段内）。
+  const re = /from '\.\/((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:js|mjs))'/g;
   let m;
   while ((m = re.exec(src)) !== null) names.add(m[1]);
   for (const name of names) {
-    let body;
+    let body, own;
     try {
-      body = readFileSync(new URL('./' + name, libDirUrl), 'utf8');
+      own = new URL('./' + name, libDirUrl);
+      body = readFileSync(own, 'utf8');
     } catch (e) {
-      continue;   // 不是 lib 目录下的模块 → 交给显式替换链
+      continue;   // 不是当前目录下的模块 → 交给显式替换链
     }
-    const inner = inlineLocalLibs(body, libDirUrl);
+    // 递归基准必须是【该模块自己的目录】：lib/run-log/x.mjs 里的 './y.mjs'
+    //   指的是 lib/run-log/y.mjs，不是 lib/y.mjs。
+    const inner = inlineLocalLibs(body, new URL('.', own));
     const url = 'data:text/javascript;base64,' + Buffer.from(inner).toString('base64');
     out = out.split("from './" + name + "'").join("from '" + url + "'");
   }
@@ -221,8 +227,15 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
     //   由 lib/memory-contract.js 的 memoryPageRoute 注册）。当时漏改这条断言，
     //   导致 test:compatibility 长期红 —— 而它恰恰是"路由注册完整性"的唯一守门人，
     //   红了就没人看，等于这道门失效。
-    assert.equal(h.routes.size, 37,
-      '路由数量应为 37（33 + 监控器 3 条 + page-table 1 条）');
+    // ── 【2026-11-26 运行日志面板】+3 = 40 ───────────────────────────────
+    //   /run-log 是七阶段运行日志摘要（lib/run-log/run-log-route.mjs），
+    //   /run-log/view.mjs 与 /run-log/view.css 是它的浏览器半静态资源
+    //   （同源、同一个 guardRoute 守卫，固定在 apply 里注册两条）。
+    // ── 【2026-11-26 诊断日志】+1(monitor-log) = 41 ──────────────────────
+    //   /monitor-log 是外部监控器诊断日志的只读宿主转发（lib/run-log/
+    //   monitor-log-route.mjs）。只读端点，不进 SENSITIVE_ROUTES。
+    assert.equal(h.routes.size, 41,
+      '路由数量应为 41（33 + 监控器 3 + page-table 1 + run-log 3 + monitor-log 1）');
     // ── 清单必须与 lib/index.js 的 ctx.webServer.register 一一对应 ──────
     // 漏写一条 → 路由存在但没被这条断言保护；多写一条 → 直接失败。
     for (const p of [
@@ -251,6 +264,12 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/mem-guard',
       '/dsh-engineering-ui/webots-context', '/dsh-engineering-ui/webots-report',
       '/dsh-engineering-ui/webots-evidence', '/dsh-engineering-ui/webots-attribute',
+      // 【2026-11-26】七阶段运行日志摘要 + 浏览器半静态资源
+      '/dsh-engineering-ui/run-log',
+      '/dsh-engineering-ui/run-log/view.mjs',
+      '/dsh-engineering-ui/run-log/view.css',
+      // 【2026-11-26】外部监控器诊断日志（只读宿主转发）
+      '/dsh-engineering-ui/monitor-log',
     ]) {
       assert.ok(h.routes.has(p), 'missing route ' + p);
     }
@@ -280,6 +299,10 @@ test('全部 33 条 HTTP 路由与守卫钩子注册，且可完整卸载', () =
       '/dsh-engineering-ui/mem-guard',
       '/dsh-engineering-ui/webots-context', '/dsh-engineering-ui/webots-report',
       '/dsh-engineering-ui/webots-evidence', '/dsh-engineering-ui/webots-attribute',
+      '/dsh-engineering-ui/run-log',
+      '/dsh-engineering-ui/run-log/view.mjs',
+      '/dsh-engineering-ui/run-log/view.css',
+      '/dsh-engineering-ui/monitor-log',
     ]).size, h.routes.size, '路由清单与注册数必须一致（清单有重复或漏项）');
     assert.equal(h.hooks.has('agent/turn-stopping'), true);
   } finally { h.dispose(); }

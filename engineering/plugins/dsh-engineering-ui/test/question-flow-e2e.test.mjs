@@ -47,13 +47,17 @@ export const agentPresetProjectionDefinition = { init: () => null, apply: () => 
 function inlineLocalLibs(src, libDir) {
   let out = src;
   const names = new Set();
-  const re = /from '\.\/([A-Za-z0-9_.-]+\.js)'/g;
+  // 【子目录 import】原来只认 './x.js'，遇到 './run-log/y.mjs' 整份漏掉 →
+  //   data: URL 无法解析相对路径 → 测试文件 ERR_UNSUPPORTED_RESOLVE_REQUEST。
+  const re = /from '\.\/((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:js|mjs))'/g;
   let m;
   while ((m = re.exec(src)) !== null) names.add(m[1]);
   for (const name of names) {
     let body;
-    try { body = fs.readFileSync(path.join(libDir, name), 'utf8'); } catch (e) { continue; }
-    const inner = inlineLocalLibs(body, libDir);
+    let own;
+    try { own = path.join(libDir, name); body = fs.readFileSync(own, 'utf8'); } catch (e) { continue; }
+    // 递归基准 = 该模块自己的目录（子目录 import 才解析得对）
+    const inner = inlineLocalLibs(body, path.dirname(own));
     out = out.split("from './" + name + "'").join("from '" + url(inner) + "'");
   }
   return out;

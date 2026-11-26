@@ -85,13 +85,16 @@ const TURNGUARD_URL = 'data:text/javascript;base64,' + Buffer.from(turnGuardSour
 function inlineLocalLibs(src, libDirUrl) {
   let out = src;
   const names = new Set();
-  const re = /from '\.\/([A-Za-z0-9_.-]+\.js)'/g;
+  // 【子目录 import】原来只认 './x.js'，遇到 './run-log/y.mjs' 整份漏掉 →
+  //   data: URL 无法解析相对路径 → 测试文件 ERR_UNSUPPORTED_RESOLVE_REQUEST。
+  const re = /from '\.\/((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:js|mjs))'/g;
   let m;
   while ((m = re.exec(src)) !== null) names.add(m[1]);
   for (const name of names) {
-    let body;
-    try { body = readFileSync(new URL('./' + name, libDirUrl), 'utf8'); } catch (e) { continue; }
-    const inner = inlineLocalLibs(body, libDirUrl);
+    let body, own;
+    try { own = new URL('./' + name, libDirUrl); body = readFileSync(own, 'utf8'); } catch (e) { continue; }
+    // 递归基准 = 该模块自己的目录（子目录 import 才解析得对）
+    const inner = inlineLocalLibs(body, new URL('.', own));
     const dataUrl = 'data:text/javascript;base64,' + Buffer.from(inner).toString('base64');
     out = out.split("from './" + name + "'").join("from '" + dataUrl + "'");
   }
