@@ -106,7 +106,12 @@ console.log('\n=== 4. 多层级（含孙代）都能映射 ===');
 }
 
 console.log('\n=== 5. 源码契约 ===');
-ck('调 listDescendants 建映射', SRC.includes('ctx.subagents.listDescendants(String(probeRoot))'));
+// 【2026-11-28】名字映射已改成复用 lineageOf 的谱系表（同一 root 只查一次
+//   listDescendants，避免读取端查两遍）。断言随之更新。
+ck('名字映射复用 lineageOf', SRC.includes('const _ln = probeRoot ? await lineageOf'));
+ck('lineageOf 内部调 listDescendants',
+   SRC.includes("typeof ctx.subagents.listDescendants !== 'function'") === false
+   || SRC.includes('ctx.subagents.listDescendants(id)'));
 ck('用 label/name/title 三选一', SRC.includes('row.label || row.name || row.title'));
 ck('保留 labelRaw', SRC.includes('e.labelRaw = String(e.label'));
 ck('counts 同步改名', SRC.includes('r.counts[k].label = nm'));

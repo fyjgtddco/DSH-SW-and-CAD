@@ -51,8 +51,13 @@ ck('★ 区分子代理 / 主对话',
 console.log('\n=== 反向：不能把既有保护改掉 ===');
 ck('链为空仍完全不介入',
    uiIndex.includes('if (!cfg.entries.length) return false;'));
-ck('子代理父级未知仍保守按工程处理',
-   uiIndex.includes('父级预设未知'));
+// 【2026-11-28 回归修复】原来的"父级未知 → 保守按工程"是所有非工程会话被
+//   误接管的根因（现场报 "Cannot switch to loomy/...: no context capacity"）。
+//   现在未知 → 不接管。这里断言新口径，并保留"别再改回宽松"的提示。
+ck('★ 未知不再默认按工程（改为 return false）',
+   uiIndex.includes('未知【不再】默认当成工程'));
+ck('注释保留了误接管现场',
+   uiIndex.includes('no context capacity'));
 ck('provider 隔离仍然存在',
    uiIndex.includes('function quarantineProvider'));
 ck('绝不返回 retry（避免白烧请求）',

@@ -658,22 +658,45 @@ export function allowedActions(s, role) {
   // 【2026-11-19】原写法是 ['status','read'].includes(role) —— 把"动作名"当成了"角色名"，
   //   真正的未绑定子会话（role='unbound'）反而拿到空清单。它此刻只能 status/read。
   if (role === 'unbound') return ['status', 'read'];
+  // ══ 【BUG-N14 修复 · 现场 2026-11-28】root 必须看得到 recover ═══════════
+  // 现场（step 7.11，63 步里第 61 步）：design 与 planner 在同一分钟先后被宿主
+  //   回收（cause=host-disposed），status.failed 里两条都在，而 root 的 allowed
+  //   里没有任何能救回来的动作 —— 唯一能 retry 的角色（planner）自己也死了，
+  //   形成权限真空，任务停在 61/63 不动。
+  //
+  // 现在 recover 由插件自己用 ctx.subagents.startActivation 建会话（不依赖 root
+  //   的 subagent_fork 工具），所以 root 只要【看得到】这个动作就有救。
+  //
+  // ⚠️ 判据必须在 `s.ended[role]` 早退分支【之前】算好：
+  //   现场正是在"用户叫停→各角色登记收尾→宿主才把会话回收"之后卡住的，
+  //   此时 root 已经 ended，早退分支只回 status/read/export，recover 会消失。
+  //   换句话说，这段若放在后面就等于没修（写的时候踩过一次）。
+  // 口径：**只要还有宿主回收类故障没清，root 就看到 recover**，与是否 ended 无关
+  //   —— 恢复动作的语义本来就是"推翻上一次收尾、接着跑"。
+  //   只放给 root，且只在真有该类故障时放，不制造无意义的出口。
+  const recoverable = Object.values(s.failures ?? {}).some(f =>
+    f && ['host-disposed', 'run-failed', 'turn-aborted'].includes(f.cause));
+  const rootCanRecover = role === 'root' && recoverable;
   if (s.ended[role]) {
     // 【BUG-5】终态下 planner/root 还能把任务恢复回来，这条要出现在 allowed 里，
     // 否则模型看到 allowed 里没有出口，就会以为只能弃任务重开。
     const list = ['status', 'read', 'export'];
     if (['planner', 'root'].includes(role) && terminal.has(s.phase)) list.push('reopen');
+    if (role==='root' && s.phase==='partial') list.push('recover');
+    if (rootCanRecover) list.push('recover');
     return list;
   }
   // root 也允许 read/export：现场主对话要靠 read 把待审正文转交给 review，
   //   旧 allowed 只写 capture/wait_user，模型不知道 read 其实可用。
-  if (role === 'root') out.add('status').add('read').add('export').add('capture').add('deliver');
+  if (role === 'root') out.add('status').add('read').add('export').add('capture').add('deliver').add('recover');
+  if (rootCanRecover) out.add('recover');
   // 【BUG-5】终态下 planner/root 的恢复出口。注意它必须【不依赖 s.ended[role]】——
   // 实机现场正是"任务已经 partial，但 planner 自己还没登记 end"，此时若只在
   // "已 end"分支里给 reopen，模型看到 allowed 里没有出口，就会以为只能弃任务。
   if (terminal.has(s.phase) && ['planner', 'root'].includes(role)) out.add('reopen');
   if (role === 'planner') {
     out.add('status').add('read').add('export').add('interpret').add('retry').add('partial').add('deliver');
+    if (!terminal.has(s.phase)) out.add('recover');
     if (s.phase === 'setup') out.add('invite');
     if (s.phase === 'frame') out.add('frame');
     if (s.phase === 'commit') out.add('commit');
@@ -895,7 +918,57 @@ function view(s, role) {
       //     "不能用 closed 抹掉"的判断）。
       //   另外补 stillOpenKeys：从未关闭过、一直挂着的，避免被误读成"重开"。
       const everClosed = new Set(closedLast.map(x => String(x?.key ?? x ?? '')));
-      const restated = ledger.filter(x => reopenedNow.has(x.key)).map(x => x.key);
+      // ══ 【BUG-N1 修复 · 现场 2026-11-28 · 任务 20261128_165714_E2089D16】═════
+      // 现场：step 1.1，review 角色**首次**成功提交 5 条硬异议后，
+      //   restatedKeys 把全部 5 条都列成「本轮重提」，同时 reopenedKeys 与
+      //   stillOpenKeys 也列了同一批。首次提交从语义上不可能是「重提」。
+      //
+      // 根因：restated 的口径是「本轮 review 提了、且台账里也有」——
+      //   它无法区分「第二次及以后又提」与「第一次提出」。首次提交时
+      //   台账已经被上一次 review 的 issues 写好（两者本来就同源），
+      //   于是每条都命中 reopenedNow，全部落进 restated。
+      //
+      // 修法（不改变任何判定，只如实地分三档）：
+      //   · reopenedKeys —— 曾出现在【更早一轮】的 closed 里，本轮又提（真·重开）；
+      //   · restatedKeys —— 本轮重提，且【上一轮 review 已经提过一次】
+      //     （即 s.slot.reviews 里存在更早的 review 也提过同一个 key）；
+      //   · stillOpenKeys —— 首次提出，此后一直挂着（含从未被关闭过的老条目）。
+      // 关键判据（最终版）：**区分"本轮新提"与"此前已提"，只能看
+      //   「本轮 review 的 issues」与「本轮之前台账里已有的 key」的差集**。
+      //
+      // 为什么不能用 s.slot.reviews 去倒推（前两版都错在这里）：
+      //   · reviews 里包含 preflight（盲审）那一轮，它的 issues 天然为空，
+      //     所以"更早的轮次里出现过这个 key"在首轮复审时永远是 false ——
+      //     于是 firstRaised 与 restated 都拿不到它，被 e2e 当场抓出；
+      //   · 而 s.slot.issues 在提交时是【本轮 review 的 issues 原样覆盖】，
+      //     所以提交后它已经等于 lastReview.issues，差集恒为空。
+      //
+      // 正确做法：拿【本轮 review 自己记下的】issues，减去【本轮之前】的台账。
+      //   台账在每次 submit 时被整体覆盖，所以"本轮之前的台账"只能从
+      //   上一轮的 review 条目里取 —— 也就是 reviews 里过滤掉 lastReview 后，
+      //   取最后一条有 issues 的（preflight 的空 issues 不参与）。
+      // 三档互斥且完备（firstRaised ∪ restated = 本轮提出的全部 key）：
+      //   · firstRaised —— 本轮提了，此前台账里没有（首次提出）；
+      //   · restated    —— 本轮提了，此前台账里就有（真·重提）；
+      //   · reopened    —— 其中曾被上一轮显式 closed 过的（真·重开）。
+      // ⚠️ 必须按 id 比较，不能用对象引用相等（r !== lastReview）：
+      //   状态每次都经 load()→JSON.parse() 重新构造，slot.review 与
+      //   slot.reviews[i] 即便"逻辑上是同一条"，内存里也是两个不同实例，
+      //   !== 恒为 true —— 那样本轮自己的 issues 会被当成"此前已有"，
+      //   首轮提交照旧全部判成重提（这就是第一版没修好的原因，
+      //   被 e2e-buglog-20261129 的 others 条数断言当场揪出）。
+      const lastReviewId = String(lastReview?.id ?? '');
+      const priorIssueKeys = new Set();
+      for (const r of (s.slot?.reviews ?? [])) {
+        if (!r) continue;
+        if (lastReviewId && String(r.id ?? '') === lastReviewId) continue;
+        for (const x of (Array.isArray(r.issues) ? r.issues : [])) {
+          priorIssueKeys.add(String(x?.key ?? ''));
+        }
+      }
+      const raisedNow = [...reopenedNow];
+      const restated = raisedNow.filter(k => priorIssueKeys.has(k));
+      const firstRaised = raisedNow.filter(k => !priorIssueKeys.has(k));
       const trulyReopened = restated.filter(k => everClosed.has(k));
       return {
         issueLedger: {
@@ -904,6 +977,9 @@ function view(s, role) {
           reopenedKeys: trulyReopened,
           restatedKeys: restated,
           stillOpenKeys: ledger.filter(x => !everClosed.has(x.key)).map(x => x.key),
+          // 【BUG-N1】首次提出的单独列出 —— 让"这轮第一次看到它"这件事可读，
+          //   避免调用方再从 restatedKeys/stillOpenKeys 里倒推。
+          firstRaisedKeys: firstRaised,
           lastClosed: closedLast,
           lastVerdict: lastReview?.verdict ?? null,
           ...(lastReview?.downgrades ? {downgrades:lastReview.downgrades} : {}),
@@ -911,8 +987,9 @@ function view(s, role) {
             ? '这份台账是【只读投影】：closableKeys 就是下一轮 submit 时 closed[] 会被接受的集合。'
               + '想验证 closed 契约不必真的提交 —— 看这里即可。'
               + '\n字段含义（别再混用）：reopenedKeys=曾被关闭过、本轮又提的；'
-              + 'restatedKeys=本轮 review 重提的（不能用 closed 抹掉）；'
-              + 'stillOpenKeys=从未关闭过、一直挂着的。'
+              + 'restatedKeys=上一轮已提过、本轮又提的（不能用 closed 抹掉）；'
+              + 'stillOpenKeys=从未关闭过、一直挂着的；'
+              + 'firstRaisedKeys=本轮【第一次】提出（不算重提）。'
             : '本步还没有任何异议台账（review 尚未提出过硬异议），closed[] 暂时无可关闭对象。',
         },
       };
@@ -1019,6 +1096,8 @@ function view(s, role) {
       // 【BUG-012 修复】催办前先看 handoff —— 这是"该不该催"的唯一权威判据。
       deliver:'{role}。主对话或总计可重发已落盘的待办，仍计入该小步对该接收角色的投递预算。'
         + '把可合并的材料一次提交，进度看 status.handoff，投递次数看 status.delivery。',
+      recover:'{role:"planner|knowledge|design|review|workers",resume?:true}。会话异常退出时换会话续同一 taskId。'
+        + '总计退出由原主对话接管；有总计在场时可补建故障岗位。人工暂停后只在用户明确要求继续时使用 resume:true。',
       // ══ 【2026-11-20 · 测试方残余 (a)】新动作必须有 help 文本 ═══════════════
       // 现场：allowed 里已经有 stop，但 actionHelp 里没有它的契约 ——
       //   子代理只知道"有个叫 stop 的动作"，不知道该不该传 reason、和 blocked 差在哪，
@@ -1124,6 +1203,7 @@ export function openFlow(stateDir) {
   }
   function trackedActor(a) {
     for (const s of tracked()) {
+      if (own(s.retiredSessions ?? {},a.id)) return {s,role:'retired'};
       const role = actorRole(s,a) || (s.planner === a.parent ? 'unbound' : null);
       if (role) return { s, role };
     }
@@ -2466,6 +2546,7 @@ export function openFlow(stateDir) {
         check(!terminal.has(s.phase), 'ALREADY_TERMINAL: 任务已在终态（' + s.phase
           + '）。要重新推进请用 action=reopen {reason}。');
         const why = named(d.reason,'reason');
+        s.paused = {phase:s.phase,jobs:s.jobs,waitReason:s.waitReason};
         s.waitReason = why;
         s.history.push({revision:s.revision, retained:s.slot, reason:why,
           partial:true, stopped:true, stoppedBy:role, stoppedByActor:a.id,
@@ -2485,6 +2566,7 @@ export function openFlow(stateDir) {
         as('planner','root');
         check(!terminal.has(s.phase), 'ALREADY_TERMINAL');
         check(s.phase==='evidence_wait' || s.question || Object.keys(s.failures).length || d.hostStop === true, 'PARTIAL_NEEDS_BLOCKER_OR_DIRECT_USER_STOP');
+        s.paused = {phase:s.phase,jobs:s.jobs,waitReason:s.waitReason};
         s.waitReason = named(d.reason,'reason');
         s.history.push({revision:s.revision, retained:s.slot, reason:s.waitReason, partial:true});
         s.phase='partial'; s.jobs={};
@@ -2656,6 +2738,8 @@ export function openFlow(stateDir) {
       case 'retry': {
         as('planner','root');
         check(own(s.failures,d.role) && !terminal.has(s.phase), 'NO_ROLE_FAILURE_TO_RETRY');
+        check(!['host-disposed','run-failed','turn-aborted'].includes(s.failures[d.role].cause),
+          'SESSION_RECOVERY_REQUIRED: 原会话未正常结束。用 recover 换绑新会话来接续原工作单。');
         named(d.reason,'reason');
         s.retryCounts ??= {};
         check((s.retryCounts[d.role] ?? 0) < 2, 'RETRY_LIMIT_PARTIAL_OR_OPERATOR_RECOVERY');
@@ -3006,6 +3090,75 @@ export function openFlow(stateDir) {
     save(s);
     return true;
   }
+
+  function resumeCheckpoint(s) {
+    const paused = s.paused;
+    // Legacy partial files did not store the phase. Infer it from certified
+    // artifacts and still run the normal gate for the next action.
+    const slot = s.slot;
+    const review = slot?.review?.kind==='review' ? slot.review : null;
+    const evidence = s.question || slot?.frame?.blockedBy?.length;
+    const phase = paused?.phase ?? (s.cursor>=steps.length ? 'ready'
+      : evidence ? 'evidence_wait'
+      : review?.verdict==='blocked' ? (slot.rework>=2 ? 'evidence_wait' : 'resolve')
+      : review?.verdict==='pass' || review?.verdict==='conditional' ? 'commit'
+      : slot?.design ? 'review' : s.cursor===0 && slot?.knowledge && !slot.preflight ? 'preflight'
+      : slot?.knowledge ? 'design' : slot?.frame ? 'knowledge' : 'frame');
+    s.history.push({at:new Date().toISOString(),revision:s.revision,recoveredFromPause:true,
+      resumePhase:phase,carriedFailures:{...s.failures},carriedEnded:s.ended,reason:s.waitReason});
+    s.phase = phase;
+    s.waitReason = paused?.waitReason ?? (phase==='evidence_wait' ? s.waitReason : null);
+    s.jobs = paused?.jobs ?? {};
+    s.ended = {};
+    s.turns = {};
+    delete s.paused;
+    const owner = phaseOwner(phase);
+    if (roles.includes(owner) && !s.jobs[owner]) reissue(s,owner);
+  }
+
+  // Called only by the host adapter after checking the actual session roster.
+  function prepareRecovery(a,task,role,previous,childId,resume=false) {
+    const s = load(task);
+    const whoIsIt = who(s,a);
+    check(id(childId) && ![s.root,s.planner,...Object.values(s.members),
+      ...Object.values(s.childForRole)].includes(childId), 'RECOVERY_CHILD_ID_INVALID');
+    if (role==='planner') check(whoIsIt==='root','RECOVERY_ROOT_REQUIRED');
+    else check(roles.includes(role) && ['root','planner'].includes(whoIsIt) && !s.ended.planner,
+      'RECOVERY_PLANNER_REQUIRED');
+    const old = role==='planner' ? s.planner : (s.members[role] ?? s.childForRole[role]);
+    check(old===previous,'RECOVERY_BINDING_CHANGED');
+    if (s.phase==='partial') {
+      check(whoIsIt==='root' && role==='planner' && resume===true,'RECOVERY_RESUME_REQUIRED');
+      resumeCheckpoint(s);
+    } else check(!s.ended.root,'RECOVERY_TASK_CLOSED');
+    s.retiredSessions ??= {};
+    if (old) s.retiredSessions[old] = true;
+    if (role==='planner') {
+      for (const sid of [...Object.values(s.members),...Object.values(s.childForRole)])
+        s.retiredSessions[sid] = true;
+      s.planner = childId;
+      s.members = {};
+      s.childForRole = {};
+      s.invitations = {};
+      s.turns = {};
+    } else {
+      // startActivation uses this plugin-generated ID and the verified planner
+      // as parent. The actor guard still checks that exact parent on every call.
+      s.members[role] = childId;
+      s.childForRole[role] = childId;
+      delete s.invitations[role];
+      if (s.phase==='setup' && roles.every(r=>s.members[r])) s.phase = 'frame';
+    }
+    const fault = s.failures[role];
+    delete s.failures[role];
+    delete s.ended[role];
+    delete s.turns[role];
+    if (roles.includes(role) && !s.jobs[role] && phaseOwner(s.phase)===role) reissue(s,role);
+    audit(s,a.id,'session_recovered',{role,previous:old ?? null,childId,phase:s.phase,
+      progress:s.records.length,...(fault ? {fault} : {})});
+    save(s);
+    return {phase:s.phase,step:steps[s.cursor]?.id ?? null,done:s.records.length};
+  }
   // ══ 【BUG-2 修复】僵尸 job ════════════════════════════════════════════════
   // 事故现场：宿主释放 knowledge 会话时没办 end，interrupt() 只登记 failures，
   //   **job 原样留在 s.jobs 里**。于是 status 显示 job 4729feef… 还在，
@@ -3027,15 +3180,22 @@ export function openFlow(stateDir) {
    */
   function interrupt(a,task,reason,opts={}) {
     const s=load(task);
-    const role=who(s,a);
+    check(s,'TASK_NOT_ATTACHED');
+    const role=actorRole(s,a) ?? (a.parent===s.planner
+      ? roles.find(r=>s.childForRole[r]===a.id && !s.members[r]) : undefined);
+    check(role,'WRONG_SESSION_OR_PARENT');
     if (s.ended[role]) return;
     const orphaned = s.jobs[role]?.id;
     const cause = opts.cause ?? 'role-blocked';
+    const existing = s.failures[role];
+    if (cause==='host-disposed' && existing?.cause===cause && existing.step===steps[s.cursor]?.id
+        && existing.revision===s.revision) return;
     s.failures[role]={reason,job:orphaned,step:steps[s.cursor]?.id,cause,
       at:new Date().toISOString(), revision:s.revision, specHash,
       ...(orphaned ? {orphanedJob:orphaned} : {})};
-    // 只作废【这个角色】的 job；别人的在途任务不受影响。
-    if (orphaned) delete s.jobs[role];
+    // Keep the whole work packet on a host failure so a replacement can reuse
+    // pending searches, filled results, and calculations from this step.
+    if (orphaned && !['host-disposed','run-failed','turn-aborted'].includes(cause)) delete s.jobs[role];
     audit(s,a.id,'interrupted',{role,reason,cause,...(orphaned?{orphanedJob:orphaned}:{})});
     save(s);
   }
@@ -3163,6 +3323,6 @@ export function openFlow(stateDir) {
   }
 
   return {call, load, trackedActor, searchJob, orderSearch, fillSearch, recordSearch,
-    reserveWorker, consumeTurn, interrupt, autoReissue, allowedActions, waitingOn:waitingOn,
+    reserveWorker, prepareRecovery, consumeTurn, interrupt, autoReissue, allowedActions, waitingOn:waitingOn,
     clean, result:task=>makeResult(load(task))};
 }

@@ -137,7 +137,7 @@ function renderAgents(agents, mode, observedAt) {
     const age = open && mode === 'live' && start && Number.isFinite(observedAt)
       ? duration(observedAt - a.since) : null;
     const card = element('article', { class: 'rl-card rl-agent' },
-      element('h3', {}, roleName(a.role)),
+      element('h3', {}, a.label || roleName(a.role)),
       chip((mode === 'history' && open
         ? '末次记录 · ' : '') + (states[a.state] ?? states.unknown), tone),
       element('p', { class: 'rl-activity' }, a.activity || '未观察到最近活动'),
@@ -147,8 +147,13 @@ function renderAgents(agents, mode, observedAt) {
         field('末次事件', timestamp(a.lastAt)),
         field('工具 / 异常', `${display(a.tools)} / ${display(a.errors)}`),
         Number.isInteger(a.pendingJobs) && a.pendingJobs > 0 ? field('未结算任务', a.pendingJobs) : null,
+        a.activation ? field('采集', {
+          active: '子代理已开启', collecting: '正在收回运行内容', archived: '运行内容已归档',
+          archive_pending: '已归档已有内容，部分后台任务未结算',
+        }[a.activation]) : null,
+        a.collectionCode ? field('收尾信息', [a.collectionCode, a.collectionDetail].filter(Boolean).join(' · ')) : null,
+        a.archivedAt ? field('归档时间', timestamp(a.archivedAt)) : null,
         field('会话', a.id)));
-    if (a.label && a.label !== roles[a.role]) card.append(element('p', { class: 'rl-muted' }, String(a.label)));
     group.append(card);
   }
   roster.append(group);
@@ -166,6 +171,8 @@ function renderEvent(e, expanded) {
     element('small', {}, meta));
   const detail = [
     detailText(e.detail),
+    e.output,
+    e.outputTruncated && '此条输出预览已截断',
     e.errorSource && `错误来源 ${e.errorSource}`,
     e.hostCode && e.pluginCode && `宿主错误码 ${e.hostCode}`,
     e.errorName && `错误类型 ${e.errorName}`,
@@ -277,12 +284,12 @@ export function mountLogPanel(container, { load, intervalMs = 2500 } = {}) {
       (!roleFilter.value || e.role === roleFilter.value) &&
       (!kindFilter.value || e.kind === kindFilter.value) &&
       (!errorsOnly.checked || hasError(e)) &&
-      (!query || [e.title, e.errorCode, e.step, e.phase, detailText(e.detail)]
+      (!query || [e.title, e.errorCode, e.step, e.phase, detailText(e.detail), e.output]
         .some(value => value != null && String(value).toLowerCase().includes(query))));
     count.textContent = `显示 ${shown.length} 条 · 已载入最近 ${snapshot.events.length} / ${snapshot.totalEvents} 条`;
     empty.hidden = shown.length > 0;
     empty.textContent = snapshot.events.length ? '没有符合筛选条件的事件。' : '暂未观察到时间线事件。';
-    const keys = JSON.stringify(shown.map(e => [e.id, e.title, e.durationMs, e.errorCode, e.phase, e.step]));
+    const keys = JSON.stringify(shown.map(e => [e.id, e.title, e.durationMs, e.errorCode, e.phase, e.step, e.output]));
     if (keys === lastEventKeys) return;
     lastEventKeys = keys;
     const expanded = new Set([...events.querySelectorAll('details[open]')].map(el => el.dataset.eventId));
@@ -292,9 +299,17 @@ export function mountLogPanel(container, { load, intervalMs = 2500 } = {}) {
   function render() {
     const history = snapshot.mode === 'history';
     status.dataset.tone = 'normal';
-    status.textContent = history ? '归档回放' : '正在读取实时记录';
+    const monitor = snapshot.monitor;
+    status.textContent = monitor
+      ? monitor.active.length ? `监控中 · ${monitor.active.length} 个子代理已开启`
+        : monitor.collecting.length ? `正在收回 ${monitor.collecting.length} 个子代理的运行内容` : '待命 · 等待子代理开启'
+      : history ? '归档回放' : '正在读取实时记录';
     updated.textContent = `最近采集 ${timestamp(snapshot.observedAt)} · 最后事件 ${timestamp(snapshot.lastEventAt)} · 北京时间`;
     notice.replaceChildren(...(snapshot.warnings ?? []).map(message => element('p', {}, String(message))));
+    if (monitor?.service?.code) {
+      const { code, detail, logFile } = monitor.service;
+      notice.append(element('p', {}, ['SW 监控进程', code, detail, logFile].filter(Boolean).join(' · ')));
+    }
     workflow.replaceChildren(renderWorkflow(snapshot.workflow, snapshot.observedAt, history));
     roster.replaceChildren(renderAgents(snapshot.agents, snapshot.mode, snapshot.observedAt));
     slowest.replaceChildren(renderSlowest(snapshot.slowest));
@@ -372,15 +387,14 @@ export function mountLogPanel(container, { load, intervalMs = 2500 } = {}) {
       polling = false;
       if (!disposed) {
         refresh.disabled = false;
-        // An archive is immutable for this view and can be refreshed by hand.
-        if (snapshot?.mode !== 'history' || status.dataset.tone === 'error') {
-          timer = setTimeout(() => poll(), intervalMs);
+        if (!document.hidden) {
+          timer = setTimeout(() => poll(), snapshot?.mode === 'history' ? Math.max(intervalMs, 5000) : intervalMs);
         }
       }
     }
   }
   function onVisibility() {
-    if (!document.hidden && snapshot?.mode !== 'history') void poll();
+    if (!document.hidden) void poll();
   }
   refresh.addEventListener('click', () => poll(true));
   download.addEventListener('click', exportLog);

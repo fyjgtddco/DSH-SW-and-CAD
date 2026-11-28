@@ -17,13 +17,11 @@
  *   · rootSessionId 只允许宿主 ID 口径（调用方传入 ID_RE），不做模糊匹配；
  *   · 子会话必须用 header.parentSession 沿父链回到该根，回不去的一律丢弃并提示；
  *   · 状态文件必须 schema 一致且 state.root === rootSessionId，否则忽略；
- *   · 下发的只有展示字段（标题、角色、耗时、错误码、步骤号），
- *     模型推理、用户原话、命令与原始工具参数都不在 buildSnapshot 的输出里。
+ *   · 下发摘要及子代理可见输出。模型推理、原始消息和工具调用参数不直接导出。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { buildSnapshot } from './model.mjs';
@@ -108,14 +106,10 @@ const mtimeOf = (file) => {
   try { return fs.statSync(file).mtimeMs; } catch (e) { return 0; }
 };
 
-const sha256OfFile = (file) => {
-  try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); } catch (e) { return null; }
-};
-
-/** steps.json 缓存：路径 → {at, spec, sha}。steps.json 只有发布新版本时才会变。 */
+/** steps.json 缓存：路径 → {at, spec}。 */
 const stepsCache = new Map();
 
-function loadSteps(candidates) {
+function loadSteps(candidates, specHash) {
   const now = Date.now();
   let fallback = null;
   for (const file of candidates) {
@@ -123,17 +117,48 @@ function loadSteps(candidates) {
     let entry = stepsCache.get(file);
     if (!entry || (now - entry.at) > STEPS_CACHE_MS) {
       const spec = safeJson(file);
-      entry = { at: now, spec, sha: spec ? sha256OfFile(file) : null };
+      entry = { at: now, spec };
       stepsCache.set(file, entry);
     }
-    if (!entry.spec) continue;
-    if (!fallback) fallback = { file, spec: entry.spec, sha: entry.sha };
-    // 同版优先：parse 出来的 spec.sha256 与文件实际哈希一致才算可信。
-    if (entry.spec.sha256 && entry.sha && entry.spec.sha256 === entry.sha) {
-      return { file, spec: entry.spec, sha: entry.sha, verified: true };
-    }
+    if (!Array.isArray(entry.spec?.steps) || !entry.spec.steps.length) continue;
+    if (!specHash || entry.spec.sha256 === specHash) return entry.spec;
+    fallback ??= entry.spec;
   }
-  return fallback ? Object.assign({ verified: false }, fallback) : null;
+  return fallback;
+}
+
+// 阶段简称对应《设计依据 V0.3》的七个流程标题。步骤编号、标题和顺序取自插件规格。
+const STAGE_NAMES = ['现场与边界', '工件与工艺', '需求与验收', '功能与路线',
+  '骨架与接口', '零件与连接', '整机集成'];
+
+export function projectEngineeringWorkflow(spec, state) {
+  const steps = Array.isArray(spec?.steps) ? spec.steps : [];
+  if (!steps.length) return { ok: false, error: '未找到工程流程规格' };
+  if (state?.specHash && state.specHash !== spec.sha256) {
+    return { ok: false, error: '当前任务的流程版本与已安装规格不一致' };
+  }
+  const records = Array.isArray(state?.records) ? state.records : [];
+  const history = Array.isArray(state?.history) ? state.history : [];
+  const complete = new Set(records.map(record => record?.step));
+  const invalidated = new Set(history.flatMap(row => Array.isArray(row?.invalidated)
+    ? row.invalidated.map(record => record?.step) : []));
+  const current = state && !['setup', 'ready', 'partial'].includes(state.phase)
+    ? steps[state.cursor] ?? null : null;
+  const waiting = Boolean(state?.question || state?.waitReason || state?.phase === 'evidence_wait');
+  const stages = new Map();
+  for (const step of steps) {
+    const n = step.stage;
+    if (!stages.has(n)) stages.set(n, { id: n, title: STAGE_NAMES[n - 1] ?? `阶段 ${n}`, steps: [] });
+    const status = step.id === current?.id ? (waiting ? 'waiting' : 'active')
+      : complete.has(step.id) ? 'complete' : invalidated.has(step.id) ? 'revisit' : 'pending';
+    stages.get(n).steps.push({ id: step.id, title: step.title, status });
+  }
+  return {
+    ok: true, taskId: state?.taskId ?? null, phase: state?.phase ?? null,
+    version: spec.version, current: current ? { id: current.id, title: current.title, waiting } : null,
+    completed: steps.filter(step => complete.has(step.id)).length, total: steps.length,
+    stages: [...stages.values()],
+  };
 }
 
 /**
@@ -182,7 +207,7 @@ function findState(rootSessionId, dirs) {
 export function createRunLogHandler(deps) {
   const {
     readSessionLog, listDescendants, stateDirCandidates, stepsJsonCandidates,
-    isLiveSession, queryOf, send, warn, idRe,
+    isLiveSession, childMonitor, queryOf, send, warn, idRe,
   } = deps || {};
   const ID = idRe instanceof RegExp ? idRe : /^[A-Za-z0-9_.:-]{1,128}$/;
   const note = typeof warn === 'function' ? warn : () => {};
@@ -203,6 +228,12 @@ export function createRunLogHandler(deps) {
     const rootSessionId = String((q && q.get ? q.get('rootSessionId') : '') || '').trim();
     if (!ID.test(rootSessionId)) {
       return send(res, 400, { ok: false, error: 'bad rootSessionId' });
+    }
+    if (q.get('view') === 'workflow') {
+      const { state } = findState(rootSessionId, stateDirs());
+      const spec = loadSteps(stepsCands(), state?.specHash);
+      try { res.setHeader('cache-control', 'no-store'); } catch (e) {}
+      return send(res, 200, projectEngineeringWorkflow(spec, state));
     }
     const download = String((q.get && q.get('download')) || '') === '1';
     const rawLimit = Number((q.get && q.get('limit')) || DEFAULT_LIMIT);
@@ -285,27 +316,43 @@ export function createRunLogHandler(deps) {
       }];
 
       // ── 子会话：先按宿主名册取候选，再用 header.parentSession 沿父链回根 ──
+      const monitor = childMonitor?.status(rootSessionId) ?? null;
+      const tracked = new Set([...(monitor?.active ?? []), ...(monitor?.collecting ?? []).map(row => row.id)]);
       let rows = [];
       try {
         rows = await listDescendants(rootSessionId);
       } catch (e) {
-        warnings.push('子代理名册不可读，仅显示主对话。');
+        warnings.push('子代理名册暂不可读。');
       }
+      try { rows = [...rows, ...(await childMonitor?.archives(rootSessionId) ?? [])]; }
+      catch (error) { warnings.push('CHILD_RUN_ARCHIVE_LIST_FAILED · ' + (error.code || error.name)); }
+      rows = [...[...tracked].map(id => ({ id, kind: 'child' })), ...rows];
       const childIds = [];
       for (const row of Array.isArray(rows) ? rows : []) {
         const cid = String((row && row.id) || '');
         if (!cid || cid === rootSessionId || childIds.includes(cid)) continue;
         if (row && row.kind && row.kind !== 'child') continue;
         if (!ID.test(cid)) continue;
-        if (childIds.length >= MAX_CHILD_SESSIONS) {
+        if (!download && !childMonitor && childIds.length >= MAX_CHILD_SESSIONS) {
           warnings.push('子会话数量超过 ' + MAX_CHILD_SESSIONS + ' 个，时间线可能不完整。');
           break;
         }
         childIds.push(cid);
       }
       for (const cid of childIds) {
+        let archive = null;
+        try { archive = await childMonitor?.readArchive(rootSessionId, cid); }
+        catch (error) { warnings.push('CHILD_RUN_ARCHIVE_READ_FAILED · ' + cid + ' · ' + (error.code || error.name)); }
+        if (archive && !archive.pending && !tracked.has(cid)) {
+          sessions.push(archive);
+          continue;
+        }
         let log = null;
         try { log = await readSessionLog(cid); } catch (e) { log = null; }
+        if (archive && (!log?.complete || !log.events.length)) {
+          sessions.push(archive);
+          continue;
+        }
         if (!log || !log.header || String(log.header.id || '') !== cid) {
           warnings.push('子会话日志暂未取得：' + cid);
           continue;
@@ -352,11 +399,10 @@ export function createRunLogHandler(deps) {
       // ── 同版 steps.json：版本对不上就只补步号，总步数按回执显示 ─────────
       let steps = null;
       if (found.state) {
-        const hit = loadSteps(stepsCands());
-        if (hit) {
-          steps = hit.spec;
-          if (found.state.specHash && hit.spec && hit.spec.sha256 &&
-              String(found.state.specHash) !== String(hit.spec.sha256)) {
+        steps = loadSteps(stepsCands(), found.state.specHash);
+        if (steps) {
+          if (found.state.specHash && steps.sha256 &&
+              String(found.state.specHash) !== String(steps.sha256)) {
             warnings.push('步骤规格与任务版本不一致，总步数改按工具回执显示。');
           }
         } else {
@@ -366,7 +412,8 @@ export function createRunLogHandler(deps) {
 
       let mode = 'history';
       try {
-        if (typeof isLiveSession === 'function' && isLiveSession(rootSessionId)) mode = 'live';
+        if (childMonitor ? tracked.size > 0
+          : typeof isLiveSession === 'function' && isLiveSession(rootSessionId)) mode = 'live';
       } catch (e) {
         mode = 'history';
       }
@@ -381,6 +428,7 @@ export function createRunLogHandler(deps) {
         observedAt: Date.now(),
         limit,
         includeAll: download,
+        monitor,
       });
     }
   };

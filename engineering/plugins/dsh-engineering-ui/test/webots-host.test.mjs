@@ -125,6 +125,7 @@ test('actual host apply keeps connection and read-only routes available without 
   memGuardEnabled,maxActiveSubagents,reclaimThresholdPct,reclaimIntervalMs,evaluateConcurrency,
   countOccupiedChildren,memorySnapshot,createReclaimer,createMonitorLogHandler,
   createRunLogHandler,createRunLogAssetHandler,
+  childRunMonitor:()=>({dispose(){}}),monitorService:()=>({}),
   DefenseSigner:class{writeRuntime(){}startGuard(){}stopGuard(){}},process:{env:{...env},platform:process.platform,cwd:()=>temp},console:{log(){},warn(){},error(){}},setTimeout:()=>0,clearTimeout(){},setInterval:()=>0,clearInterval(){},URL,URLSearchParams};
  vm.runInNewContext(source+'\nthis.boot=apply;',sandbox);const dispose=sandbox.boot(ctx2);
  assert.ok(routes.has('/dsh-engineering-ui/conn-state'));assert.ok(routes.has('/dsh-engineering-ui/webots-context'),'host did not install Webots routes');assert.equal(guards.length,1);

@@ -349,7 +349,7 @@ export function install(ctx, config, createUserMessage) {
     } catch { finish('failed'); return {code:'DELIVERY_HOST_REJECTED',attempt:row.n}; }
     return {scheduled:true,attempt:row.n,scope,role,exception:row.exception};
   }
-  function route(prior, s, sender) {
+  function route(prior, s, sender, recovering=[]) {
     if (!s) return;
     if (!routingSeen.has(s.taskId)) prior = null; // Replay only undelivered durable work after host reload.
     routingSeen.add(s.taskId);
@@ -357,6 +357,7 @@ export function install(ctx, config, createUserMessage) {
     for (const role of deliveryRoles) {
       const sid = recipient(s,role);
       if (!sid || sid===sender) continue;
+      if (recovering.includes(sid)) continue; // Their activation reads the durable checkpoint.
       const topics = topicsOf(s,role);
       if (!topics.length) continue;
       const old = scopeOfSafe(prior)===scope && recipient(prior,role)===sid
@@ -502,7 +503,16 @@ export function install(ctx, config, createUserMessage) {
       optional:{parameters:'任意 JSON（对象/数组/字符串都行）',fromStep:'要回退到的小步 id'},
       example:{messageId:'<capture 回执里的 messageId>',classification:'fact|preference|authorization|estimate|unknown|no_change',
         parameters:'…',conflict:'…',changed:'…',impact:'…',reason:'…',fromStep:'1.1'}},
-    search:{required:['jobId'],optional:{query:'单条检索词',queryParts:'同一工单中的 1～4 条检索词'},
+    // 【BUG-N8 修复】query 与 queryParts 是【二选一】，不能把 query 放进 required ——
+    //   旧写法 required:['jobId'] + 代码里硬要求 query，等于契约说"可选"、实现说"必填"，
+    //   描述性 query 与 queryParts 两条路都被挡住。现在两者同为 oneOf，
+    //   长度上限统一由 flow.orderSearch 裁定（那里是唯一权威）。
+    search:{required:['jobId'],
+      optional:{
+        'query（与 queryParts 二选一）':'单条检索词，≤500 字符、单行',
+        'queryParts（与 query 二选一）':'1～4 条子查询，每条 ≤500 字符、各自单行；用它可以省略 query',
+      },
+      oneOf:['query','queryParts'],
       example:{jobId:'<status.job.id>',queryParts:['检索主题一','检索主题二']}},
     search_fill:{required:['jobId','orderId','query','hits'],
       optional:{outcome:'ok|unavailable|error|blocked',error:'宿主原始原因'},
@@ -557,6 +567,7 @@ export function install(ctx, config, createUserMessage) {
     const a = actorOf(exec.agent);
     if (!a) return;
     const bound = flow.trackedActor(a);
+    if (bound?.role==='retired') return 'SEVEN_STAGE_TOOL_GATE: 这个会话已被替换。请结束当前回合。';
     if (!bound || exec.name===TOOL) return;
     if (!isTerminal(bound.s) && exec.name==='send_message') {
       return 'SEVEN_STAGE_TOOL_GATE: 分析期间岗位交接走插件批量投递。'
@@ -639,7 +650,7 @@ export function install(ctx, config, createUserMessage) {
       // wait_user: 仅真实主对话可用 —— 表示"这一回合是在等用户回答，正常停止"。
       //   它不是结束（结束仍要 end + read_design 复核）。
       action:{type:'string',enum:['attach','launch','bind','status','frame','search','search_fill','calculate','explore','submit','commit','rework',
-        'question','capture','interpret','rewind','propose_rooms','partial','yield','wait_user','blocked','stop','retry','reopen','end','read','export','deliver','clean','clearFailed']},
+        'question','capture','interpret','rewind','propose_rooms','partial','yield','wait_user','blocked','stop','retry','reopen','recover','end','read','export','deliver','clean','clearFailed']},
       dataJson:{type:'string',description:'动作参数的 JSON 对象。status 返回所需字段，可按错误修正。'}
     }},
     output:{schema:{type:'object',required:['text'],additionalProperties:false,properties:{text:{type:'string'}}},
@@ -762,6 +773,8 @@ export function install(ctx, config, createUserMessage) {
       check(data && typeof data==='object' && !Array.isArray(data),
         'INVALID_PAYLOAD: dataJson 解析出来必须是对象（{}），不能是数组或标量。');
       exec.signal.throwIfAborted();
+      const bound = flow.trackedActor(a);
+      check(bound?.role!=='retired','RECOVERY_SESSION_REPLACED');
       // ══ 【2026-11-20 · P0】clean 必须抢在所有"绑定校验"之前 ═══════════════
       // 理由：它要处理的正是"绑定已经烂掉"的现场 —— 僵尸 planner 让
       //   trackedActor 指到一个与 taskId 不符的任务上，WRONG_BOUND_TASK 会先把
@@ -769,7 +782,6 @@ export function install(ctx, config, createUserMessage) {
       // 权限不在这里判：flow.clean 内部要求调用者是该任务的 root 或 planner。
       if (action==='clean') return {text:JSON.stringify(flow.clean(a, taskId, data))};
       const prior = flow.load(taskId);
-      const bound = flow.trackedActor(a);
       check(!bound || bound.s.taskId===taskId,'WRONG_BOUND_TASK');
       if (!['status','read','export','clean'].includes(action)) {
         // ══ 【2026-11-19 · 会话 c9c2fd56 现场】错误码必须能自解释 ═══════════════
@@ -812,6 +824,7 @@ export function install(ctx, config, createUserMessage) {
         }
       }
       let result;
+      const recovering = [];
       if (action==='attach') {
         check(a.parent===null, 'ROOT_REQUIRED');
         // ══ 【BUG-7-B】模板指纹漂移要在【开工前】就报，不能等跑一半 ══════════
@@ -959,6 +972,77 @@ export function install(ctx, config, createUserMessage) {
         result = flow.call(a,taskId,'attach',
           {planner:plannerId, requirements, loadCasePath, livePlanners});
         if (plannerNote) result.plannerNote = plannerNote;
+      } else if (action==='recover') {
+        const root = a.id===prior.root && a.parent===null;
+        const planner = a.id===prior.planner && a.parent===prior.root;
+        check(root || (planner && !prior.ended.planner),'RECOVERY_OWNER_REQUIRED');
+        const role = compact(data.role);
+        check(role==='planner' || role==='workers' || roles.includes(role),'RECOVERY_ROLE_INVALID');
+        if (role==='planner') check(root,'RECOVERY_ROOT_REQUIRED');
+        if (prior.phase==='partial') {
+          const user = directUser(exec.agent).at(-1);
+          check(root && role==='planner' && data.resume===true && user?.source==='user'
+            && /^\s*(?:请|帮我|那就)?\s*(?:继续|续跑|续上|恢复|接着跑)/.test(user.text),
+            'RECOVERY_RESUME_REQUIRED: 原主对话需要先收到真人明确要求续跑的消息。');
+        }
+        check(!launches.has(taskId),'LAUNCH_IN_PROGRESS');
+        const provider = config.workerProvider ?? 'fork';
+        check(ctx.subagents.getProvider(provider),'WORKER_PROVIDER_UNAVAILABLE');
+        const parent = role==='planner' || planner ? exec.agent : ctx.agents.get(prior.planner);
+        const parentId = role==='planner' ? prior.root : prior.planner;
+        const parentActor = actorOf(parent);
+        check(parentActor?.id===parentId && parentActor.parent===(role==='planner' ? null : prior.root),
+          'RECOVERY_PLANNER_REQUIRED: 总计会话不可用，请在原主对话 recover {role:"planner"}。');
+        launches.add(taskId);
+        try {
+          const roster = await ctx.subagents.listDescendants(prior.root,exec.signal);
+          check(Array.isArray(roster),'RECOVERY_SESSION_STATE_UNKNOWN');
+          const targets = role==='workers' ? roles.filter(r=>!prior.members[r] && !prior.childForRole[r]) : [role];
+          const replacements = [];
+          for (const target of targets) {
+            const current = flow.load(taskId);
+            check((target==='planner' ? current.root : current.planner)===parentId,'RECOVERY_BINDING_CHANGED');
+            const old = target==='planner' ? current.planner : current.members[target] ?? current.childForRole[target];
+            if (old) {
+              const record = roster.find(r=>String(r.id)===old);
+              check(record ? record.activity==='inactive' : !ctx.agents.get(old),
+                'RECOVERY_SESSION_STILL_ACTIVE: 宿主尚未确认旧会话退出，请等它结束再恢复。');
+            }
+            exec.signal.throwIfAborted();
+            const childId = randomUUID();
+            const point = flow.prepareRecovery(a,taskId,target,old,childId,data.resume===true);
+            const child = {id:childId,parent:parentId};
+            const reportFailure = () => {
+              const latest = flow.load(taskId);
+              const liveId = target==='planner' ? latest?.planner : latest?.members[target];
+              if (liveId!==childId || latest.failures[target]?.cause==='host-disposed') return;
+              flow.interrupt(child,taskId,'替代会话启动或运行失败，断点已保留',{cause:'run-failed'});
+              route(latest,flow.load(taskId),childId);
+            };
+            const instruction = target==='planner' && point.phase==='setup'
+              ? '按 status 确认后用 launch 初始化执行岗位。'
+              : target==='planner'
+                ? '用 recover {role:"workers"} 补建缺失岗位，再按 status 继续当前小步。'
+                : '按 status 读取岗位待办并接续，按需 read 原证据。';
+            try {
+              const activation = await ctx.subagents.startActivation({
+                provider,label:target==='planner' ? '七阶段总计（断点续接）' : '七阶段分析 '+target,
+                childId,parent,maxDepth:2,signal:exec.signal,delivery:'parent',
+                prompt:[{type:'text',text:'七阶段任务 '+taskId+'，角色 '+target+'。'
+                  +'插件已绑定本会话。'+instruction+'使用原 taskId，禁止 init、clean 或从 1.1 重跑。'}]
+              });
+              check(activation.childId===childId,'HOST_CHILD_ID_MISMATCH');
+              Promise.resolve(activation.result).catch(()=>{
+                try { reportFailure(); }
+                catch (err) { ctx.logger?.warn?.('[seven-stage] RECOVERY_FAILURE_RECORD_ERROR '+err.message); }
+              });
+              narrowBySessionId(childId);
+            } catch (error) { reportFailure(); throw error; }
+            recovering.push(childId);
+            replacements.push({role:target,sessionId:childId,...point});
+          }
+          result = {...flow.call(a,taskId,'status'),replacements};
+        } finally { launches.delete(taskId); }
       } else if (action==='launch') {
         // ══ 【2026-11-20 · P0】launch 必须认人：只有【当前绑定的那个 planner】能 launch ══
         // 现场（BUG测试结果_20261120 BUG-3）：连开 3 个总计子代理，只有最后一个
@@ -1040,7 +1124,9 @@ export function install(ctx, config, createUserMessage) {
               Promise.resolve(activation.result).catch(()=>{
                 const child=ctx.agents.get(childId);
                 if (child && flow.load(taskId)?.members[role]===childId) {
-                  flow.interrupt(actorOf(child),taskId,'宿主子代理运行失败');
+                  const previous = flow.load(taskId);
+                  flow.interrupt(actorOf(child),taskId,'宿主子代理运行失败',{cause:'run-failed'});
+                  route(previous,flow.load(taskId),childId);
                 }
               });
             } catch (err) {
@@ -1061,9 +1147,46 @@ export function install(ctx, config, createUserMessage) {
         result = {ok:true,...delivered};
       } else if (action==='search') {
         // ① 知识：只发布检索工单，自己**不联网**。
-        if (data.queryParts===undefined) {
+        // ══ 【BUG-N8 修复 · 现场 2026-11-28】queryParts 必须真的可选 ══════════
+        // 现场（step 1.1 rev3，知识角色连报两次）：
+        //   ① actionHelp 宣称支持 queryParts，但 `actionContract.required`
+        //      里只有 [jobId, query]，单独传 queryParts 直接回
+        //      PUBLIC_SEARCH_QUERY_REQUIRED —— 文档说有、契约说没有；
+        //   ② 约 200 字符的描述性 query（文档称上限 500）同样被
+        //      PUBLIC_SEARCH_QUERY_REQUIRED 拒绝，≤63 字符才成功。
+        //
+        // 第一个根因在契约声明（actionContract.search 把 query 放进了
+        //   required）；第二个根因在【这里】—— 旧代码是
+        //   `const query = compact(data.query); check(query.length>=3 ...)`，
+        //   它只要 query 不是"非空且≥3"，就一律报同一个码，
+        //   所以"太短"和"太长"在外部看来完全一样，模型无从自纠。
+        //
+        // 口径：
+        //   · 只判【存在性】：既没给 query 也没给 queryParts → 才是
+        //     PUBLIC_SEARCH_QUERY_REQUIRED（真正"没写检索词"）；
+        //   · 太短 / 太长 / 换行 各有独立错误码与可执行的改法，
+        //     真正的长度上限（500）由 flow.orderSearch 统一裁定 —— 那里是
+        //     唯一权威，index 层不重复实现一套阈值（避免两处漂移）。
+        const partsGiven = data.queryParts !== undefined;
+        const queryGiven = typeof data.query === 'string' && compact(data.query).length > 0;
+        check(partsGiven || queryGiven,
+          'PUBLIC_SEARCH_QUERY_REQUIRED: 检索工单必须给出检索词 —— '
+          + '二选一：{query:"单条检索词"} 或 {queryParts:["子查询1","子查询2"]}'
+          + '（queryParts 最多 4 条，每条 ≤500 字符）。'
+          + '两者都没收到（query=' + JSON.stringify(data.query ?? null)
+          + '，queryParts=' + JSON.stringify(data.queryParts ?? null) + '）。');
+        // 有 queryParts 时 query 可省略/被忽略（语义就是"用多条代替单条"）；
+        // 只有单条 query 时，明确区分"太短"这种输入错误。
+        if (!partsGiven) {
           const query = compact(data.query);
-          check(query.length>=3 && !/[\r\n]/.test(query),'PUBLIC_SEARCH_QUERY_REQUIRED');
+          check(query.length >= 3,
+            'PUBLIC_SEARCH_QUERY_TOO_SHORT: 单条 query 只有 ' + query.length
+            + ' 个字符（至少 3 个）。太短的词检索不到有效资料 —— '
+            + '请写成完整技术名词（如 "GB/T 3480 齿轮弯曲强度"），'
+            + '或改用 queryParts 传多条子查询。');
+          check(!/[\r\n]/.test(query),
+            'PUBLIC_SEARCH_QUERY_MULTILINE: query 必须是单行。'
+            + '内容多请用 queryParts 拆成 1~4 条各自单行的子查询。');
         }
         const order = flow.orderSearch(a,taskId,data.jobId,data.query,data.queryParts);
         result = {order, status:'pending',
@@ -1153,7 +1276,8 @@ export function install(ctx, config, createUserMessage) {
           final:records.at(-1)?.step==='7.12' ? records.at(-1).outputs : null,
           note:'完整记录由交接接口导出，各小步可用 read 查询。'};
       }
-      route(prior,s,a.id);
+      if (recovering.length) route(prior,s,a.id,recovering);
+      else route(prior,s,a.id);
       if (action==='status' && bound?.role && deliveryRoles.includes(bound.role)) {
         // Analysis workers cannot interpret facts. Omit that long help entry to keep
         // their task packet below the host's result pruning threshold.
@@ -1175,7 +1299,7 @@ export function install(ctx, config, createUserMessage) {
   ctx.on('agent/turn-stopping', ({agent,signal}) => {
     const a = actorOf(agent);
     const bound = a && flow.trackedActor(a);
-    if (!bound) return;
+    if (!bound || bound.role==='retired') return;
     const {s,role} = bound;
     // 【P0 附带】root 是用户的真实主对话：结束一个回合是【正常交互】。
     //   原实现会 steer 它"结束请求未登记"，两次之后直接 flow.interrupt(root)
@@ -1192,7 +1316,7 @@ export function install(ctx, config, createUserMessage) {
       return;
     }
     if (signal?.aborted) {
-      flow.interrupt(a,s.taskId,'宿主或用户取消回合');
+      flow.interrupt(a,s.taskId,'宿主或用户取消回合',{cause:'turn-aborted'});
       route(s,flow.load(s.taskId),a.id);
       return;
     }
@@ -1216,22 +1340,26 @@ export function install(ctx, config, createUserMessage) {
   ctx.on('agent/disposed', ({agent}) => {
     const a = actorOf(agent);
     const bound = a && flow.trackedActor(a);
-    if (!bound || bound.s.ended[bound.role] || expectedDisposal.has(agent)) return;
+    if (!bound || bound.role==='retired' || bound.s.ended[bound.role] || expectedDisposal.has(agent)) return;
     const {s,role} = bound;
     // 【P0 附带】root 会话被宿主释放（换窗口 / 重开）不该把任务判成故障：
     //   状态文件还在，重新进入同一会话即可继续。
     if (role==='root') return;
+    if (roles.includes(role) && s.phase!=='setup' && !s.jobs[role] && !s.failures[role]) {
+      // The result already handed off, or the worker was idle. A later dispatch
+      // can reopen its session; this release must not block the next role.
+      stopTries.delete(a.id);
+      return;
+    }
     if (role==='unbound') {
-      const planner = actorOf(ctx.agents.get(s.planner));
-      if (planner) flow.interrupt(planner,s.taskId,'已分配的二级子代理在绑定前退出');
+      if (roles.some(r=>s.childForRole[r]===a.id && !s.members[r]))
+        flow.interrupt(a,s.taskId,'已分配的执行岗位在绑定前退出',{cause:'host-disposed'});
       route(s,flow.load(s.taskId),a.id);
     } else {
       // 【BUG-11】明确标 cause='host-disposed'：这类失败【不是角色自己干不下去】，
       //   而是宿主把会话回收了。两者处置方式相反，必须在数据层就区分开。
       flow.interrupt(a,s.taskId,'宿主释放会话，未办理结束',{cause:'host-disposed'});
-      // 自动重派一次（每角色一生一次，且绝不自动重派 role-blocked 的）
-      const issued = flow.autoReissue(a, s.taskId, role);
-      if (issued) ctx.logger?.info?.('[seven-stage] 宿主释放 ' + role + ' 的会话，已自动重派 job ' + issued);
+      // A replacement must have a new host session ID, not just a fresh job.
       route(s,flow.load(s.taskId),a.id);
     }
     stopTries.delete(a.id);

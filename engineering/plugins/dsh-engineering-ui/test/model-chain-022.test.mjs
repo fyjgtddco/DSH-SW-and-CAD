@@ -244,3 +244,76 @@ test('0.2.2：用户手动发新消息 → 续跑计数清零', async () => {
   assert.equal(resumed.length, 3, '清零后应该又能续一次');
   dispose();
 });
+
+test('接管目标按会话恢复，手动改用第三个模型时取消恢复', async () => {
+  const { all, dispose } = harness();
+  const selected = [];
+  const agent = fakeAgent('a-old', true, selected);
+  agent.session.id = 'session-stable';
+  const fail = { agent, provider: 'p1', turn: 1, failure: { code: 'RATE_LIMIT', model: 'm1' } };
+  await all('agent/request-error')[0](fail, nextFn);
+  await all('agent/disposed')[0]({ agent });
+  dispose();
+
+  const restarted = harness();
+  const agent2 = fakeAgent('a-rebuilt', true, selected);
+  agent2.session.id = agent.session.id;
+  const pre = restarted.all('agent/pre-step')[0];
+  await pre({ agent: agent2, modelSelection: { provider: 'p1', model: 'm1' } }, nextFn);
+  assert.deepEqual(selected.map(route => route.model), ['m2', 'm2']);
+  await pre({ agent: agent2, modelSelection: { provider: 'manual', model: 'chosen' } }, nextFn);
+  assert.deepEqual(selected.map(route => route.model), ['m2', 'm2']);
+  await pre({ agent: agent2, modelSelection: { provider: 'p1', model: 'm1' } }, nextFn);
+  assert.equal(selected.length, 2, '已取消的接管不应再次恢复');
+  restarted.dispose();
+});
+
+test('同一子代理会话反复重建时保留续跑次数', async () => {
+  const { all, dispose } = harness();
+  const resumed = [];
+  const pre = all('agent/pre-step')[0];
+  const onError = all('agent/request-error')[0];
+  const onDisposed = all('agent/disposed')[0];
+  for (let turn = 1; turn <= 3; turn++) {
+    const agent = fakeAgent('recreated-' + turn, true, [], resumed);
+    agent.session.id = 'durable-resume-budget';
+    const modelSelection = { provider: 'p' + turn, model: 'm' + turn };
+    agent.model.current = () => modelSelection;
+    await pre({ agent, turn, modelSelection }, nextFn);
+    await onError({ agent, turn, provider: modelSelection.provider,
+      failure: { code: 'RATE_LIMIT', model: modelSelection.model } }, nextFn);
+    await onDisposed({ agent });
+    await new Promise(resolve => setTimeout(resolve, 35));
+  }
+  assert.equal(resumed.length, 2);
+  dispose();
+});
+
+test('关闭接管时保留候选配置，压缩超限时能跳过窗口偏小的同家模型', async () => {
+  const file = join(stateDir, 'model_chain.json');
+  const original = readFileSync(file, 'utf8');
+  const selected = [];
+  const agent = fakeAgent('a-window', true, selected);
+  const request = { agent, provider: 'p1', turn: 1, failure: {
+    model: 'm1', message: 'compaction still above threshold (50,578 >= 40000)',
+  } };
+  const config = { autoResume: false, models: [
+    { provider: 'p1', model: 'small', contextWindow: 40000 },
+    { provider: 'p1', model: 'large', contextWindow: 200000 },
+  ] };
+  try {
+    writeFileSync(file, JSON.stringify({ ...config, enabled: false }));
+    const off = harness();
+    await off.all('agent/request-error')[0](request, nextFn);
+    assert.deepEqual(selected, []);
+    off.dispose();
+
+    writeFileSync(file, JSON.stringify({ ...config, enabled: true }));
+    const on = harness();
+    await on.all('agent/request-error')[0](request, nextFn);
+    assert.deepEqual(selected, [{ provider: 'p1', model: 'large' }]);
+    on.dispose();
+  } finally {
+    writeFileSync(file, original);
+  }
+});

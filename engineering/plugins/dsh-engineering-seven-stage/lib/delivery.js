@@ -51,8 +51,11 @@ export function deliveryTopics(s, role, step) {
   }
   if (role==='root' || role==='planner') {
     for (const [owner,fault] of Object.entries(s.failures ?? {})) {
+      const resume = ['host-disposed','run-failed','turn-aborted'].includes(fault.cause);
       items.push(make('failure:'+owner+':'+(fault.at ?? fault.job ?? fault.reason),
-        owner+' 已登记故障（'+(fault.cause ?? '原因待查')+'）。核对 failed 后决定补证、重派或暂停。'));
+        owner+' 已登记故障（'+(fault.cause ?? '原因待查')+'）。'
+        +(resume ? '确认旧会话退出后用 recover {role:"'+owner+'"} 接续原任务；更换总计仅由原主对话执行。'
+          : '核对 failed 后决定补证、重派或暂停。')));
     }
   }
   return items;

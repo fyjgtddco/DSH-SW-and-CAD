@@ -757,7 +757,15 @@ window.__ModuleLoader__.load({
       '.eng-mc-selwrap::after{color:#8b95a3;content:"\u25be";font-size:9px;pointer-events:none;position:absolute;right:6px;top:50%;transform:translateY(-50%)}',
       '.eng-mc-ops{display:flex;flex:none;gap:3px;width:auto}',
       '.eng-mc-ops .eng-conn-btn.tiny{font-size:10.5px;padding:1px 6px}',
-      '.eng-mc-ft{align-items:center;display:flex;gap:8px;padding-top:6px}',
+      '.eng-mc-ft{align-items:center;display:flex;flex-wrap:wrap;gap:8px;padding-top:8px}',
+      '.eng-mc-status{align-items:center;display:flex;flex-wrap:wrap;gap:8px;margin:6px 0}',
+      '.eng-mc-settings{align-items:center;display:flex;flex-wrap:wrap;gap:8px 16px;margin:10px 0;font-size:12px}',
+      '.eng-mc-settings label{align-items:center;display:inline-flex;gap:5px;cursor:pointer}',
+      '.eng-mc-settings input{accent-color:var(--dsw-alias-button-primary-fill,#2563eb)}',
+      '.eng-mc-cover{min-width:0;overflow-x:auto}',
+      '.eng-mc-controls{min-width:0;border:0;border-top:1px solid var(--dsw-alias-border-l1,#e5e7eb);padding:6px 0 0}',
+      '.eng-mc-effort[aria-hidden=true]::after,.eng-mc-selwrap:has(>input)::after{content:none}',
+      '.eng-mc-head,.eng-mc-row{min-width:465px}',
       '.eng-mc-ok{color:#15803d;font-size:11px}',
       '.eng-mc-err{color:#b91c1c;font-size:11px;overflow-wrap:anywhere}',
       '.eng-mc-empty{background:rgba(37,99,235,.06);border:1px dashed #b9cdf3;border-radius:6px;color:#3b5bdb;font-size:11px;line-height:1.55;margin-top:6px;padding:6px 9px}',
@@ -1124,6 +1132,20 @@ window.__ModuleLoader__.load({
       .eng-sv .eng-sv-home-head p { margin-top: 5px; color: var(--sv-muted); }
       .eng-sv-box { min-width: 0; background: var(--sv-paper); border: 1px solid var(--sv-border); border-radius: 12px; }
       .eng-sv .eng-sv-box > h2 { padding: 12px 16px; border-bottom: 1px solid var(--sv-border); font-size: 15px; font-weight: 680; }
+      .eng-flow { padding: 14px 16px; }
+      .eng-flow-meta { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 12px; color: var(--sv-muted); font-size: 13px; }
+      .eng-flow-meta strong { color: var(--sv-ink); overflow-wrap: anywhere; }
+      .eng-flow-track { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 6px; padding: 0; margin: 0; list-style: none; }
+      .eng-flow-stage { display: grid; gap: 4px; width: 100%; min-height: 66px; padding: 8px; text-align: start; font: inherit; color: var(--sv-muted); background: var(--sv-canvas); border: 1px solid var(--sv-border); border-radius: 8px; cursor: pointer; }
+      .eng-flow-stage:hover, .eng-flow-stage:focus-visible { border-color: var(--sv-accent); }
+      .eng-flow-stage strong { font-size: 13px; }
+      .eng-flow-stage small { font-size: 11px; }
+      .eng-flow-stage.is-active { background: var(--sv-tint); border-color: var(--sv-accent); color: var(--sv-accent); box-shadow: inset 0 2px 0 var(--sv-accent); }
+      .eng-flow-stage.is-complete { background: var(--sv-paper); }
+      .eng-flow-stage[aria-expanded='true'] { outline: 1px solid var(--sv-accent); outline-offset: -2px; }
+      .eng-flow-steps { margin: 12px 0 0; padding: 0; list-style: none; }
+      .eng-flow-steps li { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--sv-border); color: var(--sv-muted); font-size: 12px; }
+      .eng-flow-steps li[aria-current='step'] { color: var(--sv-accent); font-weight: 650; }
       .eng-sv-cards, .eng-sv-home-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
       .eng-sv-cards { padding: 16px; }
       .eng-sv-cast {
@@ -4394,7 +4416,8 @@ window.__ModuleLoader__.load({
       var opts = params || {};
       var query = new URLSearchParams();
       query.set('rootSessionId', String(opts.rootSessionId || ''));
-      if (opts.download === true) query.set('download', '1');
+      if (opts.workflow) query.set('view', 'workflow');
+      else if (opts.download === true) query.set('download', '1');
       else query.set('limit', String(opts.limit || 300));
       return fetch('/dsh-engineering-ui/run-log?' + query.toString(), {
         method: 'GET',
@@ -4402,10 +4425,30 @@ window.__ModuleLoader__.load({
         credentials: 'same-origin',
         cache: 'no-store',
       }).then(function (response) {
-        if (!response.ok) {
+        if (response.ok) return response.json();
+        // ══ 【BUG-N10 修复 · 2026-11-29】失败原因必须原样回显 ══════════════
+        // 现场：面板只显示「加载失败」，用户无从判断是"会话日志读不到""ID 不匹配"
+        //   "不是根会话"还是"版本不符"——这四种的处置方式完全不同，笼统提示
+        //   等于把排查成本全推给用户（BUG-N10 建议④点名的就是这条）。
+        // 服务端本来就把具体原因写在响应体的 error 里（见 run-log-route.mjs 的
+        //   fail(404,{error:'会话日志不可读'}) 等三处），只是浏览器半把它丢了：
+        //   旧写法只看 response.ok，从不读 body。
+        // 口径：**先读 body 取 error，取不到才退回 HTTP 码**；读 body 本身失败
+        //   （非 JSON / 空体 / 已被 abort）绝不能盖掉原始错误，否则又变成
+        //   "网络错"顶替"业务错"。
+        return response.text().then(function (text) {
+          var detail = '';
+          try {
+            var body = JSON.parse(text);
+            if (body && typeof body.error === 'string') detail = body.error;
+            else if (body && typeof body.code === 'string') detail = body.code;
+          } catch (e) { /* 非 JSON：保留原文，下面截断展示 */ }
+          if (!detail && text) detail = String(text).slice(0, 120);
+          throw new Error('运行日志读取失败（HTTP ' + response.status + '）'
+            + (detail ? '：' + detail : ''));
+        }, function () {
           throw new Error('运行日志读取失败（HTTP ' + response.status + '）');
-        }
-        return response.json();
+        });
       });
     }
 
@@ -4689,6 +4732,79 @@ window.__ModuleLoader__.load({
      *     · 渲染容器（填满对话区）。
      *   自己造页签则要复刻以上全部行为，且换 DSH 版本就会错位。
      */
+    function EngWorkflowProgress(props) {
+      var sid = props.sessionId;
+      var snapshot = useState(null);
+      var selection = useState(null);
+      var state = snapshot[0] && snapshot[0].sid === sid ? snapshot[0] : null;
+      useEffect(function () {
+        if (!sid) return;
+        var alive = true;
+        var controller = new AbortController();
+        var timer;
+        function poll() {
+          if (document.hidden) {
+            timer = setTimeout(poll, 2500);
+            return;
+          }
+          loadRunLog({ rootSessionId: sid, workflow: true, signal: controller.signal })
+            .then(function (data) {
+              if (!data.ok) throw new Error(data.error || '读取失败');
+              if (alive) snapshot[1]({ sid: sid, data: data });
+            })
+            .catch(function (err) {
+              if (!alive) return;
+              snapshot[1](function (prev) {
+                return { sid: sid, data: prev && prev.sid === sid ? prev.data : null, error: err.message };
+              });
+            })
+            .finally(function () { if (alive) timer = setTimeout(poll, 2500); });
+        }
+        poll();
+        return function () {
+          alive = false;
+          clearTimeout(timer);
+          controller.abort();
+        };
+      }, [sid]);
+
+      var data = state && state.data;
+      var current = data && data.current;
+      var open = selection[0];
+      var labels = { active: '进行中', waiting: '等待补充', complete: '已完成', revisit: '待复核', pending: '未开始' };
+      var stages = data ? data.stages : [];
+      return h('section', { className: 'eng-sv-box', 'aria-label': '工程流程' },
+        h('h2', null, '工程流程'),
+        h('div', { className: 'eng-flow' },
+          h('div', { className: 'eng-flow-meta', role: 'status' },
+            h('strong', null, state && state.error ? '流程更新失败 · ' + state.error
+              : current ? labels[current.waiting ? 'waiting' : 'active'] + ' · ' + current.id + ' ' + current.title
+              : data ? ({ setup: '正在准备流程', ready: '流程已完成', partial: '流程部分完成' }[data.phase] || '等待开始')
+              : sid ? '正在读取工程流程…' : '正在识别当前会话…'),
+            data ? h('span', null, '已完成 ' + data.completed + ' / ' + data.total + ' 步') : null),
+          data ? h('ol', { className: 'eng-flow-track' }, stages.map(function (stage) {
+            var active = stage.steps.some(function (step) { return step.status === 'active' || step.status === 'waiting'; });
+            var done = stage.steps.filter(function (step) { return step.status === 'complete'; }).length;
+            var status = active ? (current.waiting ? 'waiting' : 'active') : done === stage.steps.length ? 'complete'
+              : stage.steps.some(function (step) { return step.status === 'revisit'; }) ? 'revisit'
+              : done ? 'partial' : 'pending';
+            var expanded = !!(open && open.taskId === data.taskId && open.stage === stage.id);
+            return h('li', { key: stage.id },
+              h('button', {
+                type: 'button', className: 'eng-flow-stage' + (active ? ' is-active' : status === 'complete' ? ' is-complete' : ''),
+                'aria-expanded': expanded, 'aria-current': active ? 'step' : undefined,
+                onClick: function () { selection[1](expanded ? null : { taskId: data.taskId, stage: stage.id }); },
+              }, h('strong', null, stage.id + ' · ' + stage.title),
+              h('small', null, (status === 'partial' ? '已走过' : labels[status]) + ' · ' + done + '/' + stage.steps.length)));
+          })) : null,
+          open && data && open.taskId === data.taskId ? stages.filter(function (stage) { return stage.id === open.stage; }).map(function (stage) {
+            return h('ol', { key: stage.id, className: 'eng-flow-steps', 'aria-label': stage.title }, stage.steps.map(function (step) {
+              return h('li', { key: step.id, 'aria-current': current && current.id === step.id ? 'step' : undefined },
+                h('span', null, step.id), h('strong', null, step.title), h('span', null, labels[step.status]));
+            }));
+          }) : null));
+    }
+
     function EngSessionViewPage(props) {
       // 会话 id：conversation.view 的 inject(sessionId) 会把它作为 prop 注入；
       //   取不到时退回 DOM/列表兜底（engCurrentSessionId）。
@@ -4730,6 +4846,7 @@ window.__ModuleLoader__.load({
             h('header', { className: 'eng-sv-home-head' },
               h('h1', { tabIndex: -1, ref: titleRef }, '工程模式'),
               h('p', null, '当前会话的设计工作台')),
+            h(EngWorkflowProgress, { key: sid, sessionId: sid }),
             h('section', { className: 'eng-sv-box', 'aria-label': '栏目入口' },
               h('h2', null, '栏目入口'),
               h('div', { className: 'eng-sv-cards' },
@@ -4737,16 +4854,7 @@ window.__ModuleLoader__.load({
                 //   里面有几项，否则用户点进去才发现还有一层，会觉得点错了。
                 entry('daily', '日常使用', '主对话 / 子代理的压缩历史，各记各的账'),
                 entry('developer', '开发者使用', '七阶段运行日志与外部监控插件诊断，可下载 JSON'))),
-            // ── 【2026-11-28】「画布 / AI 投屏占符位」整块删除 ──────────────
-            // 用户原话：「这个，然后把那个画布给删了」。
-            // 它从上线起就是一个占位框（.eng-sv-cast + 「AI 投屏占符位」），
-            //   没有任何数据源，却占了首页近一半高度、把「工程流程 / 交付资料」
-            //   挤到首屏之外 —— 留着只会让人以为"这里该有东西但没加载出来"。
-            // 相关的 .eng-sv-cast / .eng-sv-slot 样式【保留】：其它地方（比如
-            //   两个 pair 卡片的占位）仍在用 .eng-sv-slot，删样式会连带打坏。
-            h('div', { className: 'eng-sv-home-pair' },
-              h('section', { className: 'eng-sv-box', 'aria-label': '工程流程' }, h('h2', null, '工程流程'), placeholder()),
-              h('section', { className: 'eng-sv-box', 'aria-label': '交付资料' }, h('h2', null, '交付资料'), placeholder()))));
+            h('section', { className: 'eng-sv-box', 'aria-label': '交付资料' }, h('h2', null, '交付资料'), placeholder())));
       }
 
       // ── 【两级导航 · 2026-11-26】开发者使用改成「目录 → 面板」两层 ──────
@@ -6064,10 +6172,11 @@ window.__ModuleLoader__.load({
         //   原来它自己是一个主栏目，"默认收起 + 点摘要行展开"是为了省版面；
         //   现在它挂在「设计过程优化」的子目录里，用户点开子项才挂载这个组件，
         //   再让它默认收起就成了"点两次才看得到内容"（实测体验很差）。
-        loaded: false, enabled: false, models: [], open: !!props && props.embedded === true, saved: '', error: '',
+        loaded: false, enabled: false, autoResume: true, saving: false, dirty: false,
+        models: [], open: !!props && props.embedded === true, saved: '', error: '',
         cat: null, catLoading: true, catError: '',
         manual: {},
-        hostDefault: null, headMatches: true
+        hostDefault: null, savedEnabled: false, savedCount: 0
       });
       var S = st[0], setS = st[1];
       function patch(part) {
@@ -6083,7 +6192,7 @@ window.__ModuleLoader__.load({
       //            不限制他们应该加多少个」。
       // 所以这里不再 slice(0,10)，只保证至少有 3 行可用。
       var MIN_SLOTS = 3;
-      function withTen(ms) {
+      function padSlots(ms) {
         var a = Array.isArray(ms) ? ms.slice() : [];
         while (a.length < MIN_SLOTS) a.push({ provider: '', model: '' });
         return a;
@@ -6094,17 +6203,16 @@ window.__ModuleLoader__.load({
           .then(function (j) {
             if (j && j.ok) {
               patch({
-                loaded: true, enabled: !!j.enabled, models: withTen(j.models), error: '',
-                // 【2026-10-30】记录宿主当前真实默认模型，用于"实际在用"提示
+                loaded: true, enabled: !!j.enabled, autoResume: j.autoResume !== false,
+                models: padSlots(j.models), error: '', savedEnabled: !!j.enabled, savedCount: (j.models || []).length,
                 hostDefault: j.host_default || null,
-                headMatches: j.head_matches_default !== false,
               });
             } else {
-              patch({ loaded: true, models: withTen([]), error: (j && j.error) || '读取失败' });
+              patch({ models: padSlots([]), error: (j && j.error) || '读取失败' });
             }
           })
           .catch(function (e) {
-            patch({ loaded: true, models: withTen([]), error: String((e && e.message) || e) });
+            patch({ models: padSlots([]), error: String((e && e.message) || e) });
           });
       }
       function loadCatalog() {
@@ -6120,16 +6228,34 @@ window.__ModuleLoader__.load({
       }
       React.useEffect(function () { load(); loadCatalog(); }, []);
       function save(next) {
+        if (!S.loaded || S.saving) return;
+        var models = [];
+        var seen = new Set();
+        for (var i = 0; i < next.models.length; i++) {
+          var row = next.models[i];
+          var provider = String(row.provider || '').trim();
+          var model = String(row.model || '').trim();
+          if (!provider && !model) continue;
+          if (!provider || !model) { patch({ error: '请补齐第 ' + (i + 1) + ' 行的提供商和模型。' }); return; }
+          var key = provider + '\u0000' + model;
+          if (seen.has(key)) { patch({ error: '第 ' + (i + 1) + ' 行与前面的备用模型重复。' }); return; }
+          seen.add(key);
+          models.push(Object.assign({}, row, { provider: provider, model: model }));
+        }
+        patch({ saving: true, saved: '', error: '' });
         fetch('/dsh-engineering-ui/model-chain', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ enabled: next.enabled, models: next.models })
+          body: JSON.stringify({ enabled: next.enabled, autoResume: next.autoResume, models: models })
         }).then(function (r) { return r.json(); })
           .then(function (j) {
-            if (j && j.ok) patch({ saved: '已保存', error: '' });
-            else patch({ saved: '', error: (j && j.error) || '保存失败' });
+            if (j && j.ok) patch({ saved: '已保存', error: '', dirty: false, saving: false,
+              enabled: !!j.enabled, autoResume: j.autoResume !== false,
+              models: next.models.length ? S.models : padSlots([]), manual: next.models.length ? S.manual : {},
+              savedEnabled: !!j.enabled, savedCount: j.models.length });
+            else patch({ saving: false, saved: '', error: (j && j.error) || '保存失败' });
           })
-          .catch(function (e) { patch({ saved: '', error: String((e && e.message) || e) }); });
+          .catch(function (e) { patch({ saving: false, saved: '', error: String((e && e.message) || e) }); });
       }
       function setSlot(i, field, val) {
         var ms = S.models.slice();
@@ -6138,15 +6264,24 @@ window.__ModuleLoader__.load({
         cur[field] = val;
         // 换 provider 后清空 model，避免出现"provider 与 model 不匹配"的脏组合
         if (field === 'provider') cur.model = '';
+        if (field === 'provider' || field === 'model') {
+          delete cur.reasoningEffort;
+          delete cur.contextWindow;
+        }
+        var info = field === 'model' ? infoOf(cur.provider, cur.model) : null;
+        if (info && info.contextWindow) cur.contextWindow = info.contextWindow;
         ms[i] = cur;
-        patch({ models: ms, saved: '' });
+        patch({ models: ms, dirty: true, saved: '', error: '' });
       }
       function move(i, dir) {
         var j = i + dir;
         if (j < 0 || j >= S.models.length) return;
         var ms = S.models.slice();
         var t = ms[i]; ms[i] = ms[j]; ms[j] = t;
-        patch({ models: ms, saved: '' });
+        var manual = Object.assign({}, S.manual);
+        manual[i] = S.manual[j];
+        manual[j] = S.manual[i];
+        patch({ models: ms, manual: manual, dirty: true, saved: '', error: '' });
       }
       function toggleManual(i) {
         var m = {};
@@ -6173,7 +6308,7 @@ window.__ModuleLoader__.load({
           if (idx === i) continue;
           nm[idx > i ? idx - 1 : idx] = S.manual[k];
         }
-        patch({ models: ms, manual: nm, saved: '' });
+        patch({ models: ms, manual: nm, dirty: true, saved: '', error: '' });
       }
       /**
        * 清空全部备用模型。
@@ -6181,17 +6316,7 @@ window.__ModuleLoader__.load({
        * 清空后只留 3 个空槽位，保存即等于"关闭兜底"。
        */
       function clearAll() {
-        var ms = [];
-        for (var i = 0; i < MIN_SLOTS; i++) ms.push({ provider: '', model: '' });
-        patch({ models: ms, manual: {}, saved: '' });
-        // 立刻落盘：空链 = 不兜底
-        save({ enabled: true, models: [] });
-      }
-      /** 保存前裁掉尾部连续空槽位，避免把一堆空行写进配置。 */
-      function trimEmpty(ms) {
-        var a = ms.slice();
-        while (a.length && !(a[a.length - 1].provider && a[a.length - 1].model)) a.pop();
-        return a;
+        save({ enabled: false, autoResume: S.autoResume, models: [] });
       }
 
       var groups = (S.cat && S.cat.groups) || [];
@@ -6248,7 +6373,7 @@ window.__ModuleLoader__.load({
             var ef = effortName(m.provider, m.model, m.reasoningEffort);
             return ef ? (nm + ' \u00b7 ' + shortName(ef, 6)) : nm;
           }).join('  \u2192  ')
-        : '未配置（展开后从下拉里选，最多 10 个）';
+        : '请添加备用模型';
 
       var rows = S.models.map(function (m, i) {
         var isManual = !!S.manual[i];
@@ -6314,7 +6439,7 @@ window.__ModuleLoader__.load({
         var minfo = infoOf(pid, m.model);
         var efforts = (minfo && minfo.reasoning && Array.isArray(minfo.reasoning.efforts))
           ? minfo.reasoning.efforts : [];
-        var effortCell = null;
+        var effortCell = h('span', { className: 'eng-mc-selwrap eng-mc-effort', 'aria-hidden': 'true' });
         if (!isManual && efforts.length) {
           var eOpts = [h('option', { value: '', key: 'e' + i + '-auto' },
             '默认' + (minfo.reasoning.defaultEffort ? ('(' + effortName(pid, m.model, minfo.reasoning.defaultEffort) + ')') : ''))];
@@ -6338,7 +6463,7 @@ window.__ModuleLoader__.load({
         // 留空 = 未知，插件仍会尝试（保守但可用），只是可能白撞一次。
         var cwCell = h('span', { className: 'eng-mc-selwrap eng-mc-cw' },
           h('input', {
-            className: 'eng-mc-sel', type: 'number', min: '1000', step: '1000',
+            className: 'eng-mc-sel', type: 'number', min: '1', step: '1',
             value: (m.contextWindow != null ? String(m.contextWindow) : ''),
             placeholder: '窗口',
             title: '上下文窗口（token）。留空=未知。填了就能避免切到装不下的小窗口模型',
@@ -6378,88 +6503,58 @@ window.__ModuleLoader__.load({
             }, '\u2715')));
       });
 
-      // ── 【2026-10-30 改版】去掉"额度不足自动换模型"开关 ──────────────────
-      // 用户要求：「把那个选项『额度不足自动换模型』给去掉」。
-      // 语义改为：只要列表里填了模型，就按顺序兜底；没填就用默认（用户自己选的）。
-      // 因此不再需要一个显式开关 —— 空列表天然等于"关闭"。
       var embedded = !!(props && props.embedded);
-      return h(EngGroup, { title: '模型自动接替', embedded: embedded },
-        // embedded 时外层「设计过程优化」的子项行已经负责开合，
-        //   这里不再画第二个折叠头（否则会出现"两层折叠"）。
-        embedded ? h('div', { className: 'eng-row-hint' },
-          '额度/限流耗尽时按下列顺序换下一个模型：' + summary) : h('div', {
-          className: 'eng-row clickable',
-          role: 'button',
-          tabIndex: 0,
-          title: '展开/收起模型列表',
+      var enabled = S.savedEnabled && S.savedCount > 0;
+      return h(EngGroup, { title: '模型自动接管', embedded: embedded },
+        h('div', { className: 'eng-mc-status' },
+          h('span', { className: 'eng-chip ' + (enabled ? 'on' : 'off'), role: 'status' },
+            !S.loaded ? (S.error ? '配置读取失败' : '正在读取配置…')
+              : enabled ? '已启用 · ' + S.savedCount + ' 个备用模型'
+              : S.savedEnabled ? '待配置备用模型' : '已关闭'),
+          h('span', { className: 'eng-row-hint' }, '工程会话先使用所选模型，遇到限流、额度耗尽等故障时按优先级接管。'),
+          !S.loaded && S.error ? h('button', { className: 'eng-conn-btn tiny', type: 'button', onClick: load }, '重新读取') : null),
+        !embedded ? h('button', {
+          className: 'eng-row clickable', type: 'button', 'aria-expanded': S.open,
           onClick: function () { patch({ open: !S.open }); }
+        }, (S.open ? '▾ ' : '▸ ') + '备用模型 · ' + summary) : null,
+        S.hostDefault ? h('div', { className: 'eng-mc-empty' },
+          '宿主默认模型 · ' + S.hostDefault.provider + ' / ' + S.hostDefault.model
+            + (S.hostDefault.reasoningEffort ? ' · ' + S.hostDefault.reasoningEffort : '')) : null,
+        S.open && S.catError ? h('div', { className: 'eng-mc-empty' },
+          '模型目录读取失败 · 可手动填写提供商和模型') : null,
+        S.open && S.loaded ? h('fieldset', {
+          className: 'eng-mc-table eng-mc-controls', disabled: S.saving, 'aria-label': '自动接管配置',
         },
-          h('div', { className: 'eng-row-txt' },
-            h('div', { className: 'eng-row-label' },
-              (S.open ? '▾ ' : '▸ ') + '备用模型（按顺序兜底）'),
-            h('div', { className: 'eng-row-hint' }, summary)),
-          h('span', { className: 'eng-row-chev' },
-            filled.length ? String(filled.length) : '›')),
-
-        // ── 【2026-10-30】"实际在用哪个模型"提示 ─────────────────────────
-        // 用户反馈"模型显示没跟上"：UI 只显示链，不显示宿主当前真实使用
-        // 的模型，于是"我选的 DeepSeek 到底有没有生效"完全看不出来。
-        // 这里把宿主默认选择显式列出来；若与链首不一致，额外提示一句。
-        S.hostDefault
-          ? h('div', { className: 'eng-mc-empty' },
-              '宿主当前默认：' + (S.hostDefault.provider || '?') + ' / '
-              + (S.hostDefault.model || '?')
-              + (S.hostDefault.reasoningEffort ? (' · ' + S.hostDefault.reasoningEffort) : '')
-              + (S.headMatches
-                  ? '\u3000✓ 与链首一致'
-                  : '\u3000⚠ 与链首不一致；接替只在该模型失败后才会改用下一个，'
-                    + '平时仍用这个默认值。'))
-          : null,
-
-        (S.open && S.catError)
-          ? h('div', { className: 'eng-mc-empty' },
-              '模型目录读取失败：' + S.catError + '\u3000（可切「手填」直接输入 provider / model）')
-          : null,
-
-        S.open ? h('div', { className: 'eng-mc-table' },
-          h('div', { className: 'eng-mc-head' },
-            h('span', { className: 'eng-mc-idx' }, '#'),
-            h('span', { className: 'eng-mc-cell' }, 'provider'),
-            h('span', { className: 'eng-mc-cell' }, 'model'),
-            h('span', { className: 'eng-mc-cell eng-mc-effort' }, '档位'),
-            // 【2026-11-28】窗口列：填了就能避免切到装不下的小窗口模型
-            h('span', { className: 'eng-mc-cell eng-mc-cw' }, '窗口'),
-            h('span', { className: 'eng-mc-ops' }, '')),
-          rows,
-          // "+" 添加一行（不限个数）—— 用户要求：默认 3 个，后面给个 + 让他们自己加
+          h('div', { className: 'eng-mc-settings' },
+            h('label', null, h('input', { type: 'checkbox', checked: S.enabled,
+              onChange: function (e) { patch({ enabled: e.target.checked, dirty: true, saved: '' }); } }), '启用自动接管'),
+            h('label', null, h('input', { type: 'checkbox', checked: S.autoResume, disabled: !S.enabled,
+              onChange: function (e) { patch({ autoResume: e.target.checked, dirty: true, saved: '' }); } }), '接管后自动续跑')),
+          h('div', { className: 'eng-mc-cover' },
+            h('div', { className: 'eng-mc-head' },
+              h('span', { className: 'eng-mc-idx', title: '优先级' }, '#'),
+              h('span', { className: 'eng-mc-cell' }, '提供商'),
+              h('span', { className: 'eng-mc-cell' }, '备用模型'),
+              h('span', { className: 'eng-mc-cell eng-mc-effort' }, '思考档位'),
+              h('span', { className: 'eng-mc-cell eng-mc-cw' }, '窗口 / tokens'),
+              h('span', { className: 'eng-mc-ops' }, '')),
+            rows),
           h('div', { className: 'eng-mc-addrow' },
-            h('button', {
-              className: 'eng-mc-add', type: 'button',
-              title: '再加一个备用模型',
-              onClick: function () { addSlot(); }
-            }, '\uFF0B 添加模型')),
+            h('button', { className: 'eng-mc-add', type: 'button', disabled: S.models.length >= 100,
+              onClick: addSlot }, '＋ 添加模型')),
           h('div', { className: 'eng-mc-ft' },
-            h('button', {
-              className: 'eng-conn-btn tiny', type: 'button',
-              onClick: function () { save({ enabled: true, models: trimEmpty(S.models) }); }
-            }, '保存'),
-            h('button', {
-              className: 'eng-conn-btn tiny', type: 'button',
-              title: '重新读取宿主可用模型',
-              onClick: function () { patch({ catLoading: true }); loadCatalog(); }
-            }, S.catLoading ? '读取中…' : '刷新目录'),
-            // 清空 —— 用户要求：没填模型就用默认（自己选的）模型
-            h('button', {
-              className: 'eng-conn-btn tiny', type: 'button',
-              title: '清空所有备用模型（等于不兜底，始终用你自己选的模型）',
-              onClick: function () { clearAll(); }
-            }, '清空'),
+            h('button', { className: 'eng-conn-btn tiny', type: 'button', disabled: !S.dirty,
+              onClick: function () { save(S); } }, S.saving ? '保存中…' : '保存配置'),
+            h('button', { className: 'eng-conn-btn tiny', type: 'button', disabled: S.catLoading,
+              onClick: function () { patch({ catLoading: true }); loadCatalog(); } },
+            S.catLoading ? '读取中…' : '刷新目录'),
+            h('button', { className: 'eng-conn-btn tiny alt', type: 'button',
+              disabled: !S.savedCount && !S.dirty, onClick: clearAll }, '清空并关闭'),
             h('span', { className: 'eng-row-hint' },
-              S.catLoading
-                ? '正在读取模型目录…'
-                : ('目录共 ' + totalModels + ' 个模型 / ' + groups.length + ' 个 provider')),
-            S.saved ? h('span', { className: 'eng-mc-ok' }, '\u2713 ' + S.saved) : null,
-            S.error ? h('span', { className: 'eng-mc-err' }, S.error) : null)) : null);
+              S.catLoading ? '正在读取模型目录…' : totalModels + ' 个可选模型'),
+            S.saved ? h('span', { className: 'eng-mc-ok', role: 'status' }, '✓ ' + S.saved) : null,
+            S.dirty ? h('span', { className: 'eng-row-hint' }, '有未保存的更改') : null)) : null,
+        S.error ? h('p', { className: 'eng-mc-err', role: 'alert' }, S.error) : null);
     }
     function EngineeringSettingsSection(props) {
       var close = props && props.close;
@@ -6538,7 +6633,7 @@ window.__ModuleLoader__.load({
             // ── 子目录 1：模型自动接替（原来是一个独立主栏目）───────────────
             //   点这一行就地展开/收起；箭头方向由 openModelChain 控制。
             h(EngRow, {
-              label: (openModelChain ? '\u25be ' : '\u203a ') + '模型自动接替',
+              label: (openModelChain ? '\u25be ' : '\u203a ') + '模型自动接管',
               hint: '额度/限流耗尽时按列表顺序换下一个模型（含子代理）。',
               onClick: function () { setOpenModelChain(!openModelChain); }
             }),

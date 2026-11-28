@@ -133,7 +133,8 @@ try {
     deriveMessages:()=>[{id:'user-1',role:'user',source:{kind:'user'},
       content:[{type:'text',text:'真人原始任务'}]},...(id==='dsh-root' ? extraUser : [])]},
     followup(msg){this.lastMessage=msg;},steer(message){steers.push({id,message});}});
-  const hr=hostAgent('dsh-root'), hp=hostAgent('dsh-planner','dsh-root');
+  const hr=hostAgent('dsh-root');
+  let hp=hostAgent('dsh-planner','dsh-root');
   for(const h of [hr,hp]) hostActors.set(h.id,h);
   install({tools:{register(t){registered=t;},guard(fn){toolGuard=fn;}},
     agents:{get:id=>hostActors.get(id)},
@@ -184,7 +185,7 @@ try {
   await waitBatch();
   await invoke(hp,'frame',frame);
   await waitBatch();
-  const hw=hostActors.get(started[0].childId);
+  let hw=hostActors.get(started[0].childId);
   const job=(await invoke(hw,'status')).job;
   // ══ 【BUG-1】插件【绝不自己联网】：无 key、无端点也能跑完整链路 ══════════
   // 旧实现在这里断言 SEARCH_KEY_MISSING —— 那正是现场死因。现在验证的是：
@@ -237,7 +238,7 @@ try {
       '提醒正文不能为空');
     await assert.rejects(invokeErr(hw,'yield',{reason:'掩盖当前待办'}),/PENDING_JOB/);
     const byRole = role => hostActors.get(started.find(item => item.label === '七阶段分析 '+role).childId);
-    const hReview = byRole('review'), hDesign = byRole('design');
+    let hReview = byRole('review'), hDesign = byRole('design');
     const deliverHost = async (agent,data) => {
       const status = await invoke(agent,'status');
       return invoke(agent,'submit',{jobId:status.job.id,...data});
@@ -302,6 +303,19 @@ try {
         const {search} = await invoke(hr,'search_fill',{jobId:k.id,orderId:order.id,query:order.query,
           hits:[{title:'受控样本',url:'https://example.com/fixture'}]});
         await waitBatch();
+        if (i===1) {
+          await assert.rejects(invokeErr(hr,'recover',{role:'knowledge'}),/RECOVERY_SESSION_STILL_ACTIVE/);
+          const old=hw;
+          hooks.get('agent/disposed')({agent:old});
+          hostActors.delete(old.id);
+          await assert.rejects(invokeErr(hr,'retry',{role:'knowledge',reason:'角色会话已经退出'}),/SESSION_RECOVERY_REQUIRED/);
+          const replacement=await invoke(hr,'recover',{role:'knowledge'});
+          hw=hostActors.get(replacement.replacements[0].sessionId);
+          await assert.rejects(invokeErr(old,'status'),/RECOVERY_SESSION_REPLACED/);
+          const {job}=await invoke(hw,'status');
+          assert.equal(job.id,k.id,'替代岗位复用同一步工作单');
+          assert.equal(job.searches[0].hits[0].id,search.hits[0].id,'已回填的来源可继续使用');
+        }
         await deliverHost(hw,{content:'检索证据',sources:[{id:search.hits[0].id,
           location:'第 1 页',applicability:'受控回放样本'}],gaps:[]});
         await waitBatch();
@@ -309,6 +323,34 @@ try {
         await waitBatch();
         await deliverHost(hReview,{content:'独立复审结论',verdict:'pass',issues:[],closed:[]});
         await waitBatch();
+      }
+      if (i===61) {
+        const old=hp;
+        const checkPoint=await invoke(old,'status');
+        assert.equal(checkPoint.progress.done,61);
+        assert.equal(checkPoint.phase,'commit');
+        hooks.get('agent/disposed')({agent:hDesign});
+        hostActors.delete(hDesign.id);
+        assert.equal((await invoke(hr,'status')).failed.design,undefined,'已经完成交接的岗位退出不阻断提交');
+        hooks.get('agent/disposed')({agent:old});
+        hostActors.delete(old.id);
+        await invoke(hr,'stop',{reason:'模拟用户在六十一小步后主动暂停'});
+        await invoke(hr,'end',{kind:'partial',reason:'模拟主会话收尾'});
+        await assert.rejects(invokeErr(hr,'recover',{role:'planner',resume:true}),/RECOVERY_RESUME_REQUIRED/);
+        assert.equal((await invoke(hr,'status')).progress.done,61);
+        extraUser.push({id:'resume-note',role:'user',source:{kind:'user'},
+          content:[{type:'text',text:'继续上一项任务'}]});
+        const newRootState=await invoke(hr,'recover',{role:'planner',resume:true});
+        assert.equal(newRootState.progress.done,61);
+        assert.equal(newRootState.phase,'commit');
+        hp=hostActors.get(newRootState.replacements[0].sessionId);
+        await assert.rejects(invokeErr(old,'status'),/RECOVERY_SESSION_REPLACED/);
+        await assert.rejects(invokeErr(hDesign,'status'),/RECOVERY_SESSION_REPLACED/);
+        const revived=await invoke(hp,'recover',{role:'workers'});
+        const get = role => hostActors.get(revived.replacements.find(x=>x.role===role).sessionId);
+        hw=get('knowledge'); hDesign=get('design'); hReview=get('review');
+        assert.equal((await invoke(hp,'status')).current.review.id,checkPoint.current.review.id,
+          '原第 7.11 步复审已落盘，恢复后可以直接提交');
       }
       const plan = await invoke(hp,'status');
       assert.equal(plan.delivery.scope,steps[i].id);
@@ -334,6 +376,7 @@ try {
     assert.equal(restarted.reserve('cap-fixture','1.1','review',propose('SECOND_REVIEW_REWORK')).code,
       'DELIVERY_BUDGET_EXHAUSTED');
     console.log('OK: 63 小步模拟宿主入口回放，真人答复合批和去重，第四批例外、第五批硬拒、重开预算保持');
+    console.log('OK: 知识会话异常换绑保留来源，从 61/63 恢复总计并提交第 7.11 步，旧会话被拒');
   } finally {
     globalThis.fetch=oldFetch;
     const restore=(k,v)=>{ if(v===undefined) delete process.env[k]; else process.env[k]=v; };

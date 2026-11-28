@@ -210,7 +210,30 @@ function identityOf(agent) {
         for (let i = 0; i < 32; i++) {
           let up = '';
           try { up = String(look(cur) || ''); } catch (e) { up = ''; }
-          if (!up || seen.has(up)) break;
+          // ══ 【2026-11-28】查不到 ≠ 没有父会话 ══════════════════════════
+          // 现场：二级及以下的记录 root 停在【直接父级】，于是同一条链上的
+          //   记录 root 各不相同（31da68c4 / f4fdb8a7 / session-4466…），
+          //   面板按 root 聚合时它们散成好几组，二级子代理根本看不见。
+          // 根因：反查表（parentMap）靠异步预热填充，落账那一刻常常还没轮到
+          //   这个会话；旧实现把"查不到"当成"没有父会话"直接 break，
+          //   于是 root 永远停在第一层父级。
+          // 口径：查不到时不再静默截断 —— 用特殊标记触发下面的一次同步兜底
+          //   （从 agent 的对象引用往上爬），爬不到才真的停。
+          if (up === '__UNKNOWN__') {
+            // 同步兜底：沿对象引用上溯（能爬多高爬多高）
+            let o = p.parent || p.parentAgent || null;
+            let g2 = 0;
+            while (o && g2 < 32) {
+              g2 += 1;
+              const pid2 = String((o.session && o.session.id) || o.id || '');
+              if (!pid2) break;
+              rootId = pid2;
+              o = o.parent || o.parentAgent || null;
+            }
+            break;
+          }
+          if (!up) break;                    // 明确的根（没有父会话）
+          if (seen.has(up)) break;           // 防环
           seen.add(up); rootId = up; cur = up;
         }
       } else {
@@ -684,7 +707,28 @@ export async function apply(ctx, config) {
   try {
     setParentResolver(function (sessionId) {
       const id = String(sessionId || '');
-      return id ? (parentMap.get(id) ?? '') : '';
+      if (!id) return '';
+      // ⚠️ 三态，不能把"还没查到"和"没有父会话"混为一谈：
+      //   命中且有父 → 返回父 id；命中且无父 → ''（真根）；
+      //   未命中 → '__UNKNOWN__'（让调用方走同步兜底，而不是静默当成根）。
+      if (!parentMap.has(id)) {
+        // 顺手触发一次补建，下次就准了
+        if (!ancestorPending.has(id)) {
+          ancestorPending.add(id);
+          try {
+            const sp = ctx.get ? ctx.get('sessionPersistence') : null;
+            if (sp && typeof sp.stat === 'function') {
+              Promise.resolve(sp.stat(id)).then((snap) => {
+                const h = (snap && snap.header) || {};
+                parentMap.set(id, String(h.parentSession || ''));
+              }).catch(() => { parentMap.set(id, ''); })
+                .finally(() => ancestorPending.delete(id));
+            }
+          } catch (e) { ancestorPending.delete(id); }
+        }
+        return '__UNKNOWN__';
+      }
+      return parentMap.get(id);
     });
   } catch (e) {}
   /** 异步补建谱系表（懒执行、限流、失败静默）。 */

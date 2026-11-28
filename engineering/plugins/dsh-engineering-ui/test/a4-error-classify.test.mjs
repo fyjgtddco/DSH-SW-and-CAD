@@ -78,7 +78,7 @@ test('③ 退避优先读 retry-after，且不超过 30s', () => {
 });
 
 test('④ 接替路径必须真的调用这两个函数（不是只定义）', () => {
-  assert.ok(SRC.includes('classifyModelError(code, (failure && failure.message)'),
+  assert.ok(SRC.includes('classifyModelError(code, message)'),
     '错误码归一必须接进 agent/request-error');
   assert.ok(SRC.includes('backoffMsOf(failure,'),
     '退避必须接进接替路径');
@@ -87,6 +87,6 @@ test('④ 接替路径必须真的调用这两个函数（不是只定义）', (
 });
 
 test('⑤ 日志必须能看出归类结果（现场 :211 无错误码）', () => {
-  assert.ok(SRC.includes('_cls.class'),
+  assert.ok(SRC.includes("(contextError ? 'context' : error.class)"),
     '日志/通知必须带分类结果');
 });

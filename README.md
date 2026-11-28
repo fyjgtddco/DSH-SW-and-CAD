@@ -14,11 +14,13 @@
 |------|-----|
 | 目标平台 | DeepSeek Harness **0.2.x**（Electron 桌面版 / `dsh web`） |
 | 预设 ID | `engineering` · 显示名「工程模式」· `order: 4` |
-| UI 插件 | `dsh-engineering-ui` **v1.2.0** |
+| UI 插件 | `dsh-engineering-ui` **v1.4.0** |
 | 技能 | **7** 个 |
 | 门禁 / 桥接脚本 | **12** 个核心脚本 + **14** 个物理模块 |
 | 回归测试 | **30** 个 Python + **12** 个插件测试 |
 | 许可 | MIT |
+
+工程模式的整体结构、角色分工和使用方式见 [工程模式使用指南](engineering/README.md)。
 
 ---
 

@@ -309,6 +309,8 @@ engineering_seven_stage(taskId="<task_id>", action="launch")
 - 搜索主题用 `search {jobId,queryParts:[...]}` 合成一张工单，最多四条子查询，主对话集中搜索并一次回填。有关联的问题一次问齐。多条真实答复已齐备时，可用 `capture {messageIds:[...]}` 一次登记。把当前问题的对应答复放第一条。
 - 收到一批待办后集中处理，必要时查一次 `status`，正文按需 `read`。结果写入 `submit`、`capture` 或 `blocked`。需要重发时，由主对话或总计调用 `deliver {role}`，仍计入上限。
 - `status.delivery` 提供投递次数和宿主结果。出现 `DELIVERY_BUDGET_EXHAUSTED` 时保留现有材料和未完成待办，停止催办，由相应角色读取台账继续处理或登记阻塞。
+- 会话异常退出时保留原任务 ID。总计退出由原主对话调用 `recover {role:"planner"}`。执行岗位退出由总计或原主对话调用 `recover {role:"knowledge"}`（或 `design`、`review`）。新总计用 `recover {role:"workers"}` 补建缺失岗位。按 `status.progress` 和当前小步接续已有成果。
+- 已经人工暂停的任务，等真人明确要求继续后，由原主对话调用 `recover {role:"planner",resume:true}`。会话故障和人工暂停都保留原有断点，恢复时沿用原任务 ID，避免调用 `init` 或 `clean` 重开。
 
 每一步固定这条路（**顺序由插件强制，跳步会被拒**）：
 

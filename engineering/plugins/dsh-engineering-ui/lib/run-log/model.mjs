@@ -26,6 +26,18 @@ const parse = v => {
 const elapsed = (start, end) => start != null && end >= start ? end - start : null;
 const keyForStep = d => Number.isInteger(d.turn) && Number.isInteger(d.step) ? `${d.turn}/${d.step}` : null;
 
+function visibleOutput(message) {
+  const text = list(message?.content).filter(block => block?.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text).join('\n')
+    .replace(/-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-\r\n]*PRIVATE KEY-----|$)/g, '[已隐藏密钥]')
+    .replace(/\bBearer[ \t]+[^\s"',;]+/gi, 'Bearer [已隐藏]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,})\b/g, '[已隐藏密钥]')
+    .replace(/(\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|authorization|password|secret)\b["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi, '$1[已隐藏]')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g, '').trim();
+  if (!text) return {};
+  return { output: text.slice(0, 4000), ...(text.length > 4000 ? { outputTruncated: true } : {}) };
+}
+
 function sessionRows(session) {
   const ownStart = timestamp(session.header.createdAt);
   const inherited = integer(session.inheritedEventCount) ?? 0;
@@ -156,6 +168,7 @@ function readActivities(session, role, mode, add, onStatus) {
         const tokenIn = integer(d.usage?.inputTokens), tokenOut = integer(d.usage?.outputTokens);
         const tokens = tokenIn != null || tokenOut != null ? `输入 ${tokenIn ?? '—'} / 输出 ${tokenOut ?? '—'} tokens` : '';
         emit(e,{kind:'model',title:'模型返回消息',detail:[summary,tokens].filter(Boolean).join(' · '),
+          ...(header.parentSession ? visibleOutput(d.message) : {}),
           durationMs:elapsed(steps.get(stepKey),at)});
         break;
       }
@@ -196,7 +209,9 @@ function readActivities(session, role, mode, add, onStatus) {
           detail:call ? null : '当前日志中缺少对应调用', tool:call?.name, action:call?.action,
           callId:clean(callId,128), context:call?.context, durationMs:elapsed(call?.at,at),
           step:stepId(output.current?.step?.id ?? output.current?.step ?? output.searchOrder?.step) ?? call?.context?.step,
-          phase:clean(output.phase,48), ...failureContext(output,hostError,rejected)});
+          phase:clean(output.phase,48), ...failureContext(output,hostError,rejected),
+          ...(header.parentSession && call && !['ask_user_question', 'request_user_input', 'send_message'].includes(call.name)
+            ? visibleOutput(msg) : {})});
         if (!rejected && id(output.taskId) && typeof output.phase === 'string' &&
             Number.isSafeInteger(output.progress?.done) && Number.isSafeInteger(output.progress?.total)) {
           onStatus(projection(output, at));
@@ -255,13 +270,21 @@ function readActivities(session, role, mode, add, onStatus) {
     activity = last?.title ?? '回合已开始，尚未记录回合结束';
     since = latestTurn.at;
   }
-  return {id:sessionId, parentId:id(header.parentSession), role, label:LABELS[role],
+  const label = clean(session.label ?? rows.find(e => e.type === 'subagent/descriptor')?.data?.label, 100);
+  return {id:sessionId, parentId:id(header.parentSession), role, label:label ?? LABELS[role],
     state, activity, since, lastAt, tools, errors, pendingJobs:pendingJobs.size,
     ...(mode === 'history' && open ? {unclosed:true} : {})};
 }
 
+export function projectChildRun(log, label) {
+  const events = [], receipts = [];
+  const agent = readActivities({ ...log, label }, 'unknown', 'history',
+    event => events.push(event), receipt => receipts.push(receipt));
+  return { agent, events, receipts };
+}
+
 export function buildSnapshot({rootSessionId, sessions, state, steps, mode = 'history', limit = 300,
-  observedAt = Date.now(), warnings = [], includeAll = false}) {
+  observedAt = Date.now(), warnings = [], includeAll = false, monitor = null}) {
   if (!validId(rootSessionId)) throw new Error('根会话 ID 无效');
   const notices = list(warnings).map(w => clean(w, 300)).filter(Boolean);
   const source = new Map(list(sessions).filter(s => id(s?.header?.id)).map(s => [s.header.id,s]));
@@ -289,7 +312,7 @@ export function buildSnapshot({rootSessionId, sessions, state, steps, mode = 'hi
   for (const session of participants) {
     if (roleOf.has(session.header.id)) continue;
     const descriptor = sessionRows(session).find(e => e.type === 'subagent/descriptor');
-    const label = descriptor?.data?.label;
+    const label = descriptor?.data?.label ?? session.projection?.agent?.label ?? session.label;
     const role = typeof label === 'string' ? /^七阶段分析 (knowledge|design|review)$/.exec(label)?.[1] : null;
     if (role && source.get(session.header.parentSession)?.header.parentSession === rootSessionId) {
       roleOf.set(session.header.id,role);
@@ -298,8 +321,21 @@ export function buildSnapshot({rootSessionId, sessions, state, steps, mode = 'hi
     }
   }
   const events = [], receipts = [];
-  const agents = participants.map(s => readActivities(s,roleOf.get(s.header.id) ?? 'unknown',mode,
-    e => events.push(e),v => receipts.push(v)));
+  const agents = participants.map(s => {
+    const role = roleOf.get(s.header.id) ?? 'unknown';
+    let agent;
+    if (s.projection) {
+      for (const event of s.projection.events) events.push({ ...event, role });
+      for (const receipt of s.projection.receipts) receipts.push(receipt);
+      agent = { ...s.projection.agent, role, archivedAt: s.archivedAt, archivePending: s.pending };
+    } else {
+      agent = readActivities(s, role, mode, event => events.push(event), receipt => receipts.push(receipt));
+    }
+    const collecting = monitor?.collecting?.find(row => row.id === agent.id);
+    return { ...agent, ...(monitor?.active?.includes(agent.id) ? { activation: 'active' }
+      : collecting ? { activation: 'collecting', collectionCode: collecting.code, collectionDetail: collecting.detail }
+      : s.projection ? { activation: s.pending ? 'archive_pending' : 'archived' } : {}) };
+  });
   const roleOrder = [...ROLES,'unknown'];
   agents.sort((a,b) => roleOrder.indexOf(a.role) - roleOrder.indexOf(b.role));
   for (const [sid,role] of roleOf) {
@@ -326,7 +362,7 @@ export function buildSnapshot({rootSessionId, sessions, state, steps, mode = 'hi
   }
   const workflow = authoritative ? projectState(state,steps,recent) : recent ?? null;
   if (!authoritative) notices.push(workflow ? '阶段取自最后一条完整工具回执。' : '暂无可核对的七阶段进度。');
-  if (mode === 'live') notices.push('会话状态以最近落盘事件为准，宿主在线状态未确认。');
+  if (mode === 'live') notices.push('运行内容来自 DSH 会话事件，已提交的模型回复和工具结果会出现在时间线。');
   events.sort((a,b) => b.at-a.at || (b.seq ?? 0)-(a.seq ?? 0) || a.id.localeCompare(b.id));
   const slowest = events.filter(e => ['tool','model'].includes(e.kind) && e.durationMs > 0)
     .sort((a,b) => b.durationMs-a.durationMs).slice(0,6);
@@ -334,5 +370,5 @@ export function buildSnapshot({rootSessionId, sessions, state, steps, mode = 'hi
   return {schema:'dsh-run-log@1', rootSessionId, mode:mode === 'live' ? 'live' : 'history', observedAt,
     lastEventAt:Math.max(0,events[0]?.at ?? 0,...agents.map(a => a.lastAt ?? 0)) || null,
     workflow, agents, events:events.slice(0,limit), slowest, warnings:[...new Set(notices)],
-    totalEvents:events.length, limit, fullExport:includeAll};
+    totalEvents:events.length, limit, fullExport:includeAll, monitor};
 }

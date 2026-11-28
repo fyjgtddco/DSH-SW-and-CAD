@@ -50,6 +50,7 @@ $RuntimeNames = @(
     'platform_status.json', 'artifacts_registry.json', 'TASK_FINISHED.json',
     'connection_state.json', 'design_params.json', 'defense_bypass.json',
     'violations.json', 'guard.json', 'runtime.json',
+    'model_chain.json', 'model_chain_pending.json', 'persona.json',
     # 【2026-10-28】这三份也是【运行时/本机数据】，不是代码：
     #   platform_agents.json  插件自动写的平台子代理注册表（每次会话都在变）
     #   part_registry.json    零件台账（本任务数据，覆盖 = 丢数据）
@@ -63,7 +64,7 @@ $RuntimeNames = @(
     'webots_state.json', 'webots_jobs.sqlite3', 'webots_jobs.sqlite3-wal',
     'webots_jobs.sqlite3-shm', 'webots_instance.lock'
 )
-$RuntimeDirs = @('reports', 'heartbeats', 'load_cases', 'physics_runs',
+$RuntimeDirs = @('reports', 'heartbeats', 'load_cases', 'physics_runs', 'seven_stage',
                  'mode_logs', '.defense', '__pycache__', 'output', 'webots_runs')
 
 function Say($m, $c = 'Gray') { Write-Host $m -ForegroundColor $c }
