@@ -125,7 +125,7 @@ try {
   const workflowFile=join(dir,'workflow.json');
   writeFileSync(workflowFile,JSON.stringify({task_id:'host-job',analysis_engine:'seven_v03',
     seven_stage_root_session_id:'dsh-root'}));
-  const hostActors=new Map(), hooks=new Map(), started=[], steers=[];
+  const hostActors=new Map(), hooks=new Map(), started=[], steers=[], prompts=[];
   let registered, toolGuard;
   const hostAgent=(id,parent=null)=>({id,session:{id,header:{parentSession:parent},
     deriveMessages:()=>[{id:'user-1',role:'user',source:{kind:'user'},
@@ -135,7 +135,7 @@ try {
   for(const h of [hr,hp]) hostActors.set(h.id,h);
   install({tools:{register(t){registered=t;},guard(fn){toolGuard=fn;}},
     agents:{get:id=>hostActors.get(id)},
-    subagents:{getProvider:()=>({}),listDescendants:async()=>[],prompt:async()=>({}),async startActivation(input){
+    subagents:{getProvider:()=>({}),listDescendants:async()=>[],prompt:async input=>{ prompts.push(input); return {}; },async startActivation(input){
       started.push(input);
       hostActors.set(input.childId,hostAgent(input.childId,input.parent.id));
       return {childId:input.childId,result:Promise.resolve({})};
@@ -219,6 +219,36 @@ try {
     assert.ok(String(steers.at(-1).message?.content?.[0]?.text ?? '').length > 0,
       '提醒正文不能为空');
     await assert.rejects(invokeErr(hw,'yield',{reason:'掩盖当前待办'}),/PENDING_JOB/);
+    const byRole = role => hostActors.get(started.find(item => item.label === '七阶段分析 '+role).childId);
+    const hReview = byRole('review'), hDesign = byRole('design');
+    const deliverHost = async (agent,data) => {
+      const status = await invoke(agent,'status');
+      return invoke(agent,'submit',{jobId:status.job.id,...data});
+    };
+    const lastPrompt = () => prompts.at(-1)?.childSessionId;
+    const plannerPrompts = () => prompts.filter(input => input.childSessionId === hp.id).length;
+    await invoke(hp,'status'); // consume the startup notice
+    const baseline = plannerPrompts();
+    const quiet = await invoke(hp,'yield',{reason:'等待执行岗位完成当前任务'});
+    assert.equal(quiet.phase,'knowledge');
+    await deliverHost(hw,{content:'检索后的知识依据',sources:[{
+      id:st.job.searches[0].hits[0].id, location:'第 1 页', applicability:'受控回放样本'
+    }],gaps:[]});
+    assert.equal(lastPrompt(),hReview.id,'盲审应收到插件通知');
+    assert.equal(plannerPrompts(),baseline,'交班给盲审不应叫醒无待办的总计');
+    await invoke(hp,'status');
+    await deliverHost(hReview,{content:'审查原始任务边界',verdict:'pass',issues:[],closed:[]});
+    assert.equal(lastPrompt(),hDesign.id,'设计应收到插件通知');
+    assert.equal(plannerPrompts(),baseline,'交班给设计不应叫醒无待办的总计');
+    await invoke(hp,'status');
+    await deliverHost(hDesign,{content:'候选设计方案',evidence:'模拟计算记录',gaps:[]});
+    assert.equal(lastPrompt(),hReview.id,'复审应收到插件通知');
+    assert.equal(plannerPrompts(),baseline,'交班给复审不应叫醒无待办的总计');
+    await deliverHost(hReview,{content:'设计方案可提交',verdict:'pass',issues:[],closed:[]});
+    assert.equal(lastPrompt(),hp.id,'复审完成应唤醒总计提交');
+    assert.equal(plannerPrompts(),baseline+1);
+    assert.equal(quiet.actionHelp,undefined,'等待回执不重复全套操作说明');
+    assert.equal((await invoke(hp,'status')).phase,'commit','详细状态仍然可读');
   } finally {
     globalThis.fetch=oldFetch;
     const restore=(k,v)=>{ if(v===undefined) delete process.env[k]; else process.env[k]=v; };

@@ -494,26 +494,24 @@ export function install(ctx, config, createUserMessage) {
     //   于是 route() 认为"状态更新了"→ 通知 planner → 它醒来 → status → 没活 → 再 yield
     //   → key 又变 → 再通知 …… **自我唤醒循环**，每轮 30–60 秒，纯空转。
     //
-    // 判据（只通知"真的有事"）：只有当【别的人】产出了新东西时才叫 planner：
-    //   · facts 变多（真人答复进来了）；
-    //   · 有新的 failures（需要它判断）；
-    //   · 有人的 job 变了（有人交活/被重派）；
-    //   · 阶段真的变了（phase 字符串不同，而不是 key 里那些时间戳在动）。
-    // 它自己 yield 导致的变化**一律不叫它** —— 它刚说过"我在等"，再叫就是空转。
+    // 只在总计有可执行动作或需要介入时唤醒。执行岗位之间直接交接，
+    // phase / job 变动本身不需要总计重新读状态、催办、再 yield。
     const phaseChanged = prior?.phase !== s.phase;
     const factsGrew = (s.facts?.length ?? 0) > (prior?.facts?.length ?? 0);
-    const failuresAppeared = Object.keys(s.failures ?? {}).length
-      > Object.keys(prior?.failures ?? {}).length;
-    const jobsChanged = Object.keys(s.jobs ?? {}).some(r =>
-      s.jobs[r]?.id !== prior?.jobs?.[r]?.id);
-    if (s.planner !== sender
-        && (phaseChanged || factsGrew || failuresAppeared || jobsChanged)) {
+    const beforeFailures = prior?.failures ?? {};
+    const failuresAppeared = Object.keys(s.failures ?? {}).some(r => !Object.hasOwn(beforeFailures,r));
+    const failuresCleared = Object.keys(beforeFailures).some(r => !Object.hasOwn(s.failures,r));
+    const plannerWorkReady = !s.question && ['frame','commit','resolve','evidence_wait'].includes(s.phase)
+      && (phaseChanged || prior?.revision !== s.revision || prior?.cursor !== s.cursor
+        || prior?.question || failuresCleared);
+    if (s.planner !== sender && !s.ended.planner
+        && (plannerWorkReady || factsGrew || failuresAppeared)) {
       notify(s.taskId, s.planner,
         '收到岗位回执或流程状态更新（' + [
           phaseChanged ? 'phase ' + prior?.phase + '→' + s.phase : '',
           factsGrew ? '新增真人答复 ' + (s.facts.length - (prior?.facts.length ?? 0)) + ' 条' : '',
           failuresAppeared ? '新增故障登记' : '',
-          jobsChanged ? '任务包有变动' : '',
+          plannerWorkReady && !phaseChanged ? '总计待办已更新' : '',
         ].filter(Boolean).join('；') + '）。', key);
     }
     if (s.root!==sender && (s.question || s.phase==='evidence_wait' || Object.keys(s.failures).length)) {
@@ -1318,6 +1316,14 @@ export function install(ctx, config, createUserMessage) {
           note:'完整记录由交接接口导出，各小步可用 read 查询。'};
       }
       route(prior,s,a.id);
+      if (action==='yield') {
+        // 详细任务包由下一次真正唤醒后的 status 提供。等待回执保留状态和审计定位字段。
+        const {taskId,role,phase,revision,waitingOn,waitReason,progress} = result;
+        const step = result.current?.step;
+        return {text:JSON.stringify({ok:true,taskId,role,phase,revision,waitingOn,waitReason,progress,
+          current:{step:typeof step==='string' ? step : step?.id ?? null},
+          next:'本回合等待已登记，结束本回合，等插件派发新任务。'})};
+      }
       return {text:JSON.stringify(result)};
   }
 

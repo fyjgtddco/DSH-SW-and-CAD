@@ -84,6 +84,28 @@ def main():
        re.search(r'function EngRunLog[\s\S]{0,1200}?useEffect', client) is not None)
 
     print('=' * 70)
+    print('C2. 开发者页两级导航')
+    print('=' * 70)
+    ok("存在开发者目录页分支", "page === 'developer'" in client)
+    ok("目录项 dev-seven", "id: 'dev-seven'" in client)
+    ok("目录项 dev-monitor", "id: 'dev-monitor'" in client)
+    # 【2026-11-28】日常也变成两级后，backTo 改成按栏目判定：
+    #   devTab  → 'developer'；dailyTab → 'daily'。旧写法 "daily ? 'home' : 'developer'"
+    #   已经不存在，直接把旧串当断言会永远失败。
+    ok("子面板返回对应目录（开发者/日常）",
+       "backTo = devTab ? 'developer' : 'daily'" in client)
+    ok("返回按钮文案区分两个目录",
+       "← 开发者目录" in client and "← 日常目录" in client)
+    ok("日常目录页存在", "page === 'daily'" in client and "日常目录" in client)
+    ok("日常拆成主对话/子代理两页",
+       "daily-main" in client and "daily-agent" in client)
+    ok("两个面板互斥渲染（else-if）",
+       "else if (page === 'dev-seven')" in client
+       and "else if (page === 'dev-monitor')" in client)
+    ok("已移除旧的 devstack 堆叠", 'eng-sv-devstack' not in client)
+    ok("目录页复用首页卡片栅格", 'eng-sv-devdir' in client)
+
+    print('=' * 70)
     print('D. 监控器诊断')
     print('=' * 70)
     mon = read(os.path.join(REPO, 'engineering', 'tools', 'sw_monitor', 'monitor.py'))

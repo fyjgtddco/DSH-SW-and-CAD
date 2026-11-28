@@ -489,8 +489,19 @@ function nextActionOf(s, role) {
           message:'检索工单还在等真实主对话回填（orderId=' + order.id + '）。'
             + '不要 submit：现在没有来源可用。可以先做本步其它准备，或 yield 等回填。'};
       } else if (filled) {
-        gate = {state:'ready-to-submit', hits:filled,
-          message:'检索已回填 ' + filled + ' 条（orderId=' + (order?.id ?? '') + '），现在就可以 submit。'
+        // ══ 【BUG-013 修复 · 现场 2026-11-26】hits 不能等于"检索工单数" ═══════
+        // 现场：status 显示 "ready-to-submit, hits:1"，而实际 job.searches[].hits
+        //   有 8 条（search_fill 回执也写着 hitCount=8）。连续两次复现。
+        // 根因：filled 取的是 searches[].length —— 那是【发了几张工单】，
+        //   一次 search_fill 可以带 N 条 hits。两者语义完全不同，
+        //   把工单数当命中数显示，会让人误判"只搜到 1 条，证据不足"。
+        // 修法：hits 用真实命中总数；工单数另给 searchRuns，两者分开说清楚。
+        const runs = filled;
+        const hitsTotal = (s.jobs[role].searches ?? [])
+          .reduce((n, x) => n + ((x.hits ?? []).length), 0);
+        gate = {state:'ready-to-submit', hits:hitsTotal, searchRuns:runs,
+          message:'检索已回填 ' + hitsTotal + ' 条命中（' + runs + ' 次检索，orderId='
+            + (order?.id ?? '') + '），现在就可以 submit。'
             + 'sources[].id 直接用 status.job.searches[].hits[].id。'};
       } else {
         gate = {state:'no-search-yet',
@@ -566,7 +577,15 @@ function nextText(s, role) {
       + (mine ? '' : '当前不在等你；等 ' + open.join('、') + ' 完成后本条会更新。');
   }
   return {
-    setup:role === 'planner' ? 'invite → 为每个角色创建独立二级子代理' : '等待三个子代理实际绑定',
+    // ══ 【BUG-002 修复 · 现场 2026-11-26】不能再让 next 指到 invite ══════
+    // 现场：setup 阶段 next 写的是 "invite → 为每个角色创建独立二级子代理"，
+    //   但真正把三个二级会话建出来的是 launch（launch 内部已含邀请逻辑）。
+    //   planner 照 next 去调 invite，实际拿不到会话，白绕一轮。
+    //   而且 allowed 里从来没有 invite/launch —— 动作放行与 next 指引对不上。
+    // 口径：next 必须指向【真正该调、且 allowed 里真有】的那个动作。
+    setup:role === 'planner'
+      ? 'launch → 一次性创建并邀请三个角色子会话（invite 已并入 launch，不单独调）'
+      : '等待三个子代理实际绑定（由 planner 的 launch 建立）',
     frame:role === 'planner' ? 'frame → 写本步对象、当前决策、搜索主题和边界' : '等待任务包',
     knowledge:'知识执行 search 发布检索工单；真实主对话用宿主内置 web_search 执行后 search_fill 回填；知识再 submit',
     preflight:'反驳先独立核对原始任务',
@@ -731,6 +750,53 @@ function view(s, role) {
          filled:(s.jobs.knowledge?.searches ?? []).length}
       : undefined,
     members: s.members, ready:validReady(s), progress:{done:s.records.length,total:steps.length},
+    // ══ 【BUG-012 / BUG-019 修复 · 现场 2026-11-26】提交判据必须一眼可读 ══
+    // 现场：planner 依据 current.knowledge / current.review 字段判断"还没提交"，
+    //   于是在 knowledge 早已 submit 之后仍反复催办 —— 全程累计约 10 次，
+    //   step 2.2 单步就连续 3 次。根因是这些字段【本来就滞后】：它们只表示
+    //   "本小步已归档的产物"，而 submit 成功后的第一时刻 phase 已经推进，
+    //   此时 current.* 仍然是 null（旧值），看上去就像"还没提交"。
+    //
+    // 口径：与其让每个角色自己猜，不如插件直接算好一份【阶段闸门】：
+    //   · 谁的本轮活已经交完（delivered）、谁还在忙（working）、谁没派活（idle）；
+    //   · 关键一句：phase 已经走到 review/commit 之后 ⇒ knowledge/design 必然已交。
+    //   这是明细字段之外的【单一权威判据】，专门用来回答"我该不该催"。
+    handoff:(() => {
+      const roleJob = r => s.jobs[r] ?? null;
+      const deliveredOf = r => {
+        // ① 产物已归档（最直接）
+        if (r === 'knowledge' && s.slot?.knowledge) return true;
+        if (r === 'design' && s.slot?.design) return true;
+        if (r === 'review' && s.slot?.review) return true;
+        // ② 阶段已越过该角色的收件口 —— 它必然交过了。
+        //    这是给"明明交了却看到 null"的现场用的兜底判据。
+        const idx = ['setup','frame','knowledge','preflight','design','review','resolve','commit'].indexOf(s.phase);
+        const gateAt = {knowledge:3, design:5, review:6}[r];
+        if (idx >= 0 && gateAt !== undefined && idx > gateAt) return true;
+        return false;
+      };
+      const row = r => {
+        const j = roleJob(r);
+        const done = deliveredOf(r);
+        const failed = Boolean(s.failures[r]);
+        return {
+          jobId: j?.id ?? null,
+          state: failed ? 'failed' : done ? 'delivered' : (j ? 'working' : 'idle'),
+          shouldNudge: !done && failed,
+        };
+      };
+      const table = { knowledge:row('knowledge'), design:row('design'), review:row('review') };
+      const nudgeable = Object.keys(table).filter(r => table[r].shouldNudge);
+      return {
+        ...table,
+        phase:s.phase,
+        nudgeable,
+        // 一句话结论：planner 照这句判断，不必再去猜 current.* 的含义。
+        verdict: nudgeable.length
+          ? ('需要处理已登记故障：' + nudgeable.join('、') + '。查看 failed，按原因决定是否 retry。')
+          : '工作单由插件自动送达；working 表示等待该岗位正常交付。没有总计待办就 yield，收到通知后再查询。',
+      };
+    })(),
     // ══ 【2026-11-20 · D14】只读验证入口：异议台账 + 当前可关闭集合 ═══════════
     // 现场反馈（BUG-总结 D14）："closed 契约修复待验证 —— 只读路径不可达，
     //   status 返回体没有 closed/closable 字段，触发动作又不在 allowed 白名单里"。
@@ -753,17 +819,34 @@ function view(s, role) {
       // 所以这里看到的就是"提交时会被接受"的集合，不含第二种判断。
       const reopenedNow = new Set((lastReview?.issues ?? []).map(x => x.key));
       const closable = ledger.filter(x => !reopenedNow.has(x.key));
+      // ══ 【BUG-007 修复 · 现场 2026-11-26】reopenedKeys ≠ "所有未关闭项" ══════
+      // 现场：reopenedKeys 恒列当前全部 4 条未关闭异议，与 current 完全同源，
+      //   字段名说"被重新打开"，实际含义是"本轮 review 又提了一遍"。
+      //   而真正"曾被关闭、这轮又打开"的项，反而看不出来。
+      // 修法：拆成两个字段，语义各自如实：
+      //   · reopenedKeys —— 曾被关闭过、本轮又提的（真·重开，应当是少数）；
+      //   · restatedKeys —— 本轮 review 重提的（原 reopenedKeys 的口径，保留给
+      //     "不能用 closed 抹掉"的判断）。
+      //   另外补 stillOpenKeys：从未关闭过、一直挂着的，避免被误读成"重开"。
+      const everClosed = new Set(closedLast.map(x => String(x?.key ?? x ?? '')));
+      const restated = ledger.filter(x => reopenedNow.has(x.key)).map(x => x.key);
+      const trulyReopened = restated.filter(k => everClosed.has(k));
       return {
         issueLedger: {
           current: ledger.map(x => ({key:x.key, kind:x.kind, owner:x.owner})),
           closableKeys: closable.map(x => ({key:x.key, kind:x.kind, owner:x.owner})),
-          reopenedKeys: ledger.filter(x => reopenedNow.has(x.key)).map(x => x.key),
+          reopenedKeys: trulyReopened,
+          restatedKeys: restated,
+          stillOpenKeys: ledger.filter(x => !everClosed.has(x.key)).map(x => x.key),
           lastClosed: closedLast,
           lastVerdict: lastReview?.verdict ?? null,
           ...(lastReview?.downgrades ? {downgrades:lastReview.downgrades} : {}),
           note: ledger.length
             ? '这份台账是【只读投影】：closableKeys 就是下一轮 submit 时 closed[] 会被接受的集合。'
               + '想验证 closed 契约不必真的提交 —— 看这里即可。'
+              + '\n字段含义（别再混用）：reopenedKeys=曾被关闭过、本轮又提的；'
+              + 'restatedKeys=本轮 review 重提的（不能用 closed 抹掉）；'
+              + 'stillOpenKeys=从未关闭过、一直挂着的。'
             : '本步还没有任何异议台账（review 尚未提出过硬异议），closed[] 暂时无可关闭对象。',
         },
       };
@@ -823,7 +906,14 @@ function view(s, role) {
       gaps:'数组（不是字符串！）：[{object,impact,obtain,owner,allowed,blocking:true|false}]，'
         + 'blocking 必须是布尔值 true/false',
       issues:'kind 为 hard|unknown|condition|preference|unsupported；owner 为 design|knowledge|planner|human',
-      commit:'{jobId:当前 review.id,scope,basis,conditions,outputs:{用 step.outputs 中的字段名逐项填写内容}}',
+      // ══ 【BUG-009 修复 · 现场 2026-11-26】conditions 必须写明是【字符串】 ══
+      // 现场：actionHelp 只写 conditions，没说类型；actionContract.example 里
+      //   才写 "conditions":"…"。planner 按"多条异议列表"传了 array →
+      //   INVALID_FIELD: conditions 必须是【非空字符串】，实际收到 array，白费一次调用。
+      // 口径：凡"看起来像列表但实际要字符串"的字段，在 actionHelp 里直接标类型。
+      commit:'{jobId:当前 review.id, scope, basis, '
+        + 'conditions:<字符串，不是数组！多条异议用文字串起来>, '
+        + 'outputs:{用 step.outputs 中的字段名逐项填写内容}}',
       rework:'{issueKey,reason}', rewind:'{fromStep,reason,evidence}',
       // 【2026-11-19】read 的语义以前只有 "{step}"，模型只能盲试参数。现在写死。
       read:'{step?,part?,offset?,limit?}。不带 part 返回该小步的「目录」（各部分字数）；'
@@ -850,6 +940,10 @@ function view(s, role) {
         + ' · 若答复消除了 frame.blockedBy 里的依赖，务必带 resolved:[...]，否则会退回 evidence_wait',
       propose_rooms:'{rooms:[{name,type,parts:[零件ID],why,depends_on:[房名]}],rationale,scope}',
       yield:'{reason}。语义=「我在等外部回执」：回合结束，靠插件投递开新回合。',
+      // 【BUG-012 修复】催办前先看 handoff —— 这是"该不该催"的唯一权威判据。
+      send_message:'{to,message}。发消息给某个角色。'
+        + '工作单、提交回执和等待都由插件传递。仅在插件通知确实失效或需要协调外部事项时手动联系。'
+        + '交付进度看 status.handoff，故障和处置看 failed。',
       // ══ 【2026-11-20 · 测试方残余 (a)】新动作必须有 help 文本 ═══════════════
       // 现场：allowed 里已经有 stop，但 actionHelp 里没有它的契约 ——
       //   子代理只知道"有个叫 stop 的动作"，不知道该不该传 reason、和 blocked 差在哪，
@@ -1021,13 +1115,42 @@ export function openFlow(stateDir) {
       const allSearches = [...stepSearches, ...(job.searches ?? [])];
       if (!allSearches.length) {
         const pending = job.searchOrder?.status === 'pending';
-        throw Error('SEARCH_REQUIRED: 本步还没有任何检索记录。'
-          + (pending
-            ? '你已经发布了检索工单（query=' + JSON.stringify(job.searchOrder.query)
-              + '，orderId=' + job.searchOrder.id + '），正在等真实主对话（传话员）'
-              + '用宿主内置 web_search 执行并 search_fill 回填。先等 status.search.order.status 变 filled。'
-            : '先用 action=search 发布检索工单（dataJson={jobId,query}），'
-              + '再由真实主对话回填。插件自己不联网。'));
+        // ══ 【BUG-011 修复 · 现场 2026-11-26】frame 说"无需检索"时的例外通道 ══
+        // 现场：planner 在 frame.searchTopic 里明写"本步为决策步…无需发布检索工单"，
+        //   但 knowledge 直接 submit 被 SEARCH_REQUIRED 硬拒，frame 的指示与引擎
+        //   直接矛盾；本可一步完成的决策步被迫多走 search→search_fill 往返。
+        //
+        // 口径（不放宽证据要求，只给出【显式豁免】）：
+        //   · frame 的 searchTopic 命中"无需检索"标记时，本步允许 sources:[] 直接提交；
+        //   · 但**必须**至少有一条 blocking gap 说明"为什么本步不需要外部检索"，
+        //     否则等于允许"什么都不查、也不解释"就交卷 —— 那会把证据要求架空。
+        //   · 豁免只在【本小步】生效（frame 换掉即失效），并写进审计留痕。
+        const topic = String(s.slot?.frame?.searchTopic ?? '');
+        const noSearchDeclared = /无需(发布)?检索|不需要检索|不用检索|无需外部检索/.test(topic);
+        if (noSearchDeclared) {
+          const gaps0 = parseGaps(data.gaps);
+          const srcs0 = list(data.sources, 'sources');
+          if (!srcs0.length) {
+            check(gaps0.some(x=>x.blocking),
+              'NO_SEARCH_DECLARED_NEEDS_BLOCKING_GAP: 本步 frame 标注了「无需检索」，'
+              + '所以允许 sources:[] 直接提交；但必须至少一条 blocking gap 写清'
+              + '「为什么本步不依赖外部检索资料」（object=缺什么，obtain=打算怎么确认）。'
+              + '这是豁免检索的代价：不查可以，但要说清为什么不查。');
+            // 豁免成立：跳过检索证据校验，按"无来源 + blocking gap"路径提交。
+            audit(s,a.id,'search_exempt_declared',{step:steps[s.cursor]?.id,topic:topic.slice(0,200)});
+          }
+        } else {
+          throw Error('SEARCH_REQUIRED: 本步还没有任何检索记录。'
+            + (pending
+              ? '你已经发布了检索工单（query=' + JSON.stringify(job.searchOrder.query)
+                + '，orderId=' + job.searchOrder.id + '），正在等真实主对话（传话员）'
+                + '用宿主内置 web_search 执行并 search_fill 回填。先等 status.search.order.status 变 filled。'
+              : '先用 action=search 发布检索工单（dataJson={jobId,query}），'
+                + '再由真实主对话回填。插件自己不联网。')
+            + '\n若本步确实不需要外部检索，请让 planner 在 frame.searchTopic 里写明'
+            + '「无需检索」并说明理由 —— 引擎会据此豁免本步的检索证据要求'
+            + '（但仍需在 gaps 里写一条 blocking 说明理由）。');
+        }
       }
       const hits = allSearches.flatMap(x=>x.hits);
       const sources = list(data.sources, 'sources').map(x=>{
@@ -2254,11 +2377,17 @@ export function openFlow(stateDir) {
           && !(s.jobs.knowledge?.searches ?? []).length
           && !s.jobs.knowledge?.searchOrder;
         check(!s.jobs[role] || orderPending || noSearchYet,
+          // ══ 【BUG-014 修复 · 现场 2026-11-26】yield 与 search_fill 的竞态 ══
+          // 现场：knowledge 在 yield 的同一时刻，检索工单刚被回填 ——
+          //   于是"我正在等回填"这个事实在两次调用之间失效了，yield 被拒。
+          //   与 BUG-010 同族：不是角色偷懒，是状态在调用间隙推进了。
           'PENDING_JOB_USE_SUBMIT_OR_REPORT_BLOCKER: 你手上有一个可以立刻提交的任务包'
           + '（jobId=' + (s.jobs[role]?.id ?? '') + '），不能 yield 跳过。'
+          + '\n⚠️ 常见于【竞态】：你调 yield 的同时，检索工单刚好被你等待的那一方回填了。'
           + '\n现在该做的：' + (role === 'knowledge'
-              ? '检索已回填，直接 action=submit（sources 用 status.job.searches[].hits[].id）。'
-              : '按 status.job.nextAction 提交，或 blocked 登记故障。'));
+              ? '直接 action=submit（sources 用 status.job.searches[].hits[].id）。'
+              : '按 status.job.nextAction 提交，或 blocked 登记故障。')
+          + '\n若你确实还没准备好提交：重读 status 确认状态后再说，不要重试 yield。');
         // ══ 【2026-11-19 · 报告 BUG-7】rework 已提交、在等外部回执时应当允许 yield ══
         // 现场：resolve 阶段唯一处置动作是 rework（退回 frame），
         //   而真正在等的是"外部文件回执"—— 它还没到，这一轮本来就该结束。
@@ -2283,9 +2412,20 @@ export function openFlow(stateDir) {
         const pendingWork = role==='planner' && ['frame','commit','resolve'].includes(s.phase)
           && !s.question && !hasPending(s) && !Object.keys(s.failures).length;
         check(reworkedAndWaiting || !pendingWork,
+          // ══ 【BUG-010 修复 · 现场 2026-11-26】不能把"竞态"说成"你想跳过" ══
+          // 现场：planner 读 status 时 phase=review（review job 还在 working），
+          //   据此 yield；但 yield 执行的那一瞬间 review 提交、phase 翻到 commit，
+          //   于是被 PLANNER_ACTION_PENDING 拒。planner 并不是想跳过 commit，
+          //   只是两次调用之间 phase 漂移了。原文案把它归到"想跳过动作"的三种
+          //   情形里，误导性很强（会让人以为自己做错了什么）。
+          // 口径：先讲"这可能是竞态"，再给正确处置（重读 status 照做），
+          //   最后才是那三种真的想跳过的情形。
           'PLANNER_ACTION_PENDING: 本阶段还有该你做的动作（' + s.phase + '），不能 yield 跳过。'
-          + '\n三种情况的正确姿势：'
-          + '\n  · 用户/上游要求【停止】→ action=stop {reason}（P指"叫停"，不会把你记成失败）；'
+          + '\n⚠️ 先排除【竞态】：如果你刚读 status 时还是别的 phase，说明状态在两次调用之间'
+          + '发生了推进（例如 review 刚好提交、phase 从 review 翻到 commit）。'
+          + '这不是你的错 —— **重读一次 status，按最新 phase 执行对应动作即可**。'
+          + '\n若确认 phase 没变、你确实想停下来，三种情况的正确姿势：'
+          + '\n  · 用户/上游要求【停止】→ action=stop {reason}（指"叫停"，不会把你记成失败）；'
           + '\n  · 在等【外部回执】→ 先 rework{reason} 说明原因，再 yield；'
           + '\n  · 真做不下去 → blocked{reason}（这会登记为故障，需要人 retry）。');
         s.turns[role] = {reason:named(d.reason,'reason'), at:Date.now()};
@@ -2532,7 +2672,15 @@ export function openFlow(stateDir) {
     const job = s.jobs.knowledge;
     check(job.searches.length<5, 'SEARCH_BUDGET_REACHED');
     check(!job.searchOrder || job.searchOrder.status!=='pending',
-      'SEARCH_ORDER_ALREADY_PENDING: 上一张检索工单还没回填。等真实主对话（传话员）执行完 search_fill 再发新的。');
+      // 【BUG-004 修复 · 现场 2026-11-26】这不是故障，是正常的单工单约束。
+      //   原文案只说"上一张还没回填"，知识角色一度当成阻塞点上报。
+      //   现在明说三件事：① 这是正常约束不是错误；② 能做什么；③ 不要做什么。
+      'SEARCH_ORDER_ALREADY_PENDING: 这是【正常的单工单约束，不是故障】：'
+      + '同一时刻只允许一张 pending 检索工单，上一张还没被真实主对话（传话员）回填。'
+      + '\n现在能做的：① 等 status.search.order.status 变成 filled（回填由真实主对话执行，'
+      + '你不需要催）；② 先做本步其它不依赖检索的准备。'
+      + '\n不要做的：不要重复发单、不要把它当阻塞上报 blocked（blocked 是"我干不下去"），'
+      + '也不要靠 yield 空转 —— 回填到达后插件会自动唤醒你。');
     const order = {id:randomUUID(), query:named(query,'query'), status:'pending',
       step:steps[s.cursor].id, jobId:job.id, at:new Date().toISOString()};
     job.searchOrder = order;

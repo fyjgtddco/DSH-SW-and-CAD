@@ -1182,7 +1182,18 @@ window.__ModuleLoader__.load({
       // ── 【外部监控插件诊断日志】开发者使用页的第二块卡片 ─────────────
       // 与七阶段面板上下堆叠：先看分析流水线有没有走通，再看 SW/COM 侧有没有被拒。
       // 两块的高度都是 min-height:0 + 内部滚动，整页不跟着事件条数变长。
-      .eng-sv-devstack { display: grid; gap: 12px; min-height: 0; }
+      // ── 【两级导航 · 2026-11-26】开发者目录 + 单面板页 ──────────────
+      // 目录页复用首页的 .eng-sv-cards（一行两张卡片），只是外面多一条说明。
+      // 面板页改成"整块撑满剩余高度 + 内部滚动"，这样事件表再长也只滚面板本身，
+      //   不会把整页顶长（用户抱怨的就是"往下滑要滑半日"）。
+      .eng-sv-devdir { display: flex; flex-direction: column; min-height: 0; }
+      .eng-sv-devdir .eng-sv-cards { padding: 16px; }
+      .eng-sv-devdir-note {
+        margin: 0 16px 16px; padding: 9px 12px; border-radius: 8px;
+        background: var(--sv-canvas); color: var(--sv-muted); font-size: 12px; line-height: 1.6;
+      }
+      .eng-sv-devpage { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+      .eng-sv-devpage > .eng-sv-box { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
       .eng-sv-monlog { display: flex; flex-direction: column; min-height: 0; overflow: auto; }
       .eng-mlog { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; min-width: 0; }
       .eng-mlog-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -4623,37 +4634,171 @@ window.__ModuleLoader__.load({
             h('section', { className: 'eng-sv-box', 'aria-label': '栏目入口' },
               h('h2', null, '栏目入口'),
               h('div', { className: 'eng-sv-cards' },
-                entry('daily', '日常使用', '查看主对话的压缩历史'),
-                entry('developer', '开发者使用', '七阶段运行日志，可下载完整 JSON'))),
-            h('section', { className: 'eng-sv-box', 'aria-label': '画布' },
-              h('h2', null, '画布'),
-              h('div', { className: 'eng-sv-cast' },
-                h('span', { className: 'eng-sv-slot' }, 'AI 投屏占符位'))),
+                // 【2026-11-28】两个栏目现在都是"先目录再面板"，描述也要如实说清
+                //   里面有几项，否则用户点进去才发现还有一层，会觉得点错了。
+                entry('daily', '日常使用', '主对话 / 子代理的压缩历史，各记各的账'),
+                entry('developer', '开发者使用', '七阶段运行日志与外部监控插件诊断，可下载 JSON'))),
+            // ── 【2026-11-28】「画布 / AI 投屏占符位」整块删除 ──────────────
+            // 用户原话：「这个，然后把那个画布给删了」。
+            // 它从上线起就是一个占位框（.eng-sv-cast + 「AI 投屏占符位」），
+            //   没有任何数据源，却占了首页近一半高度、把「工程流程 / 交付资料」
+            //   挤到首屏之外 —— 留着只会让人以为"这里该有东西但没加载出来"。
+            // 相关的 .eng-sv-cast / .eng-sv-slot 样式【保留】：其它地方（比如
+            //   两个 pair 卡片的占位）仍在用 .eng-sv-slot，删样式会连带打坏。
             h('div', { className: 'eng-sv-home-pair' },
               h('section', { className: 'eng-sv-box', 'aria-label': '工程流程' }, h('h2', null, '工程流程'), placeholder()),
               h('section', { className: 'eng-sv-box', 'aria-label': '交付资料' }, h('h2', null, '交付资料'), placeholder()))));
       }
 
-      var daily = page === 'daily';
+      // ── 【两级导航 · 2026-11-26】开发者使用改成「目录 → 面板」两层 ──────
+      // 用户原话：「点进去那个开发者模式的时候，我们也搞一个子目录让选的，
+      //   不然一个板块占了太多了，往下滑要滑半日」。
+      // 现场：七阶段那块自己就有「子步骤 / 流程阶段 / Agent 状态 / 事件时间线」
+      //   四段，下面再压一块监控器日志 —— 一屏根本看不完，定位任何一个面板都要滚。
+      // 现在：'developer' = 目录页（卡片列表）；点进去只有【那一个】面板，
+      //   顶部工具条给「← 开发者目录」，返回再选另一个。
+      //   注意：两个面板仍然【同时存在】于代码里，只是不同时渲染。
+      // ── 【两级导航 · 2026-11-28】日常使用也改成「目录 → 面板」两层 ──────
+      // 用户原话：「帮我把那个"日常使用"也改成像图这种的二级标题」。
+      // 舞台：压缩历史本来就在同一个面板里用 forceTab 切「主对话 / 子代理」两条链
+      //   （见 EngCompactPage 的 tab 逻辑），只是那个切换器藏在面板内部的小按钮里。
+      // 现在把它提到目录层：目录两张卡 = 两条链，点进去就只渲染那一条，
+      //   与「开发者使用」完全同构 —— 用户不必为两个入口学两套交互。
+      var DAILY_TABS = [
+        { id: 'daily-main', title: '主对话压缩历史',
+          desc: '这份会话被压缩过几次、每次保住多少机械数值、省下多少字符' },
+        { id: 'daily-agent', title: '子代理压缩历史',
+          desc: '各建模小屋 / 分析角色各自的压缩记录，按会话分别记账' }
+      ];
+
+      var DEV_TABS = [
+        { id: 'dev-seven', title: '七阶段运行日志',
+          desc: '做到第几步、谁在等谁、哪儿花时间、为什么停住；可下载完整 JSON' },
+        { id: 'dev-monitor', title: '外部监控插件',
+          desc: 'SW 使用权接管、COM 作业失败、验收阻断等诊断记录；可下载 JSON' }
+      ];
+      var devTab = null;
+      for (var di = 0; di < DEV_TABS.length; di++) {
+        if (DEV_TABS[di].id === page) { devTab = DEV_TABS[di]; break; }
+      }
+
+      // ── 日常使用 · 目录页 ──────────────────────────────────────────────
+      // 与开发者目录用【同一个】.eng-sv-devdir 容器与卡片栅格 —— 两级导航的
+      //   外观只定义一次，两个栏目就不会各长一套。
+      if (page === 'daily') {
+        return h('div', { className: 'eng-sv' },
+          h('div', { className: 'eng-sv-home eng-sv-subpage' },
+            h('header', { className: 'eng-sv-toolbar' },
+              h('button', { className: 'eng-sv-back', type: 'button', onClick: function () { go('home'); } }, '← 栏目首页'),
+              h('h1', { tabIndex: -1, ref: titleRef }, '日常使用'),
+              h('button', { className: 'eng-sv-back', type: 'button', onClick: function () { go('developer'); } },
+                '切换到开发者使用')),
+            h('section', { className: 'eng-sv-box eng-sv-devdir', 'aria-label': '日常目录' },
+              h('h2', null, '日常目录'),
+              h('div', { className: 'eng-sv-cards' },
+                DAILY_TABS.map(function (t) {
+                  return h('button', {
+                    className: 'eng-sv-card', type: 'button', key: t.id,
+                    onClick: function () { go(t.id); },
+                  },
+                    h('strong', null, t.title,
+                      h('span', { className: 'eng-sv-card-arrow', 'aria-hidden': 'true' }, '→')),
+                    h('span', { className: 'eng-sv-card-desc' }, t.desc));
+                })),
+              h('p', { className: 'eng-sv-devdir-note' },
+                '压缩只保「机械数值与材料」这类不能丢的硬信息，其余按摘要趋势保留。'
+                + '主对话与子代理各记各的账 —— 两边不会互相覆盖，也不会互相代表。'))));
+      }
+
+      // ── 开发者使用 · 目录页 ────────────────────────────────────────────
+      // 与首页「栏目入口」同一套卡片视觉（entry() / .eng-sv-cards），
+      //   用户不用学第二套交互：看到卡片就知道"点进去还有一层"。
+      if (page === 'developer') {
+        return h('div', { className: 'eng-sv' },
+          h('div', { className: 'eng-sv-home eng-sv-subpage' },
+            h('header', { className: 'eng-sv-toolbar' },
+              h('button', { className: 'eng-sv-back', type: 'button', onClick: function () { go('home'); } }, '← 栏目首页'),
+              h('h1', { tabIndex: -1, ref: titleRef }, '开发者使用'),
+              h('button', { className: 'eng-sv-back', type: 'button', onClick: function () { go('daily'); } },
+                '切换到日常使用')),
+            h('section', { className: 'eng-sv-box eng-sv-devdir', 'aria-label': '开发者目录' },
+              h('h2', null, '开发者目录'),
+              h('div', { className: 'eng-sv-cards' },
+                DEV_TABS.map(function (t) {
+                  return h('button', {
+                    className: 'eng-sv-card', type: 'button', key: t.id,
+                    onClick: function () { go(t.id); },
+                  },
+                    h('strong', null, t.title,
+                      h('span', { className: 'eng-sv-card-arrow', 'aria-hidden': 'true' }, '→')),
+                    h('span', { className: 'eng-sv-card-desc' }, t.desc));
+                })),
+              // 一句"这里能干什么"，避免用户点进去发现是日志又退回来。
+              h('p', { className: 'eng-sv-devdir-note' },
+                '这两块都是【只读】观测：不写会话、不调工具、不向被观测会话注入提示词。'
+                + '面板里的「下载日志 JSON」会把当前可读的全部结构化记录导出，可直接交给 AI 排查。'))));
+      }
+
+      // ── 面板页：日常子面板 / 开发者子面板，共用同一个工具条 ────────────
+      // 返回目标按层级区分：日常子面板 → 日常目录；开发者子面板 → 开发者目录。
+      //   （从子面板直接跳回首页会让用户丢掉"另一个面板还没看"这条线索。）
+      // 【2026-11-28】daily 拆成 daily-main / daily-agent 两个独立面板：
+      //   仍然复用同一个 EngCompactPage，只是用 forceTab 锁定各自的链 ——
+      //   数据源与判定口径一处不多，只是"看哪一条"由目录决定而不是面板内按钮。
+      var dailyTab = null;
+      for (var dj = 0; dj < DAILY_TABS.length; dj++) {
+        if (DAILY_TABS[dj].id === page) { dailyTab = DAILY_TABS[dj]; break; }
+      }
+      var panelTitle = devTab ? devTab.title : (dailyTab ? dailyTab.title : '日常使用');
+      var backTo = devTab ? 'developer' : 'daily';
+      var backLabel = devTab ? '← 开发者目录' : '← 日常目录';
+
+      var panelBody;
+      if (page === 'daily-main') {
+        panelBody = h('section', { className: 'eng-sv-box eng-sv-history', 'aria-label': '主对话压缩历史' },
+          sid ? h(EngCompactPage, { key: 'main:' + sid, rootSessionId: sid, forceTab: 'main', sessionView: true })
+            : h('p', { className: 'eng-cp-empty', role: 'status' }, '正在识别当前会话…'));
+      } else if (page === 'daily-agent') {
+        // forceTab='agent' 时面板内部仍按左列选中的子代理过滤（selectedId）；
+        //   这里会话视图没有左列，故不传 selectedId —— 展示全部子代理链，
+        //   与旧「日常使用」的默认行为一致，不改变筛选语义。
+        panelBody = h('section', { className: 'eng-sv-box eng-sv-history', 'aria-label': '子代理压缩历史' },
+          sid ? h(EngCompactPage, { key: 'agent:' + sid, rootSessionId: sid, forceTab: 'agent', sessionView: true })
+            : h('p', { className: 'eng-cp-empty', role: 'status' }, '正在识别当前会话…'));
+      } else if (page === 'dev-seven') {
+        panelBody = h('section', { className: 'eng-sv-box eng-sv-runlog', 'aria-label': '七阶段运行日志' },
+          sid ? h(EngRunLog, { key: 'seven:' + sid, rootSessionId: sid })
+            : h('p', { className: 'eng-cp-empty', role: 'status' }, '正在识别当前会话…'));
+      } else if (page === 'dev-monitor') {
+        panelBody = h('section', { className: 'eng-sv-box eng-sv-monlog', 'aria-label': '外部监控插件诊断日志' },
+          h(EngMonitorLog, { key: 'monitor' }));
+      }
+
       return h('div', { className: 'eng-sv' },
-        h('div', { className: 'eng-sv-home eng-sv-subpage' },
+        h('div', { className: 'eng-sv-home eng-sv-subpage eng-sv-devpage' },
           h('header', { className: 'eng-sv-toolbar' },
-            h('button', { className: 'eng-sv-back', type: 'button', onClick: function () { go('home'); } }, '← 栏目首页'),
-            h('h1', { tabIndex: -1, ref: titleRef }, daily ? '日常使用' : '开发者使用'),
-            h('button', { className: 'eng-sv-back', type: 'button', onClick: function () { go(daily ? 'developer' : 'daily'); } },
-              daily ? '切换到开发者使用' : '切换到日常使用')),
-          daily ? h('section', { className: 'eng-sv-box eng-sv-history', 'aria-label': '压缩历史' },
-            sid ? h(EngCompactPage, { key: sid, rootSessionId: sid, forceTab: 'main', sessionView: true })
-              : h('p', { className: 'eng-cp-empty', role: 'status' }, '正在识别当前会话…'))
-            : h('div', { className: 'eng-sv-devstack' },
-              h('section', { className: 'eng-sv-box eng-sv-runlog', 'aria-label': '七阶段运行日志' },
-                sid ? h(EngRunLog, { key: 'seven:' + sid, rootSessionId: sid })
-                  : h('p', { className: 'eng-cp-empty', role: 'status' }, '正在识别当前会话…')),
-              // 【外部监控插件】与七阶段并列：一个看分析流水线，一个看 SW 使用权与 COM。
-              //   两者数据源完全不同（会话日志/七阶段状态 vs 监控器诊断表），
-              //   分开成两块卡片，谁坏了都能一眼定位，不会互相掩盖。
-              h('section', { className: 'eng-sv-box eng-sv-monlog', 'aria-label': '外部监控插件诊断日志' },
-                h(EngMonitorLog, { key: 'monitor' })))));
+            h('button', { className: 'eng-sv-back', type: 'button', onClick: function () { go(backTo); } }, backLabel),
+            h('h1', { tabIndex: -1, ref: titleRef }, panelTitle),
+            // 同级子面板之间直接互相跳（省一次"返回目录再点"）。
+            //   日常与开发者各自成对，跳转只在【同一栏目内】——
+            //   跨栏目跳会让人失去"我从哪个目录进来的"这条线索。
+            devTab
+              ? h('button', {
+                  className: 'eng-sv-back', type: 'button',
+                  onClick: function () {
+                    go(page === 'dev-seven' ? 'dev-monitor' : 'dev-seven');
+                  },
+                }, page === 'dev-seven' ? '看外部监控插件' : '看七阶段日志')
+              : (dailyTab
+                  ? h('button', {
+                      className: 'eng-sv-back', type: 'button',
+                      onClick: function () {
+                        go(page === 'daily-main' ? 'daily-agent' : 'daily-main');
+                      },
+                    }, page === 'daily-main' ? '看子代理压缩历史' : '看主对话压缩历史')
+                  : h('button', { className: 'eng-sv-back', type: 'button', onClick: function () { go('developer'); } },
+                      '切换到开发者使用'))),
+          panelBody));
     }
 
 
