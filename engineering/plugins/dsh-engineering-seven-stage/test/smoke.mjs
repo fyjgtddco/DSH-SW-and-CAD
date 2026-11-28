@@ -6,6 +6,8 @@ import { openFlow, steps } from '../lib/flow.js';
 import {install} from '../lib/index.js';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {setTimeout as delay} from 'node:timers/promises';
+import {COALESCE_MS, openDeliveryBook} from '../lib/delivery.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'dsh7-check-'));
 try {
@@ -125,11 +127,11 @@ try {
   const workflowFile=join(dir,'workflow.json');
   writeFileSync(workflowFile,JSON.stringify({task_id:'host-job',analysis_engine:'seven_v03',
     seven_stage_root_session_id:'dsh-root'}));
-  const hostActors=new Map(), hooks=new Map(), started=[], steers=[], prompts=[];
+  const hostActors=new Map(), hooks=new Map(), started=[], steers=[], prompts=[], extraUser=[];
   let registered, toolGuard;
   const hostAgent=(id,parent=null)=>({id,session:{id,header:{parentSession:parent},
     deriveMessages:()=>[{id:'user-1',role:'user',source:{kind:'user'},
-      content:[{type:'text',text:'真人原始任务'}]}]},
+      content:[{type:'text',text:'真人原始任务'}]},...(id==='dsh-root' ? extraUser : [])]},
     followup(msg){this.lastMessage=msg;},steer(message){steers.push({id,message});}});
   const hr=hostAgent('dsh-root'), hp=hostAgent('dsh-planner','dsh-root');
   for(const h of [hr,hp]) hostActors.set(h.id,h);
@@ -143,8 +145,13 @@ try {
     on:(event,fn)=>hooks.set(event,fn)
   },{stateDir:join(dir,'host-state'),workflowFile},x=>x);
   const signal=new AbortController().signal;
-  const invoke=async (agent,action,args={})=>JSON.parse((await registered.execute({
-    taskId:'host-job',action,dataJson:JSON.stringify(args)}, {agent,signal})).text);
+  const waitBatch = () => delay(COALESCE_MS + 20);
+  const invoke=async (agent,action,args={})=>{
+    const out=JSON.parse((await registered.execute({
+      taskId:'host-job',action,dataJson:JSON.stringify(args)}, {agent,signal})).text);
+    assert.notEqual(out.ok,false,action+': '+(out.error ?? out.code));
+    return out;
+  };
   // 【BUG-seven-stage-tool-gate · 附带】execute() 现在把内部异常统一转成
   //   {ok:false, code, error}，不再把异常冒给宿主。凡是断言"必须被拒绝"的地方，
   //   用这个变体：它把 error/ok:false 还原成一次 throw，保持原断言写法可用。
@@ -155,6 +162,8 @@ try {
     return out;
   };
   await invoke(hr,'attach',{planner:hp.id,messageIds:['user-1']});
+  await waitBatch();
+  assert.match(toolGuard({agent:hr,name:'send_message'}),/SEVEN_STAGE_TOOL_GATE/);
   assert.match(toolGuard({agent:hp,name:'shell'}),/SEVEN_STAGE_TOOL_GATE/);
   assert.equal((await hooks.get('tools/pre-execute')({agent:hp,name:'subagent_fork'},()=>({kind:'allow'}))).kind,'deny');
   assert.equal(toolGuard({agent:hostAgent('unrelated'),name:'shell'}),undefined);
@@ -172,7 +181,9 @@ try {
     const invitation=JSON.parse(record.prompt[0].text.match(/dataJson=(\{[^}]+\})/)[1]);
     await invoke(hostActors.get(record.childId),'bind',invitation);
   }
+  await waitBatch();
   await invoke(hp,'frame',frame);
+  await waitBatch();
   const hw=hostActors.get(started[0].childId);
   const job=(await invoke(hw,'status')).job;
   // ══ 【BUG-1】插件【绝不自己联网】：无 key、无端点也能跑完整链路 ══════════
@@ -187,17 +198,22 @@ try {
   globalThis.fetch=async (...a)=>{ fetchCalls++; throw new Error('插件不该联网：'+a[0]); };
   try {
     // ① 知识发布检索工单：不联网、不需要任何 key
-    const ord=await invoke(hw,'search',{jobId:job.id,query:'plain fixture'});
+    const queryParts = ['plain fixture','interface fixture'];
+    const ord=await invoke(hw,'search',{jobId:job.id,queryParts});
     assert.equal(ord.order.status,'pending');
+    await waitBatch();
+    assert.deepEqual(ord.order.queryParts,queryParts);
+    assert.ok(steers.at(-1).message.content[0].text.includes('plain fixture'));
+    assert.ok(steers.at(-1).message.content[0].text.includes('interface fixture'));
     assert.equal(fetchCalls,0,'发布工单期间不得发起任何网络请求');
     // ② 知识重复发布同一工单 → 拒绝（防止绕开预算）
-    await assert.rejects(invokeErr(hw,'search',{jobId:job.id,query:'plain fixture'}),/SEARCH_ORDER_ALREADY_PENDING/);
+    await assert.rejects(invokeErr(hw,'search',{jobId:job.id,queryParts}),/SEARCH_ORDER_ALREADY_PENDING/);
     // ③ 知识自己回填 → 拒绝（检索者不能自证）
     await assert.rejects(invokeErr(hw,'search_fill',{jobId:job.id,orderId:ord.order.id,
-      query:'plain fixture',hits:[{title:'伪造',url:'https://example.com/fake'}]}),/SEARCH_FILL_RELAY_ONLY/);
+      query:ord.order.query,hits:[{title:'伪造',url:'https://example.com/fake'}]}),/SEARCH_FILL_RELAY_ONLY/);
     // ④ 传话员（真实主对话）回填宿主内置 web_search 的结果
     const rec=await invoke(hr,'search_fill',{jobId:job.id,orderId:ord.order.id,
-      query:'plain fixture',provider:'宿主内置 web_search',
+      query:ord.order.query,provider:'宿主内置 web_search',
       hits:[{title:'Fixture',url:'https://example.com/fixture',snippet:'controlled replay'}]});
     assert.equal(rec.search.hits.length,1);
     assert.equal(rec.search.provider,'宿主内置 web_search');
@@ -210,6 +226,7 @@ try {
     const math=await invoke(hw,'calculate',{jobId:job.id,purpose:'数字接口',units:'N',ops:[
       {op:'mul',a:2,b:9.8},{op:'div',a:'$1',b:2}]});
     assert.deepEqual(math.calculation.values,[19.6,9.8]);
+    await waitBatch();
     hooks.get('agent/turn-stopping')({agent:hw,signal});
     // 【2026-11-19】投递语义已从 followup(queue) 改为 steer，并加了"在途合并"：
     //   同一条状态变化不再每条通知都投一次，只保留最后一条未消费的通知。
@@ -234,21 +251,89 @@ try {
     await deliverHost(hw,{content:'检索后的知识依据',sources:[{
       id:st.job.searches[0].hits[0].id, location:'第 1 页', applicability:'受控回放样本'
     }],gaps:[]});
+    await waitBatch();
     assert.equal(lastPrompt(),hReview.id,'盲审应收到插件通知');
     assert.equal(plannerPrompts(),baseline,'交班给盲审不应叫醒无待办的总计');
     await invoke(hp,'status');
     await deliverHost(hReview,{content:'审查原始任务边界',verdict:'pass',issues:[],closed:[]});
+    await waitBatch();
     assert.equal(lastPrompt(),hDesign.id,'设计应收到插件通知');
     assert.equal(plannerPrompts(),baseline,'交班给设计不应叫醒无待办的总计');
     await invoke(hp,'status');
     await deliverHost(hDesign,{content:'候选设计方案',evidence:'模拟计算记录',gaps:[]});
+    await waitBatch();
     assert.equal(lastPrompt(),hReview.id,'复审应收到插件通知');
     assert.equal(plannerPrompts(),baseline,'交班给复审不应叫醒无待办的总计');
     await deliverHost(hReview,{content:'设计方案可提交',verdict:'pass',issues:[],closed:[]});
+    await waitBatch();
     assert.equal(lastPrompt(),hp.id,'复审完成应唤醒总计提交');
     assert.equal(plannerPrompts(),baseline+1);
     assert.equal(quiet.actionHelp,undefined,'等待回执不重复全套操作说明');
     assert.equal((await invoke(hp,'status')).phase,'commit','详细状态仍然可读');
+    for (let i=0;i<steps.length;i++) {
+      if (i>0) {
+        await invoke(hp,'frame',frame);
+        await waitBatch();
+        if (i===1) {
+          const ids=['batch-note-1','batch-note-2'];
+          for (const id of ids) extraUser.push({id,role:'user',source:{kind:'user'},
+            content:[{type:'text',text:'向操作者确认的备注 '+id}]});
+          await assert.rejects(invokeErr(hr,'capture',{messageIds:[ids[0],'missing']}),/ROOT_USER_MESSAGE_NOT_AVAILABLE/);
+          assert.equal((await invoke(hp,'status')).newFacts.length,0);
+          const before = plannerPrompts();
+          const captured = await invoke(hr,'capture',{messageIds:ids});
+          assert.deepEqual(captured.records.map(x=>x.id),ids);
+          await waitBatch();
+          assert.equal(plannerPrompts(),before+1,'两条真人答复整批只投一次');
+          for (const id of ids) {
+            assert.ok(prompts.at(-1).content[0].text.includes(id));
+            await invoke(hp,'interpret',{messageId:id,classification:'no_change',parameters:'只记录沟通备注',
+              conflict:'未发现与现有需求冲突',changed:'这条备注不修改设计边界',
+              impact:'本小步仍按已登记条件继续',reason:'备注仅用于补充交流记录'});
+          }
+          const duplicate = await invoke(hr,'capture',{messageIds:ids});
+          assert.equal(duplicate.idempotent,true);
+          await waitBatch();
+          assert.equal(plannerPrompts(),before+1,'重采同一批不重新投递');
+        }
+        const {job:k} = await invoke(hw,'status');
+        const {order} = await invoke(hw,'search',{jobId:k.id,query:'fixture '+steps[i].id});
+        await waitBatch();
+        const {search} = await invoke(hr,'search_fill',{jobId:k.id,orderId:order.id,query:order.query,
+          hits:[{title:'受控样本',url:'https://example.com/fixture'}]});
+        await waitBatch();
+        await deliverHost(hw,{content:'检索证据',sources:[{id:search.hits[0].id,
+          location:'第 1 页',applicability:'受控回放样本'}],gaps:[]});
+        await waitBatch();
+        await deliverHost(hDesign,{content:'候选设计结果',evidence:'模拟计算记录',gaps:[]});
+        await waitBatch();
+        await deliverHost(hReview,{content:'独立复审结论',verdict:'pass',issues:[],closed:[]});
+        await waitBatch();
+      }
+      const plan = await invoke(hp,'status');
+      assert.equal(plan.delivery.scope,steps[i].id);
+      assert.equal(plan.delivery.recipients.knowledge.attempted,i===0 ? 3 : 2);
+      assert.equal(plan.delivery.recipients.design.attempted,1);
+      assert.equal(plan.delivery.recipients.review.attempted,i===0 ? 2 : 1);
+      assert.equal(plan.delivery.recipients.root.attempted,1);
+      assert.equal(plan.delivery.recipients.planner.attempted,i<=1 ? 2 : 1);
+      const committed = await invoke(hp,'commit',{jobId:plan.current.review.id,
+        scope:'工程范围',basis:'独立复审证据',conditions:'保留实机验证条件',
+        outputs:Object.fromEntries(steps[i].outputs.map(k=>[k,'模拟交付 '+k]))});
+      assert.equal(committed.progress.done,i+1);
+    }
+    await waitBatch();
+    assert.equal((await invoke(hp,'status')).phase,'ready');
+    assert.match(toolGuard({agent:hr,name:'send_message'} ) ?? '',/^$/); // after final delivery
+    const book = openDeliveryBook(join(dir,'host-state'));
+    const propose = exception => () => ({sid:'role-fixture',keys:['sample'],exception});
+    for (let i=1;i<=3;i++) assert.equal(book.reserve('cap-fixture','1.1','review',propose(null)).row.n,i);
+    assert.equal(book.reserve('cap-fixture','1.1','review',propose(null)).code,'DELIVERY_BUDGET_EXHAUSTED');
+    const restarted = openDeliveryBook(join(dir,'host-state'));
+    assert.equal(restarted.reserve('cap-fixture','1.1','review',propose('SECOND_REVIEW_REWORK')).row.n,4);
+    assert.equal(restarted.reserve('cap-fixture','1.1','review',propose('SECOND_REVIEW_REWORK')).code,
+      'DELIVERY_BUDGET_EXHAUSTED');
+    console.log('OK: 63 小步模拟宿主入口回放，真人答复合批和去重，第四批例外、第五批硬拒、重开预算保持');
   } finally {
     globalThis.fetch=oldFetch;
     const restore=(k,v)=>{ if(v===undefined) delete process.env[k]; else process.env[k]=v; };

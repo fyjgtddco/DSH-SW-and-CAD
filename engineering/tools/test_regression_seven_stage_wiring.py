@@ -711,10 +711,12 @@ ck("★ BUG-2：非法 JSON 有专属错误码（不再把 JSON.parse 异常冒�
 ck("★ BUG-3：enforce() 对终态放行分析角色",
    "isTerminal" in _SRC_IDX and "TERMINAL_PHASES" in _SRC_IDX
    and re.search(r"if \(isTerminal\(bound\.s\)\) return;", _SRC_IDX) is not None)
-ck("★ BUG-4：终态通知只发一次（terminalNotified）",
-   "terminalNotified" in _SRC_IDX)
-ck("★ BUG-4：终态不再走逐条 notify（终态分支提前 return）",
-   re.search(r"if \(TERMINAL_PHASES\.has\(s\.phase\)\)[\s\S]{0,1400}?return;", _SRC_IDX) is not None)
+_SRC_DELIVERY = read(os.path.join(PLUGIN, "lib", "delivery.js"))
+ck("★ BUG-4：终态待办使用固定键，自动投递按账本去重",
+   "make('close:'+s.phase" in _SRC_DELIVERY and "newTopics(topics,rows,sid)" in _SRC_IDX)
+ck("★ BUG-4：终态只生成收尾待办",
+   "if (s.phase==='ready' || s.phase==='partial')" in _SRC_DELIVERY
+   and _SRC_DELIVERY.index("make('close:'+s.phase") < _SRC_DELIVERY.index("const order ="))
 ck("★ BUG-5：新增 reopen 动作（flow.js case + index enum）",
    "case 'reopen'" in _SRC_FLOW and "'reopen'" in _SRC_IDX)
 ck("★ BUG-5：reopen 只允许 planner/root",
@@ -1006,11 +1008,12 @@ ck("★ BUG-11：只对 host-disposed 自动重派，且只一次",
 ck("★ BUG-12：search_fill 对已回填的同单做幂等",
    "idempotent" in _SRC_FLOW and "search_fill_idempotent" in _SRC_FLOW)
 ck("★ BUG-12：推送工单前读磁盘实时状态",
-   "liveNow" in _SRC_JS)
+   "const current = flow.load(s.taskId)" in _SRC_JS and "sendBatch(current,role)" in _SRC_JS
+   and "order?.status==='pending'" in _SRC_DELIVERY)
 ck("★ BUG-04：planner 在任何非终态都可登记 blocked",
    "plannerCanReport" in _SRC_FLOW)
-ck("★ BUG-05：只读工具白名单（send_message/list_agents）",
-   "READONLY_TOOLS" in _SRC_JS and "send_message" in _SRC_JS)
+ck("★ 七阶段只读工具白名单保留 list_agents，消息走插件",
+   "READONLY_TOOLS = new Set(['list_agents'])" in _SRC_JS and "exec.name==='send_message'" in _SRC_JS)
 # 【2026-11-19】wait_agent 从白名单与可见工具里一并摘掉 —— 它不唤醒、只锁回合。
 ck("★ 提速：分析角色不再持有 wait_agent（避免回合内空睡）",
    "'wait_agent'" not in (_SRC_JS.split("const READONLY_TOOLS")[1] or "")[:200]
@@ -1055,7 +1058,7 @@ ck("★ 通道修复：status 只下发正文索引（bodyRef），不再塞全�
 ck("★ 通道修复：八条规则随 launch prompt 只发一次（不再每次 status 重复 2.8KB）",
    "spec.crossCutting" in _SRC_FLOW and "rulesRef" in _SRC_FLOW)
 ck("★ 通道修复：capture 回执 messageId（interpret 不再盲猜）",
-   "out.messageId = fact.id" in _SRC_FLOW and "out.messageId = existing.id" in _SRC_FLOW)
+   "out.messageId = record.id" in _SRC_FLOW and "} = captured[0]" in _SRC_FLOW)
 ck("★ 通道修复：重复 capture 幂等，不再撞 USER_MESSAGE_ALREADY_RECORDED",
    "out.idempotent = true" in _SRC_FLOW)
 ck("★ 通道修复：capture 认 ask_user_question 的题目 id",
@@ -1095,7 +1098,7 @@ ck("★ 提速④：VERDICT_ISSUE_MISMATCH 说清两者实际值",
 ck("★ 提速④：INVALID_LIST 报出实际类型与正确形态",
    "LIST_HINTS" in _SRC_FLOW and "必须是【数组】" in _SRC_FLOW)
 ck("★ 提速：capture 成功后插件主动叫醒 planner（不再靠 root 转话）",
-   "capture 后通知 planner 失败" in _SRC_JS and "真人答复已捕获" in _SRC_JS)
+   "deliveryTopics" in _SRC_JS and "route(prior,s,a.id)" in _SRC_JS)
 
 # ── 【2026-11-19 第三轮 · 作者交付的 bug 报告 BUG-1~21】────────────────────
 # 来源：C:\Users\j1877\Desktop\test\bug-report-七十七插件-20261119_AAF031E4.md
@@ -1139,9 +1142,14 @@ ck('★ 报告BUG-14：actionHelp 的 gaps 标明「数组（不是字符串！�
 ck("★ 报告BUG-17：换阶段/进补证不再抹掉别人的故障登记",
    "s.failures = carriedFailures" in _SRC_FLOW
    and "s.failures = {...(s.failures ?? {})}" in _SRC_FLOW)
+# 【2026-11-28 修正】原断言检查 "jobsChanged"，但该变量在 2026-11-27 的重构
+#   （ecd1c2b）里已被 plannerWorkReady 取代 —— 它检查的 job 组合条件更宽
+#   （不只是"job 变了"，还包括"planner 此刻确实有活要干"）。
+#   断言长期失效 = 一条永远红的测试，比没有测试更糟。改为检查现有真实判据。
 ck('★ 报告BUG-21 / §7.2：planner 的「状态更新」通知走增量判据（防自我唤醒循环）',
-   "const phaseChanged = prior?.phase !== s.phase" in _SRC_JS
-   and "factsGrew" in _SRC_JS and "jobsChanged" in _SRC_JS)
+   "if (!sid || sid===sender) continue" in _SRC_JS
+   and "topics.every(x=>old.has(x.key))" in _SRC_JS
+   and "['frame','commit','resolve','evidence_wait'].includes(s.phase)" in _SRC_DELIVERY)
 ck("★ 口径：root 仍【不能】interpret（判断权归总计子代理）",
    "interpret 归总计子代理" in _SRC_FLOW and "as('planner');\n        const fact" in _SRC_FLOW)
 
@@ -1191,11 +1199,7 @@ ck("★ 提速：nextAction 覆盖 planner 的 frame/commit/resolve/evidence_wai
      "case 'evidence_wait': return {action:'question'",
      "case 'ready': return {action:'propose_rooms'"]))
 
-# ── 【2026-11-19 · 排队消息】投递方式：queue → steer + 在途合并 ─────────────
-# 现场（截图）：主对话侧堆了 4 条「七阶段插件任务…有新任务包」，全部卡在
-#   队列里逐个 turn 跑。根因是 delivery:'queue' → agent.followup()，
-#   宿主文档写明 "The item becomes the sole ordinary message of its own turn"
-#   —— 每条通知独占一个完整 turn。
+# ── 七阶段通知统一批量投递，重发同样记账 ──────────────────────────────
 ck("★ 排队修复：子会话投递改用 steer（插队到最近一步，不排成独立 turn）",
    "delivery:'steer'" in _SRC_JS)
 # 注释里提到旧写法（解释为什么改）是允许的，只断言【可执行代码】里没有 queue。
@@ -1205,16 +1209,11 @@ ck("★ 排队修复：可执行代码里已不存在 delivery:'queue'",
    not any(("delivery" in l and "'queue'" in l) for l in _js_code_lines),
    [l.strip()[:90] for l in _js_code_lines if "'queue'" in l][:3])
 ck("★ 排队修复：root 用 agent.steer 而不是 followup",
-   "live.steer(msg(message))" in _SRC_JS)
-ck("★ 排队修复：同一 (task,sid) 未消费前不再重复投递（在途合并）",
-   "inFlight" in _SRC_JS and "inflight.text = message" in _SRC_JS)
-ck("★ 排队修复：角色一旦调用工具即视为消费，解除在途标记",
-   "markNotifiedConsumed(taskId, a.id)" in _SRC_JS)
-ck("★ 排队修复：投递失败必须清掉在途标记（否则永久静音）",
-   "inFlight.delete(n)" in _SRC_JS)
-ck("★ 排队修复：deliver 显式重发可绕过在途合并",
-   "function notify(task, sid, text, key, force = false)" in _SRC_JS
-   and "targetPhase(prior), true)" in _SRC_JS)
+   "agent.steer(msg(text))" in _SRC_JS)
+ck("★ 同一小步和接收角色在发送前合并，发送前登记次数",
+   "if (queued.has(key))" in _SRC_JS and "delivery.reserve(s.taskId,scope,role" in _SRC_JS)
+ck("★ deliver 显式重发走同一批量入口",
+   "sendBatch(prior,role,{manual:true})" in _SRC_JS)
 
 # 行为验证
 if _NODE and os.path.isfile(_GATE_JS):
@@ -1412,7 +1411,7 @@ const kCid = Object.entries(roleOf).find(([, r]) => r === 'knowledge')[0];
 const kA = agents.get(kCid);
 ck('提速 wait_agent 已被禁（分析期间不锁回合）',
   typeof guardFn({ agent: kA, name: 'wait_agent' }) === 'string');
-ck('BUG-05 send_message 放行', guardFn({ agent: kA, name: 'send_message' }) === undefined);
+ck('七阶段 send_message 交接受限', /SEVEN_STAGE_TOOL_GATE/.test(guardFn({ agent: kA, name: 'send_message' })));
 ck('BUG-05 list_agents 放行', guardFn({ agent: kA, name: 'list_agents' }) === undefined);
 ck('BUG-05 write 仍被拦', typeof guardFn({ agent: kA, name: 'write' }) === 'string');
 ck('BUG-05 pwsh 仍被拦', typeof guardFn({ agent: kA, name: 'pwsh' }) === 'string');

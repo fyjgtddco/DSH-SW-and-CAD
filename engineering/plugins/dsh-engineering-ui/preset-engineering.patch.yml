@@ -762,6 +762,15 @@
                   #   （那是插件自己读的，不经宿主 schema 校验）。
                   maxTokens: 16000
                   retainRatio: 0.16
+                  # HY4 Flash 的供应商用量与本地消息计量有差值。近期原文保留 16,000
+                  # tokens，给 192,000 tokens 的触发线留出余量，避免逐工具步压缩。
+                  modelPolicies:
+                    - provider: buddy
+                      model: hy4flash-free
+                      retainTokens: 16000
+                    - provider: workbuddy
+                      model: hy4flash-free
+                      retainTokens: 16000
 
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'

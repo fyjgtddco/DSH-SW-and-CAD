@@ -151,6 +151,15 @@ function recentPages(messages, previous, revised, redacted = new Set()) {
  *   （用户截图里的两条黄圈）。账本里没有这两个字段的话，前端就只能拿到一串
  *   裸 sessionId，分不清哪条属于哪个房间。
  */
+// ---- 父会话反查器 --------------------------------------------------------
+// identityOf 必须能问到「某个 sessionId 的父会话是谁」，才能一路爬到最顶层根。
+// 但它是纯函数、拿不到 ctx；所以在 apply() 里把反查能力注进来。
+// 返回 '' 表示没有父会话（= 它就是根）。
+let parentResolver = null;
+export function setParentResolver(fn) {
+  parentResolver = typeof fn === 'function' ? fn : null;
+}
+
 function identityOf(agent) {
   const out = { target: '', root: '', label: '', preset: '' };
   try {
@@ -158,17 +167,67 @@ function identityOf(agent) {
     out.target = String((session && session.id) || (agent && agent.id) || '');
     try { out.preset = String((session && session.header && session.header.agentPreset) || ''); } catch (e) {}
   } catch (e) {}
+  // ══ 【BUG 修复 2026-11-28】root 必须沿 header.parentSession 上溯 ══════════
+  // 现场：压缩历史面板的「子代理」页永远空白，账本里 1006 条记录【全部】
+  //   target === root，前端按 `target !== root` 分链时分不出任何一条。
+  //
+  // 根因：这里原来靠 agent.parent / agent.parentAgent —— 那是【对象引用】，
+  //   而 DSH 0.2.x 的 agent 上并没有这个字段（谱系是写在会话 header 里的
+  //   字符串 parentSession）。于是循环第一次就拿不到 parent，
+  //   root 直接等于 target，所有记录都被判成「主对话」。
+  //
+  // 正确取法与 dsh-engineering-ui/lib/index.js 的 parentSessionId() 一致：
+  //   header.parentSession → agent.parentSession / parentId 兜底。
   try {
-    let cur = agent; let guard = 0; let root = out.target;
-    while (cur && guard < 32) {
-      guard += 1;
-      const parent = cur.parent || cur.parentAgent || null;
-      if (!parent) break;
-      const pid = String((parent.session && parent.session.id) || parent.id || '');
-      if (pid) root = pid;
-      cur = parent;
+    // ---- 取【直接父会话 id】 ----
+    const p = agent || {};
+    let parentId = '';
+    try {
+      parentId = String((p.session && p.session.header && p.session.header.parentSession) || '');
+    } catch (e) {}
+    if (!parentId) parentId = String(p.parentSession || p.parentId || '');
+    if (!parentId) {
+      const par = p.parent || p.parentAgent || null;
+      parentId = par ? String((par.session && par.session.id) || par.id || '') : '';
     }
-    out.root = root;
+    out.parent = parentId;
+    // ---- 再一路往上找到【最顶层根会话】 ----
+    // 【BUG 修复 2026-11-28 · 第二轮】上一版把 root 直接当成直接父会话就停了，
+    //   结果二级及以下的孙代挂到它自己的父会话下，和一级子代理的 root 不同，
+    //   面板按 root 聚合时它们整组丢失（用户反馈：分子代理能显示，二级以下不显示）。
+    //
+    // 正确口径：root = 谱系最顶端的主对话。这样一条链上所有层级的记录，
+    //   root 字段都相同，面板一次 root 过滤就能全部取到；
+    //   「属于哪个子代理」由 target 自己回答，不靠 root 表达。
+    // 上溯方式：优先用 ctx 反查（能拿到父会话的 header，最可靠）；
+    //   拿不到 ctx 时退回沿对象引用爬。两路都最多 32 层，防环。
+    let rootId = parentId;
+    if (parentId) {
+      // ① 首选：注入的反查器（见 apply 里的 setParentResolver）
+      const look = parentResolver;
+      if (typeof look === 'function') {
+        let cur = parentId; const seen = new Set([cur]);
+        for (let i = 0; i < 32; i++) {
+          let up = '';
+          try { up = String(look(cur) || ''); } catch (e) { up = ''; }
+          if (!up || seen.has(up)) break;
+          seen.add(up); rootId = up; cur = up;
+        }
+      } else {
+        // ② 兜底：沿对象引用往上爬（旧版结构 / 单测环境）
+        let cur = p.parent || p.parentAgent || null;
+        let guard = 0;
+        while (cur && guard < 32) {
+          guard += 1;
+          const pid = String((cur.session && cur.session.id) || cur.id || '');
+          if (!pid) break;
+          rootId = pid;
+          cur = cur.parent || cur.parentAgent || null;
+        }
+      }
+    }
+    // 没有父会话时它自己就是根（主对话），target 与 root 相等是【正确】的。
+    out.root = rootId || out.target;
   } catch (e) { out.root = out.target; }
   try {
     const label = agent && (agent.label || agent.title || (agent.session && agent.session.title));
@@ -615,6 +674,47 @@ export class GuardedCompaction extends BasicCompactionEngine {
 export const inject = ['sessionPersistence', 'sessions', 'llm', 'tokenMeter', 'tools', 'systemPrompt'];
 
 export async function apply(ctx, config) {
+  // -- 【2026-11-28】父会话谱系：异步预热 + 落账时同步查表 --
+  // 约束：账本落盘是【同步】路径（压缩提交那一刻），不能 await。
+  //   而 sessionPersistence.stat() 是异步的。
+  // 方案：启动时异步把「每个 sessionId 的父会话」扫进 map，落账时纯查表。
+  //   表是【缓存】不是真相 —— 查不到就返回空，identityOf 会退回直接父级，
+  //   绝不会因为表没建好而写错数据（只会少折叠一两层，面板仍能显示）。
+  const parentMap = new Map();   // sessionId -> parentSessionId(''=根)
+  try {
+    setParentResolver(function (sessionId) {
+      const id = String(sessionId || '');
+      return id ? (parentMap.get(id) ?? '') : '';
+    });
+  } catch (e) {}
+  /** 异步补建谱系表（懒执行、限流、失败静默）。 */
+  let lineageTimer = null;
+  function scheduleLineageRefresh() {
+    if (lineageTimer) return;
+    lineageTimer = setTimeout(async function () {
+      lineageTimer = null;
+      try {
+        const sp = ctx.get ? ctx.get('sessionPersistence') : null;
+        if (!sp || typeof sp.list !== 'function' || typeof sp.stat !== 'function') return;
+        const ids = await sp.list();
+        if (!Array.isArray(ids)) return;
+        // 只补表里还没有的，避免每次全量重扫
+        for (const raw of ids.slice(0, 4000)) {
+          const id = String(raw && (raw.id || raw.sessionId || raw) || '');
+          if (!id || parentMap.has(id)) continue;
+          try {
+            const snap = await sp.stat(id);
+            const h = (snap && snap.header) || {};
+            parentMap.set(id, String(h.parentSession || ''));
+          } catch (e) { parentMap.set(id, ''); }
+        }
+      } catch (e) {
+        try { ctx.logger.warn('工程记忆：谱系表补建失败（压缩历史可能只折叠到直接父级）'); } catch (_e) {}
+      }
+    }, 800);
+    try { if (typeof lineageTimer.unref === 'function') lineageTimer.unref(); } catch (e) {}
+  }
+  scheduleLineageRefresh();
   await ctx.plugin(installAudit);
   await ctx.inject(['engineeringCompactionAudit'], async scope => {
     scope.systemPrompt.section({

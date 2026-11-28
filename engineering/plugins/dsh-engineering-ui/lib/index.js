@@ -284,6 +284,15 @@ function normalizeModelChain(raw) {
       const entry = { provider, model };
       const eff = String(m.reasoningEffort || '').trim();
       if (eff) entry.reasoningEffort = eff;
+      // ── 【2026-11-28】显式声明上下文窗口（可选）──────────────────────
+      // 为什么要它：换模型时如果新模型的窗口比当前上下文还小，切过去必然报
+      //   "compaction still above threshold after N attempts" —— 现场那条
+      //   trae/mimo-v2.6-flash（40K）就是这样撞的。
+      // 不填也能用：插件会从错误文本里学到实际占用，只是"谁装得下"要靠试。
+      // 填了就能在切换【前】直接跳过装不下的候选。
+      const cw = Number(m.contextWindow ?? m.context_window
+        ?? m.maxContextTokens ?? m.max_context_tokens);
+      if (Number.isFinite(cw) && cw > 0) entry.contextWindow = Math.floor(cw);
       out.entries.push(entry);
       // ── 【2026-10-30 改版】不再限制 10 个 ──────────────────────────────
       // 用户要求：「不限制他们应该加多少个」。
@@ -311,6 +320,99 @@ function nextModelCandidate(entries, tried) {
     return e;
   }
   return null;
+}
+
+// ══ 【2026-11-28 · 换模型策略 v2】回头重试 + 窗口适配 ═══════════════════════
+//
+// 现场三条（用户反馈）：
+//   ③ 切到 trae/mimo-v2.6-flash 直接报错：
+//      "context compaction failed: compaction still above threshold after 2
+//       compaction attempts (50578 >= threshold 40000)"
+//      —— 新模型窗口只有 40K，而会话已经 50K+，压缩也压不下去。
+//      旧逻辑【完全不看窗口大小】就切过去，必然撞墙。
+//   ④ 二级及以下子代理换不回来。
+//   ⑤ 用户要求：第 4 个失败时，先回头试第 1~3 个（它们可能已经恢复了），
+//      四个都不行才轮到第 5 个 —— 即"都要回头看看这个模型是否正常"。
+//
+// 于是候选挑选改成三轮：
+//   第 1 轮：链上还没试过、且窗口足够、且没被隔离的；
+//   第 2 轮：本轮试过但【已经过了冷却期】的（回头重试，用户明确要求）；
+//   第 3 轮：忽略隔离（宁可试一个被隔离的家，也不空转）。
+// 窗口不足的候选在每一轮都跳过 —— 那不是"暂时不行"，是"结构上就装不下"。
+
+/** 解析模型声明的上下文窗口（拿不到返回 null）。 */
+function windowOfEntry(entry) {
+  try {
+    const w = Number(entry && (entry.contextWindow || entry.context_window
+      || entry.maxContextTokens || entry.max_context_tokens));
+    return Number.isFinite(w) && w > 0 ? w : null;
+  } catch (e) { return null; }
+}
+
+// 试过之后多久允许回头重试。太短会立刻撞同一个限流窗口，太长就等于永不回头。
+const RETRY_AFTER_MS = 90 * 1000;
+
+/** triedTimes: Map<key, 时间戳>；返回该 key 是否已过冷却期。 */
+function cooledDown(triedTimes, key) {
+  try {
+    const t = triedTimes && triedTimes.get ? triedTimes.get(key) : undefined;
+    if (t === undefined) return true;
+    return (Date.now() - Number(t)) >= RETRY_AFTER_MS;
+  } catch (e) { return true; }
+}
+
+/**
+ * 挑选下一个候选（v2）。
+ * @param entries     规整后的链
+ * @param tried       本轮已尝试的 key 集合（保留以兼容旧调用）
+ * @param opts.triedTimes   Map<key, 时间戳>（用于冷却判断）
+ * @param opts.needTokens   当前上下文规模（超出候选窗口就跳过）
+ * @param opts.isQuarantined (provider)=>bool
+ * @returns {{entry:object|null, reason:string}}
+ */
+function pickCandidateV2(entries, tried, opts) {
+  const o = opts || {};
+  const list = Array.isArray(entries) ? entries : [];
+  const triedSet = tried || new Set();
+  const triedTimes = o.triedTimes || new Map();
+  const need = Number.isFinite(o.needTokens) && o.needTokens > 0 ? o.needTokens : 0;
+  const isQ = typeof o.isQuarantined === 'function' ? o.isQuarantined : () => false;
+
+  /** 窗口是否装得下：候选没声明窗口时按"未知"处理（允许试，但记一笔）。 */
+  const fits = (e) => {
+    const w = windowOfEntry(e);
+    if (w === null) return true;
+    // 留 10% 余量：贴着窗口上限切过去，压缩完照样可能超
+    return need <= Math.floor(w * 0.9);
+  };
+
+  // ① 首次尝试：没试过 + 窗口够 + 没被隔离
+  for (const e of list) {
+    const k = e.provider + '\u0000' + e.model;
+    if (triedSet.has(k)) continue;
+    if (!fits(e)) continue;
+    if (isQ(e.provider)) continue;
+    return { entry: e, reason: 'FIRST_TRY' };
+  }
+  // ② 回头重试：试过但已过冷却期（用户要求"回头看看是否正常"）
+  for (const e of list) {
+    const k = e.provider + '\u0000' + e.model;
+    if (!triedSet.has(k)) continue;
+    if (!fits(e)) continue;
+    if (!cooledDown(triedTimes, k)) continue;
+    if (isQ(e.provider)) continue;
+    return { entry: e, reason: 'RETRY_COOLED' };
+  }
+  // ③ 忽略隔离：宁可试一个被隔离的家，也不空转
+  for (const e of list) {
+    const k = e.provider + '\u0000' + e.model;
+    if (!fits(e)) continue;
+    if (triedSet.has(k) && !cooledDown(triedTimes, k)) continue;
+    return { entry: e, reason: 'IGNORE_QUARANTINE' };
+  }
+  // ④ 全都不合适：区分"都试过了"与"窗口都装不下"
+  const anyFits = list.some(fits);
+  return { entry: null, reason: anyFits ? 'ALL_TRIED' : 'NO_WINDOW_FITS' };
 }
 
 function modelKey(provider, model) {
@@ -1515,7 +1617,41 @@ export function apply(ctx) {
       //   且链路副作用仅是"换一个模型"，远小于"子代理直接死掉"的代价）。
       try {
         const pid = parentSessionId(agent);
+        // ── 【2026-11-28 · 用户第④条】二级及以下子代理换不回来 ────────────
+        // 现场：一级子代理能换模型，但二级及以下不行。
+        // 根因：这里只沿【直接父级】判断一次。二级子代理的父级是另一个子代理，
+        //   而那个父级往往【没有 preset 记录】（它的 header 只有 parentSession，
+        //   不带 agentPreset），于是 cached===undefined 走到"未知"分支；
+        //   更糟的是父级若曾被判成非工程（例如父级自己也处于 off 状态），
+        //   这里就直接 return false，整个子树全部失去换模型能力。
+        // 正确判据：**沿祖先链一路向上**，只要任一祖先明确是工程模式即成立。
+        //   只有【整条链都明确不是工程】才返回 false。
         if (pid) {
+          try {
+            // 沿祖先链上溯（最多 32 层）：只要有一层明确是工程就算成立。
+            // 为什么需要这个：二级子代理的父级是另一个子代理，它的 preset 记录
+            //   往往不在缓存里（header 只有 parentSession，没有 agentPreset）；
+            //   只看直接父级会得到"未知"甚至"非工程"，整个子树就失去换模型能力。
+            let cur = String(pid);
+            const seen = new Set([cur]);
+            for (let hop = 0; hop < 32 && cur; hop++) {
+              const c = presetCache.get(cur);
+              if (c === GUARD_PRESET) return true;
+              const cs = modelChainState.get(cur);
+              if (cs && cs.isEng === true) return true;
+              if (c && c !== GUARD_PRESET && isKnownPreset(c)) return false;
+              // 该层没有记录：往上再走一层（反查它的 parentSession）
+              const up = ancestorCache.get(cur);
+              if (up === undefined) {
+                // 还没查到 → 异步预热，本次按"未知"继续（不阻塞判定）
+                readParentOf(cur).catch(() => {});
+                break;
+              }
+              if (!up || seen.has(up)) break;
+              seen.add(up);
+              cur = up;
+            }
+          } catch (e) {}
           const pst = parentChainStateOf(agent);
           if (pst && pst.isEng === true) return true;
           if (pst && pst.isEng === false) return false;   // 父级明确不是工程 → 不管
@@ -1534,6 +1670,50 @@ export function apply(ctx) {
     } catch (e) {
       return false;
     }
+  }
+
+  // ── 【2026-11-28】祖先谱系缓存（sessionId -> parentSessionId）───────────
+  // 为什么需要独立缓存：判定"这个会话属不属于工程模式"必须能一路往上走，
+  //   而 agent 对象只有自己的信息。反查走宿主的 sessionPersistence（异步），
+  //   所以做成【异步预热 + 同步查表】：查不到时本次按"未知"继续，
+  //   绝不阻塞判定，也绝不因为查不到就判成"非工程"（那会让整棵子树失去换模型）。
+  const ancestorCache = new Map();   // sessionId -> parentSessionId（'' = 无父）
+  const ancestorPending = new Set();
+  async function readParentOf(sessionId) {
+    const id = String(sessionId || '');
+    if (!id) return '';
+    if (ancestorCache.has(id)) return ancestorCache.get(id);
+    if (ancestorPending.has(id)) return '';
+    ancestorPending.add(id);
+    try {
+      const sp = ctx.sessionPersistence;
+      if (!sp || typeof sp.stat !== 'function') return '';
+      const snap = await sp.stat(id);
+      const h = (snap && snap.header) || {};
+      const p = String(h.parentSession || '');
+      ancestorCache.set(id, p);
+      // 顺手记下它的 preset，省一次 readPreset
+      try {
+        const pr = String(h.agentPreset || '');
+        if (pr && !presetCache.has(id)) presetCache.set(id, pr);
+      } catch (e) {}
+      return p;
+    } catch (e) {
+      return '';
+    } finally {
+      ancestorPending.delete(id);
+    }
+  }
+  /** 预热：把一个会话及其祖先链一次性拉进缓存（异步，失败静默）。 */
+  async function warmAncestors(sessionId) {
+    try {
+      let cur = String(sessionId || '');
+      const seen = new Set();
+      for (let i = 0; i < 32 && cur && !seen.has(cur); i++) {
+        seen.add(cur);
+        cur = await readParentOf(cur);
+      }
+    } catch (e) {}
   }
 
   /** 取/建某 agent 的接替状态，并按 turn 重置已试集合。 */
@@ -1732,7 +1912,20 @@ export function apply(ctx) {
     try {
       const cfg = readModelChainConfig();
       if (cfg.autoResume === false) return false;
-      if (!agent || typeof agent.followup !== 'function') return false;
+      if (!agent) return false;
+      // -- 可观测性 2026-11-28 --
+      // 子代理最常见的失败形态：select() 已经写进新路由，但会话在失败时被判 ready
+      //   并 dispose，于是 followup 无从唤醒。这里必须把这种情形【说出来】，
+      //   否则用户看到的就是「子代理停了、模型也没换」。
+      if (typeof agent.followup !== 'function') {
+        try {
+          if (/^(1|true|yes)$/i.test(String(process.env.DSH_ENG_MODEL_DIAG || ''))) {
+            console.warn('[dsh-engineering-ui][model-chain] NO_FOLLOWUP: agent='
+              + String(agent.id || '-') + '，无法自动续跑（会话可能已 dispose）');
+          }
+        } catch (e) {}
+        return false;
+      }
       const max = Number.isFinite(cfg.autoResumeMax) ? cfg.autoResumeMax : 3;
       if ((st.resumeCount || 0) >= max) {
         try {
@@ -1938,9 +2131,35 @@ export function apply(ctx) {
       const agent = payload && payload.agent;
       const failure = payload && payload.failure;
       const code = String((failure && failure.code) || '');
-      if (!agent || !agent.id) return next();
-      if (!modelChainApplies(agent)) return next();
+      // -- 可观测性 2026-11-28：把为什么没换模型写清楚 --
+      // 现场：子代理被限流时不换模型，而日志里什么都看不到，
+      //   因为下面每一处提前 return 都是静默的。
+      // 现在每条放行分支都打一行，诊断时一眼看出卡在哪（NO_AGENT / NOT_APPLIES）。
+      // 只有设置 DSH_ENG_MODEL_DIAG=1 时才打，默认不刷屏。
+      const _diagOn = /^(1|true|yes)$/i.test(String(process.env.DSH_ENG_MODEL_DIAG || ''));
+      const _diag = (why, extra) => {
+        if (!_diagOn) return;
+        try {
+          console.warn('[dsh-engineering-ui][model-chain] ' + why
+            + ' | agent=' + String((agent && agent.id) || '-')
+            + ' code=' + (code || '-')
+            + (extra ? ' | ' + extra : ''));
+        } catch (e) {}
+      };
+      if (!agent || !agent.id) { _diag('NO_AGENT'); return next(); }
+      // 【2026-11-28】先把祖先链预热进缓存，再判定作用域 —— 否则深层子代理
+      //   第一次出错误时谱系还没查到，会被误判成"非工程"而失去换模型能力。
+      //   warmAncestors 是异步的，这里不 await（不阻塞错误处理）；
+      //   首次可能仍走"未知→保守按工程"，第二次起就有准确谱系了。
+      try { warmAncestors(agent.id).catch(() => {}); } catch (e) {}
+      if (!modelChainApplies(agent)) {
+        const _cfg2 = readModelChainConfig();
+        _diag('NOT_APPLIES', 'chainEntries=' + ((_cfg2.entries || []).length)
+          + ' supportsSelect=' + supportsModelSelect(agent));
+        return next();
+      }
       const cfg = readModelChainConfig();
+      _diag('APPLIES', 'chainEntries=' + cfg.entries.length);
       const st = modelChainStateOf(agent, payload.turn);
 
       // ── 【2026-10-30 强化】判定"这个模型是否还能正常工作" ────────────────
@@ -1971,13 +2190,27 @@ export function apply(ctx) {
         || /empty response|no content|invalid response|decode/i.test(String((failure && failure.message) || ''));
 
       // 达到任一条件才换；否则交回默认重试链路（让宿主自己重试本模型）
-      if (!_fatal && !_tooMany && !_broken) return next();
+      if (!_fatal && !_tooMany && !_broken) {
+        _diag('NOT_SWITCH_WORTHY', 'fatal=' + _fatal + ' tooMany=' + _tooMany
+          + ' broken=' + _broken + ' class=' + (_cls && _cls.class));
+        return next();
+      }
+      _diag('SWITCH_TRIGGERED', 'fatal=' + _fatal + ' tooMany=' + _tooMany
+        + ' class=' + (_cls && _cls.class) + ' cnt=' + _cnt);
       // 把"刚失败的模型"记为已试，避免又切回它
+      // 【2026-11-28】同时记时间戳：冷却之后允许回头重试（用户要求）。
+      st.triedTimes = st.triedTimes || new Map();
+      const _nowTs = Date.now();
       st.tried.add(modelKey(payload.provider, (failure && failure.model) || ''));
+      st.triedTimes.set(modelKey(payload.provider, (failure && failure.model) || ''), _nowTs);
       st.tried.add(modelKey(payload.provider, ''));
+      st.triedTimes.set(modelKey(payload.provider, ''), _nowTs);
       // 同 provider 的候选全部标掉 —— 额度是按账号算的，同家大概率一起挂
       for (const e of cfg.entries) {
-        if (e.provider === payload.provider) st.tried.add(modelKey(e.provider, e.model));
+        if (e.provider === payload.provider) {
+          st.tried.add(modelKey(e.provider, e.model));
+          st.triedTimes.set(modelKey(e.provider, e.model), _nowTs);
+        }
       }
       // ── 【2026-10-30 修正】从【当前实际在用的模型】往后找候选 ──────────
       // 原实现用 nextModelCandidate(entries, tried) 从头扫，于是：
@@ -2002,17 +2235,59 @@ export function apply(ctx) {
       // ── 【2026-11-05 · 0.2.2】优先挑"没被隔离的家" ─────────────────────
       // 同批 fork 出来的子代理会读到同一份隔离表：一个撞了额度，后面的
       // 直接跳过这个 provider，不必每个都先撞一堵墙再切。
-      let nxt = firstHealthyCandidate(cfg.entries, st.tried, null);
-      if (!nxt) {
-        // 整条链都被隔离 / 都试过了 → 退一步只按"本轮试没试过"挑，
-        // 宁可去试一个被隔离的家，也不空转。
-        nxt = nextModelCandidate(cfg.entries, st.tried);
-      }
-      if (!nxt) {
-        // 链已试完 → 交回默认（明确失败，绝不空转）
+      // ── 【2026-11-28 · 策略 v2】首次尝试 → 回头重试 → 忽略隔离 ──────────
+      // 旧实现只做"本轮没试过的第一个"，于是：
+      //   · 第 4 个失败后直接判定"链耗尽"，不会回头试前三个（用户第⑤条要求）；
+      //   · 完全不看新模型窗口，切到 40K 窗口的模型必然撞
+      //     "compaction still above threshold"（用户第③条报错）。
+      // 现在一并解决：窗口装不下的候选一律跳过，其余按三轮挑。
+      // ── 估算"当前上下文占用了多少 token" ────────────────────────────
+      // 为什么优先从错误文本里抠：宿主压缩失败时报得很准，例如
+      //   "compaction still above threshold after 2 compaction attempts
+      //    (50578 estimated tokens >= threshold 40000)"
+      //   50578 就是真实的当前占用，直接拿它判断"新窗口装不装得下"最可靠。
+      // 抠不到时退回压缩阈值（≈ 当前占用已经接近的量级，作为保守下界）。
+      const _needTokens = (() => {
         try {
-          console.warn('[dsh-engineering-ui] 链内候选已全部失败（'
-            + cfg.entries.length + ' 个），交还宿主处理');
+          const m = /(\d{3,7})\s*estimated\s*tokens/i.exec(String(code) + ' '
+            + String((failure && failure.message) || ''));
+          if (m) return Number(m[1]);
+        } catch (e) {}
+        try {
+          // 会话自己的窗口也能反推规模下界：当前占用不会超过它
+          const _th = compactionThresholdOf(agent);
+          if (Number.isFinite(_th && _th.value) && _th.value > 0) return Number(_th.value);
+        } catch (e) {}
+        return 0;
+      })();
+      const _pick = pickCandidateV2(cfg.entries, st.tried, {
+        triedTimes: st.triedTimes,
+        needTokens: _needTokens,
+        isQuarantined: isProviderQuarantined,
+      });
+      let nxt = _pick.entry;
+      _diag('PICK_V2', 'reason=' + _pick.reason
+        + ' need≈' + _needTokens
+        + ' tried=' + st.tried.size
+        + (nxt ? ' -> ' + nxt.provider + '/' + nxt.model : ''));
+      if (!nxt) {
+        _diag('NO_CANDIDATE_LEFT', 'reason=' + _pick.reason
+          + ' tried=' + st.tried.size + ' entries=' + cfg.entries.length
+          + ' quarantine=' + providerQuarantine.size + ' need=' + _needTokens);
+        // 两种截然不同的结局必须分开说（原来一律报「链已耗尽」）：
+        //   NO_WINDOW_FITS —— 链里有模型，但当前上下文太大，谁的窗口都装不下。
+        //     这不是「模型都挂了」：重试同一批只会反复撞 compaction 错误。
+        //     正确处置是清理/压缩该会话，或加入窗口更大的模型。
+        //   ALL_TRIED —— 确实都试过了，交还宿主。
+        try {
+          if (_pick.reason === 'NO_WINDOW_FITS') {
+            console.warn('[dsh-engineering-ui] 换模型已停止：链内 ' + cfg.entries.length
+              + ' 个模型的上下文窗口都装不下当前会话（约 ' + _needTokens + ' tokens）；'
+              + '请清理/压缩该会话，或在设置页加入窗口更大的模型。');
+          } else {
+            console.warn('[dsh-engineering-ui] 链内候选已全部失败（'
+              + cfg.entries.length + ' 个），交还宿主处理');
+          }
         } catch (e) {}
         return next();
       }
@@ -2030,13 +2305,29 @@ export function apply(ctx) {
       if (supportsModelSelect(agent)) {
         // ── 0.2.2 通道 ────────────────────────────────────────────────
         const ok = selectModelRoute(agent, nxt);
+        _diag('SELECT_WRITTEN', 'to=' + nxt.provider + '/' + nxt.model + ' ok=' + ok);
         try {
           console.warn('[dsh-engineering-ui] 模型接替（select）：' + payload.provider
             + ' 错误 ' + code + ' → ' + nxt.provider + '/' + nxt.model
             + (ok ? '，下一次尝试生效' : '（select 写入失败，交还宿主）'));
         } catch (e) {}
         // 失败后自己续一轮，不用用户手动重发（可用 autoResume:false 关掉）
-        maybeAutoResume(agent, st, payload, nxt);
+        // -- 2026-11-28 加固：子代理场景 --
+        // select() 只对「下一个尚未准备的步骤」生效；子代理在失败时很可能被判
+        // ready 并 dispose，于是新路由写了却没机会生效，用户看到的是
+        // 「子代理停了、模型也没换」。这里在续跑前把事实记清楚：
+        //   · 能给 followup → 正常续跑（新路由一定被读到）；
+        //   · 不能给 followup → 明确提示需要重开该子代理会话，而不是静默放弃。
+        const resumed = maybeAutoResume(agent, st, payload, nxt);
+        if (!resumed) {
+          try {
+            const isChild = !!parentSessionId(agent);
+            console.warn('[dsh-engineering-ui] 模型接替已写入但无法自动续跑'
+              + '（' + (isChild ? '子代理' : '主对话') + ' agent=' + String(agent.id || '-')
+              + '），新模型 ' + nxt.provider + '/' + nxt.model
+              + ' 将在该会话下次启动时生效；若该会话已被回收，请重新派发。');
+          } catch (e) {}
+        }
         // ⚠️ 绝不返回 {kind:'retry'}：重试会复用本步已捕获的旧路由，
         //    只会再撞一次同样的错、白烧一次请求。交回下游收尾。
         return next();
@@ -2810,6 +3101,49 @@ export function apply(ctx) {
                           contextWindow: null, ratio: fb.ratio, at: Date.now() };
           }
         } catch (e) {}
+        // ── 【2026-11-28】把子代理 id 映射成【可读名字】 ──────────────────
+        // 现场：面板里每条都显示 31da68c4 / f4fdb8a7 这类 hash 前缀，
+        //   用户原话「还是没有区分是哪个子代理的压缩历史，可以沿用子代理名称」。
+        // 根因：账本写入时 agent.label / session.title 在 0.2.x 上取不到，
+        //   只能退回 target 前 8 位；而那串 hash 对人没有意义。
+        // 修法：宿主这里本来就有【权威目录】—— subagents.listDescendants(root)
+        //   返回的每行都带 label/name。用它建 id→名字映射，回填到 entries。
+        //   为什么不改写入端：压缩发生在会话内部，那里拿不到兄弟会话的名字；
+        //   而 UI 侧有 root，一次就能问全（且是真正的显示名，不是猜的）。
+        try {
+          const probeRoot = rootId || (r && r.entries && r.entries[0] && r.entries[0].root) || '';
+          if (probeRoot && ctx.subagents && typeof ctx.subagents.listDescendants === 'function') {
+            const tree = await ctx.subagents.listDescendants(String(probeRoot));
+            const nameOf = new Map();
+            for (const row of (Array.isArray(tree) ? tree : [])) {
+              const id = String((row && (row.id || row.sessionId)) || '');
+              if (!id) continue;
+              const nm = String((row && (row.label || row.name || row.title)) || '').trim();
+              if (nm) nameOf.set(id, nm);
+            }
+            if (nameOf.size && r && Array.isArray(r.entries)) {
+              for (const e of r.entries) {
+                const id = String(e && e.target || '');
+                // 根会话自己不在 descendants 里：它是主对话，给个固定名字，
+                //   免得主对话那条也显示成 hash 前缀。
+                if (!nameOf.has(id) && id && id === String(probeRoot)) nameOf.set(id, '主对话');
+                const nm = nameOf.get(id);
+                if (nm) {
+                  // 保留原始 label 供排查，另给 displayLabel 供渲染
+                  if (!e.labelRaw) e.labelRaw = String(e.label || '');
+                  e.label = nm;
+                }
+              }
+              // counts 里也同步（徽标用的就是它）
+              if (r.counts && typeof r.counts === 'object') {
+                for (const k of Object.keys(r.counts)) {
+                  const nm = nameOf.get(k);
+                  if (nm) r.counts[k].label = nm;
+                }
+              }
+            }
+          }
+        } catch (e) { /* 拿不到名字就用原值，绝不影响面板 */ }
         return send(res, 200, Object.assign({}, r, { threshold }));
       } catch (error) {
         return send(res, 200, { ok: false, entries: [], error: String((error && error.message) || error) });

@@ -749,6 +749,11 @@ window.__ModuleLoader__.load({
       // 档位列窄一些（provider / model 才是主要信息）
       '.eng-mc-effort{flex:0 0 68px}',
       '.eng-mc-head .eng-mc-effort{flex:0 0 68px}',
+      // 【2026-11-28】上下文窗口列：窄输入框，去掉下拉箭头（它是 number input）
+      '.eng-mc-cw{flex:0 0 82px}',
+      '.eng-mc-head .eng-mc-cw{flex:0 0 82px}',
+      '.eng-mc-cw::after{content:none}',
+      '.eng-mc-cw .eng-mc-sel{padding-right:7px;cursor:text}',
       '.eng-mc-selwrap::after{color:#8b95a3;content:"\u25be";font-size:9px;pointer-events:none;position:absolute;right:6px;top:50%;transform:translateY(-50%)}',
       '.eng-mc-ops{display:flex;flex:none;gap:3px;width:auto}',
       '.eng-mc-ops .eng-conn-btn.tiny{font-size:10.5px;padding:1px 6px}',
@@ -1166,6 +1171,25 @@ window.__ModuleLoader__.load({
       .eng-sv-history :is(.eng-cp-cap-t, .eng-cp-name, .eng-cp-sum-i b) { color: var(--sv-ink); font-size: 14px; }
       .eng-sv-history :is(.eng-cp-cap-n, .eng-cp-empty, .eng-cp-time, .eng-cp-save, .eng-cp-body, .eng-cp-sum-i) { color: var(--sv-muted); font-size: 13px; }
       .eng-sv-history .eng-cp-row:hover { background: var(--sv-tint); }
+      // ── 【分组 2026-11-28】子代理压缩历史的分组头 ─────────────────────
+      // 现场：十几个子代理的记录混在一张表里、label 全是 hash 前缀，
+      //   用户原话「这里也要分子代理展示，不然太乱了」。
+      // 组头做成可点折叠，视觉上比行略重（浅底色 + 粗体名），
+      //   一眼看出"这几条属于同一个子代理"。
+      .eng-cp-group {
+        display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+        padding: 7px 10px; margin-top: 6px; border-radius: 7px;
+        background: var(--sv-canvas); border: 1px solid var(--sv-border);
+        cursor: pointer; font-size: 13px; position: sticky; top: 0; z-index: 1;
+      }
+      .eng-cp-group:hover { border-color: var(--sv-accent); }
+      .eng-cp-group-arrow { color: var(--sv-accent); width: 12px; }
+      .eng-cp-group-name {
+        font-weight: 680; color: var(--sv-ink);
+        font-family: ui-monospace, Consolas, monospace;
+      }
+      .eng-cp-group-n { color: var(--sv-ink); font-weight: 600; }
+      .eng-cp-group-meta { color: var(--sv-muted); font-size: 12px; }
       @container (max-width: 600px) {
         .eng-sv-cards, .eng-sv-home-pair { grid-template-columns: 1fr; }
       }
@@ -4020,6 +4044,11 @@ window.__ModuleLoader__.load({
       var openSt = useState(null);
       var openAt = openSt[0];
       var setOpenAt = openSt[1];
+      // 【分组 2026-11-28】哪个子代理分组被折叠了（缺省=全展开）。
+      //   同样必须写在所有早退分支之前，否则 hook 数量会变。
+      var openGroupSt = useState({});
+      var openGroup = openGroupSt[0];
+      var setOpenGroup = openGroupSt[1];
 
       var rootId = props && props.rootSessionId ? String(props.rootSessionId) : '';
       var selectedId = props && props.selectedId ? String(props.selectedId) : '';
@@ -4108,6 +4137,36 @@ window.__ModuleLoader__.load({
       //   仅当左列还没选中任何子代理时才展示全部（概览语义）。
       if (tab === 'agent' && selectedId) {
         shown = shown.filter(function (e) { return String(e.target || '') === selectedId; });
+      }
+
+      // ── 【分组 · 2026-11-28】子代理页按【子代理】分组 ──────────────────
+      // 现场：子代理页把十几个不同子代理的记录混在一张表里，label 都是
+      //   hash 前缀（31da68c4 / f4fdb8a7…），完全分不清谁是谁，用户原话
+      //   「这里也要分子代理展示，不然太乱了」。
+      // 做法：按 target 分组，组内仍按时间倒序；组头显示该子代理的
+      //   标识 + 压缩次数 + 省下字符，组可折叠。主对话页不受影响。
+      //   ⚠️ 分组只影响展示，不改任何数据与计数口径。
+      var grouped = null;
+      if (tab === 'agent' && !selectedId && shown.length) {
+        var byTarget = Object.create(null);
+        var order = [];
+        for (var gi = 0; gi < shown.length; gi++) {
+          var ge = shown[gi];
+          var gk = String(ge.target || '');
+          if (!byTarget[gk]) {
+            byTarget[gk] = { target: gk, label: '', items: [], saved: 0, nums: 0, lastAt: 0 };
+            order.push(gk);
+          }
+          var gb = byTarget[gk];
+          gb.items.push(ge);
+          gb.saved += Math.max(0, Number(ge.saved_chars || 0));
+          gb.nums += Number(ge.l0_numbers || 0) + Number(ge.l0_materials || 0);
+          var gat = Number(ge.at) || 0;
+          if (gat > gb.lastAt) { gb.lastAt = gat; gb.label = String(ge.label || gb.label || ''); }
+        }
+        // 组按「最近压缩时间」倒序：最活跃的子代理排在最上面
+        grouped = order.map(function (k) { return byTarget[k]; })
+          .sort(function (a, b) { return b.lastAt - a.lastAt; });
       }
 
       // ── 【布局 v13 · 2026-11-16】最新的在最上面 ─────────────────────────
@@ -4211,7 +4270,8 @@ window.__ModuleLoader__.load({
       //   openAt 记的是"哪一条被点开"，同一时刻只展开一条（避免长文本堆叠）。
       // 宿主已按「最新在上」排好；这里直接用 ordered，不再 reverse（旧实现
       //   reverse() 是为抵消"账本尾部是最新"的存储顺序，换后端后该假设已不成立）。
-      var rows = ordered.map(function (e, i) {
+      /** 渲染单条记录（抽成函数：分组视图与扁平视图共用同一套行样式）。 */
+      function renderRow(e, i, hideName) {
         var nums = Number(e.l0_numbers || 0) + Number(e.l0_materials || 0);
         var restored = Number(e.l0_restored || 0);
         var at = Number(e.at) || 0;
@@ -4226,7 +4286,8 @@ window.__ModuleLoader__.load({
         var rowCls = 'eng-cp-row' + (excerpt ? ' clickable' : '');
         var children = [
           h('span', { className: 'eng-cp-time', key: 't' }, hhmm),
-          h('span', { className: 'eng-cp-name', key: 'n' }, label),
+          // 分组视图里名字已在组头，行内不再重复（省一列宽度）
+          hideName ? null : h('span', { className: 'eng-cp-name', key: 'n' }, label),
           h('span', { className: 'eng-cp-num', key: 'l', title: '本次保住的机械数值条数' }, 'L0 ' + nums),
           restored > 0
             ? h('span', { className: 'eng-cp-fix', key: 'f', title: '模型漏写、已自动补回 ' + restored + ' 条' }, '+' + restored)
@@ -4246,10 +4307,48 @@ window.__ModuleLoader__.load({
               }
             : undefined,
         }, children);
-      });
+      }
+
+      // ── 分组视图：子代理页且未选中具体子代理时，按子代理分块 ──────────
+      var listChildren = null;
+      if (grouped && grouped.length > 1) {
+        listChildren = [];
+        for (var gk2 = 0; gk2 < grouped.length; gk2++) {
+          (function (g) {
+            var gid = g.target;
+            var gname = String(g.label || '').trim() || g.target.slice(0, 8);
+            var isOpen = openGroup[gid] !== false;   // 默认展开
+            var head = h('div', {
+              className: 'eng-cp-group',
+              key: 'g:' + gid,
+              title: '点击折叠/展开这个子代理的压缩记录',
+              onClick: function (ev) {
+                try { ev.stopPropagation(); } catch (err) {}
+                setOpenGroup(function (prev) {
+                  var n = {}; for (var kk in prev) if (Object.prototype.hasOwnProperty.call(prev, kk)) n[kk] = prev[kk];
+                  n[gid] = !isOpen; return n;
+                });
+              },
+            },
+              h('span', { className: 'eng-cp-group-arrow' }, isOpen ? '▾' : '▸'),
+              h('span', { className: 'eng-cp-group-name' }, gname),
+              h('span', { className: 'eng-cp-group-n' }, g.items.length + ' 次'),
+              g.nums > 0 ? h('span', { className: 'eng-cp-group-meta' }, '数值 ' + g.nums) : null,
+              h('span', { className: 'eng-cp-group-meta' }, '省 ' + g.saved + ' 字符'));
+            listChildren.push(head);
+            if (isOpen) {
+              for (var ii = 0; ii < g.items.length; ii++) {
+                // 组内不再重复显示名字（组头已经写了），省一列空间
+                listChildren.push(renderRow(g.items[ii], gk2 + ':' + ii, true));
+              }
+            }
+          })(grouped[gk2]);
+        }
+      }
 
       return h('div', { className: 'eng-cp' }, cap, sumBar,
-        h('div', { className: 'eng-cp-list', ref: boxRef }, rows));
+        h('div', { className: 'eng-cp-list', ref: boxRef },
+          listChildren || ordered.map(function (e, i) { return renderRow(e, i, false); })));
     }
 
     /* ══════════════════════════════════════════════════════════════════════
@@ -6231,11 +6330,30 @@ window.__ModuleLoader__.load({
             }, eOpts));
         }
 
+        // -- 【2026-11-28】上下文窗口（可选）---------------------------------
+        // 为什么要给用户填：换模型时若新模型窗口比当前会话还小，切过去必然
+        //   报 "compaction still above threshold"（现场 trae/mimo-v2.6-flash
+        //   40K vs 会话 50K+ 就是这样撞的）。填了这个数，插件会在切换【前】
+        //   就跳过装不下的候选，而不是撞一次错再退回来。
+        // 留空 = 未知，插件仍会尝试（保守但可用），只是可能白撞一次。
+        var cwCell = h('span', { className: 'eng-mc-selwrap eng-mc-cw' },
+          h('input', {
+            className: 'eng-mc-sel', type: 'number', min: '1000', step: '1000',
+            value: (m.contextWindow != null ? String(m.contextWindow) : ''),
+            placeholder: '窗口',
+            title: '上下文窗口（token）。留空=未知。填了就能避免切到装不下的小窗口模型',
+            onChange: function (e) {
+              var v = String(e.target.value || '').trim();
+              setSlot(i, 'contextWindow', v === '' ? undefined : Number(v));
+            },
+          }));
+
         return h('div', { className: 'eng-mc-row', key: 'mc' + i },
           h('span', { className: 'eng-mc-idx' }, String(i + 1)),
           h('span', { className: 'eng-mc-selwrap' }, provCell),
           h('span', { className: 'eng-mc-selwrap' }, modelCell),
           effortCell,
+          cwCell,
           h('span', { className: 'eng-mc-ops' },
             h('button', {
               className: 'eng-conn-btn tiny', type: 'button', disabled: i === 0,
@@ -6309,6 +6427,8 @@ window.__ModuleLoader__.load({
             h('span', { className: 'eng-mc-cell' }, 'provider'),
             h('span', { className: 'eng-mc-cell' }, 'model'),
             h('span', { className: 'eng-mc-cell eng-mc-effort' }, '档位'),
+            // 【2026-11-28】窗口列：填了就能避免切到装不下的小窗口模型
+            h('span', { className: 'eng-mc-cell eng-mc-cw' }, '窗口'),
             h('span', { className: 'eng-mc-ops' }, '')),
           rows,
           // "+" 添加一行（不限个数）—— 用户要求：默认 3 个，后面给个 + 让他们自己加

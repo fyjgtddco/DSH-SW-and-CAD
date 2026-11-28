@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
-import { openFlow, roles, specHashDrift } from './flow.js';
+import { openFlow, roles, steps, specHashDrift } from './flow.js';
+import { COALESCE_MS, RECOVERY_MS, deliveryRoles, deliveryTopics, fourthReason, openDeliveryBook } from './delivery.js';
 
 export const name = 'dsh-engineering-seven-stage';
 export const inject = ['tools','agents','subagents'];
@@ -288,253 +289,109 @@ export function install(ctx, config, createUserMessage) {
   const stopTries = new Map();
   const expectedDisposal = new WeakSet();
   const launches = new Set();
-  const wakeups = new Map();
-  /**
-   * ── 【2026-11-19 · 排队消息】同一节点"未消费就不再重复投递" ───────────────
-   *
-   * 现场（截图）：主对话/子会话侧堆了 **4 条**「七阶段插件任务…有新任务包」
-   *   「…检索工单已回填…」，全部卡在队列里逐个 turn 跑。
-   *
-   * 两个原因叠加：
-   *   ① 宿主的 delivery:'queue' → agent.followup()，语义是
-   *      "Queue an ordinary follow-up turn... The item becomes the sole ordinary
-   *       message of its own turn."（runtime-types.ts:253）
-   *      —— 每一条通知都**独占一个完整 turn**，4 条就是 4 轮往返。
-   *   ② route() 在每次工具调用后都会跑，靶心 key 里含 phase/jobs/facts 等，
-   *      状态一动 key 就变，于是同质内容被反复投递。
-   *
-   * 但所有通知的实质都是同一件事：**"去调 status 读最新状态"**。
-   *   status 读的是磁盘上的当下值，所以**只要一条就够了**，早发的必然过时。
-   *
-   * 修法（两道）：
-   *   ① delivery 'queue' → 'steer'：
-   *      "Submit steering for the nearest step. An idle driver starts a turn;
-   *       a running driver consumes it at its next step boundary."（同上文件）
-   *      —— 插队进当前步，空闲时立刻开 turn，不再排成一串。
-   *   ② 每个 (task, sid) 维护一个"未消费"标记：期间新的通知只更新
-   *      `pendingText`，等这一轮真正被消费（该角色下次调用工具）才允许再发。
-   *      这样同一波状态变化无论触发多少次 route()，对方最多收到一条。
-   */
-  const inFlight = new Map();     // n -> {text, key}
-  const consumedAt = new Map();   // n -> 上次被消费的 key
-  const targetPhase = s => [s.revision,s.cursor,s.phase,s.question?.id,
-    ...Object.values(s.jobs).map(j=>j.id),Object.keys(s.ended).join(','),
-    Object.keys(s.failures).join(','),s.facts.length,Object.keys(s.members).length].join('|');
-
-  /**
-   * @param {boolean} [force] 跳过"在途合并"强制投递 —— 只给 deliver（人工显式重发）用。
-   *   写成显式形参而不是读 arguments：后者在参数增删时静默失效，是最难查的那种 bug。
-   */
-  function notify(task, sid, text, key, force = false) {
-    if(!sid || !text) return;
-    const n = task + ':' + sid;
-    if(wakeups.get(n)===key) return;
-    // ══ 【2026-11-19 · 会话 c9c2fd56 现场】角色不该"睡死"在一个回合里 ═══════
-    // 现场：knowledge/design/review 各调了一次 wait_agent(timeout_ms=600000)。
-    //   11:44:58 任务包已经到了它们的 inbox，但 wait_agent 的语义是
-    //   "等【下一个 step】的输入"——它只把消息放进 next-turn 队列，
-    //   不打断正在进行的这一步。于是三个角色各空等 41 分钟，
-    //   直到用户在 12:26 手动掐断。
-    //   问题的本质：**插件用"投递消息"驱动角色，而角色用"阻塞等待"驱动自己**，
-    //   两套模型对不上。能改的是插件这一侧：明确告诉角色"别等，直接 status 轮询"。
-    const message='七阶段插件任务 ' + task + '。' + text
-      + ' 请先调用 ' + TOOL + ' action=status 读取当前状态及版本。'
-      // 这段每句话都有明确目的：不用 wait_agent、按 next 走、没事就 yield 退出回合。
-      + '\n【推进方式】status.next 已经写清这一步该做什么，照做即可；'
-      + '有任务包就处理，没有任务包就 action=yield 结束本回合（宿主会在需要时再叫你）。'
-      + '⚠️ 不要用 wait_agent 等待任务包 —— 它等的是"下一步的输入"，你的任务包进了队列也不会唤醒它，'
-      + '实测会空等到超时。等待的正确姿势是：yield 结束回合，靠插件投递唤醒。';
-    // ② 已有一条【已投递但还没被消费】的通知 —— 不再另发。
-    //    同一批 route() 里可能对同一个 sid 触发多条（例如 root 同时收到
-    //    "工单待回填" 与 "进入补证等待"）：只保留**最后一条**。
-    //    为什么保留最后一条而不是拼接：每条通知都以"请先调 status 读当前状态"收尾，
-    //    status 永远给最新值，所以旧的那条必然过时 —— 拼进去只会让 prompt 更长。
-    const inflight = force ? undefined : inFlight.get(n);
-    if (inflight) {
-      inflight.text = message;
-      inflight.key = key ?? inflight.key;
-      wakeups.set(n, key);
-      return;
-    }
-    const s=flow.load(task);
-    wakeups.set(n,key);
-    const failed=()=>{
-      // 投递失败必须清掉 inFlight，否则这个 (task,sid) 会被永久静音。
-      inFlight.delete(n);
-      if (wakeups.get(n)===key) wakeups.delete(n);
-      ctx.logger?.warn?.('[seven-stage] 通知未确认，任务已存。可用 deliver 重发 ' + sid);
-    };
-    inFlight.set(n, {text:message, key, at:Date.now()});
+  const delivery = openDeliveryBook(stateDir);
+  const queued = new Map();
+  const routingSeen = new Set();
+  const recipient = (s, role) => role==='root' ? s.root : role==='planner' ? s.planner : s.members[role];
+  const stepId = s => steps[s.cursor]?.id;
+  const scopeOf = s => s.phase==='setup' ? 'setup'
+    : ['ready','partial'].includes(s.phase) ? 'close' : stepId(s);
+  const topicsOf = (s,role) => deliveryTopics(s,role,steps[s.cursor]);
+  const newTopics = (topics, rows, sid) => {
+    const sent = new Set(rows.filter(row=>row.sid===sid && row.outcome!=='failed').flatMap(row=>row.keys));
+    return topics.filter(x=>!sent.has(x.key));
+  };
+  function sendBatch(s, role, {manual=false, reminder, live}={}) {
+    const scope = scopeOf(s), sid = recipient(s,role);
+    if (!scope || !sid || s.ended[role]) return {code:'RELAY_ROLE_UNAVAILABLE'};
+    const topics = topicsOf(s,role);
+    if (reminder) topics.push(reminder);
+    if (!topics.length) return {code:'NO_PENDING_WORK_TO_RELAY'};
+    let dispatch;
     try {
-      if (sid===s.root) {
-        const live=ctx.agents.get(sid);
-        if (!live) return failed();
-        // root 是真实主对话：steer 会在它下一个 step 边界插入，空闲时直接开 turn。
-        // 旧实现用 followup()，每条通知独占一个 turn。
-        try { live.steer(msg(message)); }
-        catch { live.followup(msg(message)); }
+      dispatch = delivery.reserve(s.taskId,scope,role,rows=>{
+        const last = rows.at(-1);
+        const todo = newTopics(topics,rows,sid);
+        if (!todo.length && !manual) return {code:'DELIVERY_ALREADY_SENT'};
+        if (!todo.length && last.outcome!=='failed' && Date.now() - last.at < RECOVERY_MS)
+          return {code:'DELIVERY_ALREADY_SENT'};
+        const exception = rows.length === 3 ? fourthReason(s,last) : null;
+        return {sid,keys:(todo.length ? todo : topics).map(x=>x.key), exception};
+      });
+    } catch (err) {
+      ctx.logger?.warn?.('[seven-stage] DELIVERY_LEDGER_UNAVAILABLE '+s.taskId+' '+role+' '+err.message);
+      return {code:'DELIVERY_LEDGER_UNAVAILABLE'};
+    }
+    if (!dispatch.row) return dispatch;
+    const row = dispatch.row;
+    const text = '七阶段插件任务 '+s.taskId+'。'+(stepId(s) ? '小步 '+stepId(s)+'。' : '')
+      +'发给 '+role+' 的第 '+row.n+' 批。'
+      +(row.exception ? '第四批原因 '+row.exception+'。' : '')
+      +'\n'+topics.filter(x=>row.keys.includes(x.key)).map(x=>'• '+x.text).join('\n')
+      +'\n本批按需调用一次 status 核对版本，正文用 read。没有待办就 yield，不要用 wait_agent 等待任务包。';
+    const finish = outcome => {
+      try { delivery.settle(s.taskId,row,outcome); }
+      catch (err) { ctx.logger?.warn?.('[seven-stage] DELIVERY_LEDGER_WRITE_FAILED '+s.taskId+' '+role+' '+err.message); }
+      if (outcome==='failed') ctx.logger?.warn?.('[seven-stage] DELIVERY_HOST_REJECTED '+s.taskId+' '+scope+' '+role+' 第 '+row.n+' 批');
+    };
+    try {
+      if (live || role==='root') {
+        const agent = live ?? ctx.agents.get(sid);
+        if (!agent) throw Error('RELAY_ROLE_UNAVAILABLE');
+        // A synchronous failure may be ambiguous; do not use a second transport for the same slot.
+        agent.steer(msg(text));
+        finish('queued');
       } else {
-        // 使用宿主原生的可续跑投递。delivery:'steer' —— 插队到最近一步，
-        // 而不是 'queue' 那样"每条通知排成独立 turn"。
         Promise.resolve(ctx.subagents.prompt({
-          requestId:randomUUID(),childSessionId:sid,delivery:'steer',
-          content:[{type:'text',text:message}]
-        },AbortSignal.timeout(15_000))).catch(failed);
+          requestId:randomUUID(),childSessionId:sid,delivery:'steer',content:[{type:'text',text}]
+        },AbortSignal.timeout(15_000))).then(()=>finish('queued'),()=>finish('failed'));
       }
-    } catch { failed(); }
+    } catch { finish('failed'); return {code:'DELIVERY_HOST_REJECTED',attempt:row.n}; }
+    return {scheduled:true,attempt:row.n,scope,role,exception:row.exception};
   }
-  /**
-   * 某角色刚刚真的调用了一次工具 → 说明它已经消费掉此前的通知，
-   * 解除该 (task,sid) 的在途标记，允许下一波状态变化再投递一条。
-   */
-  function markNotifiedConsumed(task, sid) {
-    if (!sid) return;
-    const n = task + ':' + sid;
-    if (inFlight.has(n)) { consumedAt.set(n, inFlight.get(n).key); inFlight.delete(n); }
-  }
-  /**
-   * 【BUG-1】检索工单必须真的送到传话员手里。
-   *
-   * 旧实现里 knowledge 自己联网，所以"发工单"这一步根本不存在。
-   * 现在工单由知识发布、由真实主对话执行，如果这里不发通知，
-   * 传话员永远不知道有人等它去 web_search —— 那就是新的静默死锁。
-   *
-   * targetPhase() 只覆盖 jobs / phase / ended / failures / facts 等字段，
-   * 不包含 searchOrder，所以工单状态变化要单独算一个 key。
-   */
-  const searchKey = s => s.jobs.knowledge?.searchOrder
-    ? 'order|' + s.jobs.knowledge.searchOrder.id + '|' + s.jobs.knowledge.searchOrder.status
-    : '';
-  // ══ 【BUG-4 修复】终态通知只能发一次 ═══════════════════════════════════════
-  // 现场：任务停在 phase=partial 后，**连续 7 次**收到同一句话
-  //   「收到需要真人参与或核对的分析消息。请先调用 status…」，
-  //   每次 status 返回逐字节相同，模型被反复唤醒、零可推进。
-  //
-  // 根因（已用模拟宿主复现，不是猜的）：
-  //   targetPhase() 的 key 里含 Object.keys(s.ended).join(',') 与
-  //   Object.keys(s.failures).join(',')。终态下每有一个角色补登记 end，
-  //   这个 key 就变一次 → 去重失效 → 同一条通知重发一次。
-  //   现场四个角色 + root 陆续 end，正好是 6~7 次。
-  //   也就是说：不是"无限循环"，是"每次状态推进都重发一遍同样的文案"。
-  //
-  // 修法（两条一起才够）：
-  //   ① 终态单独处理：每个任务只发一条【说清还剩谁、该做什么】的收尾通知，
-  //      发过就记在 terminalNotified 里，永不重发；
-  //   ② 终态**不再走**下面那串逐条 notify —— 那串是给"分析进行中"设计的，
-  //      终态下它只会重复同一句无信息量的话。
-  //   非终态的通知逻辑完全不动（那部分是有用的状态推进信号）。
-  const terminalNotified = new Set();
   function route(prior, s, sender) {
     if (!s) return;
-    // ── 终态：只发一次收尾通知，然后退出 ────────────────────────────────
-    if (TERMINAL_PHASES.has(s.phase)) {
-      const open = ['knowledge','design','review','planner','root']
-        .filter(r => (r==='root'||r==='planner'||s.members[r]) && !s.ended[r] && !s.failures[r]);
-      const noticeKey = s.taskId + ':' + s.phase + ':' + open.join(',');
-      if (terminalNotified.has(s.taskId)) return;      // 已经说过，绝不重发
-      terminalNotified.add(s.taskId);
-      // 只有真的需要 root 做事（还有角色没 end / 还在等它取凭证）才发。
-      if (s.root !== sender) {
-        const tail = open.length
-          ? '还差 ' + open.join('、') + ' 登记 end（kind=' + s.phase + '）。'
-          : '五个角色都已登记结束，可以用 action=export 取凭证、再 register-design。'
-          ;
-        notify(s.taskId, s.root,
-          '分析已进入终态（phase=' + s.phase + '）。' + tail
-          + '这是本任务最后一条自动通知，之后不会重复；需要时你自己调 status 即可。',
-          noticeKey);
-      }
-      // 终态下也给没 end 的角色发一次（同样靠 wakeups 去重，不再逐次重发）
-      for (const role of roles) {
-        if (open.includes(role) && s.members[role] !== sender) {
-          notify(s.taskId, s.members[role],
-            '任务已进入终态（phase=' + s.phase + '）。请用 action=end 登记你的结束原因（kind=' + s.phase + '）。',
-            noticeKey);
+    if (!routingSeen.has(s.taskId)) prior = null; // Replay only undelivered durable work after host reload.
+    routingSeen.add(s.taskId);
+    const scope = scopeOf(s);
+    for (const role of deliveryRoles) {
+      const sid = recipient(s,role);
+      if (!sid || sid===sender) continue;
+      const topics = topicsOf(s,role);
+      if (!topics.length) continue;
+      const old = scopeOfSafe(prior)===scope && recipient(prior,role)===sid
+        ? new Set(topicsOf(prior,role).map(x=>x.key)) : new Set();
+      if (topics.every(x=>old.has(x.key))) continue;
+      const key = [s.taskId,scope,role,sid].join(':');
+      if (queued.has(key)) continue; // Rebuild all current topics at flush time.
+      const timer = setTimeout(()=>{
+        queued.delete(key);
+        try {
+          const current = flow.load(s.taskId);
+          if (!current || scopeOf(current)!==scope || recipient(current,role)!==sid) return;
+          const out = sendBatch(current,role);
+          if (out.code==='DELIVERY_BUDGET_EXHAUSTED')
+            ctx.logger?.warn?.('[seven-stage] '+out.code+' '+s.taskId+' '+scope+' '+role);
+        } catch (err) {
+          ctx.logger?.warn?.('[seven-stage] DELIVERY_BATCH_FAILED '+s.taskId+' '+role+' '+err.message);
         }
-      }
-      return;
+      },COALESCE_MS);
+      queued.set(key,timer);
     }
-    // ── 非终态：以下逻辑与修复前完全一致，只是把 ready/partial 从各判断里摘掉
-    //    （它们已经在上面 return 了，留着只会误导下一个改代码的人）。
-    if (prior && targetPhase(prior)===targetPhase(s)
-        && searchKey(prior)===searchKey(s)) return;
-    const key = targetPhase(s) + '|' + searchKey(s);
-    // ① 有【待回填】的检索工单 → 通知真实主对话（传话员）去用内置 web_search 执行。
-    //    【BUG-12】必须先读【磁盘实时状态】，不能用传进来的 s（那是动作开始前的快照）：
-    //      现场出现过"已经 filled 的工单被重新推送"，主对话照做一次 web_search +
-    //      一次失败的 search_fill，还会误判成自己漏填了。
-    const liveNow = flow.load(s.taskId);
-    const order = liveNow?.jobs?.knowledge?.searchOrder;
-    if (order && order.status === 'pending' && prior?.jobs?.knowledge?.searchOrder?.status !== 'pending'
-        && s.root !== sender) {
-      notify(s.taskId, s.root,
-        '知识发布了一条检索工单：query=' + JSON.stringify(order.query) + '，orderId=' + order.id
-        + '，jobId=' + order.jobId + '。请用你的内置 web_search 执行这条查询，'
-        + '再把 sources 用 engineering_seven_stage action=search_fill 回填'
-        + '（dataJson={jobId,orderId,query,hits:[{title,url,snippet}]}）。'
-        + '你只负责搬运结果，不要改查询词、不要替知识下结论。',
-        key);
-    }
-    // ② 工单被回填 → 通知知识回来 submit。
-    if (order && order.status === 'filled' && prior?.jobs?.knowledge?.searchOrder?.status === 'pending'
-        && s.members.knowledge !== sender) {
-      notify(s.taskId, s.members.knowledge,
-        '检索工单已回填：' + order.hitCount + ' 条来源（orderId=' + order.id + '）。'
-        + '请按来源 ID 提交出处位置、适用边界与缺口。',
-        key);
-    }
-    for (const [role,job] of Object.entries(s.jobs)) {
-      if (prior?.jobs[role]?.id===job.id && !(prior?.failures[role] && !s.failures[role])) continue;
-      if (!s.failures[role]) notify(s.taskId,s.members[role],'有新任务包。',key);
-    }
-    // ══ 【2026-11-19 · 报告 BUG-21 / §7.2】planner 的"状态更新"通知必须退避 ══
-    // 现场（139 条台账 log、123.7 分钟）：yield 占 **68 次 / 49%**，
-    //   其中大量是连续 yield（09:34–09:40 六连、10:00–10:03 五连）。
-    //   根因：planner 每 yield 一次，targetPhase 的 key 就变一次（turns 里写了新时间），
-    //   于是 route() 认为"状态更新了"→ 通知 planner → 它醒来 → status → 没活 → 再 yield
-    //   → key 又变 → 再通知 …… **自我唤醒循环**，每轮 30–60 秒，纯空转。
-    //
-    // 只在总计有可执行动作或需要介入时唤醒。执行岗位之间直接交接，
-    // phase / job 变动本身不需要总计重新读状态、催办、再 yield。
-    const phaseChanged = prior?.phase !== s.phase;
-    const factsGrew = (s.facts?.length ?? 0) > (prior?.facts?.length ?? 0);
-    const beforeFailures = prior?.failures ?? {};
-    const failuresAppeared = Object.keys(s.failures ?? {}).some(r => !Object.hasOwn(beforeFailures,r));
-    const failuresCleared = Object.keys(beforeFailures).some(r => !Object.hasOwn(s.failures,r));
-    const plannerWorkReady = !s.question && ['frame','commit','resolve','evidence_wait'].includes(s.phase)
-      && (phaseChanged || prior?.revision !== s.revision || prior?.cursor !== s.cursor
-        || prior?.question || failuresCleared);
-    if (s.planner !== sender && !s.ended.planner
-        && (plannerWorkReady || factsGrew || failuresAppeared)) {
-      notify(s.taskId, s.planner,
-        '收到岗位回执或流程状态更新（' + [
-          phaseChanged ? 'phase ' + prior?.phase + '→' + s.phase : '',
-          factsGrew ? '新增真人答复 ' + (s.facts.length - (prior?.facts.length ?? 0)) + ' 条' : '',
-          failuresAppeared ? '新增故障登记' : '',
-          plannerWorkReady && !phaseChanged ? '总计待办已更新' : '',
-        ].filter(Boolean).join('；') + '）。', key);
-    }
-    if (s.root!==sender && (s.question || s.phase==='evidence_wait' || Object.keys(s.failures).length)) {
-      // 文案必须带信息量 + 带【故障原因分类】：
-      //   · host-disposed 型（宿主回收会话）插件已自动重派，root 不用管；
-      //   · role-blocked 型（角色自己干不下去）需要 planner/root 判断后 retry。
-      //   混在一起说"有角色登记了故障"会让人白忙一轮。
-      const causes = Object.entries(s.failures).map(([r, f]) => {
-        const kind = f?.cause === 'host-disposed' ? '宿主回收会话（已自动重派）'
-          : f?.cause === 'run-failed' ? '子代理运行失败'
-          : '角色自报阻塞（需人工判断）';
-        return r + '：' + kind;
-      });
-      const why = s.question ? 'planner 提了一个需要真人回答的问题'
-        : s.phase === 'evidence_wait' ? '分析进入补证等待（evidence_wait）：' + (s.waitReason ?? '')
-        : '故障登记 —— ' + causes.join('；');
-      // 【BUG-12】通知前再核一次真实状态：不能拿 prior 快照说事。
-      //   现场有"已 filled 的旧工单被重新推给主对话"，主对话白跑一次检索。
-      const live = flow.load(s.taskId);
-      const liveOrder = live?.jobs?.knowledge?.searchOrder;
-      if (liveOrder && liveOrder.status !== 'pending' && /检索工单/.test(why)) return;
-      notify(s.taskId,s.root,why + '。处理完请按 status 的 next 继续。',key);
-    }
+  }
+  const scopeOfSafe = s => s ? scopeOf(s) : null;
+  function deliveryStatus(s,role) {
+    const scope = scopeOf(s);
+    if (!scope) return undefined;
+    const visible = role==='root' || role==='planner' ? deliveryRoles : [role];
+    return {scope,preferred:2,normalLimit:3,hardLimit:4,recipients:Object.fromEntries(visible.map(r=>{
+      const rows = delivery.read(s.taskId,scope,r);
+      const last = rows.at(-1);
+      const limit = fourthReason(s,last) ? 4 : 3;
+      const waiting = newTopics(topicsOf(s,r),rows,recipient(s,r)).length;
+      return [r,{attempted:rows.length,lastOutcome:last?.outcome ?? null, fourthReason:last?.exception ?? null,
+        ...(waiting && rows.length>=limit ? {blocked:'DELIVERY_BUDGET_EXHAUSTED'} : {})}];
+    }))};
   }
   function currentWorkflow(task) {
     const wf = JSON.parse(readFileSync(workflowFile,'utf8').replace(/^\uFEFF/,''));
@@ -645,7 +502,8 @@ export function install(ctx, config, createUserMessage) {
       optional:{parameters:'任意 JSON（对象/数组/字符串都行）',fromStep:'要回退到的小步 id'},
       example:{messageId:'<capture 回执里的 messageId>',classification:'fact|preference|authorization|estimate|unknown|no_change',
         parameters:'…',conflict:'…',changed:'…',impact:'…',reason:'…',fromStep:'1.1'}},
-    search:{required:['jobId','query'],example:{jobId:'<status.job.id>',query:'…'}},
+    search:{required:['jobId'],optional:{query:'单条检索词',queryParts:'同一工单中的 1～4 条检索词'},
+      example:{jobId:'<status.job.id>',queryParts:['检索主题一','检索主题二']}},
     search_fill:{required:['jobId','orderId','query','hits'],
       optional:{outcome:'ok|unavailable|error|blocked',error:'宿主原始原因'},
       example:{jobId:'<order.jobId>',orderId:'<order.id>',query:'<order.query 原文>',
@@ -676,7 +534,7 @@ export function install(ctx, config, createUserMessage) {
   /** 取某动作的契约；没有登记的动作返回 undefined（不硬造）。 */
   const actionContract = name => ACTION_CONTRACT[name];
 
-  const READONLY_TOOLS = new Set(['send_message', 'list_agents']);
+  const READONLY_TOOLS = new Set(['list_agents']);
   // ══ 【2026-11-19 · 提速】把工具【从声明里摘掉】，而不只是拦住执行 ══════════
   //
   // 现场测量（planner 会话，91 个 LLM 步）：
@@ -694,12 +552,17 @@ export function install(ctx, config, createUserMessage) {
   //   allow 是白名单，新工具默认【不可见】—— 与"分析角色只能读、结论归插件"的口径一致。
   // 见上面 READONLY_TOOLS 的说明：wait_agent 在分析期间等于"拒绝把控制权交回插件"，
   //   实测吃掉 52 分钟，故从可见工具里一并摘掉（不只是 guard 拦）。
-  const ANALYSIS_TOOL_ALLOW = ['engineering_seven_stage', 'send_message', 'list_agents'];
+  const ANALYSIS_TOOL_ALLOW = ['engineering_seven_stage', 'list_agents'];
   function enforce(exec) {
     const a = actorOf(exec.agent);
     if (!a) return;
     const bound = flow.trackedActor(a);
     if (!bound || exec.name===TOOL) return;
+    if (!isTerminal(bound.s) && exec.name==='send_message') {
+      return 'SEVEN_STAGE_TOOL_GATE: 分析期间岗位交接走插件批量投递。'
+        + '用 submit、search、question、capture 或 blocked 登记要交接的内容；'
+        + '主对话或总计可用 deliver 检查并重发已有待办。';
+    }
     if (bound.role === 'root') return;      // ← 【P0 修复】真实主对话放行
     if (isTerminal(bound.s)) return;        // ← 【BUG-3 修复】终态解锁分析角色
     if (READONLY_TOOLS.has(exec.name)) return;  // ← 【BUG-05 修复】只读/通讯放行
@@ -720,7 +583,7 @@ export function install(ctx, config, createUserMessage) {
       + '用 action=question 登记给真人，或用 gaps 写一条缺口（owner=human|planner）说明谁补、怎么补；'
       + '插件会把责任落到具体角色。\n'
       + '★ 修文件、跑门禁命令、写盘落档，是【真实主对话（传话员）】的职责：'
-      + '用 send_message 发给 lead 说明"要哪个文件、改成什么、为什么"，由它执行。';
+      + '在 question 或 blocked 中登记"要哪个文件、为什么、由谁处理"，由插件交给主对话。';
   }
   ctx.tools.guard(enforce);
   ctx.on('tools/pre-execute', (exec, next) => {
@@ -899,10 +762,6 @@ export function install(ctx, config, createUserMessage) {
       check(data && typeof data==='object' && !Array.isArray(data),
         'INVALID_PAYLOAD: dataJson 解析出来必须是对象（{}），不能是数组或标量。');
       exec.signal.throwIfAborted();
-      // 【2026-11-19 · 排队消息】任何角色只要真的动了一次工具，就说明它已经
-      //   消化掉前一条"去 status"的通知。在这里解除在途标记，允许下一波再投一条。
-      //   位置必须在最前面：即使这次调用会因为别的 check 被拒，也证明它醒了。
-      markNotifiedConsumed(taskId, a.id);
       // ══ 【2026-11-20 · P0】clean 必须抢在所有"绑定校验"之前 ═══════════════
       // 理由：它要处理的正是"绑定已经烂掉"的现场 —— 僵尸 planner 让
       //   trackedActor 指到一个与 taskId 不符的任务上，WRONG_BOUND_TASK 会先把
@@ -1100,7 +959,6 @@ export function install(ctx, config, createUserMessage) {
         result = flow.call(a,taskId,'attach',
           {planner:plannerId, requirements, loadCasePath, livePlanners});
         if (plannerNote) result.plannerNote = plannerNote;
-        if (!prior) notify(taskId,plannerId,'已绑定为需求与规划。调用 launch 创建三个工作角色。','attach');
       } else if (action==='launch') {
         // ══ 【2026-11-20 · P0】launch 必须认人：只有【当前绑定的那个 planner】能 launch ══
         // 现场（BUG测试结果_20261120 BUG-3）：连开 3 个总计子代理，只有最后一个
@@ -1194,23 +1052,20 @@ export function install(ctx, config, createUserMessage) {
         } finally { launches.delete(taskId); }
       } else if (action==='deliver') {
         check(['root','planner'].includes(bound?.role),'RELAY_ACCESS_DENIED');
+        check(!prior.ended[bound.role],'RELAY_ACCESS_DENIED');
         const role=data.role;
-        check(role==='planner' || roles.includes(role),'RELAY_ROLE_INVALID');
-        const recipient=role==='planner' ? prior.planner : prior.members[role];
-        check(recipient && !prior.ended[role], 'RELAY_ROLE_UNAVAILABLE');
-        check(role==='planner' || prior.jobs[role] || ['ready','partial'].includes(prior.phase),
-          'NO_PENDING_WORK_TO_RELAY');
-        // deliver 是**人工显式重发**（有人主动想再催一次），必须绕过"在途合并"，
-        // 否则用户点了一次没反应，会以为 deliver 坏了。
-        notify(taskId,recipient,'重读待办和已落盘的消息。',targetPhase(prior), true);
-        result={ok:true,note:'已安排通知，是否接收以会话读取到任务并提交为准。'};
+        check(deliveryRoles.includes(role),'RELAY_ROLE_INVALID');
+        const delivered = sendBatch(prior,role,{manual:true});
+        check(!delivered.code || delivered.code==='DELIVERY_ALREADY_SENT',
+          delivered.code+': 当前待办已保留。请用 status 核对本步投递和负责角色，不要重复发送。');
+        result = {ok:true,...delivered};
       } else if (action==='search') {
         // ① 知识：只发布检索工单，自己**不联网**。
-        const query = compact(data.query);
-        check(query.length>=3 && query.length<=240 && !/[\r\n]/.test(query),'PUBLIC_SEARCH_QUERY_REQUIRED');
-        const job = flow.searchJob(a,taskId,data.jobId).jobs.knowledge;
-        check(!job.searches.some(x=>x.query===query),'SEARCH_LIMIT_OR_DUPLICATE');
-        const order = flow.orderSearch(a,taskId,data.jobId,query);
+        if (data.queryParts===undefined) {
+          const query = compact(data.query);
+          check(query.length>=3 && !/[\r\n]/.test(query),'PUBLIC_SEARCH_QUERY_REQUIRED');
+        }
+        const order = flow.orderSearch(a,taskId,data.jobId,data.query,data.queryParts);
         result = {order, status:'pending',
           next:'检索工单已发布。真实主对话（传话员）会用宿主内置 web_search 执行本条查询，'
             + '然后 search_fill 回填来源；你先做本步其它准备，等 status.search.order.status 变成 filled 再 submit。'
@@ -1235,59 +1090,42 @@ export function install(ctx, config, createUserMessage) {
       } else if (action==='capture') {
         check(bound?.role==='root','ROOT_REQUIRED');
         const all = directUser(exec.agent);
-        // 【2026-11-19】三种 id 都认：消息 id / ask_user_question 的题目 id / toolCallId。
-        //   现场主对话手里只有题目 id（"rated_duty"），旧实现只比消息 id → 永远找不到，
-        //   而错误提示里给出的 id 是另一种形态，模型只会再猜一次。
-        const wanted = compact(data.messageId ?? data.recordId ?? data.questionId);
-        const record = all.findLast(m=>!wanted || m.id===wanted
+        const findUser = wanted => all.findLast(m=>!wanted || m.id===wanted
           || m.toolCallId===wanted || (m.questionIds ?? []).includes(wanted));
-        if (!record) {
-          // 【BUG-02】采集失败时必须说清"我到底看到了什么"，
-          // 而不是一句 ROOT_USER_MESSAGE_NOT_AVAILABLE 让人干猜。
-          const seen = all.slice(-5).map(m => ({id:m.id, source:m.source,
-            ...(m.questionIds ? {questionIds:m.questionIds} : {}),
-            preview:String(m.text).slice(0,60)}));
-          const e = new Error('ROOT_USER_MESSAGE_NOT_AVAILABLE: 在会话里找不到符合条件的真人来源消息。'
-            + (wanted ? '指定的 messageId=' + JSON.stringify(wanted)
-              + ' 既不是消息 id，也不是 ask_user_question 的题目 id。' : '')
-            + '\n能作为真人来源的只有两类：'
-            + '① role=user 且 source.kind=user 的纯文本；'
-            + '② ask_user_question 返回的 {answers:[{id,selected,custom}]} 结构（形如 tool result）。'
-            + '\n最近 5 条可采集记录（id=消息 id，questionIds=题目 id，两种都能直接传给 capture）：'
-            + JSON.stringify(seen)
-            + '\n（若为空，说明用户答复尚未到达本会话，或答复用了别的提问方式。）');
-          e.code = 'ROOT_USER_MESSAGE_NOT_AVAILABLE';
-          throw e;
-        }
-        result = flow.call(a,taskId,'capture',{record});
-        // ══ 【2026-11-19 · 现场 20261119_173044】capture 之后必须【主动叫醒】planner ══
-        // 现场：root capture 成功、回执里也写了 messageId，但 planner 不知道；
-        //   root 只好自己再 send_message 转一遍（17:45、18:03、18:37 各一次），
-        //   而这条消息到达 planner 后又要走一轮完整的 LLM 往返。
-        //   evidence_wait 期间每多绕一圈就是好几分钟 —— 因为 planner 此刻
-        //   很可能正在 yield 后的空闲态，没有人叫它就没人推进。
-        //
-        // 为什么不是"让 root 再调一次 interpret"：interpret 是**判断**
-        //   （给原话定性、决定回退到哪一小步），归总计子代理，不能下放给传话员。
-        //   传话员的职责到 capture 为止 —— 所以正确的做法是 capture 一落库，
-        //   由插件自己去叫大脑，而不是让传话员兼职跑腿。
-        //
-        // 只对**新捕获**发通知（幂等返回不重复叫）：重复 capture 同一条消息，
-        //   说明 planner 早就在处理了，再叫只会制造无谓的往返。
-        try {
-          if (!result.idempotent) {
-            const sAfter = flow.load(taskId);
-            if (sAfter?.planner) {
-              notify(taskId, sAfter.planner,
-                '真人答复已捕获（messageId=' + (result.messageId ?? '<见 capture 回执>')
-                + '）。请 action=interpret 给它定性，并按 classification 决定是否回退受影响小步。',
-                'capture:' + (result.messageId ?? '') + '|' + (sAfter.revision ?? ''));
-            }
+        if (Object.hasOwn(data,'messageIds')) {
+          const ids = data.messageIds;
+          check(Array.isArray(ids) && ids.length>0 && ids.length<=16 &&
+            ids.every(x=>typeof x==='string' && x.trim()), 'INVALID_CAPTURE_BATCH: messageIds 必须是 1～16 个真人消息 ID。');
+          check(!data.messageId && !data.recordId && !data.questionId,
+            'INVALID_CAPTURE_BATCH: messageIds 不能和单条消息 ID 混用。');
+          const records = ids.map(id=>findUser(id.trim()));
+          check(records.every(Boolean),'ROOT_USER_MESSAGE_NOT_AVAILABLE: 批次含未找到的真人消息，整批未落盘。');
+          result = flow.call(a,taskId,'capture',{records});
+        } else {
+          // 【2026-11-19】三种 id 都认：消息 id / ask_user_question 的题目 id / toolCallId。
+          //   现场主对话手里只有题目 id（"rated_duty"），旧实现只比消息 id → 永远找不到，
+          //   而错误提示里给出的 id 是另一种形态，模型只会再猜一次。
+          const wanted = compact(data.messageId ?? data.recordId ?? data.questionId);
+          const record = findUser(wanted);
+          if (!record) {
+            // 【BUG-02】采集失败时必须说清"我到底看到了什么"，
+            // 而不是一句 ROOT_USER_MESSAGE_NOT_AVAILABLE 让人干猜。
+            const seen = all.slice(-5).map(m => ({id:m.id, source:m.source,
+              ...(m.questionIds ? {questionIds:m.questionIds} : {}),
+              preview:String(m.text).slice(0,60)}));
+            const e = new Error('ROOT_USER_MESSAGE_NOT_AVAILABLE: 在会话里找不到符合条件的真人来源消息。'
+              + (wanted ? '指定的 messageId=' + JSON.stringify(wanted)
+                + ' 既不是消息 id，也不是 ask_user_question 的题目 id。' : '')
+              + '\n能作为真人来源的只有两类：'
+              + '① role=user 且 source.kind=user 的纯文本；'
+              + '② ask_user_question 返回的 {answers:[{id,selected,custom}]} 结构（形如 tool result）。'
+              + '\n最近 5 条可采集记录（id=消息 id，questionIds=题目 id，两种都能直接传给 capture）：'
+              + JSON.stringify(seen)
+              + '\n（若为空，说明用户答复尚未到达本会话，或答复用了别的提问方式。）');
+            e.code = 'ROOT_USER_MESSAGE_NOT_AVAILABLE';
+            throw e;
           }
-        } catch (err) {
-          // 通知失败不能把 capture 的成功结果吞掉 —— 事实已经落库了。
-          ctx.logger?.warn?.('[seven-stage] capture 后通知 planner 失败：'
-            + String(err && err.message || err).slice(0, 160));
+          result = flow.call(a,taskId,'capture',{record});
         }
       } else if (action==='partial') {
         // 真人的原话来自会话。模型填写的布尔值不能赋予结束授权。
@@ -1316,6 +1154,13 @@ export function install(ctx, config, createUserMessage) {
           note:'完整记录由交接接口导出，各小步可用 read 查询。'};
       }
       route(prior,s,a.id);
+      if (action==='status' && bound?.role && deliveryRoles.includes(bound.role)) {
+        // Analysis workers cannot interpret facts. Omit that long help entry to keep
+        // their task packet below the host's result pruning threshold.
+        if (roles.includes(bound.role) && result.actionHelp) delete result.actionHelp.interpret;
+        try { result.delivery = deliveryStatus(s,bound.role); }
+        catch { result.delivery = {error:'DELIVERY_LEDGER_UNREADABLE'}; }
+      }
       if (action==='yield') {
         // 详细任务包由下一次真正唤醒后的 status 提供。等待回执保留状态和审计定位字段。
         const {taskId,role,phase,revision,waitingOn,waitReason,progress} = result;
@@ -1348,6 +1193,7 @@ export function install(ctx, config, createUserMessage) {
     }
     if (signal?.aborted) {
       flow.interrupt(a,s.taskId,'宿主或用户取消回合');
+      route(s,flow.load(s.taskId),a.id);
       return;
     }
     if (flow.consumeTurn(a,s.taskId)) { expectedDisposal.add(agent); stopTries.delete(a.id); return; }
@@ -1360,7 +1206,12 @@ export function install(ctx, config, createUserMessage) {
     }
     stopTries.set(a.id,count+1);
     const mode = ['ready','partial'].includes(s.phase) ? 'end（结束）' : 'yield（等待）或 blocked（任务受阻）';
-    agent.steer(msg('结束请求未登记。任务 '+s.taskId+'。先用 '+TOOL+' status，完成当前职责后说明原因并提交 '+mode+'。'));
+    const out = sendBatch(s,role,{live:agent,reminder:{key:'turn-stopping:'+count,
+      text:'结束请求未登记。完成当前职责并说明原因，提交 '+mode+'。'}});
+    if (out.code && out.code!=='DELIVERY_ALREADY_SENT') {
+      flow.interrupt(a,s.taskId,'结束请求未登记，插件提醒未能投递：'+out.code);
+      route(s,flow.load(s.taskId),a.id);
+    }
   });
   ctx.on('agent/disposed', ({agent}) => {
     const a = actorOf(agent);
@@ -1373,25 +1224,24 @@ export function install(ctx, config, createUserMessage) {
     if (role==='unbound') {
       const planner = actorOf(ctx.agents.get(s.planner));
       if (planner) flow.interrupt(planner,s.taskId,'已分配的二级子代理在绑定前退出');
+      route(s,flow.load(s.taskId),a.id);
     } else {
       // 【BUG-11】明确标 cause='host-disposed'：这类失败【不是角色自己干不下去】，
       //   而是宿主把会话回收了。两者处置方式相反，必须在数据层就区分开。
       flow.interrupt(a,s.taskId,'宿主释放会话，未办理结束',{cause:'host-disposed'});
       // 自动重派一次（每角色一生一次，且绝不自动重派 role-blocked 的）
       const issued = flow.autoReissue(a, s.taskId, role);
-      if (issued) {
-        ctx.logger?.info?.('[seven-stage] 宿主释放 ' + role + ' 的会话，已自动重派 job ' + issued);
-        const next = flow.load(s.taskId);
-        if (next && next.members[role]) {
-          notify(s.taskId, next.members[role],
-            '宿主回收了你的会话，插件已经自动重新派发任务包（job=' + issued + '）。'
-            + '请先 action=status 读取，然后继续推进本步。', 'auto-reissue:' + issued);
-        }
-      }
+      if (issued) ctx.logger?.info?.('[seven-stage] 宿主释放 ' + role + ' 的会话，已自动重派 job ' + issued);
       route(s,flow.load(s.taskId),a.id);
     }
     stopTries.delete(a.id);
     stopTries.delete(a.id+':bind');
   });
-  ctx.on('dispose', () => { instances.delete(flow); stopTries.clear(); wakeups.clear(); });
+  ctx.on('dispose', () => {
+    instances.delete(flow);
+    stopTries.clear();
+    for (const timer of queued.values()) clearTimeout(timer);
+    queued.clear();
+    routingSeen.clear();
+  });
 }

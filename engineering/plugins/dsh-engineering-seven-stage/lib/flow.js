@@ -453,6 +453,28 @@ function nextActionOf(s, role) {
           conditions:'…', outputs:{/* step.outputs 的每个键都要填 */}},
         required:['jobId','scope','basis','conditions','outputs'],
         note:'jobId 必须是当前 review 的 id；outputs 的键名逐字取自 step.outputs。'};
+      // ══ 【BUG-4 修复 · 现场 2026-11-28】planner 在角色阶段"什么都不用做" ══
+      // 现场对照实验（step 1.5）：planner 故意不发唤醒直接 yield，
+      //   review 子代理零唤醒自行完成 submit，phase 自动推进到 commit。
+      //   结论：三个分析角色收到 job 后都能当场做完，"每步必唤醒"纯属多余 ——
+      //   实测每步多一倍回合，而且唤醒依据的往往是滞后快照（BUG-8/12）。
+      //
+      // 口径：角色阶段给 planner 一个明确的「yield」指引，而不是让它去猜要不要催。
+      //   真需要催的只有两种情况，且都写进 note：
+      //     ① handoff.<role>.shouldNudge === true（确实有活没交）；
+      //     ② 角色已 failed / ended（那要走 retry，不是 send_message）。
+      //   注意：这不是强制（actionHelp 仍允许 send_message），只是把默认值摆正：
+      //   默认 yield，等插件投递；不要把"催一下"当成必经步骤。
+      case 'knowledge':
+      case 'preflight':
+      case 'design':
+      case 'review': return {action:'yield',
+        dataJson:{reason:'等待 <' + s.phase + '> 角色提交本步产出'},
+        required:['reason'],
+        note:'★ 角色阶段 planner【默认什么都不用做】：直接 yield 等插件投递即可，'
+          + '子代理收到 job 后会自行完成 submit，不需要你唤醒。'
+          + '\n只有在 status.handoff.nudgeable 非空（确实有活没交）或该角色已 failed 时才考虑动作；'
+          + '判据看 status.handoff，不要看 current.<role> 是否为 null（它滞后）。'};
       case 'resolve': return {action:'rework',
         dataJson:{issueKey:'<issue.key>', reason:'…'}, required:['issueKey','reason'],
         note:'owner=human 的异议不能 rework，只能 question。'};
@@ -497,15 +519,45 @@ function nextActionOf(s, role) {
         //   把工单数当命中数显示，会让人误判"只搜到 1 条，证据不足"。
         // 修法：hits 用真实命中总数；工单数另给 searchRuns，两者分开说清楚。
         const runs = filled;
-        const hitsTotal = (s.jobs[role].searches ?? [])
-          .reduce((n, x) => n + ((x.hits ?? []).length), 0);
+        // ══ 【BUG-9 修复 · 现场 2026-11-28】可用来源 ID 必须免于裁剪 ══════════
+        // 现场：step 1.4 knowledge 首次 submit 被 UNOBSERVED_SEARCH_SOURCE 拒 ——
+        //   status 输出中段被宿主 pruner 截成 [... pruned ...]，第 7~8 条 hits 的
+        //   id 没显示出来，它就猜了两个不存在的 id。改用 read part=searches 才拿到。
+        //
+        // 根因：submit 必需的信息（来源 id）藏在【长正文】里，而长正文正是被裁的部分。
+        // 口径：把"这次 submit 能用的 id"直接提炼成短清单放进 ready ——
+        //   id 是 uuid，几十字节一条，哪怕 12 条也远小于裁剪阈值，
+        //   于是它总能活下来。正文仍按需 read，两者分工明确。
+        const allHits = (s.jobs[role].searches ?? []).flatMap(x => x.hits ?? []);
+        const hitsTotal = allHits.length;
         gate = {state:'ready-to-submit', hits:hitsTotal, searchRuns:runs,
+          // ★ 这是 submit 唯一需要的 ID 来源，短且完整，不受 status 裁剪影响。
+          sourceIds: allHits.map((h, i) => ({id:h.id, n:i+1,
+            title:String(h.title ?? '').slice(0, 60)})),
           message:'检索已回填 ' + hitsTotal + ' 条命中（' + runs + ' 次检索，orderId='
             + (order?.id ?? '') + '），现在就可以 submit。'
-            + 'sources[].id 直接用 status.job.searches[].hits[].id。'};
+            + '\n★ sources[].id 直接用 ready.sourceIds[].id（这份清单【不会被裁剪】，'
+            + '不必去翻 status.job.searches —— 那个长列表会被 pruner 截断，'
+            + '照截断处猜 id 会被 UNOBSERVED_SEARCH_SOURCE 拒）。'
+            + (hitsTotal === allHits.length ? '' : '')};
       } else {
-        gate = {state:'no-search-yet',
-          message:'本步还没有检索记录：先用 action=search 发布工单，等回填后再 submit。'};
+        // ══ 【死锁修复 · 2026-11-28】frame 声明"无需检索"时不能再报 no-search-yet ══
+        // 现场：step 1.5 是纯汇总步，frame 明写"无需检索"，但 nextAction.ready
+        //   依旧返回 state=no-search-yet、提示"先发检索工单" ——
+        //   与"本步不该检索"直接矛盾，是本次死锁的入口之一。
+        // 口径：豁免生效时给 ready-to-submit，并明确告诉它要走 noSearchReason。
+        const declaredTopic = String(s.slot?.frame?.searchTopic ?? '');
+        const exempt = /(无需|不需要|不用|不必|免)[^。；;\n]{0,8}检索/.test(declaredTopic)
+          || /(无需|不需要|不用|不必)[^。；;\n]{0,10}(外部|资料|来源|文献)/.test(declaredTopic);
+        gate = exempt
+          ? {state:'ready-to-submit', noSearch:true, hits:0, searchRuns:0,
+             message:'本步已声明「无需检索」：可直接 submit（sources:[]），'
+               + '但必须带 noSearchReason（>=8 字）说明为何不需要检索。'
+               + '不要写进 gaps（会被 commit 当缺证）。'}
+          : {state:'no-search-yet',
+             message:'本步还没有检索记录：先用 action=search 发布工单，等回填后再 submit。'
+               + '\n（若本步确实不需要外部检索，让 planner 在 frame.searchTopic 里写明'
+               + '「无需检索」并说明理由，引擎会豁免本步的检索证据要求。）'};
       }
     }
     return {
@@ -513,7 +565,9 @@ function nextActionOf(s, role) {
       ...(gate ? {ready:gate} : {}),
       dataJson: role === 'knowledge'
         ? {jobId:'<本 job.id>', content:'…',
-          sources:[{id:'<status.job.searches[].hits[].id>', location:'…', applicability:'…'}], gaps:[]}
+          sources:[{id:'<ready.sourceIds[].id>', location:'…', applicability:'…'}], gaps:[],
+          // 仅当本步 frame 声明"无需检索"时需要（见 ready.noSearch）
+          'noSearchReason（可选，声明无需检索时必填）':'为什么本步不依赖外部检索资料'}
         : role === 'review'
           ? {jobId:'<本 job.id>', content:'…', verdict:'pass|conditional|blocked',
             issues:[{key:'…', object:'…', requirement:'…', mechanism:'…', evidence:'…',
@@ -613,13 +667,13 @@ export function allowedActions(s, role) {
   }
   // root 也允许 read/export：现场主对话要靠 read 把待审正文转交给 review，
   //   旧 allowed 只写 capture/wait_user，模型不知道 read 其实可用。
-  if (role === 'root') out.add('status').add('read').add('export').add('capture');
+  if (role === 'root') out.add('status').add('read').add('export').add('capture').add('deliver');
   // 【BUG-5】终态下 planner/root 的恢复出口。注意它必须【不依赖 s.ended[role]】——
   // 实机现场正是"任务已经 partial，但 planner 自己还没登记 end"，此时若只在
   // "已 end"分支里给 reopen，模型看到 allowed 里没有出口，就会以为只能弃任务。
   if (terminal.has(s.phase) && ['planner', 'root'].includes(role)) out.add('reopen');
   if (role === 'planner') {
-    out.add('status').add('read').add('export').add('interpret').add('retry').add('partial');
+    out.add('status').add('read').add('export').add('interpret').add('retry').add('partial').add('deliver');
     if (s.phase === 'setup') out.add('invite');
     if (s.phase === 'frame') out.add('frame');
     if (s.phase === 'commit') out.add('commit');
@@ -749,6 +803,18 @@ function view(s, role) {
       ? {order:s.jobs.knowledge?.searchOrder ?? null,
          filled:(s.jobs.knowledge?.searches ?? []).length}
       : undefined,
+    // ══ 【BUG-8 / BUG-12 修复 · 现场 2026-11-28】status 必须自带新鲜度 ══════
+    // 现场：planner 在不同 step 上反复拿"上一轮记住的 status"去催办，
+    //   而它读的那一刻角色其实早就 submit 了（review 侧回执显示 phase=commit、
+    //   review.state=delivered）。累计复现 ≥6 次，每步多一轮无意义往返。
+    //
+    // 根因不是插件读盘慢（每次 call 都 flow.load 现读磁盘），而是
+    //   **调用方无法判断"我手里这份 status 有多旧"**。于是给两个可直接比较的量：
+    //   · observedAt —— 本次 status 生成的时间戳（毫秒）；
+    //   · revision   —— 本来就有，任何一次状态推进都会让它变。
+    // 用法（写进 note 里，见下面 planner 指引）：拿不准就先重读一次，
+    //   两次 status 的 revision 相同才可当作"没变"。
+    observedAt: Date.now(),
     members: s.members, ready:validReady(s), progress:{done:s.records.length,total:steps.length},
     // ══ 【BUG-012 / BUG-019 修复 · 现场 2026-11-26】提交判据必须一眼可读 ══
     // 现场：planner 依据 current.knowledge / current.review 字段判断"还没提交"，
@@ -887,7 +953,11 @@ function view(s, role) {
     roomProposal:role==='planner'||role==='root' ? s.roomProposal ?? null : undefined,
     actionHelp:{
       frame:'{object,decision,boundaries,searchTopic,verification,assumptions,prior,blockedBy:[]}',
-      search:'{jobId,query}，发布检索工单（插件不联网）',
+      // 【BUG-11 修复】query 有宿主硬上限，必须在 help 里写死，否则知识会发 560 字的单。
+      search:'{jobId,query} 或 {jobId,queryParts:[…]}，发布检索工单（插件不联网）。'
+        + '⚠️ 单条 query 最多 500 字符（宿主 web_search 硬上限，超了直接 HTTP 400）；'
+        + '内容多时用 queryParts 传 1~4 条各自 ≤500 字符的子查询，'
+        + '按主题拆（零件分解 / 接口标准 / 误差链…），不要机械截断。',
       // 【BUG-07】三个 id 的关系必须写死，否则 status.search.order 里 id / jobId 两个
       //   字段看着像同一件事，回填时必然试错。实测就有：用 order.id 当 jobId 传 →
       //   CURRENT_KNOWLEDGE_JOB_REQUIRED，绕了好几轮。
@@ -904,7 +974,12 @@ function view(s, role) {
       //   看起来像"传一个 JSON 字符串"，而代码要的是【真数组】——
       //   实测传字符串 → INVALID_LIST 才让人发现。现在写成数组样式并显式标注。
       gaps:'数组（不是字符串！）：[{object,impact,obtain,owner,allowed,blocking:true|false}]，'
-        + 'blocking 必须是布尔值 true/false',
+        + 'blocking 必须是布尔值。'
+        + '★ blocking:true=关键缺证，commit 会转 evidence_wait。'
+        + '「为何不检索」这类说明不能写 gaps，用 noSearchReason。',
+      // 【死锁修复 2026-11-28】独立字段，与 gaps 彻底分离
+      noSearchReason:'字符串（≥8 字）。仅当 frame 声明「无需检索」时必填：'
+        + '写清为什么本步不依赖外部检索。它【不占 gaps】，commit 不当缺证。',
       issues:'kind 为 hard|unknown|condition|preference|unsupported；owner 为 design|knowledge|planner|human',
       // ══ 【BUG-009 修复 · 现场 2026-11-26】conditions 必须写明是【字符串】 ══
       // 现场：actionHelp 只写 conditions，没说类型；actionContract.example 里
@@ -923,8 +998,9 @@ function view(s, role) {
         + 'read {what:"rules"} 可重读八条规则。',
       question:'{decision,question,why,unknownPath}',
       // 【2026-11-19】capture 必须回执 record.id —— 否则 interpret 只能靠猜。
-      capture:'{messageId?}。返回 record.id，interpret 的 messageId 必须用它；'
-        + 'messageId 也可填 ask_user_question 的题目 id。同一答案重复 capture 幂等返回原记录。',
+      capture:'{messageId?} 或 {messageIds:[...]}。只采集真人消息；多条已经齐备可一次登记并合并通知。'
+        + '有在问的问题时，把对应答复放在第一条。interpret 按返回的消息 ID 处理。'
+        + '同一答案重复 capture 幂等返回原记录。',
       // 【BUG-01/07】字段类型必须逐项写清 —— 现场就是靠这些说明盲试的。
       // 【2026-11-19 · 报告 BUG-8】messageId 有三种合法来源，以前只写了第一种。
       interpret:'{messageId:<以下三种都行：① capture 回执的 messageId/record.id；'
@@ -941,9 +1017,8 @@ function view(s, role) {
       propose_rooms:'{rooms:[{name,type,parts:[零件ID],why,depends_on:[房名]}],rationale,scope}',
       yield:'{reason}。语义=「我在等外部回执」：回合结束，靠插件投递开新回合。',
       // 【BUG-012 修复】催办前先看 handoff —— 这是"该不该催"的唯一权威判据。
-      send_message:'{to,message}。发消息给某个角色。'
-        + '工作单、提交回执和等待都由插件传递。仅在插件通知确实失效或需要协调外部事项时手动联系。'
-        + '交付进度看 status.handoff，故障和处置看 failed。',
+      deliver:'{role}。主对话或总计可重发已落盘的待办，仍计入该小步对该接收角色的投递预算。'
+        + '把可合并的材料一次提交，进度看 status.handoff，投递次数看 status.delivery。',
       // ══ 【2026-11-20 · 测试方残余 (a)】新动作必须有 help 文本 ═══════════════
       // 现场：allowed 里已经有 stop，但 actionHelp 里没有它的契约 ——
       //   子代理只知道"有个叫 stop 的动作"，不知道该不该传 reason、和 blocked 差在哪，
@@ -1126,18 +1201,60 @@ export function openFlow(stateDir) {
         //     否则等于允许"什么都不查、也不解释"就交卷 —— 那会把证据要求架空。
         //   · 豁免只在【本小步】生效（frame 换掉即失效），并写进审计留痕。
         const topic = String(s.slot?.frame?.searchTopic ?? '');
-        const noSearchDeclared = /无需(发布)?检索|不需要检索|不用检索|无需外部检索/.test(topic);
+        // ══ 【BUG-10 修复 · 现场 2026-11-28】豁免标记必须认得"人话" ══════════
+        // 现场：frame 写的是「无需【新】检索，直接汇总前四步既有记录即可」——
+        //   中间多了一个"新"字，旧正则 /无需(发布)?检索/ 就匹配不到，
+        //   于是该豁免的汇总步照样被逼去发检索工单，多一轮无意义往返。
+        // 教训：让模型去适配正则，不如让正则去吃人话。这里改成：
+        //   · 允许「无需」与「检索」之间插入任意短修饰（新/再/额外/外部/发布…）；
+        //   · 同时认 不需要/不用/不必/免 这几种等价说法；
+        //   · 也认"不涉及外部资料"这类等效表达。
+        //   宁可宽松：豁免仍要求 blocking gap 说明理由，宽松不会削弱证据要求。
+        const noSearchDeclared = /(无需|不需要|不用|不必|免)[^。；;\n]{0,8}检索/.test(topic)
+          || /(无需|不需要|不用|不必)[^。；;\n]{0,10}(外部|资料|来源|文献)/.test(topic);
         if (noSearchDeclared) {
           const gaps0 = parseGaps(data.gaps);
           const srcs0 = list(data.sources, 'sources');
           if (!srcs0.length) {
-            check(gaps0.some(x=>x.blocking),
-              'NO_SEARCH_DECLARED_NEEDS_BLOCKING_GAP: 本步 frame 标注了「无需检索」，'
-              + '所以允许 sources:[] 直接提交；但必须至少一条 blocking gap 写清'
-              + '「为什么本步不依赖外部检索资料」（object=缺什么，obtain=打算怎么确认）。'
-              + '这是豁免检索的代价：不查可以，但要说清为什么不查。');
-            // 豁免成立：跳过检索证据校验，按"无来源 + blocking gap"路径提交。
-            audit(s,a.id,'search_exempt_declared',{step:steps[s.cursor]?.id,topic:topic.slice(0,200)});
+            // == 【死锁修复 2026-11-28】无检索理由必须走【独立字段】 ==
+            // 现场（真死锁，任务卡死在 step 1.5）：
+            //   ① gaps 全 blocking=false + sources:[] -> NO_SEARCH_DECLARED_NEEDS_BLOCKING_GAP 拒
+            //      （上一版我要求"必须 >=1 条 blocking gap"）；
+            //   ② 加一条 blocking=true 的"本步无检索依赖" -> submit 过了，
+            //      但 commit 的 [...design.gaps,...knowledge.gaps].some(x=>x.blocking)
+            //      立刻把它当成"关键缺证" -> evidence_wait；
+            //   ③ review 还提了 rv1-5-knowledge-bogus-blocking-gap 异议。
+            //   -> 两条门禁对同一个 gap 的要求【互斥】，怎么填都过不去。
+            //
+            // 根因（设计错误）：把"豁免理由"塞进了 gaps 这个【缺证台账】。
+            //   gaps 的语义是"还缺什么、谁来补"，而"为什么本步不需要检索"
+            //   是一条【方法说明】，不是缺失项。混在同一个数组里，commit 无法
+            //   区分"真的缺证据"和"在解释为什么不查"。
+            //
+            // 修法（方案②，唯一不削弱判据的）：新增独立字段 noSearchReason。
+            //   · submit 时必填（豁免的代价：不查可以，但要说清为什么不查）；
+            //   · 归档进 slot.knowledge.noSearchReason 供 review/commit 阅读；
+            //   · commit【不】把它当 blocking —— 它本来就不是缺证。
+            // 为什么不用方案①（直接放行）：那等于什么都不用说就能过，证据要求被架空；
+            // 为什么不用方案③（commit 排除 owner=knowledge 的 gap）：owner 是模型自填的，
+            //   排除它等于给"伪造非阻塞"开了口子。
+            const reason = String(data.noSearchReason ?? '').trim();
+            check(reason.length >= 8,
+              'NO_SEARCH_REASON_REQUIRED: 本步 frame 标注了「无需检索」，'
+              + '所以允许 sources:[] 直接提交 —— 但必须在 dataJson 里用'
+              + '【noSearchReason】写清「为什么本步不依赖外部检索资料」（至少 8 个字）。'
+              + '\n  dataJson={"jobId":"…","content":"…","sources":[],"gaps":[],'
+              + '"noSearchReason":"本步为前四步的汇总，依据已在对应小步登记，无新增外部依赖"}'
+              + '\n注意：这条理由【不要】写进 gaps。gaps 是"还缺什么、谁来补"的台账，'
+              + '而"为什么不查"是方法说明 —— 写进 gaps 会被 commit 当成关键缺证，'
+              + '任务会卡进 evidence_wait（这正是上一版留下的死锁）。');
+            // 豁免成立：跳过检索证据校验。
+            // 这里【不能写 a.id】：finishPacket(s, data, role) 的作用域里没有 a
+            //   （第一次写就踩了 ReferenceError: a is not defined，被 e2e 抓住）。
+            audit(s, s.members[role] ?? role, 'search_exempt_declared',
+              {step:steps[s.cursor]?.id, topic:topic.slice(0,200), reason:reason.slice(0,300)});
+            // 挂回 data，供下面归档进 slot.knowledge
+            data.noSearchReason = reason;
           }
         } else {
           throw Error('SEARCH_REQUIRED: 本步还没有任何检索记录。'
@@ -1165,7 +1282,10 @@ export function openFlow(stateDir) {
       // 允许 sources:[] + 至少一条 blocking gap —— 但 gap 必须写清楚谁来补、怎么补。
       if (!sources.length) {
         const failed = job.searches.filter(x => x.outcome && x.outcome !== 'ok');
-        check(gaps.some(x=>x.blocking),
+        // 【死锁修复 2026-11-28】有 noSearchReason（frame 已声明无需检索）时，
+        //   不再要求 gaps 里必须有 blocking —— 否则与 commit 判据互斥成死锁。
+        //   注意这里只是"不强制 blocking gap"，理由本身已在上面校验过长度。
+        check(Boolean(data.noSearchReason) || gaps.some(x=>x.blocking),
           'NO_SEARCH_EVIDENCE_OR_BLOCKING_GAP: 本 job 回填了 '
           + (failed.length ? (failed.at(-1).outcome + '：' + (failed.at(-1).error ?? ''))
                            : '0 条可用来源')
@@ -1175,7 +1295,10 @@ export function openFlow(stateDir) {
           + '注意：这类步骤最终【无法通过 read_design 交付】—— 交付要求每步都有真实来源。');
       }
       // 归档时把"本步累计证据"完整写进 slot，供 retry/reissue 之后的 submit 复用
+      // 【死锁修复 2026-11-28】noSearchReason 与 gaps 分开归档：
+      //   它是"方法说明"，commit 读它但不把它当缺证（见 case 'commit'）。
       s.slot.knowledge = { id:job.id, content, sources, gaps,
+        ...(data.noSearchReason ? { noSearchReason: data.noSearchReason } : {}),
         searches:allSearches, calculations:[...(s.slot?.calculations ?? []), ...(job.calculations ?? [])] };
       if (s.cursor === 0 && !s.slot.preflight) advance(s,'preflight','review');
       else advance(s,'design','design');
@@ -1958,7 +2081,8 @@ export function openFlow(stateDir) {
       //   所以这里必须重新 load 一次，否则本函数末尾的 save(s) 会把刚落盘的工单覆盖掉。
       case 'search': {
         as('knowledge'); at('knowledge');
-        out.order = orderSearch(a, task, d.jobId, d.query);
+        // queryParts 可选透传（BUG-11）：query 超 500 字符时必须用它拆条。
+        out.order = orderSearch(a, task, d.jobId, d.query, d.queryParts);
         s = load(task);
         break;
       }
@@ -1986,7 +2110,21 @@ export function openFlow(stateDir) {
         check(review?.id===d.jobId && review.designId===design?.id
           && review.knowledgeId===knowledge?.id && review.revision===s.revision, 'REVISION_REVIEW_REQUIRED');
         check(!Object.values(issues).some(serious), 'OPEN_BLOCKING_ISSUE');
-        if ([...design.gaps,...knowledge.gaps].some(x=>x.blocking)) {
+        // 【死锁修复 2026-11-28】knowledge.gaps 里若混进了"无检索理由"性质的条目，
+        //   不能再当成关键缺证 —— 那正是本次死锁的成因。
+        //   两个判据同时成立才算可排除：① 本步确实声明了 noSearchReason；
+        //   ② 该 gap 是 owner=knowledge 且描述里明确提到"无需/不依赖检索"。
+        //   为什么要卡这么死：单纯"排除 owner=knowledge 的 blocking gap"会让人
+        //   把手填一个 owner=knowledge 的大缺口也绕过 commit —— 那是真缺证。
+        const exemptNoSearch = Boolean(s.slot?.knowledge?.noSearchReason);
+        const looksLikeSearchExemption = g => {
+          if (!exemptNoSearch || String(g?.owner ?? '') !== 'knowledge') return false;
+          const blob = String(g?.object ?? '') + String(g?.impact ?? '') + String(g?.obtain ?? '');
+          return /(无需|不依赖|不需要)[^。；;\n]{0,10}(检索|外部|资料|来源)/.test(blob);
+        };
+        const blockingGaps = [...design.gaps, ...knowledge.gaps]
+          .filter(x => x.blocking && !looksLikeSearchExemption(x));
+        if (blockingGaps.length) {
           evidenceWait(s,'知识或设计提交了关键缺证，不能登记通过。'); break;
         }
         const step = steps[s.cursor];
@@ -2067,33 +2205,33 @@ export function openFlow(stateDir) {
       case 'capture': {
         as('root');
         check(!Object.keys(s.ended).length && s.phase!=='partial', 'CLOSED_ROLES_REQUIRE_NEW_TASK');
-        const record = userRecord(d.record);
-        // ══ 【2026-11-19】capture 必须回执 record.id，且重复捕获要幂等 ════════
-        // 现场：capture({}) 成功，但回执里没有 id；主对话只能拿 ask_user_question
-        //   的题目 id（"rated_duty"）去 interpret → HOST_CAPTURED_MESSAGE_REQUIRED；
-        //   再 capture({messageId:"rated_duty"}) → ROOT_USER_MESSAGE_NOT_AVAILABLE；
-        //   如果改用 capture({}) 重试 → 又撞 USER_MESSAGE_ALREADY_RECORDED。
-        //   三条路全堵死，evidence_wait 就此停住。
-        // 现在：成功时把 id 明明白白写进 messageId 字段；重复捕获返回原记录。
-        const existing = [...s.facts, ...s.requirements].find(x =>
-          x.id === record.id || digest(x.text) === digest(record.text));
-        if (existing) {
-          out.record = {id:existing.id, text:existing.text, source:existing.source,
-            ...(existing.question?.id ? {questionId:existing.question.id} : {})};
-          out.messageId = existing.id;
-          out.idempotent = true;
-          out.next = '这条真人消息已经捕获过（幂等返回，未重复记录）。'
-            + 'interpret 的 messageId 用 "' + existing.id + '"。';
-          break;
+        const batch = d.records !== undefined;
+        const records = (batch ? list(d.records,'records',16) : [d.record]).map(userRecord);
+        check(records.length>0,'INVALID_CAPTURE_BATCH');
+        const captured = records.map(record=>{
+          const existing = [...s.facts,...s.requirements].find(x=>
+            x.id===record.id || digest(x.text)===digest(record.text));
+          const fact = existing ?? {...record,question:s.question,at:new Date().toISOString()};
+          if (!existing) {
+            s.facts.push(fact);
+            s.question = null;
+          }
+          return {id:fact.id,text:fact.text,source:fact.source,
+            ...(fact.question?.id ? {questionId:fact.question.id} : {}),duplicate:!!existing};
+        });
+        if (batch) {
+          out.records = captured.map(({id,questionId,duplicate})=>
+            ({id,...(questionId ? {questionId} : {}),duplicate}));
+          out.idempotent = captured.every(record=>record.duplicate);
+          out.next = '已核对本批真人消息。总计按 records[].id 解释尚未处理的原话。';
+        } else {
+          const {duplicate,...record} = captured[0];
+          out.record = record;
+          out.messageId = record.id;
+          if (duplicate) out.idempotent = true;
+          out.next = (duplicate ? '这条真人消息已经捕获（未重复记录）。' : '已捕获。')
+            + 'interpret 的 messageId 用 "' + record.id + '"。';
         }
-        const fact = {...record, question:s.question, at:new Date().toISOString()};
-        s.facts.push(fact);
-        s.question = null;
-        out.record = {id:fact.id, text:fact.text, source:fact.source,
-          ...(fact.question?.id ? {questionId:fact.question.id} : {})};
-        out.messageId = fact.id;
-        out.next = '已捕获。下一步 interpret 的 messageId 必须填 "' + fact.id + '"'
-          + (fact.question ? '（对应问题 id=' + fact.question.id + '）' : '') + '。';
         break;
       }
       case 'interpret': {
@@ -2157,8 +2295,24 @@ export function openFlow(stateDir) {
               + '\n  · authorization —— 用户在授权某个决定；'
               + '\n  · estimate      —— 用户给的是估计值；'
               + '\n  · unknown       —— 用户明确说他也不知道（会保持 evidence_wait，但会记下"问过了"）。'
-              + '\n同时：如果这条答复消除了 frame.blockedBy 里的依赖，'
-              + '重发 frame 时带 resolved:[<被解决的依赖原文>]，否则会立刻退回 evidence_wait。'
+              // ══ 【BUG-6 修复 · 现场 2026-11-28】不能无条件叫人带 resolved ══════
+              // 现场：interpret 成功后 next 要求"把 carriedBlockedBy 原文写进 resolved
+              //   核销"，可当时 blockedBy=[]（本来就是空的）—— 照做就被
+              //   RESOLVED_DEPENDENCY_NOT_FOUND 拒："resolved 项不在本步 blockedBy 中"。
+              //   按提示操作必然被拒一次，纯属浪费回合。
+              // 口径：只在本步确实有 blockedBy 时才提 resolved；空的时候明确说
+              //   "本步没有依赖，不要传 resolved"。
+              + (() => {
+                  const deps = Array.isArray(s.slot?.frame?.blockedBy) ? s.slot.frame.blockedBy : [];
+                  return deps.length
+                    ? '\n同时：本步 frame.blockedBy 当前有 ' + deps.length + ' 项：'
+                      + JSON.stringify(deps)
+                      + '。如果这条答复消除了其中某些，重发 frame 时带 resolved:[<被解决的依赖原文>]，'
+                      + '否则会立刻退回 evidence_wait。'
+                    : '\n注意：本步 frame.blockedBy 当前是【空】的 —— '
+                      + '**不要传 resolved**（传了会被 RESOLVED_DEPENDENCY_NOT_FOUND 拒，'
+                      + '因为它只接受 blockedBy 里的原文）。本步没有待核销的外部依赖。';
+                })()
               + '\n（no_change 只适用于"本条输入不产生任何变化"的普通消息，'
               + '不适用于 question 的答复。）');
             e.code = 'NEEDS_EVIDENCE_DISPOSITION';
@@ -2666,8 +2820,9 @@ export function openFlow(stateDir) {
     try { const u = new URL(h?.url); return ['https:','http:'].includes(u.protocol); }
     catch { return false; }
   };
-  /** ① 知识发布检索工单（不联网）。 */
-  function orderSearch(a,task,jobId,query) {
+  /** ① 知识发布检索工单（不联网）。
+   *  queryParts 可选：query 超 500 字符时必须用它拆成多条子查询（BUG-11）。 */
+  function orderSearch(a,task,jobId,query,queryParts) {
     const s = searchJob(a,task,jobId);
     const job = s.jobs.knowledge;
     check(job.searches.length<5, 'SEARCH_BUDGET_REACHED');
@@ -2681,7 +2836,61 @@ export function openFlow(stateDir) {
       + '你不需要催）；② 先做本步其它不依赖检索的准备。'
       + '\n不要做的：不要重复发单、不要把它当阻塞上报 blocked（blocked 是"我干不下去"），'
       + '也不要靠 yield 空转 —— 回填到达后插件会自动唤醒你。');
-    const order = {id:randomUUID(), query:named(query,'query'), status:'pending',
+    // ══ 【BUG-11 修复 · 现场 2026-11-28】query 必须守住宿主上限 ══════════
+    // 现场：step 2.1 知识发的 query 约 560 字符，root 拿原文调宿主 web_search
+    //   直接 400：{"code":15003,"msg":"query exceeds maximum length of 500"}。
+    //   另外宿主单次 web_search 的 queries 数组最多 4 条，传 5 条也会被拒。
+    //   root 只能人工拆成 4 条短查询才跑通 —— 本可避免的一步。
+    //
+    // 口径：插件在【发单时】就拦住，而不是等 root 撞 400。
+    //   · 单条 query ≤ 500 字符（宿主硬上限，留 0 余量：超了就是跑不了）；
+    //   · 超长时不静默截断（截断会悄悄改变检索意图），而是明确要求拆开：
+    //     用 queryParts 传多条子查询，插件逐条落盘，root 一次最多发 4 条。
+    //   · 兼容旧调用：只传 query 且不超长时行为完全不变。
+    const HOST_QUERY_MAX = 500;
+    const HOST_QUERY_BATCH = 4;
+    // ══ 【BUG-11 修复·补】queryParts 模式下 query 可以为空 ══════════════════
+    // 现场（本测试暴露）：用 queryParts 发单却报 "INVALID_FIELD: query 必须是
+    //   非空字符串" —— 因为 named() 在 partsIn 判定【之前】就执行了。
+    //   queryParts 的语义本来就是"用多条子查询代替单条 query"，
+    //   此时再强制 query 必填等于把这个功能堵死。
+    // 口径：先判 partsIn；有 parts 时 query 可省略（给了也忽略）。
+    if (queryParts !== undefined) check(Array.isArray(queryParts) && queryParts.length>0 &&
+      queryParts.every(x=>typeof x==='string' && x.trim().length>0 && !/[\r\n]/.test(x)),
+      'SEARCH_QUERY_PARTS_INVALID: 请传入 1～4 条独立的非空单行检索词。');
+    const partsIn = queryParts ?? null;
+    const rawQuery = partsIn
+      ? (typeof query === 'string' ? query.trim() : '')
+      : named(query,'query').trim();
+    if (!partsIn && rawQuery.length > HOST_QUERY_MAX) {
+      throw Error('SEARCH_QUERY_TOO_LONG: 检索词有 ' + rawQuery.length
+        + ' 个字符，超过宿主 web_search 的上限 ' + HOST_QUERY_MAX + '。'
+        + '\n宿主会直接回 HTTP 400（code=15003 query exceeds maximum length of 500），'
+        + '这张工单按原文根本执行不了。'
+        + '\n请改写 dataJson，用 queryParts 传多条【各自 ≤ ' + HOST_QUERY_MAX
+        + ' 字符】的子查询（最多一次发 ' + HOST_QUERY_BATCH + ' 条）：'
+        + '\n  dataJson={"jobId":"<本 job.id>","queryParts":["子查询1","子查询2",…]}'
+        + '\n拆的时候按主题分（零件分解 / 接口标准 / 误差链…），不要只是机械截断 —— '
+        + '截断会改变检索意图，反而搜不到东西。');
+    }
+    if (partsIn && (!partsIn.length || partsIn.length > HOST_QUERY_BATCH)) {
+      throw Error('SEARCH_QUERY_PARTS_INVALID: queryParts 必须是 1~' + HOST_QUERY_BATCH
+        + ' 条（宿主单次 web_search 最多接受 ' + HOST_QUERY_BATCH + ' 条 queries）；'
+        + '收到 ' + partsIn.length + ' 条。请合并同主题的子查询后再发。');
+    }
+    if (partsIn) {
+      const tooLong = partsIn.filter(x => String(x ?? '').trim().length > HOST_QUERY_MAX);
+      if (tooLong.length) {
+        throw Error('SEARCH_QUERY_PARTS_INVALID: 有 ' + tooLong.length
+          + ' 条子查询仍超过 ' + HOST_QUERY_MAX + ' 字符：'
+          + JSON.stringify(tooLong.map(x => String(x).slice(0, 40) + '…(' + String(x).length + '字符)')));
+      }
+    }
+    const finalQuery = partsIn ? partsIn.map(x=>String(x).trim()).filter(Boolean).join(' || ') : rawQuery;
+    check(!job.searches.some(x=>x.query===finalQuery),'SEARCH_LIMIT_OR_DUPLICATE');
+    const order = {id:randomUUID(), query:finalQuery, status:'pending',
+      // queryParts 保留结构，root 可以【直接逐条】调 web_search，不必自己再拆。
+      ...(partsIn ? {queryParts:partsIn.map(x=>String(x).trim()).filter(Boolean)} : {}),
       step:steps[s.cursor].id, jobId:job.id, at:new Date().toISOString()};
     job.searchOrder = order;
     audit(s,a.id,'search_order',{query:order.query,orderId:order.id});

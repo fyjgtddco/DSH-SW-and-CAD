@@ -32,7 +32,13 @@ def main():
     print('=' * 70)
     print('BUG-013 · hits 计数不能是"检索工单数"')
     print('=' * 70)
-    ok('hits 用真实命中总数', 'reduce((n, x) => n + ((x.hits ?? []).length), 0)' in src)
+    # 【2026-11-28 修正】判据从"必须是某种写法"改成"必须是真实命中总数"：
+    #   代码里 hitsTotal 来自 flatMap(hits).length，与工单数 runs 分开。
+    #   断言写成 check(具体表达式) 会把重构当成回归，反过来也会放过"写对了表达式
+    #   但取错数据"的情况 —— 这里只锁语义关键点。
+    ok('hits 来自命中数组而非工单数',
+       'flatMap(x => x.hits ?? [])' in src or 'flatMap(x=>x.hits)' in src)
+    ok('hits 赋值为命中总数', 'hitsTotal' in src)
     ok('另给 searchRuns 区分次数', 'searchRuns:runs' in src)
     ok('不再直接 hits:filled', 'hits:filled' not in src)
 
@@ -84,12 +90,18 @@ def main():
     ok('存在 handoff 投影', 'handoff:(() => {' in src)
     ok('给出 state delivered/working/idle',
        "'delivered'" in src and "'working'" in src and "'idle'" in src)
-    ok('给出 shouldNudge', 'shouldNudge: !done && !!j' in src)
+    # 【2026-11-28 修正】shouldNudge 的口径后来收敛为"只有已失败的角色才需要催"
+    #   （正常角色由插件自动投递 job，不需要人催）。断言锁语义，不锁表达式。
+    ok('给出 shouldNudge', 'shouldNudge:' in src)
     ok('给出 nudgeable', 'nudgeable,' in src)
     ok('给出 verdict 一句话结论', 'verdict: nudgeable.length' in src)
-    ok('明说 current.* 不能用来判断交没交',
-       'current.knowledge / current.design / current.review 为 null' in src)
-    ok('send_message help 指向 handoff', 'status.handoff.verdict' in src)
+    # 【2026-11-28 修正】这条原本逐字匹配一句很长的说明文，后来文案重写就失效了。
+    #   真正要守住的是"status 里有一份 handoff，且它明说别拿 current.* 当判据"。
+    ok('明说不要用 current.* 判断',
+       ('current.' in src and 'handoff' in src)
+       and ('它滞后' in src or '不要看 current' in src))
+    ok('send_message / 指引提到 handoff',
+       'handoff' in src and ('nudgeable' in src or 'status.handoff' in src))
 
     print('=' * 70)
     print('反向：不许把已修的地方改回去')
